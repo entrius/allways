@@ -52,10 +52,10 @@ alw --help
 - **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
 - **CLI**: User interface for posting pairs, managing collateral, and executing swaps
 
-## Disclaimer
-
-Allways is permissionless, open-source, beta software. The protocol facilitates trustless peer-to-peer transactions — the creators and contributors do not custody, control, or intermediate any funds. Use at your own risk. This software is provided "as is" without warranty of any kind. Nothing herein constitutes financial advice, and the creators assume no liability for losses arising from use of the protocol.
-
 ## License
 
 MIT License
+
+---
+
+<sub>Allways is permissionless, open-source, beta software. The protocol facilitates trustless peer-to-peer transactions — the creators and contributors do not custody, control, or intermediate any funds. Use at your own risk. This software is provided "as is" without warranty of any kind. Nothing herein constitutes financial advice, and the creators assume no liability for losses arising from use of the protocol.</sub>
