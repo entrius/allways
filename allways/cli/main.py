@@ -41,7 +41,14 @@ _sys.argv = _saved_argv
 parse_global_flags()
 
 
-@click.group()
+DISCLAIMER = (
+    'Allways is permissionless, open-source, beta software. The protocol facilitates trustless'
+    ' peer-to-peer transactions — the creators and contributors do not custody, control, or'
+    ' intermediate any funds. Use at your own risk. No warranty. Not financial advice.'
+)
+
+
+@click.group(epilog=DISCLAIMER)
 @click.version_option(version=__import__('allways').__version__, prog_name='allways')
 def cli():
     """Universal Transaction Layer"""
