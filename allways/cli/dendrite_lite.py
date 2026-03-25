@@ -34,10 +34,11 @@ def get_ephemeral_wallet() -> bt.Wallet:
     return wallet
 
 
-def discover_validators(subtensor: bt.Subtensor, netuid: int) -> list:
+def discover_validators(subtensor: bt.Subtensor, netuid: int, contract_client=None) -> list:
     """Discover validator axon endpoints from metagraph.
 
     Filters for UIDs with validator_permit=True and is_serving=True.
+    When contract_client is provided, also filters to only whitelisted validators.
     Returns list of axon endpoints.
     """
     metagraph = subtensor.metagraph(netuid=netuid)
@@ -49,6 +50,12 @@ def discover_validators(subtensor: bt.Subtensor, netuid: int) -> list:
         axon = metagraph.axons[uid]
         if not axon.is_serving:
             continue
+        if contract_client:
+            try:
+                if not contract_client.is_validator(metagraph.hotkeys[uid]):
+                    continue
+            except Exception:
+                pass
         axons.append(axon)
 
     return axons

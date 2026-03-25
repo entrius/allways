@@ -14,6 +14,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     read_miner_commitment,
 )
+from allways.cli.dendrite_lite import discover_validators
 from allways.contract_client import ContractError
 
 
@@ -176,13 +177,9 @@ def miner_activate():
 
     synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message)
 
-    # Discover validators from metagraph
-    metagraph = subtensor.metagraph(netuid=netuid)
+    # Discover whitelisted validators from metagraph
     dendrite = bt.Dendrite(wallet=wallet)
-
-    validator_axons = [
-        axon for uid, axon in enumerate(metagraph.axons) if metagraph.validator_permit[uid] and axon.is_serving
-    ]
+    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
 
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]\n')

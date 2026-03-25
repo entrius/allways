@@ -187,7 +187,7 @@ def broadcast_reserve_with_retry(
     )
 
     ephemeral_wallet = get_ephemeral_wallet()
-    validator_axons = discover_validators(subtensor, netuid)
+    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return None
