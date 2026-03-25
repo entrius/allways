@@ -6,6 +6,7 @@ import time
 import rich_click as click
 from rich.table import Table
 
+from allways.cli.dendrite_lite import discover_validators
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
     console,
@@ -14,7 +15,6 @@ from allways.cli.swap_commands.helpers import (
     loading,
     read_miner_commitment,
 )
-from allways.cli.dendrite_lite import discover_validators
 from allways.contract_client import ContractError
 
 
