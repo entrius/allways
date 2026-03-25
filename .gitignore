@@ -1,0 +1,30 @@
+venv/
+allways-venv/
+.env
+*.env
+
+__pycache__
+.pytest_cache/
+
+*.egg-info
+
+# for mergetool
+*.orig
+
+*.log
+
+CLAUDE.md
+.claude/
+.vscode/
+
+# Rust/Cargo build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+!uv.lock
+tmp/
+
+# Chain node data
+data/
+
+CLAUDE.md

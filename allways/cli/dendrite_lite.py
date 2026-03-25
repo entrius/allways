@@ -1,0 +1,72 @@
+"""Dendrite-lite: ephemeral keypair + validator discovery for TAO-less users.
+
+Users don't have TAO wallets. This module provides:
+- Ephemeral sr25519 keypair generation/storage for transport-layer auth
+- Validator discovery from metagraph
+- Dendrite broadcast helper
+"""
+
+from pathlib import Path
+
+import bittensor as bt
+
+EPHEMERAL_WALLET_DIR = Path.home() / '.allways' / 'ephemeral_wallet'
+EPHEMERAL_WALLET_NAME = 'allways_ephemeral'
+EPHEMERAL_HOTKEY_NAME = 'default'
+
+
+def get_ephemeral_wallet() -> bt.Wallet:
+    """Get or create an ephemeral wallet for dendrite-lite transport auth.
+
+    The ephemeral keypair is stored in ~/.allways/ephemeral_wallet/.
+    It's NOT used for authentication — the real auth is the source chain
+    address proof inside the synapse payload.
+    """
+    wallet_path = str(EPHEMERAL_WALLET_DIR.parent)
+    wallet = bt.Wallet(name=EPHEMERAL_WALLET_NAME, hotkey=EPHEMERAL_HOTKEY_NAME, path=wallet_path)
+
+    hotkey_file = Path(wallet_path) / EPHEMERAL_WALLET_NAME / 'hotkeys' / EPHEMERAL_HOTKEY_NAME
+    if not hotkey_file.exists():
+        hotkey_file.parent.mkdir(parents=True, exist_ok=True)
+        wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+        bt.logging.info('Created ephemeral wallet for dendrite-lite')
+
+    return wallet
+
+
+def discover_validators(subtensor: bt.Subtensor, netuid: int) -> list:
+    """Discover validator axon endpoints from metagraph.
+
+    Filters for UIDs with validator_permit=True and is_serving=True.
+    Returns list of axon endpoints.
+    """
+    metagraph = subtensor.metagraph(netuid=netuid)
+    axons = []
+
+    for uid in range(metagraph.n):
+        if not metagraph.validator_permit[uid]:
+            continue
+        axon = metagraph.axons[uid]
+        if not axon.is_serving:
+            continue
+        axons.append(axon)
+
+    return axons
+
+
+def broadcast_synapse(wallet: bt.Wallet, axons: list, synapse, timeout: float = 30.0) -> list:
+    """Broadcast a synapse to all validator axons via dendrite.
+
+    Returns list of response synapses.
+    """
+    import asyncio
+
+    dendrite = bt.Dendrite(wallet=wallet)
+
+    loop = asyncio.new_event_loop()
+    try:
+        responses = loop.run_until_complete(dendrite(axons=axons, synapse=synapse, deserialize=False, timeout=timeout))
+    finally:
+        loop.close()
+
+    return responses

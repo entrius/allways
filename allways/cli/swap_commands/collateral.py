@@ -1,0 +1,212 @@
+"""alw collateral - Manage miner collateral on the smart contract."""
+
+import rich_click as click
+from rich.table import Table
+
+from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
+from allways.contract_client import ContractError
+
+
+@click.group('collateral')
+def collateral_group():
+    """Manage miner collateral.
+
+    \b
+    Subcommands:
+        deposit             Deposit collateral (in TAO)
+        withdraw            Withdraw collateral (in TAO)
+        view                View current collateral
+    """
+    pass
+
+
+@collateral_group.command('deposit')
+@click.option('--amount', default=None, type=float, help='Amount in TAO')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def collateral_deposit(amount: float | None, yes: bool):
+    """Deposit collateral to the swap contract.
+
+    \b
+    Amount is in TAO. Minimum collateral to be active: see MIN_COLLATERAL_TAO.
+
+    Examples:
+        alw collateral deposit --amount 5.0
+        alw collateral deposit                  (prompts interactively)
+    """
+    if amount is None:
+        amount = click.prompt('Amount to deposit (TAO)', type=float)
+
+    if amount <= 0:
+        console.print('[red]Amount must be positive[/red]')
+        return
+
+    amount_rao = to_rao(amount)
+
+    _, wallet, _, client = get_cli_context()
+
+    console.print('\n[bold]Depositing Collateral[/bold]\n')
+    console.print(f'  Amount:  [green]{amount} TAO[/green] ({amount_rao} rao)')
+    console.print(f'  Wallet:  {wallet.name}')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+
+    try:
+        max_collateral_rao = client.get_max_collateral()
+        if max_collateral_rao > 0:
+            current_collateral_rao = client.get_miner_collateral(wallet.hotkey.ss58_address)
+            new_total_rao = current_collateral_rao + amount_rao
+            if new_total_rao > max_collateral_rao:
+                console.print(
+                    f'[red]This would exceed the max collateral limit ({from_rao(max_collateral_rao):.4f} TAO). '
+                    f'Current: {from_rao(current_collateral_rao):.4f} TAO, posting: {amount} TAO.[/red]'
+                )
+                return
+
+        account_info = client.subtensor.substrate.query('System', 'Account', [wallet.hotkey.ss58_address])
+        account_data = account_info.value if hasattr(account_info, 'value') else account_info
+        free_balance = account_data.get('data', {}).get('free', 0)
+        required = amount_rao + MIN_BALANCE_FOR_TX_RAO
+        if free_balance < required:
+            console.print(
+                f'[red]Insufficient balance. Free: {from_rao(free_balance):.4f} TAO, '
+                f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+            )
+            return
+    except ContractError as e:
+        console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
+    except Exception as e:
+        console.print(f'[yellow]Warning: balance check failed ({e}), proceeding anyway[/yellow]')
+
+    if not yes and not click.confirm('Confirm depositing collateral?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        with loading('Submitting transaction...'):
+            client.post_collateral(wallet=wallet, amount_rao=amount_rao)
+        console.print(f'[green]Successfully deposited {amount} TAO collateral![/green]')
+    except ContractError as e:
+        console.print(f'[red]Failed to deposit collateral: {e}[/red]')
+
+
+@collateral_group.command('withdraw')
+@click.option('--amount', default=None, type=float, help='Amount in TAO')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def collateral_withdraw(amount: float | None, yes: bool):
+    """Withdraw collateral from the swap contract.
+
+    \b
+    Amount is in TAO. Cannot withdraw if you have active swaps.
+
+    Examples:
+        alw collateral withdraw --amount 2.0
+        alw collateral withdraw                 (prompts interactively)
+    """
+    if amount is None:
+        amount = click.prompt('Amount to withdraw (TAO)', type=float)
+
+    if amount <= 0:
+        console.print('[red]Amount must be positive[/red]')
+        return
+
+    amount_rao = to_rao(amount)
+
+    _, wallet, subtensor, client = get_cli_context()
+
+    console.print('\n[bold]Withdrawing Collateral[/bold]\n')
+    console.print(f'  Amount:  [yellow]{amount} TAO[/yellow] ({amount_rao} rao)')
+    console.print(f'  Wallet:  {wallet.name}')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+
+    try:
+        hotkey = wallet.hotkey.ss58_address
+        current_block = subtensor.get_current_block()
+
+        is_active = client.get_miner_active_flag(hotkey)
+        if is_active:
+            console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
+            return
+
+        deactivation_block = client.get_miner_deactivation_block(hotkey)
+        if deactivation_block > 0:
+            timeout_blocks = client.get_fulfillment_timeout()
+            cooldown_end = deactivation_block + (timeout_blocks * 2)
+            if current_block < cooldown_end:
+                remaining = cooldown_end - current_block
+                remaining_min = remaining * SECONDS_PER_BLOCK / 60
+                console.print(
+                    f'[red]Withdrawal cooldown active. ~{remaining} blocks (~{remaining_min:.0f} min) remaining.[/red]'
+                )
+                return
+
+        reserved_until = client.get_miner_reserved_until(hotkey)
+        if reserved_until >= current_block:
+            console.print('[red]Cannot withdraw while miner is reserved for a swap.[/red]')
+            return
+
+        has_active_swap = client.get_miner_has_active_swap(hotkey)
+        if has_active_swap:
+            console.print('[red]Cannot withdraw while miner has an active swap.[/red]')
+            return
+
+        current_collateral_rao = client.get_miner_collateral(hotkey)
+        if amount_rao > current_collateral_rao:
+            console.print(
+                f'[red]Insufficient collateral. Current: {from_rao(current_collateral_rao):.4f} TAO, '
+                f'requested: {amount} TAO.[/red]'
+            )
+            return
+    except ContractError as e:
+        console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
+    except Exception as e:
+        console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
+
+    if not yes and not click.confirm('Confirm withdrawing collateral?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        with loading('Submitting transaction...'):
+            client.withdraw_collateral(wallet=wallet, amount_rao=amount_rao)
+        console.print(f'[green]Successfully withdrew {amount} TAO collateral![/green]')
+    except ContractError as e:
+        console.print(f'[red]Failed to withdraw collateral: {e}[/red]')
+
+
+@collateral_group.command('view')
+@click.option('--hotkey', default=None, help='Hotkey to check (default: your hotkey)')
+def collateral_view(hotkey: str):
+    """View collateral balance.
+
+    Example:
+        alw collateral view
+        alw collateral view --hotkey 5Cxyz...
+    """
+    _, wallet, _, client = get_cli_context()
+
+    if not hotkey:
+        hotkey = wallet.hotkey.ss58_address
+
+    try:
+        with loading('Reading collateral...'):
+            collateral_rao = client.get_miner_collateral(hotkey)
+            is_active = client.get_miner_active_flag(hotkey)
+    except ContractError as e:
+        console.print(f'[red]Failed to read collateral: {e}[/red]')
+        return
+
+    console.print('\n[bold]Collateral Status[/bold]\n')
+
+    table = Table(show_header=True)
+    table.add_column('Field', style='cyan')
+    table.add_column('Value', style='green')
+
+    table.add_row('Hotkey', hotkey)
+    table.add_row('Collateral', f'{from_rao(collateral_rao):.4f} TAO ({collateral_rao} rao)')
+    table.add_row('Minimum Required', f'{MIN_COLLATERAL_TAO} TAO')
+
+    status = '[green]Active[/green]' if is_active else '[red]Inactive[/red]'
+    table.add_row('Status', status)
+
+    console.print(table)
+    console.print()

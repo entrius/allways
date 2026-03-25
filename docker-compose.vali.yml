@@ -1,0 +1,44 @@
+services:
+  validator:
+    image: entrius/allways:latest
+    container_name: aw-vali
+    restart: unless-stopped
+    mem_limit: "3g"
+    entrypoint: /app/scripts/vali-entrypoint.sh
+    env_file:
+      - .env
+    ports:
+      - "${PORT}:${PORT}"
+    volumes:
+      - ${WALLET_PATH}:/root/.bittensor/wallets:ro
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  btc-node:
+    image: bitcoin/bitcoin:28
+    container_name: aw-btc
+    restart: unless-stopped
+    mem_limit: "512m" # set to "4g" for initial BTC sync, then revert
+    # mem_limit: "4g"       # initial BTC sync — revert to 512m after sync completes
+    command:
+      - bitcoind
+      - -server
+      - -prune=5000 # keep ~5g worth of data on disk
+      - -rpcuser=${BTC_RPC_USER}
+      - -rpcpassword=${BTC_RPC_PASS}
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -rpcport=8332
+    volumes:
+      - ./data/btc:/home/bitcoin/.bitcoin
+
+  watchtower:
+    image: nickfedor/watchtower
+    container_name: allways-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: 200
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"

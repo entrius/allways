@@ -1,0 +1,13 @@
+min_compute:
+  gpu: false
+  cpu:
+    min_cores: 2
+    min_speed: 2.0
+  ram:
+    min_gb: 4
+  storage:
+    min_gb: 20
+  os:
+    - linux
+  python:
+    - "3.12"

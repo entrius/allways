@@ -1,0 +1,10 @@
+.git
+.env
+*.env
+__pycache__
+*.egg-info
+.pytest_cache
+target/
+data/
+.claude/
+.vscode/

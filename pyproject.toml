@@ -1,0 +1,84 @@
+[project]
+name = "allways"
+version = "0.1.0"
+description = "Allways - Universal Transaction Layer: Trustless cross-chain swaps on Bittensor Subnet 7"
+license = "MIT"
+requires-python = ">=3.10,<3.15"
+authors = [{ name = "Allways" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "bittensor==10.1.0",
+    "bittensor-cli==9.17.0",
+    "bittensor-commit-reveal==0.4.0",
+    "bittensor-wallet==4.0.0",
+    "wandb==0.21.3",
+    "python-dotenv==1.2.1",
+    "substrate-interface",
+    "requests",
+    "bitcoin-message-tool",
+    "click",
+    "rich",
+    "rich-click",
+    "embit",
+    "base58",
+    "bech32",
+    "pycryptodome",
+    "numpy",
+]
+
+[project.scripts]
+alw = "allways.cli.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.14.10",
+]
+
+# bitcoin-message-tool incorrectly lists pytest as a runtime dependency
+[tool.uv]
+override-dependencies = ["pytest>=9.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["allways"]
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+skip_gitignore = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "single"

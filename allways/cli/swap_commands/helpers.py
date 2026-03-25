@@ -1,0 +1,209 @@
+import json
+import os
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Optional, Tuple
+
+import bittensor as bt
+from rich.console import Console
+
+from allways.classes import SwapStatus
+from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
+from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
+from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.contract_client import AllwaysContractClient
+
+ALLWAYS_DIR = Path.home() / '.allways'
+CONFIG_FILE = ALLWAYS_DIR / 'config.json'
+PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
+
+console = Console()
+
+SECONDS_PER_BLOCK = 12
+
+SWAP_STATUS_COLORS = {
+    SwapStatus.ACTIVE: 'yellow',
+    SwapStatus.FULFILLED: 'blue',
+    SwapStatus.COMPLETED: 'green',
+    SwapStatus.TIMED_OUT: 'red',
+}
+
+
+def loading(message: str, spinner: str = 'dots', color: str = 'cyan'):
+    """Return a Rich spinner context manager for long-running operations."""
+    return console.status(f'[{color}]{message}[/{color}]', spinner=spinner, spinner_style=color)
+
+
+# Global flags that can appear anywhere in the command line.
+# Maps CLI flag names to config keys.
+_GLOBAL_FLAGS = {
+    '--network': 'network',
+    '--wallet': 'wallet',
+    '--wallet.name': 'wallet',
+    '--wallet-name': 'wallet',
+    '--hotkey': 'hotkey',
+    '--wallet.hotkey': 'hotkey',
+    '--netuid': 'netuid',
+}
+
+
+def is_local_network(network: str) -> bool:
+    """Check if the network config points to a local dev environment."""
+    if network == 'local':
+        return True
+    return any(host in network for host in ('127.0.0.1', 'localhost', '0.0.0.0'))
+
+
+def to_rao(amount_tao: float) -> int:
+    """Convert TAO to rao."""
+    return int(amount_tao * TAO_TO_RAO)
+
+
+def from_rao(amount_rao: int) -> float:
+    """Convert rao to TAO."""
+    return amount_rao / TAO_TO_RAO
+
+
+def load_cli_config() -> dict:
+    """Load CLI configuration from ~/.allways/config.json."""
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _parse_global_flags() -> dict:
+    """Extract global flags (--network, --wallet, etc.) from sys.argv.
+
+    Strips matched flags and their values from sys.argv so Click
+    subcommands don't choke on unknown options.
+    """
+    overrides = {}
+    new_argv = [sys.argv[0]]
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        # Handle --flag=value form
+        if '=' in arg:
+            flag, value = arg.split('=', 1)
+            if flag in _GLOBAL_FLAGS:
+                overrides[_GLOBAL_FLAGS[flag]] = value
+                i += 1
+                continue
+        # Handle --flag value form
+        if arg in _GLOBAL_FLAGS:
+            if i + 1 < len(sys.argv):
+                overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
+                i += 2
+                continue
+        new_argv.append(arg)
+        i += 1
+    sys.argv[:] = new_argv
+    return overrides
+
+
+_CLI_OVERRIDES: dict = {}
+
+
+def parse_global_flags():
+    """Parse and strip global flags from sys.argv. Must be called after argv is restored."""
+    global _CLI_OVERRIDES
+    _CLI_OVERRIDES = _parse_global_flags()
+
+
+def _get_effective_config() -> dict:
+    """Merge file config with CLI global overrides (CLI flags win)."""
+    config = load_cli_config()
+    config.update(_CLI_OVERRIDES)
+    return config
+
+
+def get_cli_context(
+    need_wallet: bool = True,
+    need_client: bool = True,
+) -> Tuple[dict, Optional[bt.Wallet], bt.Subtensor, Optional[AllwaysContractClient]]:
+    """Standard CLI context setup: config, wallet, subtensor, contract client.
+
+    CLI flags (--network, --wallet, --hotkey, --netuid) override config file values.
+    """
+    config = _get_effective_config()
+    network = config.get('network', 'finney')
+    with console.status(
+        f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'
+    ):
+        subtensor = bt.Subtensor(network=network)
+        wallet = None
+        if need_wallet:
+            wallet = bt.Wallet(
+                name=config.get('wallet', 'default'),
+                hotkey=config.get('hotkey', 'default'),
+            )
+        contract_addr = config.get('contract-address') or config.get('contract_address') or DEFAULT_CONTRACT_ADDRESS
+        client = AllwaysContractClient(contract_address=contract_addr, subtensor=subtensor) if need_client else None
+    # Ensure netuid is resolved for callers
+    if 'netuid' not in config:
+        config['netuid'] = NETUID_FINNEY
+    else:
+        config['netuid'] = int(config['netuid'])
+    return config, wallet, subtensor, client
+
+
+# =========================================================================
+# Pending swap state persistence
+# =========================================================================
+
+
+@dataclass
+class PendingSwapState:
+    miner_hotkey: str
+    miner_uid: int
+    source_chain: str
+    dest_chain: str
+    source_amount: int
+    dest_amount: int
+    tao_amount: int
+    user_receives: int
+    rate_str: str
+    miner_source_address: str
+    user_source_address: str
+    receive_address: str
+    reserved_until_block: int
+    netuid: int
+    wallet_name: str
+    hotkey_name: str
+    created_at: float
+
+
+def save_pending_swap(state: PendingSwapState) -> None:
+    """Atomically write pending swap state to ~/.allways/pending_swap.json."""
+    ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(asdict(state), indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(data)
+        os.replace(tmp_path, PENDING_SWAP_FILE)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+def load_pending_swap() -> Optional[PendingSwapState]:
+    """Load pending swap state. Returns None if file doesn't exist or is invalid."""
+    if not PENDING_SWAP_FILE.exists():
+        return None
+    try:
+        data = json.loads(PENDING_SWAP_FILE.read_text())
+        return PendingSwapState(**data)
+    except Exception:
+        return None
+
+
+def clear_pending_swap() -> None:
+    """Remove the pending swap state file."""
+    PENDING_SWAP_FILE.unlink(missing_ok=True)
