@@ -86,7 +86,7 @@ def post_tx_command(tx_hash: str, netuid: int):
     source_key = wallet.coldkey if state.source_chain == 'tao' else None
 
     # Discover validators
-    validator_axons = discover_validators(subtensor, netuid)
+    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return
