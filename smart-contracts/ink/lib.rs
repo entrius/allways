@@ -86,6 +86,9 @@ mod allways_swap_manager {
     const REQ_EXTEND: u8 = 3;
     const REQ_EXTEND_TIMEOUT: u8 = 4;
 
+    // Fee cap: divisor >= 20 means fee can never exceed 5%
+    const MIN_FEE_DIVISOR: u128 = 20;
+
     // =========================================================================
     // Internal helpers
     // =========================================================================
@@ -719,7 +722,7 @@ mod allways_swap_manager {
                 swap.status = SwapStatus::Completed;
                 swap.completed_block = self.env().block_number();
 
-                // Fee from miner collateral -> accumulated_fees (fee_divisor >= 2 enforced by setter)
+                // Fee from miner collateral -> accumulated_fees (divisor >= 20 enforced, max 5%)
                 #[allow(clippy::arithmetic_side_effects)]
                 let fee = swap.tao_amount.saturating_div(self.fee_divisor);
                 let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
@@ -1100,7 +1103,7 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn set_fee_divisor(&mut self, divisor: u128) -> Result<(), Error> {
             self.ensure_owner()?;
-            if divisor < 2 {
+            if divisor < MIN_FEE_DIVISOR {
                 return Err(Error::InvalidAmount);
             }
             self.fee_divisor = divisor;
