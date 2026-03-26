@@ -7,7 +7,7 @@ NETUID_LOCAL = 2
 # CONTRACT_ADDRESS = '5GhkGErFdX5yYfwf6HJnAAXphsPJubPxrjUMne3sjM95oi1h'
 
 # mainnet
-CONTRACT_ADDRESS = '5G3ZQdJ38xfgiXEainmASyhEzHLAia1iD6WELTw8YZKdUJFG'
+CONTRACT_ADDRESS = '5FTkUEhRmLPsALn4b7bJpVFhDQqohGbc6khnmA2aiYFLMZYP'
 
 # ─── Polling ──────────────────────────────────────────────
 MINER_POLL_INTERVAL_SECONDS = 12  # Match Bittensor block time for lowest latency
@@ -53,8 +53,8 @@ EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend reservation when this 
 DEFAULT_FEE_DIVISOR = 100  # tao_amount / fee_divisor — read from contract, fallback here
 SWAP_FEE_PERCENT = 0.01  # display only — derived from DEFAULT_FEE_DIVISOR
 MAX_FEE_PERCENT = 0.05  # contract enforces divisor >= 20 (max 5% fee)
-MIN_COLLATERAL_TAO = 1.2  # Must be > max swap amount
+MIN_COLLATERAL_TAO = 0.1  # Must be > max swap amount
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min — `alw admin set-timeout`
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO — `alw admin set-min-swap`
-DEFAULT_MAX_SWAP_AMOUNT_RAO = 1_000_000_000  # 1 TAO   — `alw admin set-max-swap`
+DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO   — `alw admin set-max-swap`
 RESERVATION_TTL_BLOCKS = 30  # ~5 min — `alw admin set-reservation-ttl`
