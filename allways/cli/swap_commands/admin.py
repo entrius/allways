@@ -112,13 +112,13 @@ def set_reservation_ttl(blocks: int):
 @admin_group.command('set-fee-divisor')
 @click.argument('divisor', type=int)
 def set_fee_divisor(divisor: int):
-    """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 200 = 0.5% fee).
+    """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 20 = 5% fee max).
 
     Example:
         alw admin set-fee-divisor 100
     """
-    if divisor < 2:
-        console.print('[red]Divisor must be at least 2[/red]')
+    if divisor < 20:
+        console.print('[red]Divisor must be at least 20 (max 5% fee)[/red]')
         return
 
     _, wallet, _, client = get_cli_context()
