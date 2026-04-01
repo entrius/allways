@@ -42,6 +42,7 @@ pub struct SwapData {
     pub user_source_address: String,
     pub user_dest_address: String,
     pub miner_source_address: String,
+    pub miner_dest_address: String,
     pub rate: String,
     pub source_tx_hash: String,
     pub source_tx_block: u32,

@@ -396,6 +396,9 @@ async def handle_swap_confirm(
             miner_deposit_address = (
                 commitment.source_address if swap_source_chain == commitment.source_chain else commitment.dest_address
             )
+            miner_fulfillment_address = (
+                commitment.dest_address if swap_source_chain == commitment.source_chain else commitment.source_address
+            )
 
             provider = validator.axon_chain_providers.get(swap_source_chain)
             if provider is None:
@@ -424,6 +427,7 @@ async def handle_swap_confirm(
                     source_amount=res_source_amount,
                     dest_amount=res_dest_amount,
                     miner_deposit_address=miner_deposit_address,
+                    miner_dest_address=miner_fulfillment_address,
                     rate_str=commitment.rate_str,
                     reserved_until=reserved_until,
                 )
@@ -468,6 +472,7 @@ async def handle_swap_confirm(
                 source_tx_block=tx_info.block_number or 0,
                 dest_amount=res_dest_amount,
                 miner_source_address=miner_deposit_address,
+                miner_dest_address=miner_fulfillment_address,
                 rate=commitment.rate_str,
             )
             synapse.accepted = True
