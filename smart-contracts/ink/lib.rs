@@ -7,7 +7,48 @@ mod events;
 use types::{SwapData, SwapStatus, VoteType};
 use errors::Error;
 
-#[ink::contract]
+#[ink::chain_extension(extension = 0x1000)]
+pub trait SubtensorExtension {
+    type ErrorCode = SubtensorError;
+
+    #[ink(function = 18)]
+    fn add_stake_recycle(
+        hotkey: <CustomEnvironment as ink::env::Environment>::AccountId,
+        netuid: u16,
+        amount: u64,
+    ) -> u64;
+}
+
+#[ink::scale_derive(Encode, Decode, TypeInfo)]
+pub enum SubtensorError {
+    ChainExtensionFailed,
+}
+
+impl ink::env::chain_extension::FromStatusCode for SubtensorError {
+    fn from_status_code(status_code: u32) -> Result<(), Self> {
+        match status_code {
+            0 => Ok(()),
+            _ => Err(Self::ChainExtensionFailed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[ink::scale_derive(TypeInfo)]
+pub enum CustomEnvironment {}
+
+impl ink::env::Environment for CustomEnvironment {
+    const MAX_EVENT_TOPICS: usize =
+        <ink::env::DefaultEnvironment as ink::env::Environment>::MAX_EVENT_TOPICS;
+    type AccountId = <ink::env::DefaultEnvironment as ink::env::Environment>::AccountId;
+    type Balance = <ink::env::DefaultEnvironment as ink::env::Environment>::Balance;
+    type Hash = <ink::env::DefaultEnvironment as ink::env::Environment>::Hash;
+    type Timestamp = <ink::env::DefaultEnvironment as ink::env::Environment>::Timestamp;
+    type BlockNumber = <ink::env::DefaultEnvironment as ink::env::Environment>::BlockNumber;
+    type ChainExtension = SubtensorExtension;
+}
+
+#[ink::contract(env = crate::CustomEnvironment)]
 mod allways_swap_manager {
     use super::*;
     use events::*;
@@ -1134,7 +1175,10 @@ mod allways_swap_manager {
                 return Err(Error::ZeroAmount);
             }
 
-            self.env().transfer(self.recycle_address, fees)
+            let amount: u64 = fees.try_into().map_err(|_| Error::TransferFailed)?;
+            self.env()
+                .extension()
+                .add_stake_recycle(self.treasury_hotkey, self.netuid, amount)
                 .map_err(|_| Error::TransferFailed)?;
 
             self.accumulated_fees = 0;

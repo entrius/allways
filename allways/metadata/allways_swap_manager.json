@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0x30b3f2dc49bdb3ba3843f7c0851a8036e6b4f89e76132515d88653301a41ff15",
+    "hash": "0x15206c9262e680d8c0d5ce92e3b880e2d4c0c30d6e2e489c706be5d3904405cc",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -6419,9 +6419,8 @@
           "variant": {}
         },
         "path": [
-          "ink_env",
-          "types",
-          "NoChainExtension"
+          "allways_swap_manager",
+          "SubtensorExtension"
         ]
       }
     }
