@@ -27,7 +27,11 @@ class ReservationStatus(IntEnum):
 
 @dataclass
 class MinerPair:
-    """A miner's posted exchange pair from on-chain commitments."""
+    """A miner's posted exchange pair from on-chain commitments.
+
+    After normalization, source_chain is always non-TAO and dest_chain is always TAO.
+    rate/rate_str is the non-TAO->TAO rate, rate_reverse/rate_reverse_str is TAO->non-TAO.
+    """
 
     uid: int
     hotkey: str
@@ -35,8 +39,16 @@ class MinerPair:
     source_address: str
     dest_chain: str
     dest_address: str
-    rate: float  # TAO per 1 non-TAO asset — for display/sorting
-    rate_str: str = ''  # Raw string from commitment — used for precise dest_amount calculation
+    rate: float  # non-TAO->TAO rate (TAO per 1 non-TAO asset) — for display/sorting
+    rate_str: str = ''  # Raw string — for precise dest_amount calculation
+    rate_reverse: float = 0.0  # TAO->non-TAO rate (TAO per 1 non-TAO asset)
+    rate_reverse_str: str = ''  # Raw string — for precise dest_amount calculation
+
+    def get_rate_for_direction(self, source_is_tao: bool) -> tuple:
+        """Return (rate, rate_str) for the given swap direction."""
+        if source_is_tao:
+            return self.rate_reverse, self.rate_reverse_str
+        return self.rate, self.rate_str
 
 
 @dataclass

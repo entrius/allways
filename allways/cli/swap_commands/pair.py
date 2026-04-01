@@ -19,13 +19,18 @@ def _prompt_chain(label: str, exclude: str | None = None) -> str:
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
 
 
-def _prompt_rate() -> float:
-    """Prompt for a positive rate."""
+def _prompt_rates(non_tao_ticker: str) -> tuple:
+    """Prompt for direction-specific rates. Second defaults to first."""
     while True:
-        value = click.prompt('Rate (TAO per 1 non-TAO asset)', type=float)
-        if value > 0:
-            return value
+        fwd = click.prompt(f'Rate for {non_tao_ticker} -> TAO (TAO per 1 {non_tao_ticker})', type=float)
+        if fwd > 0:
+            break
         console.print('[red]Rate must be positive[/red]')
+    rev = click.prompt(f'Rate for TAO -> {non_tao_ticker} (TAO per 1 {non_tao_ticker})', type=float, default=fwd)
+    if rev <= 0:
+        console.print('[red]Rate must be positive, using forward rate[/red]')
+        rev = fwd
+    return fwd, rev
 
 
 @click.command('pair')
@@ -34,6 +39,7 @@ def _prompt_rate() -> float:
 @click.argument('dst_chain', required=False, default=None, type=str)
 @click.argument('dst_addr', required=False, default=None, type=str)
 @click.argument('rate', required=False, default=None, type=float)
+@click.argument('rate_reverse', required=False, default=None, type=float)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
     src_chain: str | None,
@@ -41,6 +47,7 @@ def post_pair(
     dst_chain: str | None,
     dst_addr: str | None,
     rate: float | None,
+    rate_reverse: float | None,
     yes: bool,
 ):
     """Post a trading pair to chain via commitment.
@@ -50,16 +57,18 @@ def post_pair(
 
     \b
     Arguments:
-        SRC_CHAIN   Source chain ID (e.g. btc, tao)
-        SRC_ADDR    Your receiving address on source chain
-        DST_CHAIN   Destination chain ID (e.g. tao, btc)
-        DST_ADDR    Your sending address on destination chain
-        RATE        TAO per 1 non-TAO asset (e.g. 345 means 1 BTC = 345 TAO)
+        SRC_CHAIN      Source chain ID (e.g. btc, tao)
+        SRC_ADDR       Your receiving address on source chain
+        DST_CHAIN      Destination chain ID (e.g. tao, btc)
+        DST_ADDR       Your sending address on destination chain
+        RATE           non-TAO->TAO rate (TAO per 1 non-TAO asset)
+        RATE_REVERSE   TAO->non-TAO rate (optional, defaults to RATE)
 
     \b
     Examples:
-        alw miner post                                        (interactive wizard)
-        alw miner post btc bc1q...abc tao 5Cxyz...def 345    (all at once)
+        alw miner post                                              (interactive wizard)
+        alw miner post btc bc1q...abc tao 5Cxyz...def 340 350      (direction-specific rates)
+        alw miner post btc bc1q...abc tao 5Cxyz...def 345          (same rate both ways)
     """
     # --- Prompt for any missing arguments ---
     if src_chain is None:
@@ -89,14 +98,24 @@ def post_pair(
     if dst_addr is None:
         dst_addr = click.prompt(f'Your sending address on {SUPPORTED_CHAINS[dst_chain].name}')
 
+    non_tao = src_chain if src_chain != 'tao' else dst_chain
+    non_tao_ticker = non_tao.upper()
+
     if rate is None:
-        rate = _prompt_rate()
+        rate, rate_reverse = _prompt_rates(non_tao_ticker)
     elif rate <= 0:
         console.print('[red]Rate must be positive[/red]')
         return
+    else:
+        if rate_reverse is None:
+            rate_reverse = rate
+        elif rate_reverse <= 0:
+            console.print('[red]Rate must be positive[/red]')
+            return
 
     # Normalize to canonical direction: non-TAO → TAO.
-    # Rate is always "TAO per 1 non-TAO asset" regardless of direction.
+    # Rates are NOT swapped — prompts and help text already define them in canonical order
+    # (RATE = non-TAO->TAO, RATE_REVERSE = TAO->non-TAO).
     if src_chain == 'tao' and dst_chain != 'tao':
         console.print('[dim]Normalizing pair direction to canonical form (non-TAO -> TAO).[/dim]')
         src_chain, dst_chain = dst_chain, src_chain
@@ -106,15 +125,27 @@ def post_pair(
     netuid = config['netuid']
 
     rate_str = f'{rate:g}'
-    commitment_data = f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}'
+    rate_reverse_str = f'{rate_reverse:g}'
+    commitment_data = (
+        f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{rate_reverse_str}'
+    )
 
-    non_tao = src_chain if src_chain != 'tao' else dst_chain
-    non_tao_ticker = non_tao.upper()
+    data_bytes = commitment_data.encode('utf-8')
+    if len(data_bytes) > 128:
+        console.print(
+            f'[red]Commitment too long ({len(data_bytes)} bytes, max 128). '
+            f'Try a shorter address format (e.g. P2WPKH instead of P2TR).[/red]'
+        )
+        return
 
     console.print('\n[bold]Posting trading pair commitment[/bold]\n')
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
-    console.print(f'  Rate:        [green]1 {non_tao_ticker} = {rate:g} TAO[/green]')
+    if rate == rate_reverse:
+        console.print(f'  Rate:        [green]1 {non_tao_ticker} = {rate:g} TAO (both directions)[/green]')
+    else:
+        console.print(f'  Rate ({non_tao_ticker}->TAO):  [green]1 {non_tao_ticker} = {rate:g} TAO[/green]')
+        console.print(f'  Rate (TAO->{non_tao_ticker}):  [green]1 {non_tao_ticker} = {rate_reverse:g} TAO[/green]')
     console.print(f'  Netuid:      {netuid}')
     console.print(f'  Data:        [dim]{commitment_data}[/dim]\n')
 
@@ -123,7 +154,6 @@ def post_pair(
         return
 
     try:
-        data_bytes = commitment_data.encode('utf-8')
         with loading('Submitting commitment...'):
             call = subtensor.substrate.compose_call(
                 call_module='Commitments',

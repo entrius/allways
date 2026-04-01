@@ -12,13 +12,13 @@ from allways.constants import COMMITMENT_VERSION
 def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[MinerPair]:
     """Parse a commitment string into a MinerPair.
 
-    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}
-    Rate is TAO per 1 non-TAO asset (e.g. 345 means 1 BTC = 345 TAO).
-    Example: v2:btc:bc1q...:tao:5C...:345
+    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{rate_reverse}
+    Both rates are TAO per 1 non-TAO asset. rate is for non-TAO->TAO, rate_reverse is for TAO->non-TAO.
+    Example: v3:btc:bc1q...:tao:5C...:340:350
     """
     try:
         parts = raw.split(':')
-        if len(parts) != 6:
+        if len(parts) != 7:
             return None
 
         version_str = parts[0]
@@ -35,6 +35,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         dst_addr = parts[4]
         rate_str = parts[5]
         rate = float(rate_str)
+        rate_reverse_str = parts[6]
+        rate_reverse = float(rate_reverse_str)
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
@@ -43,11 +45,12 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
             return None
 
         # Normalize to canonical direction: non-TAO → TAO.
-        # Rate is always "TAO per 1 non-TAO asset" regardless of posted direction,
-        # so swapping source/dest doesn't change rate interpretation.
+        # When swapping direction, swap rates too: the posted "forward" rate becomes "reverse".
         if src_chain == 'tao' and dst_chain != 'tao':
             src_chain, dst_chain = dst_chain, src_chain
             src_addr, dst_addr = dst_addr, src_addr
+            rate, rate_reverse = rate_reverse, rate
+            rate_str, rate_reverse_str = rate_reverse_str, rate_str
 
         return MinerPair(
             uid=uid,
@@ -58,6 +61,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
             dest_address=dst_addr,
             rate=rate,
             rate_str=rate_str,
+            rate_reverse=rate_reverse,
+            rate_reverse_str=rate_reverse_str,
         )
     except (ValueError, IndexError):
         return None

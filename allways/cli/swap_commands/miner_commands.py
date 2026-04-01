@@ -80,7 +80,13 @@ def miner_status(hotkey: str):
 
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
-        console.print(f'  {pair.source_chain.upper()}/{pair.dest_chain.upper()} @ [green]{pair.rate:g}[/green]')
+        non_tao = pair.source_chain.upper()
+        if pair.rate_reverse_str and pair.rate != pair.rate_reverse:
+            console.print(f'  {non_tao}/TAO')
+            console.print(f'    {non_tao} -> TAO: [green]{pair.rate:g}[/green]')
+            console.print(f'    TAO -> {non_tao}: [green]{pair.rate_reverse:g}[/green]')
+        else:
+            console.print(f'  {non_tao}/TAO @ [green]{pair.rate:g}[/green]')
         console.print(f'  Source address: [dim]{pair.source_address}[/dim]')
         console.print(f'  Dest address:   [dim]{pair.dest_address}[/dim]')
     else:

@@ -399,6 +399,7 @@ async def handle_swap_confirm(
             miner_fulfillment_address = (
                 commitment.dest_address if swap_source_chain == commitment.source_chain else commitment.source_address
             )
+            _, selected_rate_str = commitment.get_rate_for_direction(swap_source_chain == 'tao')
 
             provider = validator.axon_chain_providers.get(swap_source_chain)
             if provider is None:
@@ -428,7 +429,7 @@ async def handle_swap_confirm(
                     dest_amount=res_dest_amount,
                     miner_deposit_address=miner_deposit_address,
                     miner_dest_address=miner_fulfillment_address,
-                    rate_str=commitment.rate_str,
+                    rate_str=selected_rate_str,
                     reserved_until=reserved_until,
                 )
                 if validator.pending_confirms.enqueue(pending):
@@ -473,7 +474,7 @@ async def handle_swap_confirm(
                 dest_amount=res_dest_amount,
                 miner_source_address=miner_deposit_address,
                 miner_dest_address=miner_fulfillment_address,
-                rate=commitment.rate_str,
+                rate=selected_rate_str,
             )
             synapse.accepted = True
             bt.logging.info(f'Voted to initiate swap for miner {miner}')

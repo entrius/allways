@@ -540,6 +540,7 @@ def swap_now_command(
         if p.source_chain == source_chain and p.dest_chain == dest_chain:
             matching_pairs.append(p)
         elif p.source_chain == dest_chain and p.dest_chain == source_chain:
+            rev_rate, rev_rate_str = p.get_rate_for_direction(source_is_tao=True)
             matching_pairs.append(
                 MinerPair(
                     uid=p.uid,
@@ -548,8 +549,8 @@ def swap_now_command(
                     source_address=p.dest_address,
                     dest_chain=p.source_chain,
                     dest_address=p.source_address,
-                    rate=p.rate,
-                    rate_str=p.rate_str,
+                    rate=rev_rate,
+                    rate_str=rev_rate_str,
                 )
             )
 
