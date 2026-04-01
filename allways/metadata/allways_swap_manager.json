@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0x30b3f2dc49bdb3ba3843f7c0851a8036e6b4f89e76132515d88653301a41ff15",
+    "hash": "0xd107a94d3c007dbe3fb4dc7767535b674cea6eaa098611a98906f248322f73a2",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -1237,6 +1237,15 @@
           },
           {
             "label": "miner_source_address",
+            "type": {
+              "displayName": [
+                "String"
+              ],
+              "type": 13
+            }
+          },
+          {
+            "label": "miner_dest_address",
             "type": {
               "displayName": [
                 "String"
@@ -2736,6 +2745,15 @@
                               "ty": 13
                             }
                           },
+                          "name": "miner_dest_address"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x2b1d1362",
+                              "ty": 13
+                            }
+                          },
                           "name": "rate"
                         },
                         {
@@ -3526,6 +3544,11 @@
               },
               {
                 "name": "miner_source_address",
+                "type": 13,
+                "typeName": "String"
+              },
+              {
+                "name": "miner_dest_address",
                 "type": 13,
                 "typeName": "String"
               },
