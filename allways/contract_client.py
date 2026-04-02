@@ -47,7 +47,6 @@ CONTRACT_SELECTORS = {
     'set_consensus_threshold': bytes.fromhex('c0d8ec47'),
     'set_min_swap_amount': bytes.fromhex('800e1573'),
     'set_max_swap_amount': bytes.fromhex('3e868f32'),
-    'set_recycle_address': bytes.fromhex('50dfe685'),
     'set_reservation_ttl': bytes.fromhex('3143d9e3'),
     'set_fee_divisor': bytes.fromhex('8832de41'),
     'recycle_fees': bytes.fromhex('97756ea1'),
@@ -65,7 +64,6 @@ CONTRACT_SELECTORS = {
     'get_accumulated_fees': bytes.fromhex('bf3b5d4e'),
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
-    'get_recycle_address': bytes.fromhex('3847e06c'),
     'get_pending_slash': bytes.fromhex('48c78c4a'),
     'get_min_swap_amount': bytes.fromhex('fca7daa4'),
     'get_max_swap_amount': bytes.fromhex('97826e04'),
@@ -130,7 +128,6 @@ CONTRACT_ARG_TYPES = {
     'set_consensus_threshold': [('percent', 'u8')],
     'set_min_swap_amount': [('amount', 'u128')],
     'set_max_swap_amount': [('amount', 'u128')],
-    'set_recycle_address': [('address', 'AccountId')],
     'set_reservation_ttl': [('blocks', 'u32')],
     'set_fee_divisor': [('divisor', 'u128')],
     'recycle_fees': [],
@@ -243,6 +240,7 @@ CONTRACT_ERROR_VARIANTS = {
     24: ('HashMismatch', 'Request hash does not match computed hash'),
     25: ('PendingConflict', 'A pending vote exists for a different request'),
     26: ('SameChain', 'Source and destination chains must be different'),
+    27: ('SystemHalted', 'System is halted — no new activity allowed'),
 }
 
 
@@ -843,9 +841,6 @@ class AllwaysContractClient:
     def get_halted(self) -> bool:
         return self._read_bool('get_halted')
 
-    def get_recycle_address(self) -> str:
-        return self._read_account_id('get_recycle_address')
-
     def is_validator(self, account: str) -> bool:
         return self._read_bool('is_validator', {'account': account})
 
@@ -1110,12 +1105,6 @@ class AllwaysContractClient:
         self._ensure_initialized()
         tx_hash = self._exec_contract_raw('set_min_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Min swap amount set to {amount_rao}: {tx_hash}')
-        return tx_hash
-
-    def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
-        bt.logging.info(f'Recycle address set to {address}: {tx_hash}')
         return tx_hash
 
     def set_reservation_ttl(self, wallet: bt.Wallet, blocks: int) -> str:

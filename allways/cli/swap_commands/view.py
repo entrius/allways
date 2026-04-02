@@ -430,7 +430,6 @@ def view_contract():
             accumulated_fees_rao = _read(client.get_accumulated_fees)
             total_recycled_rao = _read(client.get_total_recycled_fees)
             owner = _read(client.get_owner)
-            recycle_address = _read(client.get_recycle_address, default=None)
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
         return
@@ -457,8 +456,6 @@ def view_contract():
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
     table.add_row('Owner', owner)
-    if recycle_address:
-        table.add_row('Recycle Address', recycle_address)
 
     console.print(table)
     console.print()

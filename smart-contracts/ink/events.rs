@@ -118,7 +118,7 @@ pub struct ConfigUpdated {
     pub value: u128,
 }
 
-/// Event emitted when accumulated fees are recycled (transferred to recycle address)
+/// Event emitted when accumulated fees are staked on-chain via chain extension
 #[ink::event]
 pub struct FeesRecycled {
     pub tao_amount: u128,

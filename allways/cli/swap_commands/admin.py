@@ -20,10 +20,9 @@ def admin_group():
         set-min-swap <amount_tao>       Set minimum swap amount (0 = no minimum)
         set-max-swap <amount_tao>       Set maximum swap amount (0 = no maximum)
         set-votes <count>               Set required validator votes
-        set-recycle-address <account_id> Set address for fee recycling transfers
         add-vali <hotkey>               Add a validator
         remove-vali <hotkey>            Remove a validator
-        recycle-fees                    Recycle accumulated fees (stake + burn alpha)
+        recycle-fees                    Stake accumulated fees on-chain via chain extension
         transfer-ownership <account_id> Transfer contract ownership
         danger halt                     Halt the system (block new reservations)
         danger resume                   Resume the system (allow new reservations)
@@ -411,42 +410,28 @@ def remove_vali(hotkey: str):
         console.print(f'[red]Failed to remove validator: {e}[/red]\n')
 
 
-@admin_group.command('set-recycle-address')
-@click.argument('account_id', type=str)
-def set_recycle_address(account_id: str):
-    """Set the address where recycled fees are transferred.
-
-    Example:
-        alw admin set-recycle-address 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
-    """
-    _, wallet, _, client = get_cli_context()
-
-    console.print('\n[bold]Set Recycle Address[/bold]\n')
-    console.print(f'  Address: {account_id}\n')
-
-    if not click.confirm('Confirm?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_recycle_address(wallet=wallet, address=account_id)
-        console.print(f'[green]Recycle address set to {account_id}[/green]\n')
-    except ContractError as e:
-        console.print(f'[red]Failed to set recycle address: {e}[/red]\n')
-
-
 @admin_group.command('recycle-fees')
 def recycle_fees():
-    """Transfer accumulated fees to the designated recycle address.
+    """Stake accumulated fees on-chain via chain extension.
 
     Example:
         alw admin recycle-fees
     """
     _, wallet, _, client = get_cli_context()
 
+    try:
+        accumulated = client.get_accumulated_fees()
+    except ContractError:
+        accumulated = None
+
+    if accumulated is not None and accumulated == 0:
+        console.print('\n[yellow]No accumulated fees to recycle[/yellow]\n')
+        return
+
+    fee_display = f'{from_rao(accumulated):.4f} TAO' if accumulated else 'unknown'
     console.print('\n[bold]Recycle Fees[/bold]\n')
-    console.print('  Action: transfer all accumulated fees to recycle address\n')
+    console.print(f'  Accumulated fees: {fee_display}')
+    console.print('  Action: stake fees on-chain via chain extension\n')
 
     if not click.confirm('Confirm recycling fees?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -457,7 +442,10 @@ def recycle_fees():
             client.recycle_fees(wallet=wallet)
         console.print('[green]Fees recycled successfully[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to recycle fees: {e}[/red]\n')
+        console.print(f'[red]Failed to recycle fees: {e}[/red]')
+        if 'ContractReverted' in str(e):
+            console.print('[dim]Hint: treasury hotkey may not be registered on the subnet[/dim]')
+        console.print()
 
 
 @admin_group.command('transfer-ownership')

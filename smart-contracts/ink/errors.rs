@@ -58,6 +58,6 @@ pub enum Error {
     PendingConflict,
     /// Source and destination chains must be different
     SameChain,
-    /// System is halted — no new reservations allowed
+    /// System is halted — no new activity allowed
     SystemHalted,
 }
