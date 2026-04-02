@@ -62,7 +62,6 @@ mod allways_swap_manager {
         // Configuration
         owner: AccountId,
         treasury_hotkey: AccountId,
-        recycle_address: AccountId,
         netuid: u16,
         fulfillment_timeout_blocks: u32,
         reservation_ttl: u32,
@@ -265,7 +264,6 @@ mod allways_swap_manager {
         #[ink(constructor)]
         pub fn new(
             treasury_hotkey: AccountId,
-            recycle_address: AccountId,
             netuid: u16,
             fulfillment_timeout_blocks: u32,
             reservation_ttl: u32,
@@ -278,7 +276,6 @@ mod allways_swap_manager {
             Self {
                 owner: Self::env().caller(),
                 treasury_hotkey,
-                recycle_address,
                 netuid,
                 fulfillment_timeout_blocks,
                 reservation_ttl,
@@ -1124,13 +1121,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn set_recycle_address(&mut self, address: AccountId) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.recycle_address = address;
-            Ok(())
-        }
-
-        #[ink(message)]
         pub fn set_reservation_ttl(&mut self, blocks: u32) -> Result<(), Error> {
             self.ensure_owner()?;
             self.reservation_ttl = blocks;
@@ -1264,11 +1254,6 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_halted(&self) -> bool {
             self.halted
-        }
-
-        #[ink(message)]
-        pub fn get_recycle_address(&self) -> AccountId {
-            self.recycle_address
         }
 
         #[ink(message)]
