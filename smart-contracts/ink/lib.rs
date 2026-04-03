@@ -108,6 +108,13 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        fn ensure_not_halted(&self) -> Result<(), Error> {
+            if self.halted {
+                return Err(Error::SystemHalted);
+            }
+            Ok(())
+        }
+
         fn get_required_votes(&self) -> u32 {
             if self.validator_count == 0 {
                 return 1;
@@ -293,6 +300,7 @@ mod allways_swap_manager {
 
         #[ink(message, payable)]
         pub fn post_collateral(&mut self) -> Result<(), Error> {
+            self.ensure_not_halted()?;
             let caller = self.env().caller();
             let amount = self.env().transferred_value();
             if amount == 0 {
@@ -373,9 +381,7 @@ mod allways_swap_manager {
             dest_amount: Balance,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            if self.halted {
-                return Err(Error::SystemHalted);
-            }
+            self.ensure_not_halted()?;
             let caller = self.env().caller();
             let current_block = self.env().block_number();
 
@@ -941,6 +947,7 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_activate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
+            self.ensure_not_halted()?;
             let caller = self.env().caller();
 
             if self.miner_active.get(miner).unwrap_or(false) {
