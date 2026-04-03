@@ -188,6 +188,7 @@ def _process_pending_confirms(self: Validator) -> None:
                 source_tx_block=tx_info.block_number or 0,
                 dest_amount=item.dest_amount,
                 miner_source_address=item.miner_deposit_address,
+                miner_dest_address=item.miner_dest_address,
                 rate=item.rate_str,
             )
             bt.logging.success(

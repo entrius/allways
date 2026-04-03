@@ -552,6 +552,7 @@ mod allways_swap_manager {
             source_tx_block: u32,
             dest_amount: Balance,
             miner_source_address: String,
+            miner_dest_address: String,
             rate: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
@@ -573,7 +574,7 @@ mod allways_swap_manager {
             if source_amount == 0 || tao_amount == 0 {
                 return Err(Error::InvalidAmount);
             }
-            if source_tx_hash.is_empty() || miner_source_address.is_empty() || rate.is_empty() {
+            if source_tx_hash.is_empty() || miner_source_address.is_empty() || miner_dest_address.is_empty() || rate.is_empty() {
                 return Err(Error::InputEmpty);
             }
             if source_tx_hash.len() > 128 {
@@ -631,6 +632,7 @@ mod allways_swap_manager {
                     user_source_address,
                     user_dest_address,
                     miner_source_address,
+                    miner_dest_address,
                     rate,
                     source_tx_hash: source_tx_hash.clone(),
                     source_tx_block,

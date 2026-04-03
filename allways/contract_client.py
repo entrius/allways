@@ -113,6 +113,7 @@ CONTRACT_ARG_TYPES = {
         ('source_tx_block', 'u32'),
         ('dest_amount', 'u128'),
         ('miner_source_address', 'str'),
+        ('miner_dest_address', 'str'),
         ('rate', 'str'),
     ],
     'vote_activate': [('miner', 'AccountId')],
@@ -584,6 +585,7 @@ class AllwaysContractClient:
             user_source_address, o = self._decode_string(data, o)
             user_dest_address, o = self._decode_string(data, o)
             miner_source_address, o = self._decode_string(data, o)
+            miner_dest_address, o = self._decode_string(data, o)
             rate, o = self._decode_string(data, o)
             source_tx_hash, o = self._decode_string(data, o)
             source_tx_block = struct.unpack_from('<I', data, o)[0]
@@ -615,6 +617,7 @@ class AllwaysContractClient:
                 user_source_address=user_source_address,
                 user_dest_address=user_dest_address,
                 miner_source_address=miner_source_address,
+                miner_dest_address=miner_dest_address,
                 rate=rate,
                 source_tx_hash=source_tx_hash,
                 source_tx_block=source_tx_block,
@@ -997,6 +1000,7 @@ class AllwaysContractClient:
         source_tx_block: int = 0,
         dest_amount: int = 0,
         miner_source_address: str = '',
+        miner_dest_address: str = '',
         rate: str = '',
     ) -> str:
         """Vote to initiate a swap. On quorum, swap is created on contract."""
@@ -1017,6 +1021,7 @@ class AllwaysContractClient:
                 'source_tx_block': source_tx_block,
                 'dest_amount': dest_amount,
                 'miner_source_address': miner_source_address,
+                'miner_dest_address': miner_dest_address,
                 'rate': rate,
             },
             keypair=wallet.hotkey,

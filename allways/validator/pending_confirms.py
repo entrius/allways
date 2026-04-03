@@ -26,6 +26,7 @@ class PendingConfirm:
     source_amount: int
     dest_amount: int
     miner_deposit_address: str
+    miner_dest_address: str
     rate_str: str
     reserved_until: int
     queued_at: float = field(default_factory=time.time)

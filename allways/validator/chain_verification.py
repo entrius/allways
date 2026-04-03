@@ -33,7 +33,14 @@ class SwapVerifier:
         self._last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
 
     def _verify_tx(
-        self, swap: Swap, chain: str, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
+        self,
+        swap: Swap,
+        chain: str,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        expected_sender: str = '',
     ) -> bool:
         """Verify a confirmed transaction on a specific chain."""
         provider = self.providers.get(chain)
@@ -67,7 +74,14 @@ class SwapVerifier:
                         f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
                         f'addr={expected_recipient[:16]}... expected={expected_amount})'
                     )
-            return tx_info is not None and tx_info.confirmed
+            if tx_info is None or not tx_info.confirmed:
+                return False
+            if expected_sender and tx_info.sender != expected_sender:
+                bt.logging.warning(
+                    f'Swap {swap.id}: sender mismatch on {chain} — expected {expected_sender}, got {tx_info.sender}'
+                )
+                return False
+            return True
         except Exception as e:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False
@@ -113,6 +127,7 @@ class SwapVerifier:
             swap.user_dest_address,
             expected_user_receives,
             swap.dest_tx_block,
+            swap.miner_dest_address,
         )
 
         return source_ok and dest_ok

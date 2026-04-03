@@ -62,6 +62,7 @@ class Swap:
     user_source_address: str
     user_dest_address: str
     miner_source_address: str = ''
+    miner_dest_address: str = ''
     rate: str = ''
     source_tx_hash: str = ''
     source_tx_block: int = 0
