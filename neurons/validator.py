@@ -82,7 +82,8 @@ class Validator(BaseValidatorNeuron):
         )
 
         # Pending confirmation queue (axon handler thread → forward loop thread)
-        self.pending_confirms = PendingConfirmQueue()
+        # Exposes current block so the queue can purge expired reservations on read.
+        self.pending_confirms = PendingConfirmQueue(current_block_fn=lambda: self.block)
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
