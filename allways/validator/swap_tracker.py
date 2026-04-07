@@ -1,12 +1,13 @@
 """Incremental swap lifecycle tracker. Eliminates O(N) full scans."""
 
 import asyncio
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
+from allways.validator.scoring_store import ScoringWindowStore, resolved_block
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -27,6 +28,7 @@ class SwapTracker:
         client: AllwaysContractClient,
         fulfillment_timeout_blocks: int,
         window_blocks: int,
+        store: Optional[ScoringWindowStore] = None,
     ):
         self.client = client
         self.last_scanned_id = 0
@@ -36,9 +38,19 @@ class SwapTracker:
 
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
         self.window_blocks = window_blocks
+        self._store = store
 
     def initialize(self, current_block: int):
-        """Cold start — scan backward from latest swap to populate active set."""
+        """Cold start — scan backward from latest swap to populate active set.
+
+        Also restores the scoring window and voted set from disk so that
+        scoring is continuous across restarts.
+        """
+        if self._store:
+            restored_window, restored_voted = self._store.load(self.window_blocks, current_block)
+            self.window = restored_window
+            self.voted_ids = restored_voted
+
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
             self.last_scanned_id = 0
@@ -64,12 +76,14 @@ class SwapTracker:
                 self.active[swap.id] = swap
 
         self.last_scanned_id = latest_id
+        self._persist()
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant vote extrinsics."""
         self.voted_ids.add(swap_id)
+        self._persist()
 
     def is_voted(self, swap_id: int) -> bool:
         """Check if we've already voted on this swap."""
@@ -130,15 +144,17 @@ class SwapTracker:
 
         if resolved_ids:
             bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
+            self._persist()
 
     def prune_window(self, current_block: int):
         """Remove resolved swaps older than the scoring window."""
         window_start = current_block - self.window_blocks
         before = len(self.window)
-        self.window = [s for s in self.window if _resolved_block(s) >= window_start]
+        self.window = [s for s in self.window if resolved_block(s) >= window_start]
         pruned = before - len(self.window)
         if pruned > 0:
             bt.logging.debug(f'SwapTracker: pruned {pruned} expired swaps from window')
+            self._persist()
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""
@@ -166,11 +182,8 @@ class SwapTracker:
             and current_block > s.timeout_block
         ]
 
+    def _persist(self) -> None:
+        """Save window and voted set to disk if a store is configured."""
+        if self._store:
+            self._store.save(self.window, self.voted_ids)
 
-def _resolved_block(swap: Swap) -> int:
-    """Block when a terminal swap was resolved."""
-    if swap.completed_block > 0:
-        return swap.completed_block
-    if swap.timeout_block > 0:
-        return swap.timeout_block
-    return swap.initiated_block
