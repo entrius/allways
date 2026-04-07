@@ -81,7 +81,11 @@ def miner_status(hotkey: str):
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
         src_up, dst_up = pair.source_chain.upper(), pair.dest_chain.upper()
-        if pair.rate_str != pair.counter_rate_str:
+        if pair.counter_rate == 0:
+            console.print(f'  {src_up}/{dst_up}')
+            console.print(f'    {src_up} -> {dst_up}: [green]{pair.rate:g}[/green]')
+            console.print(f'    {dst_up} -> {src_up}: [yellow]not supported[/yellow]')
+        elif pair.rate_str != pair.counter_rate_str:
             console.print(f'  {src_up}/{dst_up}')
             console.print(f'    {src_up} -> {dst_up}: [green]{pair.rate:g}[/green]')
             console.print(f'    {dst_up} -> {src_up}: [green]{pair.counter_rate:g}[/green]')

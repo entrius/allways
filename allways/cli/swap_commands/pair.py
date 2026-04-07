@@ -10,6 +10,9 @@ from allways.constants import COMMITMENT_VERSION
 def _prompt_chain(label: str, exclude: str | None = None) -> str:
     """Prompt the user to pick a chain from SUPPORTED_CHAINS."""
     chains = [c for c in SUPPORTED_CHAINS if c != exclude]
+    if len(chains) == 1:
+        console.print(f'{label}: [cyan]{chains[0]}[/cyan]')
+        return chains[0]
     choices = ', '.join(chains)
     while True:
         value = click.prompt(f'{label} ({choices})').strip().lower()
@@ -20,17 +23,19 @@ def _prompt_chain(label: str, exclude: str | None = None) -> str:
 
 
 def _prompt_rates(canon_src: str, canon_dest: str) -> tuple:
-    """Prompt for direction-specific rates. Second defaults to first."""
+    """Prompt for direction-specific rates. Counter rate defaults to forward; 0 = direction not supported."""
     src_up, dst_up = canon_src.upper(), canon_dest.upper()
     while True:
         fwd = click.prompt(f'Rate for {src_up} -> {dst_up} ({dst_up} per 1 {src_up})', type=float)
         if fwd > 0:
             break
         console.print('[red]Rate must be positive[/red]')
-    rev = click.prompt(f'Rate for {dst_up} -> {src_up} ({dst_up} per 1 {src_up})', type=float, default=fwd)
-    if rev <= 0:
-        console.print('[red]Rate must be positive, using forward rate[/red]')
-        rev = fwd
+    rev = click.prompt(
+        f'Rate for {dst_up} -> {src_up} ({dst_up} per 1 {src_up}, 0 = not supported)', type=float, default=fwd
+    )
+    if rev < 0:
+        console.print('[red]Rate cannot be negative, using 0 (not supported)[/red]')
+        rev = 0.0
     return fwd, rev
 
 
@@ -73,7 +78,7 @@ def post_pair(
     """
     # --- Prompt for any missing arguments ---
     if src_chain is None:
-        src_chain = _prompt_chain('Source chain')
+        src_chain = _prompt_chain('Source chain (you receive on this chain)')
     else:
         src_chain = src_chain.lower()
         if src_chain not in SUPPORTED_CHAINS:
@@ -85,7 +90,7 @@ def post_pair(
         src_addr = click.prompt(f'Your receiving address on {SUPPORTED_CHAINS[src_chain].name}')
 
     if dst_chain is None:
-        dst_chain = _prompt_chain('Destination chain', exclude=src_chain)
+        dst_chain = _prompt_chain('Destination chain (you send on this chain)', exclude=src_chain)
     else:
         dst_chain = dst_chain.lower()
         if dst_chain not in SUPPORTED_CHAINS:
@@ -109,8 +114,8 @@ def post_pair(
     else:
         if counter_rate is None:
             counter_rate = rate
-        elif counter_rate <= 0:
-            console.print('[red]Rate must be positive[/red]')
+        elif counter_rate < 0:
+            console.print('[red]Rate cannot be negative[/red]')
             return
 
     # Normalize to canonical direction (alphabetical ordering).
@@ -142,7 +147,10 @@ def post_pair(
     console.print('\n[bold]Posting trading pair commitment[/bold]\n')
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
-    if rate == counter_rate:
+    if counter_rate == 0:
+        console.print(f'  Rate ({src_up}->{dst_up}):  [green]1 {src_up} = {rate:g} {dst_up}[/green]')
+        console.print(f'  Rate ({dst_up}->{src_up}):  [yellow]not supported[/yellow]')
+    elif rate == counter_rate:
         console.print(f'  Rate:        [green]1 {src_up} = {rate:g} {dst_up} (both directions)[/green]')
     else:
         console.print(f'  Rate ({src_up}->{dst_up}):  [green]1 {src_up} = {rate:g} {dst_up}[/green]')

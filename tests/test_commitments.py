@@ -108,6 +108,36 @@ class TestParseCommitmentData:
         assert pair.rate == 0.0
         assert pair.counter_rate == 0.0
 
+    def test_single_direction_forward_only(self):
+        """Miner supports only BTC→TAO (counter_rate=0 means TAO→BTC not offered)."""
+        raw = 'v3:btc:bc1qaddr:tao:5Caddr:345:0'
+        pair = parse_commitment_data(raw)
+        assert pair is not None
+        assert pair.rate == 345.0
+        assert pair.counter_rate == 0.0
+        # Forward direction returns valid rate
+        rate, rate_str = pair.get_rate_for_direction('btc')
+        assert rate == 345.0
+        # Counter direction returns 0
+        rate, rate_str = pair.get_rate_for_direction('tao')
+        assert rate == 0.0
+
+    def test_single_direction_counter_only(self):
+        """Miner posts tao→btc only. After normalization, rate=0, counter_rate has the value."""
+        raw = 'v3:tao:5Caddr:btc:bc1qaddr:345:0'
+        pair = parse_commitment_data(raw)
+        assert pair is not None
+        # Normalization flips: btc→tao becomes source→dest
+        # Original rate 345 was tao→btc (now counter), original 0 was btc→tao (now forward)
+        assert pair.rate == 0.0
+        assert pair.counter_rate == 345.0
+        # BTC→TAO returns 0 (not supported)
+        rate, _ = pair.get_rate_for_direction('btc')
+        assert rate == 0.0
+        # TAO→BTC returns 345
+        rate, _ = pair.get_rate_for_direction('tao')
+        assert rate == 345.0
+
     def test_default_uid_and_hotkey(self):
         pair = parse_commitment_data('v3:btc:addr:tao:addr:1.0:2.0')
         assert pair.uid == 0
