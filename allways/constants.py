@@ -41,6 +41,11 @@ SCORING_SUCCESS_EXPONENT = 8  # Harsh failure penalty: 92% → 0.51x, 96% → 0.
 RECYCLE_UID = 53  # Subnet owner UID — emissions recycled on-chain
 DAILY_EMISSION_ALPHA = 7200 * 0.41  # 2952 alpha/day (7200 blocks/day * 0.41 miner share)
 
+# ─── Axon Rate Limiting ──────────────────────────────────
+RATE_LIMIT_MAX_REQUESTS = 10  # Max requests per IP within the sliding window
+RATE_LIMIT_WINDOW_SECONDS = 60  # Sliding window duration in seconds
+RATE_LIMIT_CLEANUP_SECONDS = 300  # Purge stale IP entries every 5 min
+
 # ─── Reservation ─────────────────────────────────────────
 RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation (validator-enforced)
 RESERVATION_COOLDOWN_MULTIPLIER = 2  # Exponential backoff: 150 → 300 → 600 ...

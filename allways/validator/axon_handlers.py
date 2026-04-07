@@ -96,6 +96,33 @@ def _reject(synapse, reason: str, context: str = '') -> None:
         bt.logging.debug(f'{context}: {reason}')
 
 
+def _get_caller_ip(synapse) -> str:
+    """Extract the caller's IP from the dendrite header, or empty string if unavailable."""
+    if synapse.dendrite is not None:
+        return getattr(synapse.dendrite, 'ip', None) or ''
+    return ''
+
+
+def _check_rate_limit(validator, synapse) -> Tuple[bool, str]:
+    """Apply rate limiting if the validator has a rate limiter configured.
+
+    Returns (blacklisted, reason) — same contract as blacklist_fn.
+    Fails open: if IP is unavailable or no limiter exists, the request passes.
+    """
+    if not hasattr(validator, 'rate_limiter'):
+        return False, 'No rate limiter'
+
+    caller_ip = _get_caller_ip(synapse)
+    if not caller_ip:
+        return False, 'No IP available'
+
+    allowed, reason = validator.rate_limiter.is_allowed(caller_ip)
+    if not allowed:
+        return True, reason
+
+    return False, 'Passed'
+
+
 # =============================================================================
 # MinerActivateSynapse handlers
 # =============================================================================
@@ -186,13 +213,13 @@ async def blacklist_swap_reserve(
     validator,
     synapse: SwapReserveSynapse,
 ) -> Tuple[bool, str]:
-    """Pass-through — custom field checks happen in forward handler.
+    """Rate-limit unauthenticated user requests before any chain work.
 
-    Bittensor's axon middleware constructs the synapse from HTTP headers (default values)
-    before calling blacklist. Custom fields (source_address, proof, etc.) are only available
-    in the JSON body, which is parsed later for the forward handler.
+    Custom synapse fields (source_address, proof, etc.) aren't available here —
+    they arrive in the JSON body parsed later for the forward handler. But the
+    dendrite IP header is available, so we can enforce per-IP rate limits.
     """
-    return False, 'Passed'
+    return _check_rate_limit(validator, synapse)
 
 
 async def priority_swap_reserve(
@@ -333,11 +360,12 @@ async def blacklist_swap_confirm(
     validator,
     synapse: SwapConfirmSynapse,
 ) -> Tuple[bool, str]:
-    """Pass-through — custom field checks happen in forward handler.
+    """Rate-limit unauthenticated user requests before any chain work.
 
-    See blacklist_swap_reserve docstring for rationale.
+    Same rationale as blacklist_swap_reserve — custom fields aren't parsed yet,
+    but the dendrite IP header is available for rate limiting.
     """
-    return False, 'Passed'
+    return _check_rate_limit(validator, synapse)
 
 
 async def priority_swap_confirm(

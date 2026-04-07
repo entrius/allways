@@ -32,6 +32,7 @@ from allways.validator.axon_handlers import (
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.forward import forward
 from allways.validator.pending_confirms import PendingConfirmQueue
+from allways.validator.rate_limiter import AxonRateLimiter
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
@@ -83,6 +84,9 @@ class Validator(BaseValidatorNeuron):
 
         # Pending confirmation queue (axon handler thread → forward loop thread)
         self.pending_confirms = PendingConfirmQueue()
+
+        # Per-IP rate limiter for user-facing axon endpoints (reserve, confirm)
+        self.rate_limiter = AxonRateLimiter()
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
