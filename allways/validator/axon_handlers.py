@@ -399,7 +399,10 @@ async def handle_swap_confirm(
             miner_fulfillment_address = (
                 commitment.dest_address if swap_source_chain == commitment.source_chain else commitment.source_address
             )
-            _, selected_rate_str = commitment.get_rate_for_direction(swap_source_chain == 'tao')
+            selected_rate, selected_rate_str = commitment.get_rate_for_direction(swap_source_chain)
+            if selected_rate <= 0:
+                _reject(synapse, 'Miner does not support this swap direction', ctx)
+                return synapse
 
             provider = validator.axon_chain_providers.get(swap_source_chain)
             if provider is None:

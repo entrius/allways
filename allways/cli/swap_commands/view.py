@@ -59,7 +59,7 @@ def view_miners():
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
     table.add_column('Pair', style='green')
-    table.add_column('Rate (TAO/1 non-TAO)', style='yellow')
+    table.add_column('Rate (fwd / rev)', style='yellow')
     table.add_column('Collateral (TAO)', style='magenta')
     table.add_column('Active', style='bold')
     table.add_column(f'{pairs[0].source_chain.upper()} Addr', style='dim')
@@ -73,8 +73,8 @@ def view_miners():
             pair_str = f'{pair.source_chain.upper()} <-> {pair.dest_chain.upper()}'
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
 
-            if pair.rate_reverse_str and pair.rate != pair.rate_reverse:
-                rate_display = f'{pair.rate:g} / {pair.rate_reverse:g}'
+            if pair.rate_str != pair.counter_rate_str:
+                rate_display = f'{pair.rate:g} / {pair.counter_rate:g}'
             else:
                 rate_display = f'{pair.rate:g}'
             table.add_row(
@@ -155,13 +155,13 @@ def view_rates(pair: str):
 
         table = Table(show_header=True)
         table.add_column('UID', style='cyan')
-        table.add_column(f'{src.upper()}->TAO', style='green')
-        table.add_column(f'TAO->{src.upper()}', style='green')
+        table.add_column(f'{src.upper()}->{dst.upper()}', style='green')
+        table.add_column(f'{dst.upper()}->{src.upper()}', style='green')
         table.add_column('Hotkey', style='dim')
 
         pair_list.sort(key=lambda x: x.rate, reverse=True)
         for p in pair_list:
-            rev = f'{p.rate_reverse:g}' if p.rate_reverse_str else f'{p.rate:g}'
+            rev = f'{p.counter_rate:g}' if p.counter_rate_str else f'{p.rate:g}'
             table.add_row(str(p.uid), f'{p.rate:g}', rev, p.hotkey[:16] + '...')
 
         console.print(table)

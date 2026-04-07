@@ -4,7 +4,7 @@ from typing import List, Optional
 
 import bittensor as bt
 
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
 from allways.constants import COMMITMENT_VERSION
 
@@ -12,8 +12,8 @@ from allways.constants import COMMITMENT_VERSION
 def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[MinerPair]:
     """Parse a commitment string into a MinerPair.
 
-    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{rate_reverse}
-    Both rates are TAO per 1 non-TAO asset. rate is for non-TAO->TAO, rate_reverse is for TAO->non-TAO.
+    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{counter_rate}
+    Both rates are 'canonical_dest per 1 canonical_source'. rate is for source→dest, counter_rate for dest→source.
     Example: v3:btc:bc1q...:tao:5C...:340:350
     """
     try:
@@ -35,8 +35,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         dst_addr = parts[4]
         rate_str = parts[5]
         rate = float(rate_str)
-        rate_reverse_str = parts[6]
-        rate_reverse = float(rate_reverse_str)
+        counter_rate_str = parts[6]
+        counter_rate = float(counter_rate_str)
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
@@ -44,13 +44,14 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         if src_chain == dst_chain:
             return None
 
-        # Normalize to canonical direction: non-TAO → TAO.
+        # Normalize to canonical direction (alphabetical ordering).
         # When swapping direction, swap rates too: the posted "forward" rate becomes "reverse".
-        if src_chain == 'tao' and dst_chain != 'tao':
+        canon_src, _ = canonical_pair(src_chain, dst_chain)
+        if src_chain != canon_src:
             src_chain, dst_chain = dst_chain, src_chain
             src_addr, dst_addr = dst_addr, src_addr
-            rate, rate_reverse = rate_reverse, rate
-            rate_str, rate_reverse_str = rate_reverse_str, rate_str
+            rate, counter_rate = counter_rate, rate
+            rate_str, counter_rate_str = counter_rate_str, rate_str
 
         return MinerPair(
             uid=uid,
@@ -61,8 +62,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
             dest_address=dst_addr,
             rate=rate,
             rate_str=rate_str,
-            rate_reverse=rate_reverse,
-            rate_reverse_str=rate_reverse_str,
+            counter_rate=counter_rate,
+            counter_rate_str=counter_rate_str,
         )
     except (ValueError, IndexError):
         return None

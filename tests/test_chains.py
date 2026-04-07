@@ -5,6 +5,7 @@ import pytest
 from allways.chains import (
     CHAIN_BTC,
     CHAIN_TAO,
+    canonical_pair,
     confirmations_to_subtensor_blocks,
     get_chain,
 )
@@ -34,6 +35,19 @@ class TestChainProperties:
 
     def test_tao_block_time(self):
         assert CHAIN_TAO.seconds_per_block == 12
+
+
+class TestCanonicalPair:
+    def test_already_canonical(self):
+        assert canonical_pair('btc', 'tao') == ('btc', 'tao')
+
+    def test_reversed_input(self):
+        assert canonical_pair('tao', 'btc') == ('btc', 'tao')
+
+    def test_future_chains(self):
+        # Alphabetical: btc < eth < tao
+        assert canonical_pair('eth', 'btc') == ('btc', 'eth')
+        assert canonical_pair('btc', 'eth') == ('btc', 'eth')
 
 
 class TestConfirmationsToSubtensorBlocks:

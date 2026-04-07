@@ -2,7 +2,7 @@
 
 import rich_click as click
 
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
 
@@ -19,14 +19,15 @@ def _prompt_chain(label: str, exclude: str | None = None) -> str:
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
 
 
-def _prompt_rates(non_tao_ticker: str) -> tuple:
+def _prompt_rates(canon_src: str, canon_dest: str) -> tuple:
     """Prompt for direction-specific rates. Second defaults to first."""
+    src_up, dst_up = canon_src.upper(), canon_dest.upper()
     while True:
-        fwd = click.prompt(f'Rate for {non_tao_ticker} -> TAO (TAO per 1 {non_tao_ticker})', type=float)
+        fwd = click.prompt(f'Rate for {src_up} -> {dst_up} ({dst_up} per 1 {src_up})', type=float)
         if fwd > 0:
             break
         console.print('[red]Rate must be positive[/red]')
-    rev = click.prompt(f'Rate for TAO -> {non_tao_ticker} (TAO per 1 {non_tao_ticker})', type=float, default=fwd)
+    rev = click.prompt(f'Rate for {dst_up} -> {src_up} ({dst_up} per 1 {src_up})', type=float, default=fwd)
     if rev <= 0:
         console.print('[red]Rate must be positive, using forward rate[/red]')
         rev = fwd
@@ -39,7 +40,7 @@ def _prompt_rates(non_tao_ticker: str) -> tuple:
 @click.argument('dst_chain', required=False, default=None, type=str)
 @click.argument('dst_addr', required=False, default=None, type=str)
 @click.argument('rate', required=False, default=None, type=float)
-@click.argument('rate_reverse', required=False, default=None, type=float)
+@click.argument('counter_rate', required=False, default=None, type=float)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
     src_chain: str | None,
@@ -47,7 +48,7 @@ def post_pair(
     dst_chain: str | None,
     dst_addr: str | None,
     rate: float | None,
-    rate_reverse: float | None,
+    counter_rate: float | None,
     yes: bool,
 ):
     """Post a trading pair to chain via commitment.
@@ -61,8 +62,8 @@ def post_pair(
         SRC_ADDR       Your receiving address on source chain
         DST_CHAIN      Destination chain ID (e.g. tao, btc)
         DST_ADDR       Your sending address on destination chain
-        RATE           non-TAO->TAO rate (TAO per 1 non-TAO asset)
-        RATE_REVERSE   TAO->non-TAO rate (optional, defaults to RATE)
+        RATE           source→dest rate (e.g. TAO per 1 BTC for btc-tao pair)
+        COUNTER_RATE   dest→source rate (optional, defaults to RATE)
 
     \b
     Examples:
@@ -98,26 +99,24 @@ def post_pair(
     if dst_addr is None:
         dst_addr = click.prompt(f'Your sending address on {SUPPORTED_CHAINS[dst_chain].name}')
 
-    non_tao = src_chain if src_chain != 'tao' else dst_chain
-    non_tao_ticker = non_tao.upper()
+    canon_src, canon_dest = canonical_pair(src_chain, dst_chain)
 
     if rate is None:
-        rate, rate_reverse = _prompt_rates(non_tao_ticker)
+        rate, counter_rate = _prompt_rates(canon_src, canon_dest)
     elif rate <= 0:
         console.print('[red]Rate must be positive[/red]')
         return
     else:
-        if rate_reverse is None:
-            rate_reverse = rate
-        elif rate_reverse <= 0:
+        if counter_rate is None:
+            counter_rate = rate
+        elif counter_rate <= 0:
             console.print('[red]Rate must be positive[/red]')
             return
 
-    # Normalize to canonical direction: non-TAO → TAO.
-    # Rates are NOT swapped — prompts and help text already define them in canonical order
-    # (RATE = non-TAO->TAO, RATE_REVERSE = TAO->non-TAO).
-    if src_chain == 'tao' and dst_chain != 'tao':
-        console.print('[dim]Normalizing pair direction to canonical form (non-TAO -> TAO).[/dim]')
+    # Normalize to canonical direction (alphabetical ordering).
+    # Rates are NOT swapped — prompts and help text already define them in canonical order.
+    if src_chain != canon_src:
+        console.print(f'[dim]Normalizing pair direction to canonical form ({canon_src} -> {canon_dest}).[/dim]')
         src_chain, dst_chain = dst_chain, src_chain
         src_addr, dst_addr = dst_addr, src_addr
 
@@ -125,9 +124,9 @@ def post_pair(
     netuid = config['netuid']
 
     rate_str = f'{rate:g}'
-    rate_reverse_str = f'{rate_reverse:g}'
+    counter_rate_str = f'{counter_rate:g}'
     commitment_data = (
-        f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{rate_reverse_str}'
+        f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{counter_rate_str}'
     )
 
     data_bytes = commitment_data.encode('utf-8')
@@ -138,14 +137,16 @@ def post_pair(
         )
         return
 
+    src_up, dst_up = src_chain.upper(), dst_chain.upper()
+
     console.print('\n[bold]Posting trading pair commitment[/bold]\n')
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
-    if rate == rate_reverse:
-        console.print(f'  Rate:        [green]1 {non_tao_ticker} = {rate:g} TAO (both directions)[/green]')
+    if rate == counter_rate:
+        console.print(f'  Rate:        [green]1 {src_up} = {rate:g} {dst_up} (both directions)[/green]')
     else:
-        console.print(f'  Rate ({non_tao_ticker}->TAO):  [green]1 {non_tao_ticker} = {rate:g} TAO[/green]')
-        console.print(f'  Rate (TAO->{non_tao_ticker}):  [green]1 {non_tao_ticker} = {rate_reverse:g} TAO[/green]')
+        console.print(f'  Rate ({src_up}->{dst_up}):  [green]1 {src_up} = {rate:g} {dst_up}[/green]')
+        console.print(f'  Rate ({dst_up}->{src_up}):  [green]1 {src_up} = {counter_rate:g} {dst_up}[/green]')
     console.print(f'  Netuid:      {netuid}')
     console.print(f'  Data:        [dim]{commitment_data}[/dim]\n')
 
