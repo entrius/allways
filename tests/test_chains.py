@@ -44,8 +44,12 @@ class TestCanonicalPair:
     def test_reversed_input(self):
         assert canonical_pair('tao', 'btc') == ('btc', 'tao')
 
-    def test_future_chains(self):
-        # Alphabetical: btc < eth < tao
+    def test_tao_always_dest(self):
+        # TAO preference: even when a chain sorts after "tao", TAO is dest
+        assert canonical_pair('thor', 'tao') == ('thor', 'tao')
+        assert canonical_pair('tao', 'thor') == ('thor', 'tao')
+
+    def test_no_tao_alphabetical(self):
         assert canonical_pair('eth', 'btc') == ('btc', 'eth')
         assert canonical_pair('btc', 'eth') == ('btc', 'eth')
 
