@@ -166,13 +166,14 @@ def view_rates(pair: str):
 
         pair_list.sort(key=lambda x: x.rate, reverse=True)
         for p in pair_list:
+            fwd = f'{p.rate:g}' if p.rate > 0 else '—'
             if p.counter_rate > 0:
                 rev = f'{p.counter_rate:g}'
             elif p.counter_rate_str:
                 rev = '—'
             else:
-                rev = f'{p.rate:g}'
-            table.add_row(str(p.uid), f'{p.rate:g}', rev, p.hotkey[:16] + '...')
+                rev = fwd
+            table.add_row(str(p.uid), fwd, rev, p.hotkey[:16] + '...')
 
         console.print(table)
 

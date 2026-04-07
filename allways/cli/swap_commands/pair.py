@@ -105,6 +105,7 @@ def post_pair(
         dst_addr = click.prompt(f'Your sending address on {SUPPORTED_CHAINS[dst_chain].name}')
 
     canon_src, canon_dest = canonical_pair(src_chain, dst_chain)
+    rates_from_args = rate is not None
 
     if rate is None:
         rate, counter_rate = _prompt_rates(canon_src, canon_dest)
@@ -118,12 +119,15 @@ def post_pair(
             console.print('[red]Rate cannot be negative[/red]')
             return
 
-    # Normalize to canonical direction (alphabetical ordering).
-    # Rates are NOT swapped — prompts and help text already define them in canonical order.
+    # Normalize to canonical direction.
+    # Positional args: RATE = user's source→dest, so swap rates to match canonical order.
+    # Interactive prompts: already asked in canonical order, no rate swap needed.
     if src_chain != canon_src:
         console.print(f'[dim]Normalizing pair direction to canonical form ({canon_src} -> {canon_dest}).[/dim]')
         src_chain, dst_chain = dst_chain, src_chain
         src_addr, dst_addr = dst_addr, src_addr
+        if rates_from_args:
+            rate, counter_rate = counter_rate, rate
 
     config, wallet, subtensor, _ = get_cli_context(need_client=False)
     netuid = config['netuid']
@@ -147,14 +151,17 @@ def post_pair(
     console.print('\n[bold]Posting trading pair commitment[/bold]\n')
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
-    if counter_rate == 0:
-        console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
-        console.print(f'  {dst_up} → {src_up}:  [yellow]not supported[/yellow]')
-    elif rate == counter_rate:
+    if rate == counter_rate and rate > 0:
         console.print(f'  Rate:        [green]send 1 {src_up}, get {rate:g} {dst_up} (both directions)[/green]')
     else:
-        console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
-        console.print(f'  {dst_up} → {src_up}:  [green]send {counter_rate:g} {dst_up}, get 1 {src_up}[/green]')
+        if rate > 0:
+            console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
+        else:
+            console.print(f'  {src_up} → {dst_up}:  [yellow]not supported[/yellow]')
+        if counter_rate > 0:
+            console.print(f'  {dst_up} → {src_up}:  [green]send {counter_rate:g} {dst_up}, get 1 {src_up}[/green]')
+        else:
+            console.print(f'  {dst_up} → {src_up}:  [yellow]not supported[/yellow]')
     console.print(f'  Netuid:      {netuid}')
     console.print(f'  Data:        [dim]{commitment_data}[/dim]\n')
 
