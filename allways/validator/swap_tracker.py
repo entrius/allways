@@ -53,6 +53,11 @@ class SwapTracker:
 
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
+            stale_voted = len(self.voted_ids)
+            if stale_voted > 0:
+                self.voted_ids.clear()
+                bt.logging.debug(f'SwapTracker init: pruned {stale_voted} stale voted IDs (no active swaps)')
+                self._persist()
             self.last_scanned_id = 0
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
@@ -74,6 +79,13 @@ class SwapTracker:
 
             if swap.status in ACTIVE_STATUSES:
                 self.active[swap.id] = swap
+
+        if self.voted_ids:
+            before = len(self.voted_ids)
+            self.voted_ids.intersection_update(self.active.keys())
+            pruned = before - len(self.voted_ids)
+            if pruned > 0:
+                bt.logging.debug(f'SwapTracker init: pruned {pruned} stale voted IDs')
 
         self.last_scanned_id = latest_id
         self._persist()
