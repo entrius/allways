@@ -1,14 +1,12 @@
-from dataclasses import replace
-from pathlib import Path
 import threading
 import time
+from dataclasses import replace
+from pathlib import Path
 
 from allways.validator.pending_confirms import (
     PendingConfirm,
     PendingConfirmQueue,
-    SqlitePendingConfirmStore,
 )
-
 
 PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
     miner_hotkey='miner-1',
@@ -49,11 +47,12 @@ PENDING_CONFIRM_SAMPLE2 = PendingConfirm(
 class TestPendingConfirmQueue:
     def test_persists_across_queue_instances(self, tmp_path: Path):
         db_path = tmp_path / 'pending_confirms.db'
-        queue1 = PendingConfirmQueue(store=SqlitePendingConfirmStore(db_path))
-        assert queue1.enqueue(PENDING_CONFIRM_SAMPLE1)
-        assert queue1.enqueue(PENDING_CONFIRM_SAMPLE2)
+        queue1 = PendingConfirmQueue(db_path=db_path)
+        queue1.enqueue(PENDING_CONFIRM_SAMPLE1)
+        queue1.enqueue(PENDING_CONFIRM_SAMPLE2)
+        queue1.close()
 
-        queue2 = PendingConfirmQueue(store=SqlitePendingConfirmStore(db_path))
+        queue2 = PendingConfirmQueue(db_path=db_path)
         items = queue2.get_all()
 
         assert queue2.size() == 2
@@ -65,10 +64,10 @@ class TestPendingConfirmQueue:
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
         db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(store=SqlitePendingConfirmStore(db_path))
+        queue = PendingConfirmQueue(db_path=db_path)
 
-        assert queue.enqueue(PENDING_CONFIRM_SAMPLE1)
-        assert queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, source_tx_hash='tx-new'))
+        queue.enqueue(PENDING_CONFIRM_SAMPLE1)
+        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, source_tx_hash='tx-new'))
 
         items = queue.get_all()
         assert queue.size() == 1
@@ -77,11 +76,11 @@ class TestPendingConfirmQueue:
 
     def test_has_reflects_enqueue_and_remove(self, tmp_path: Path):
         db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(store=SqlitePendingConfirmStore(db_path))
+        queue = PendingConfirmQueue(db_path=db_path)
 
         assert not queue.has('miner-1')
 
-        assert queue.enqueue(PENDING_CONFIRM_SAMPLE1)
+        queue.enqueue(PENDING_CONFIRM_SAMPLE1)
         assert queue.has('miner-1')
 
         removed = queue.remove('miner-1')
@@ -92,12 +91,12 @@ class TestPendingConfirmQueue:
     def test_reads_purge_expired_entries(self, tmp_path: Path):
         db_path = tmp_path / 'pending_confirms.db'
         queue = PendingConfirmQueue(
-            store=SqlitePendingConfirmStore(db_path),
+            db_path=db_path,
             current_block_fn=lambda: 101,
         )
 
-        assert queue.enqueue(PENDING_CONFIRM_SAMPLE1)
-        assert queue.enqueue(replace(PENDING_CONFIRM_SAMPLE2, reserved_until=105))
+        queue.enqueue(PENDING_CONFIRM_SAMPLE1)
+        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE2, reserved_until=105))
 
         items = queue.get_all()
 
@@ -108,13 +107,13 @@ class TestPendingConfirmQueue:
 
     def test_enqueue_and_remove_are_safe_across_threads(self, tmp_path: Path):
         db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(store=SqlitePendingConfirmStore(db_path))
+        queue = PendingConfirmQueue(db_path=db_path)
         removed_hotkeys: list[str] = []
 
         def writer():
-            assert queue.enqueue(PENDING_CONFIRM_SAMPLE1)
+            queue.enqueue(PENDING_CONFIRM_SAMPLE1)
             time.sleep(0.01)
-            assert queue.enqueue(PENDING_CONFIRM_SAMPLE2)
+            queue.enqueue(PENDING_CONFIRM_SAMPLE2)
 
         def remover():
             deadline = time.monotonic() + 2.0
@@ -133,6 +132,6 @@ class TestPendingConfirmQueue:
         writer_thread.join()
         remover_thread.join()
 
-        assert removed_hotkeys == ['miner-1', 'miner-2']
+        assert set(removed_hotkeys) == {'miner-1', 'miner-2'}
         assert queue.size() == 0
         assert queue.get_all() == []

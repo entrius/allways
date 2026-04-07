@@ -119,6 +119,12 @@ class Validator(BaseValidatorNeuron):
         """Validator forward pass - delegates to allways.validator.forward."""
         return await forward(self)
 
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.pending_confirms.close()
+
 
 # Main entry point
 if __name__ == '__main__':

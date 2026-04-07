@@ -431,17 +431,13 @@ async def handle_swap_confirm(
                     rate_str=commitment.rate_str,
                     reserved_until=reserved_until,
                 )
-                if validator.pending_confirms.enqueue(pending):
-                    synapse.accepted = True
-                    synapse.rejection_reason = (
-                        f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '
-                        f'Validator will auto-initiate when confirmed.'
-                    )
-                    bt.logging.info(
-                        f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations'
-                    )
-                else:
-                    _reject(synapse, 'Validator confirmation queue is full — retry later', ctx)
+                validator.pending_confirms.enqueue(pending)
+                synapse.accepted = True
+                synapse.rejection_reason = (
+                    f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '
+                    f'Validator will auto-initiate when confirmed.'
+                )
+                bt.logging.info(f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations')
                 return synapse
 
             miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
