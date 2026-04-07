@@ -594,7 +594,7 @@ def swap_now_command(
     canon_src, canon_dest = canonical_pair(source_chain, dest_chain)
     best_pair = available_miners[0][0]
     console.print(
-        f'\n  Best rate: 1 {canon_src.upper()} = {best_pair.rate:g} {canon_dest.upper()} (Miner UID {best_pair.uid})'
+        f'\n  Best rate: send 1 {source_chain.upper()}, get {best_pair.rate:g} {dest_chain.upper()} (Miner UID {best_pair.uid})'
     )
 
     if auto_select or len(available_miners) == 1:
@@ -713,7 +713,7 @@ def swap_now_command(
         f'  Send:    [red]{amount} {source_chain.upper()}[/red]\n'
         f'  Receive: [green]{_from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
         f'  Fee:     {fee_percent:g}% ({_from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
-        f'  Rate:    1 {canon_src.upper()} = {selected_pair.rate:g} {canon_dest.upper()}\n'
+        f'  Rate:    send 1 {source_chain.upper()}, get {selected_pair.rate:g} {dest_chain.upper()}\n'
         f'  Miner:   UID {selected_pair.uid}\n'
         f'  To:      {receive_address}'
     )

@@ -148,13 +148,13 @@ def post_pair(
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
     if counter_rate == 0:
-        console.print(f'  Rate ({src_up}->{dst_up}):  [green]1 {src_up} = {rate:g} {dst_up}[/green]')
-        console.print(f'  Rate ({dst_up}->{src_up}):  [yellow]not supported[/yellow]')
+        console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
+        console.print(f'  {dst_up} → {src_up}:  [yellow]not supported[/yellow]')
     elif rate == counter_rate:
-        console.print(f'  Rate:        [green]1 {src_up} = {rate:g} {dst_up} (both directions)[/green]')
+        console.print(f'  Rate:        [green]send 1 {src_up}, get {rate:g} {dst_up} (both directions)[/green]')
     else:
-        console.print(f'  Rate ({src_up}->{dst_up}):  [green]1 {src_up} = {rate:g} {dst_up}[/green]')
-        console.print(f'  Rate ({dst_up}->{src_up}):  [green]1 {src_up} = {counter_rate:g} {dst_up}[/green]')
+        console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
+        console.print(f'  {dst_up} → {src_up}:  [green]send {counter_rate:g} {dst_up}, get 1 {src_up}[/green]')
     console.print(f'  Netuid:      {netuid}')
     console.print(f'  Data:        [dim]{commitment_data}[/dim]\n')
 

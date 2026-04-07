@@ -82,15 +82,17 @@ def miner_status(hotkey: str):
         console.print('[bold]Committed Pair[/bold]\n')
         src_up, dst_up = pair.source_chain.upper(), pair.dest_chain.upper()
         if pair.counter_rate == 0:
-            console.print(f'  {src_up}/{dst_up}')
-            console.print(f'    {src_up} -> {dst_up}: [green]{pair.rate:g}[/green]')
-            console.print(f'    {dst_up} -> {src_up}: [yellow]not supported[/yellow]')
+            console.print(f'  {src_up} ↔ {dst_up}')
+            console.print(f'    {src_up} → {dst_up}: [green]send 1 {src_up}, get {pair.rate:g} {dst_up}[/green]')
+            console.print(f'    {dst_up} → {src_up}: [yellow]not supported[/yellow]')
         elif pair.rate_str != pair.counter_rate_str:
-            console.print(f'  {src_up}/{dst_up}')
-            console.print(f'    {src_up} -> {dst_up}: [green]{pair.rate:g}[/green]')
-            console.print(f'    {dst_up} -> {src_up}: [green]{pair.counter_rate:g}[/green]')
+            console.print(f'  {src_up} ↔ {dst_up}')
+            console.print(f'    {src_up} → {dst_up}: [green]send 1 {src_up}, get {pair.rate:g} {dst_up}[/green]')
+            console.print(
+                f'    {dst_up} → {src_up}: [green]send {pair.counter_rate:g} {dst_up}, get 1 {src_up}[/green]'
+            )
         else:
-            console.print(f'  {src_up}/{dst_up} @ [green]{pair.rate:g}[/green]')
+            console.print(f'  {src_up} ↔ {dst_up} @ [green]{pair.rate:g}[/green]')
         console.print(f'  Source address: [dim]{pair.source_address}[/dim]')
         console.print(f'  Dest address:   [dim]{pair.dest_address}[/dim]')
     else:
