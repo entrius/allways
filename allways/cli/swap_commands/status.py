@@ -107,7 +107,14 @@ def status_command(netuid: int):
                 my_pairs = [p for p in pairs if p.hotkey == hotkey]
                 if my_pairs:
                     for p in my_pairs:
-                        table.add_row('Miner Pair', f'{p.source_chain.upper()}/{p.dest_chain.upper()} @ {p.rate:g}')
+                        src_up, dst_up = p.source_chain.upper(), p.dest_chain.upper()
+                        if p.rate > 0 and p.counter_rate > 0 and p.rate_str != p.counter_rate_str:
+                            rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                        elif p.rate > 0:
+                            rate_display = f'{p.rate:g}'
+                        else:
+                            rate_display = f'{p.counter_rate:g}'
+                        table.add_row('Miner Pair', f'{src_up} ↔ {dst_up} @ {rate_display}')
         except ContractError:
             table.add_row('Miner Status', '[dim]unable to read[/dim]')
 

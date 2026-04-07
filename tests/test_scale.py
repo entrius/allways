@@ -267,6 +267,9 @@ class TestDecodeSwapData:
         source_amount=100000,
         dest_amount=0,
         tao_amount=1_000_000_000,
+        miner_source_address='bc1qminer',
+        miner_dest_address='5Cminer',
+        rate='345',
         source_tx_hash='txhash',
         source_tx_block=50,
         dest_tx_hash='',
@@ -294,6 +297,9 @@ class TestDecodeSwapData:
         data += client._encode_value(tao_amount, 'u128')
         data += client._encode_value('bc1quser', 'str')
         data += client._encode_value('5Cuser', 'str')
+        data += client._encode_value(miner_source_address, 'str')
+        data += client._encode_value(miner_dest_address, 'str')
+        data += client._encode_value(rate, 'str')
         data += client._encode_value(source_tx_hash, 'str')
         data += struct.pack('<I', source_tx_block)
         data += client._encode_value(dest_tx_hash, 'str')

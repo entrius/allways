@@ -56,27 +56,36 @@ def view_miners():
         console.print('[yellow]No miner commitments found[/yellow]\n')
         return
 
+    src_up = pairs[0].source_chain.upper()
+    dst_up = pairs[0].dest_chain.upper()
+
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
-    table.add_column('Pair', style='green')
-    table.add_column('Rate (TAO)', style='yellow')
+    table.add_column(f'{src_up}→{dst_up}', style='green')
+    table.add_column(f'{dst_up}→{src_up}', style='green')
     table.add_column('Collateral (TAO)', style='magenta')
     table.add_column('Active', style='bold')
-    table.add_column(f'{pairs[0].source_chain.upper()} Addr', style='dim')
-    table.add_column(f'{pairs[0].dest_chain.upper()} Addr', style='dim')
+    table.add_column(f'{src_up} Addr', style='dim')
+    table.add_column(f'{dst_up} Addr', style='dim')
 
     try:
         for pair in pairs:
             collateral_rao = client.get_miner_collateral(pair.hotkey)
             is_active = client.get_miner_active_flag(pair.hotkey)
-
-            pair_str = f'{pair.source_chain.upper()} <-> {pair.dest_chain.upper()}'
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
+
+            fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
+            if pair.counter_rate > 0:
+                ctr_display = f'{pair.counter_rate:g}'
+            elif pair.counter_rate_str:
+                ctr_display = '[dim]—[/dim]'
+            else:
+                ctr_display = f'{pair.rate:g}'
 
             table.add_row(
                 str(pair.uid),
-                pair_str,
-                f'{pair.rate:g}',
+                fwd_display,
+                ctr_display,
                 f'{from_rao(collateral_rao):.4f}',
                 active_str,
                 pair.source_address[:16] + '...',
@@ -147,16 +156,24 @@ def view_rates(pair: str):
         src_name = SUPPORTED_CHAINS.get(src, src).name if src in SUPPORTED_CHAINS else src
         dst_name = SUPPORTED_CHAINS.get(dst, dst).name if dst in SUPPORTED_CHAINS else dst
 
-        console.print(f'[bold]{src_name} <-> {dst_name}[/bold]')
+        console.print(f'[bold]{src_name} ↔ {dst_name}[/bold]')
 
         table = Table(show_header=True)
         table.add_column('UID', style='cyan')
-        table.add_column('Rate (TAO)', style='green')
+        table.add_column(f'{src.upper()}→{dst.upper()}', style='green')
+        table.add_column(f'{dst.upper()}→{src.upper()}', style='green')
         table.add_column('Hotkey', style='dim')
 
         pair_list.sort(key=lambda x: x.rate, reverse=True)
         for p in pair_list:
-            table.add_row(str(p.uid), f'{p.rate:g}', p.hotkey[:16] + '...')
+            fwd = f'{p.rate:g}' if p.rate > 0 else '—'
+            if p.counter_rate > 0:
+                rev = f'{p.counter_rate:g}'
+            elif p.counter_rate_str:
+                rev = '—'
+            else:
+                rev = fwd
+            table.add_row(str(p.uid), fwd, rev, p.hotkey[:16] + '...')
 
         console.print(table)
 

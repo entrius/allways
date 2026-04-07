@@ -141,9 +141,9 @@ class SwapFulfiller:
 
         key = self.wallet if swap.dest_chain == 'tao' else None
 
-        # For BTC sends, read the miner's commitment to get their BTC address.
-        # Commitments are normalized to non-TAO→TAO, so the BTC address is
-        # always source_address regardless of swap direction.
+        # For non-TAO sends, read the miner's commitment to get the sending address.
+        # Commitments are normalized to canonical order, so source_address is
+        # always the canonical source chain's address.
         from_address = None
         if swap.dest_chain != 'tao':
             try:
