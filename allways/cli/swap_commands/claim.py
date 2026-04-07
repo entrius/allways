@@ -1,23 +1,23 @@
 """alw claim - Claim a pending slash payout for a timed-out swap."""
 
-import rich_click as click
+import click
 
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading
 from allways.contract_client import ContractError
 
 
-@click.command('claim')
+@click.command('claim', cls=StyledCommand, show_disclaimer=True)
 @click.argument('swap_id', type=int)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def claim_command(swap_id: int, yes: bool):
     """Claim a pending slash payout for a timed-out swap.
 
-    \b
-    If a miner failed to fulfill your swap before the timeout,
-    you can claim a slash payout from their collateral.
+    [dim]If a miner failed to fulfill your swap before the timeout,
+    you can claim a slash payout from their collateral.[/dim]
 
-    Example:
-        alw claim 42
+    [dim]Examples:
+        $ alw claim 42[/dim]
     """
     _, wallet, _, client = get_cli_context()
 

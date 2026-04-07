@@ -3,13 +3,14 @@
 import time
 from dataclasses import replace
 
-import rich_click as click
+import click
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.classes import SwapStatus
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
@@ -24,17 +25,9 @@ from allways.cli.swap_commands.helpers import (
 from allways.contract_client import ContractError
 
 
-@click.group('view')
+@click.group('view', cls=StyledGroup)
 def view_group():
-    """View swaps, miners, and rates.
-
-    \b
-    Subcommands:
-        miners      View active miners and their pairs
-        rates       View exchange rates
-        swaps       View active swaps
-        swap <id>   View a specific swap
-    """
+    """View swaps, miners, and rates."""
     pass
 
 
@@ -42,8 +35,8 @@ def view_group():
 def view_miners():
     """View active miners and their trading pairs.
 
-    Example:
-        alw view miners
+    [dim]Examples:
+        $ alw view miners[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -104,10 +97,9 @@ def view_miners():
 def view_rates(pair: str):
     """View current exchange rates.
 
-    \b
-    Examples:
-        alw view rates
-        alw view rates --pair btc-tao
+    [dim]Examples:
+        $ alw view rates
+        $ alw view rates --pair btc-tao[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -187,13 +179,18 @@ def view_rates(pair: str):
 
 
 @view_group.command('swaps')
-@click.option('--status', default=None, type=str, help='Filter by status (active, fulfilled, completed, timed_out)')
+@click.option(
+    '--status',
+    default=None,
+    type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
+    help='Filter by status (active, fulfilled, completed, timed_out)',
+)
 def view_swaps(status: str):
     """View active swaps on the contract.
 
-    Example:
-        alw view swaps
-        alw view swaps --status pending
+    [dim]Examples:
+        $ alw view swaps
+        $ alw view swaps --status active[/dim]
     """
     _, _, _, client = get_cli_context(need_wallet=False)
 
@@ -309,10 +306,9 @@ def _display_swap(swap, chain_info=True):
 def view_swap(swap_id: int, watch: bool):
     """View details of a specific swap.
 
-    \b
-    Examples:
-        alw view swap 42
-        alw view swap 42 --watch
+    [dim]Examples:
+        $ alw view swap 42
+        $ alw view swap 42 --watch[/dim]
     """
     _, _, subtensor, client = get_cli_context(need_wallet=False)
 
@@ -414,8 +410,8 @@ def watch_swap(client, swap_id: int, swap=None):
 def view_contract():
     """View contract parameters.
 
-    Example:
-        alw view contract
+    [dim]Examples:
+        $ alw view contract[/dim]
     """
     config, wallet, _, client = get_cli_context(need_wallet=False)
 
@@ -485,11 +481,10 @@ def view_contract():
 def view_reservation():
     """View your active swap reservation.
 
-    \b
-    Reads local state file and validates against on-chain data.
+    [dim]Reads local state file and validates against on-chain data.[/dim]
 
-    Example:
-        alw view reservation
+    [dim]Examples:
+        $ alw view reservation[/dim]
     """
     _, _, subtensor, client = get_cli_context(need_wallet=False)
 

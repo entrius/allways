@@ -1,38 +1,31 @@
 """alw collateral - Manage miner collateral on the smart contract."""
 
-import rich_click as click
+import click
 from rich.table import Table
 
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
 from allways.contract_client import ContractError
 
 
-@click.group('collateral')
+@click.group('collateral', cls=StyledGroup, show_disclaimer=True)
 def collateral_group():
-    """Manage miner collateral.
-
-    \b
-    Subcommands:
-        deposit             Deposit collateral (in TAO)
-        withdraw            Withdraw collateral (in TAO)
-        view                View current collateral
-    """
+    """Manage miner collateral."""
     pass
 
 
-@collateral_group.command('deposit')
+@collateral_group.command('deposit', show_disclaimer=True)
 @click.option('--amount', default=None, type=float, help='Amount in TAO')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_deposit(amount: float | None, yes: bool):
     """Deposit collateral to the swap contract.
 
-    \b
-    Amount is in TAO. Minimum collateral to be active: see MIN_COLLATERAL_TAO.
+    [dim]Amount is in TAO. Minimum collateral to be active: see MIN_COLLATERAL_TAO.[/dim]
 
-    Examples:
-        alw collateral deposit --amount 5.0
-        alw collateral deposit                  (prompts interactively)
+    [dim]Examples:
+        $ alw collateral deposit --amount 5.0
+        $ alw collateral deposit  (prompts interactively)[/dim]
     """
     if amount is None:
         amount = click.prompt('Amount to deposit (TAO)', type=float)
@@ -89,18 +82,17 @@ def collateral_deposit(amount: float | None, yes: bool):
         console.print(f'[red]Failed to deposit collateral: {e}[/red]')
 
 
-@collateral_group.command('withdraw')
+@collateral_group.command('withdraw', show_disclaimer=True)
 @click.option('--amount', default=None, type=float, help='Amount in TAO')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_withdraw(amount: float | None, yes: bool):
     """Withdraw collateral from the swap contract.
 
-    \b
-    Amount is in TAO. Cannot withdraw if you have active swaps.
+    [dim]Amount is in TAO. Cannot withdraw if you have active swaps.[/dim]
 
-    Examples:
-        alw collateral withdraw --amount 2.0
-        alw collateral withdraw                 (prompts interactively)
+    [dim]Examples:
+        $ alw collateral withdraw --amount 2.0
+        $ alw collateral withdraw  (prompts interactively)[/dim]
     """
     if amount is None:
         amount = click.prompt('Amount to withdraw (TAO)', type=float)
@@ -178,9 +170,9 @@ def collateral_withdraw(amount: float | None, yes: bool):
 def collateral_view(hotkey: str):
     """View collateral balance.
 
-    Example:
-        alw collateral view
-        alw collateral view --hotkey 5Cxyz...
+    [dim]Examples:
+        $ alw collateral view
+        $ alw collateral view --hotkey 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
