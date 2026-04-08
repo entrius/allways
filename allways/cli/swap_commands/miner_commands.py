@@ -3,10 +3,11 @@
 import asyncio
 import time
 
-import rich_click as click
+import click
 from rich.table import Table
 
 from allways.cli.dendrite_lite import discover_validators
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
     console,
@@ -18,18 +19,9 @@ from allways.cli.swap_commands.helpers import (
 from allways.contract_client import ContractError
 
 
-@click.group('miner')
+@click.group('miner', cls=StyledGroup)
 def miner_group():
-    """Miner dashboard commands.
-
-    \b
-    Subcommands:
-        post            Post a trading pair commitment
-        status          View miner collateral, pair, and active swaps
-        activate        Activate miner via validator API
-        deactivate      Deactivate miner via validator API
-        mark-fulfilled  Manually mark a swap as fulfilled
-    """
+    """Miner dashboard commands."""
     pass
 
 
@@ -38,9 +30,9 @@ def miner_group():
 def miner_status(hotkey: str):
     """View miner status: collateral, committed pair, and active swaps.
 
-    Example:
-        alw miner status
-        alw miner status --hotkey 5Cxyz...
+    [dim]Examples:
+        $ alw miner status
+        $ alw miner status --hotkey 5Cxyz...[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     netuid = config['netuid']
@@ -161,12 +153,12 @@ def _friendly_rejection(reason: str) -> str:
 def miner_activate():
     """Activate miner via dendrite broadcast to all validators.
 
-    Broadcasts a MinerActivateSynapse to all validators. Each validator
+    [dim]Broadcasts a MinerActivateSynapse to all validators. Each validator
     independently verifies commitment and collateral, then votes on contract.
-    Activation requires quorum.
+    Activation requires quorum.[/dim]
 
-    Example:
-        alw miner activate
+    [dim]Examples:
+        $ alw miner activate[/dim]
     """
     import bittensor as bt
 
@@ -248,11 +240,11 @@ def miner_activate():
 def miner_deactivate():
     """Deactivate miner directly on contract (permissionless).
 
-    Calls deactivate() on the contract directly. No validator needed.
-    After deactivation, must wait 2 * timeout_blocks before withdrawing collateral.
+    [dim]Calls deactivate() on the contract directly. No validator needed.
+    After deactivation, must wait 2 * timeout_blocks before withdrawing collateral.[/dim]
 
-    Example:
-        alw miner deactivate
+    [dim]Examples:
+        $ alw miner deactivate[/dim]
     """
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
@@ -280,12 +272,11 @@ def miner_deactivate():
 def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, yes: bool):
     """Manually mark a swap as fulfilled on the contract.
 
-    \b
-    Use this when you've sent destination funds manually (e.g. via external
-    wallet) and need to notify the contract.
+    [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
+    and need to notify the contract.[/dim]
 
-    Examples:
-        alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000
+    [dim]Examples:
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000[/dim]
     """
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address

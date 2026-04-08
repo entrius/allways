@@ -5,7 +5,7 @@ import time
 from typing import Optional
 
 import bittensor as bt
-import rich_click as click
+import click
 from rich.panel import Panel
 from rich.table import Table
 
@@ -13,6 +13,7 @@ from allways.chain_providers import create_chain_providers
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import MinerPair, SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     PendingSwapState,
@@ -391,18 +392,12 @@ def _send_btc(chain_providers, config, to_address: str, amount_sat: int, from_ad
 # =========================================================================
 
 
-@click.group('swap')
+@click.group('swap', cls=StyledGroup, show_disclaimer=True)
 def swap_group():
-    """Execute and manage cross-chain swaps.
-
-    \b
-    Subcommands:
-        now       Execute a swap (guided interactive)
-        post-tx   Submit source transaction hash for a pending swap
-    """
+    """Execute and manage cross-chain swaps."""
 
 
-@swap_group.command('now')
+@swap_group.command('now', show_disclaimer=True)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
 @click.option('--src', 'source_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--dest', 'dest_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
@@ -425,22 +420,19 @@ def swap_now_command(
 ):
     """Guided interactive swap - step by step.
 
-    \b
-    Walks through a complete swap from start to finish:
+    [dim]Walks through a complete swap from start to finish:
     - Select swap direction and miner
     - Enter amount and addresses
     - Funds are sent automatically when possible
-    - Transaction hash is posted to validators automatically
+    - Transaction hash is posted to validators automatically[/dim]
 
-    \b
-    Non-interactive mode (for scripting/testing):
-        alw swap now --src btc --dest tao --amount 0.001 \\
+    [dim]Non-interactive mode (for scripting/testing):
+        $ alw swap now --src btc --dest tao --amount 0.001 \\
             --receive-address 5C... --source-address bc1q... \\
-            --source-tx-hash abc123... --auto --yes
+            --source-tx-hash abc123... --auto --yes[/dim]
 
-    \b
-    Interactive mode:
-        alw swap now
+    [dim]Interactive mode:
+        $ alw swap now[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     if netuid is None:

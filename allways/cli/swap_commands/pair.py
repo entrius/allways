@@ -1,8 +1,9 @@
 """alw post - Post a trading pair commitment to chain."""
 
-import rich_click as click
+import click
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
 
@@ -39,7 +40,7 @@ def _prompt_rates(canon_src: str, canon_dest: str) -> tuple:
     return fwd, rev
 
 
-@click.command('pair')
+@click.command('pair', cls=StyledCommand)
 @click.argument('src_chain', required=False, default=None, type=str)
 @click.argument('src_addr', required=False, default=None, type=str)
 @click.argument('dst_chain', required=False, default=None, type=str)
@@ -58,23 +59,20 @@ def post_pair(
 ):
     """Post a trading pair to chain via commitment.
 
-    \b
-    All arguments are optional — if omitted, you'll be prompted interactively.
+    [dim]All arguments are optional — if omitted, you'll be prompted interactively.[/dim]
 
-    \b
-    Arguments:
-        SRC_CHAIN      Source chain ID (e.g. btc, tao)
-        SRC_ADDR       Your receiving address on source chain
-        DST_CHAIN      Destination chain ID (e.g. tao, btc)
-        DST_ADDR       Your sending address on destination chain
-        RATE           source→dest rate (e.g. TAO per 1 BTC for btc-tao pair)
-        COUNTER_RATE   dest→source rate (optional, defaults to RATE)
+    [dim]Arguments:
+        SRC_CHAIN       Source chain ID (e.g. btc, tao)
+        SRC_ADDR        Your receiving address on source chain
+        DST_CHAIN       Destination chain ID (e.g. tao, btc)
+        DST_ADDR        Your sending address on destination chain
+        RATE            source→dest rate (e.g. TAO per 1 BTC for btc-tao pair)
+        COUNTER_RATE    dest→source rate (optional, defaults to RATE)[/dim]
 
-    \b
-    Examples:
-        alw miner post                                              (interactive wizard)
-        alw miner post btc bc1q...abc tao 5Cxyz...def 340 350      (direction-specific rates)
-        alw miner post btc bc1q...abc tao 5Cxyz...def 345          (same rate both ways)
+    [dim]Examples:
+        $ alw miner post                                            (interactive wizard)
+        $ alw miner post btc bc1q...abc tao 5Cxyz...def 340 350     (direction-specific rates)
+        $ alw miner post btc bc1q...abc tao 5Cxyz...def 345         (same rate both ways)[/dim]
     """
     # --- Prompt for any missing arguments ---
     if src_chain is None:
