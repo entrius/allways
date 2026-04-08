@@ -11,6 +11,7 @@ Usage:
 import threading
 import time
 from functools import partial
+from pathlib import Path
 
 import bittensor as bt
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ from allways.validator.axon_handlers import (
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.forward import forward
 from allways.validator.pending_confirms import PendingConfirmQueue
+from allways.validator.scoring_store import ScoringWindowStore
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
@@ -60,10 +62,13 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.warning(f'Failed to read fee_divisor, using default {DEFAULT_FEE_DIVISOR}: {e}')
             self.fee_divisor = DEFAULT_FEE_DIVISOR
+        scoring_cache_path = Path(self.config.neuron.full_path) / 'scoring_window.json'
+        self.scoring_store = ScoringWindowStore(scoring_cache_path)
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
             window_blocks=SCORING_WINDOW_BLOCKS,
+            store=self.scoring_store,
         )
         self.swap_tracker.initialize(self.block)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')

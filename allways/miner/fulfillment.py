@@ -1,6 +1,7 @@
 """Swap fulfillment engine - verifies receipt and sends funds."""
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
@@ -65,7 +66,7 @@ class SwapFulfiller:
             data = {str(k): [v[0], v[1]] for k, v in self._sent.items()}
             tmp = self._sent_cache_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data))
-            tmp.rename(self._sent_cache_path)
+            os.replace(tmp, self._sent_cache_path)
         except Exception as e:
             bt.logging.error(f'CRITICAL: Failed to persist sent cache: {e}')
 
