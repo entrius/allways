@@ -884,8 +884,11 @@ def swap_now_command(
     clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
 
-    # In non-interactive mode, just print the ID and exit (let caller handle watching)
+    # In non-interactive mode, save to history and exit
     if skip_confirm:
+        from allways.cli.swap_commands.view import save_initiated_swap_to_history
+
+        save_initiated_swap_to_history(client, swap_id)
         return
 
     # Watch swap through lifecycle

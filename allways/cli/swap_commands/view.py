@@ -1,5 +1,6 @@
 """alw view - View swaps, miners, and rates."""
 
+import datetime
 import time
 from dataclasses import replace
 
@@ -320,6 +321,15 @@ def view_swap(swap_id: int, watch: bool):
         return
 
     if not swap:
+        # Check local history before giving up
+        from allways.cli.swap_commands.history import load_swap as load_history_swap
+
+        record = load_history_swap(swap_id)
+        if record:
+            console.print(f'\n[dim]Swap {swap_id} resolved on-chain. Showing local history:[/dim]')
+            _display_history_detail(record)
+            return
+
         try:
             next_id = client.get_next_swap_id()
         except ContractError:
@@ -343,6 +353,30 @@ def view_swap(swap_id: int, watch: bool):
     watch_swap(client, swap_id, swap)
 
 
+def save_to_history(swap):
+    """Save a swap to local history (best-effort, never raises).
+
+    Called at terminal states (COMPLETED/TIMED_OUT) and also at initiation
+    for non-interactive flows. Uses INSERT OR REPLACE so later updates win.
+    """
+    try:
+        from allways.cli.swap_commands.history import save_swap
+
+        save_swap(swap)
+    except Exception:
+        pass
+
+
+def save_initiated_swap_to_history(client, swap_id: int):
+    """Fetch a just-initiated swap and save to history (best-effort)."""
+    try:
+        swap = client.get_swap(swap_id)
+        if swap:
+            save_to_history(swap)
+    except Exception:
+        pass
+
+
 def watch_swap(client, swap_id: int, swap=None):
     """Poll and display a swap until it reaches a terminal state.
 
@@ -361,6 +395,7 @@ def watch_swap(client, swap_id: int, swap=None):
 
     terminal = (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
     if swap.status in terminal:
+        save_to_history(swap)
         _display_swap(swap)
         return swap
 
@@ -394,16 +429,206 @@ def watch_swap(client, swap_id: int, swap=None):
                             status=SwapStatus.COMPLETED,
                             completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
                         )
+                    save_to_history(final)
                     live.update(_render(final, chain_info=False, watching=False))
                     return final
                 last_swap = swap
                 live.update(_render(swap))
                 if swap.status in terminal:
+                    save_to_history(swap)
                     live.update(_render(swap, watching=False))
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
         return None
+
+
+@view_group.command('history')
+@click.option('--swap', 'swap_id', default=None, type=int, help='Show full detail for a specific swap ID')
+@click.option(
+    '--status', 'status_filter', default=None, type=click.Choice(['completed', 'timed_out']), help='Filter by status'
+)
+@click.option('--limit', 'limit', default=50, type=int, help='Max number of swaps to show')
+@click.option('--stats', is_flag=True, help='Show aggregate summary after the table')
+def view_history(swap_id: int, status_filter: str, limit: int, stats: bool):
+    """View local swap history.
+
+    [dim]Shows completed and timed-out swaps saved from previous swap sessions.
+    History is stored locally at ~/.allways/swap_history.db.[/dim]
+
+    [dim]Examples:
+        $ alw view history
+        $ alw view history --swap 42
+        $ alw view history --status completed
+        $ alw view history --stats[/dim]
+    """
+    from allways.cli.swap_commands.history import load_history, load_swap
+
+    if swap_id is not None:
+        record = load_swap(swap_id)
+        if not record:
+            console.print(f'[yellow]Swap {swap_id} not found in local history.[/yellow]')
+            return
+        _display_history_detail(record)
+        return
+
+    status_int = None
+    if status_filter == 'completed':
+        status_int = int(SwapStatus.COMPLETED)
+    elif status_filter == 'timed_out':
+        status_int = int(SwapStatus.TIMED_OUT)
+
+    records = load_history(status=status_int, limit=limit)
+    if not records:
+        console.print('\n[yellow]No swap history yet.[/yellow]\n')
+        return
+
+    table = Table(show_header=True, title='Swap History')
+    table.add_column('ID', style='cyan')
+    table.add_column('Direction', style='white')
+    table.add_column('Sent', style='red')
+    table.add_column('Received', style='green')
+    table.add_column('Status', style='white')
+    table.add_column('Date', style='dim')
+
+    for r in records:
+        src_chain = r['source_chain']
+        dst_chain = r['dest_chain']
+        src_dec = get_chain(src_chain).decimals
+        dst_dec = get_chain(dst_chain).decimals
+        human_src = r['source_amount'] / (10**src_dec)
+        human_dst = r['dest_amount'] / (10**dst_dec)
+
+        status_val = SwapStatus(r['status'])
+        status_labels = {
+            SwapStatus.COMPLETED: '[green]Done[/green]',
+            SwapStatus.TIMED_OUT: '[red]Timeout[/red]',
+            SwapStatus.ACTIVE: '[yellow]Active[/yellow]',
+            SwapStatus.FULFILLED: '[blue]Fulfilled[/blue]',
+        }
+        status_label = status_labels.get(status_val, str(status_val.name))
+
+        date_str = datetime.datetime.fromtimestamp(r['saved_at'], tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')
+
+        table.add_row(
+            str(r['swap_id']),
+            f'{src_chain.upper()} -> {dst_chain.upper()}',
+            f'{human_src:.8f} {src_chain.upper()}',
+            f'{human_dst:.8f} {dst_chain.upper()}',
+            status_label,
+            date_str,
+        )
+
+    console.print()
+    console.print(table)
+
+    if stats and records:
+        _display_history_stats(records)
+
+    console.print()
+
+
+def _display_history_stats(records: list[dict]):
+    """Display aggregate summary for a set of history records."""
+    completed = sum(1 for r in records if r['status'] == int(SwapStatus.COMPLETED))
+    timed_out = sum(1 for r in records if r['status'] == int(SwapStatus.TIMED_OUT))
+    total = len(records)
+
+    # Aggregate volumes per chain
+    sent_by_chain: dict[str, int] = {}
+    received_by_chain: dict[str, int] = {}
+    for r in records:
+        src = r['source_chain']
+        dst = r['dest_chain']
+        sent_by_chain[src] = sent_by_chain.get(src, 0) + r['source_amount']
+        if r['status'] == int(SwapStatus.COMPLETED):
+            received_by_chain[dst] = received_by_chain.get(dst, 0) + r['dest_amount']
+
+    console.print()
+    console.print('[bold]Summary[/bold]')
+
+    stats_table = Table(show_header=False, box=None, padding=(0, 2))
+    stats_table.add_column(style='cyan')
+    stats_table.add_column(style='white')
+
+    pct = f'{completed / total * 100:.0f}%' if total > 0 else '—'
+    stats_table.add_row('Total Swaps', str(total))
+    stats_table.add_row('Completed', f'{completed} ({pct})')
+    if timed_out > 0:
+        stats_table.add_row('Timed Out', str(timed_out))
+
+    for chain_id, amount in sorted(sent_by_chain.items()):
+        decimals = get_chain(chain_id).decimals
+        human = amount / (10**decimals)
+        stats_table.add_row(f'Total Sent {chain_id.upper()}', f'{human:.8f} {chain_id.upper()}')
+
+    for chain_id, amount in sorted(received_by_chain.items()):
+        decimals = get_chain(chain_id).decimals
+        human = amount / (10**decimals)
+        stats_table.add_row(f'Total Received {chain_id.upper()}', f'{human:.8f} {chain_id.upper()}')
+
+    console.print(stats_table)
+
+
+def _display_history_detail(r: dict):
+    """Display full detail for a single swap history record."""
+    src_chain = r['source_chain']
+    dst_chain = r['dest_chain']
+    src_dec = get_chain(src_chain).decimals
+    dst_dec = get_chain(dst_chain).decimals
+    human_src = r['source_amount'] / (10**src_dec)
+    human_dst = r['dest_amount'] / (10**dst_dec)
+
+    # Rate is stored as canonical (TAO per 1 non-TAO). Display as non-TAO per 1 TAO (priced in TAO).
+    rate_str = r['rate']
+    try:
+        rate_val = float(rate_str)
+        if rate_val > 0:
+            non_tao = dst_chain if src_chain == 'tao' else src_chain
+            inverse_rate = 1.0 / rate_val
+            rate_display = f'{inverse_rate:.8f} {non_tao.upper()}/TAO'
+        else:
+            rate_display = rate_str
+    except (ValueError, ZeroDivisionError):
+        rate_display = rate_str
+
+    status_val = SwapStatus(r['status'])
+    status_label = 'Completed' if status_val == SwapStatus.COMPLETED else 'Timed Out'
+
+    saved_at = datetime.datetime.fromtimestamp(r['saved_at'], tz=datetime.timezone.utc).strftime(
+        '%Y-%m-%d %H:%M:%S UTC'
+    )
+
+    console.print()
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style='cyan')
+    table.add_column(style='white')
+
+    table.add_row('Swap ID', str(r['swap_id']))
+    table.add_row(
+        'Status',
+        f'[green]{status_label}[/green]' if status_val == SwapStatus.COMPLETED else f'[red]{status_label}[/red]',
+    )
+    table.add_row('Direction', f'{src_chain.upper()} -> {dst_chain.upper()}')
+    table.add_row('', '')
+    table.add_row('Source Amount', f'{human_src:.8f} {src_chain.upper()}')
+    table.add_row('Dest Amount', f'{human_dst:.8f} {dst_chain.upper()}')
+    table.add_row('Rate Applied', rate_display)
+    table.add_row('', '')
+    table.add_row('Source TX', r['source_tx_hash'] or '—')
+    table.add_row('Dest TX', r['dest_tx_hash'] or '—')
+    table.add_row('', '')
+    table.add_row('User Source Addr', r['user_source_address'] or '—')
+    table.add_row('User Dest Addr', r['user_dest_address'] or '—')
+    table.add_row('Miner Hotkey', r['miner_hotkey'] or '—')
+    table.add_row('', '')
+    table.add_row('Initiated Block', f'{r["initiated_block"]:,}' if r['initiated_block'] else '—')
+    table.add_row('Fulfilled Block', f'{r["fulfilled_block"]:,}' if r['fulfilled_block'] else '—')
+    table.add_row('Completed Block', f'{r["completed_block"]:,}' if r['completed_block'] else '—')
+    table.add_row('Timestamp', saved_at)
+
+    console.print(table)
+    console.print()
 
 
 @view_group.command('contract')

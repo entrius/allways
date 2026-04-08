@@ -198,6 +198,9 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
 
     if skip_confirm:
+        from allways.cli.swap_commands.view import save_initiated_swap_to_history
+
+        save_initiated_swap_to_history(client, swap_id)
         return
 
     from allways.cli.swap_commands.view import watch_swap
