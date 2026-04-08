@@ -55,6 +55,7 @@ SWAP_FEE_PERCENT = 0.01  # display only — derived from DEFAULT_FEE_DIVISOR
 MAX_FEE_PERCENT = 0.05  # contract enforces divisor >= 20 (max 5% fee)
 MIN_COLLATERAL_TAO = 0.1  # Must be > max swap amount
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min — `alw admin set-timeout`
+FULFILLMENT_TIMEOUT_MARGIN_BLOCKS = 3  # ~36s at 12s/block — avoid near-timeout sends that may fail to finalize on-chain
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO — `alw admin set-min-swap`
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO   — `alw admin set-max-swap`
 RESERVATION_TTL_BLOCKS = 30  # ~5 min — `alw admin set-reservation-ttl`

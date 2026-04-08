@@ -15,7 +15,12 @@ from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitment
-from allways.constants import DEFAULT_FEE_DIVISOR, MINER_STATUS_LOG_INTERVAL_STEPS, TAO_TO_RAO
+from allways.constants import (
+    DEFAULT_FEE_DIVISOR,
+    FULFILLMENT_TIMEOUT_MARGIN_BLOCKS,
+    MINER_STATUS_LOG_INTERVAL_STEPS,
+    TAO_TO_RAO,
+)
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.miner.fulfillment import SwapFulfiller
 from allways.miner.swap_poller import SwapPoller
@@ -50,6 +55,7 @@ class Miner(BaseMinerNeuron):
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
+        recovery_log_path = Path.home() / '.allways' / 'miner' / f'fulfillment_recovery_{hotkey[:12]}.jsonl'
 
         self.swap_fulfiller = SwapFulfiller(
             contract_client=self.contract_client,
@@ -60,6 +66,8 @@ class Miner(BaseMinerNeuron):
             metagraph=self.metagraph,
             fee_divisor=fee_divisor,
             sent_cache_path=sent_cache_path,
+            timeout_margin_blocks=FULFILLMENT_TIMEOUT_MARGIN_BLOCKS,
+            recovery_log_path=recovery_log_path,
         )
 
         self._last_status_step = 0

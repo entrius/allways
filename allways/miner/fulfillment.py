@@ -7,8 +7,9 @@ from typing import Dict, Optional, Set, Tuple
 import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider
-from allways.classes import Swap
-from allways.contract_client import AllwaysContractClient, ContractError
+from allways.classes import Swap, SwapStatus
+from allways.constants import FULFILLMENT_TIMEOUT_MARGIN_BLOCKS
+from allways.contract_client import AllwaysContractClient, ContractError, ContractErrorKind
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -31,6 +32,8 @@ class SwapFulfiller:
         metagraph: Optional['bt.Metagraph'] = None,
         fee_divisor: int = 100,
         sent_cache_path: Optional[Path] = None,
+        timeout_margin_blocks: int = FULFILLMENT_TIMEOUT_MARGIN_BLOCKS,
+        recovery_log_path: Optional[Path] = None,
     ):
         self.client = contract_client
         self.providers = chain_providers
@@ -41,7 +44,63 @@ class SwapFulfiller:
         self.fee_divisor = fee_divisor
         self._sent: Dict[int, Tuple[str, int]] = {}
         self._sent_cache_path = sent_cache_path
+        self.timeout_margin_blocks = timeout_margin_blocks
+        self._recovery_log_path = recovery_log_path
+        self._terminal_failures: Set[int] = set()
         self._load_sent_cache()
+
+    @staticmethod
+    def _is_terminal_mark_fulfilled_error(error: ContractError) -> bool:
+        if error.kind in (
+            ContractErrorKind.NOT_INITIALIZED,
+            ContractErrorKind.RPC_FAILURE,
+            ContractErrorKind.INSUFFICIENT_BALANCE,
+        ):
+            return False
+
+        msg = str(error)
+        terminal_variants = ('SwapNotFound', 'InvalidStatus', 'NotAssignedMiner', 'MinerNotActive')
+        return any(v in msg for v in terminal_variants)
+
+    def _append_recovery_entry(self, entry: Dict) -> None:
+        if not self._recovery_log_path:
+            return
+
+        try:
+            self._recovery_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._recovery_log_path.open('a', encoding='utf-8') as f:
+                f.write(json.dumps(entry) + '\n')
+        except Exception as e:
+            bt.logging.error(f"Swap {entry.get('swap_id', 'unknown')}: failed to write recovery log: {e}")
+
+    def _append_recovery_log(
+        self,
+        swap: Swap,
+        dest_tx_hash: str,
+        dest_tx_block: int,
+        dest_amount: int,
+        reason: str,
+        event: str,
+    ) -> None:
+        entry = {
+            'event': event,
+            'swap_id': swap.id,
+            'miner_hotkey': swap.miner_hotkey,
+            'source_chain': swap.source_chain,
+            'dest_chain': swap.dest_chain,
+            'source_tx_hash': swap.source_tx_hash,
+            'dest_tx_hash': dest_tx_hash,
+            'dest_tx_block': dest_tx_block,
+            'dest_amount': dest_amount,
+            'timeout_block': swap.timeout_block,
+            'reason': reason,
+        }
+
+        bt.logging.error(
+            f"Swap {swap.id}: recovery required ({event}) — sent tx={dest_tx_hash}, "
+            f"block={dest_tx_block}, amount={dest_amount}, reason={reason}"
+        )
+        self._append_recovery_entry(entry)
 
     def _load_sent_cache(self):
         """Load persisted send results from disk to prevent double-sends after restart."""
@@ -73,18 +132,60 @@ class SwapFulfiller:
         """Remove cached send results for swaps no longer active."""
         stale = [sid for sid in self._sent if sid not in active_swap_ids]
         for sid in stale:
+            tx_hash, tx_block = self._sent[sid]
+            resolved = None
+            try:
+                resolved = self.client.get_swap(sid)
+            except Exception as e:
+                bt.logging.debug(f'Swap {sid}: get_swap failed during stale send cleanup: {e}')
+
+            if resolved is not None and resolved.status == SwapStatus.COMPLETED:
+                bt.logging.info(
+                    f'Swap {sid}: clearing stale send cache after completed resolution '
+                    f'(tx={tx_hash}, block={tx_block})'
+                )
+            elif resolved is not None and resolved.status == SwapStatus.TIMED_OUT:
+                bt.logging.error(
+                    f'Swap {sid}: swap timed out after funds were sent '
+                    f'(tx={tx_hash}, block={tx_block}) — manual recovery may be required'
+                )
+                self._append_recovery_entry(
+                    {
+                        'event': 'stale_sent_cache_cleanup',
+                        'swap_id': sid,
+                        'dest_tx_hash': tx_hash,
+                        'dest_tx_block': tx_block,
+                        'status': resolved.status.name,
+                        'reason': 'swap timed out after send',
+                    }
+                )
+            else:
+                status_name = resolved.status.name if resolved else 'UNKNOWN'
+                bt.logging.warning(
+                    f'Swap {sid}: clearing stale send cache with status={status_name} '
+                    f'(tx={tx_hash}, block={tx_block})'
+                )
             self._sent.pop(sid)
+            self._terminal_failures.discard(sid)
             bt.logging.debug(f'Cleaned up stale send cache for swap {sid}')
         if stale:
             self._save_sent_cache()
 
-    def _verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
+    def _verify_swap_safety(self, swap: Swap, enforce_timeout_margin: bool = True) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill. Returns (dest_amount, miner_source_address) or None."""
         # Timeout check
         current_block = self.subtensor.get_current_block()
-        if current_block >= swap.timeout_block:
-            bt.logging.warning(f'Swap {swap.id}: already timed out (block {current_block} >= {swap.timeout_block})')
-            return None
+        if swap.timeout_block > 0:
+            blocks_left = swap.timeout_block - current_block
+            if blocks_left <= 0:
+                bt.logging.warning(f'Swap {swap.id}: already timed out (block {current_block} >= {swap.timeout_block})')
+                return None
+            if enforce_timeout_margin and blocks_left <= self.timeout_margin_blocks:
+                bt.logging.warning(
+                    f'Swap {swap.id}: too close to timeout to fulfill safely '
+                    f'(blocks_left={blocks_left}, margin={self.timeout_margin_blocks})'
+                )
+                return None
 
         # Rate and address from swap struct (snapshotted at initiation)
         if not swap.rate or not swap.miner_source_address:
@@ -184,8 +285,14 @@ class SwapFulfiller:
         """
         bt.logging.info(f'Processing swap {swap.id}: {swap.source_chain} -> {swap.dest_chain}')
 
+        if swap.id in self._terminal_failures:
+            bt.logging.warning(f'Swap {swap.id}: skipped after terminal mark_fulfilled failure (manual recovery required)')
+            return True
+
+        has_cached_send = swap.id in self._sent
+
         # Step 1: Verify swap safety (timeout, rate, collateral)
-        safety_result = self._verify_swap_safety(swap)
+        safety_result = self._verify_swap_safety(swap, enforce_timeout_margin=not has_cached_send)
         if safety_result is None:
             bt.logging.warning(f'Swap {swap.id}: failed safety checks, skipping')
             return False
@@ -193,12 +300,15 @@ class SwapFulfiller:
         dest_amount, my_source_address = safety_result
 
         # Step 2: Verify user sent source funds
-        if not self.verify_user_sent_funds(swap, my_source_address):
-            bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
-            return False
+        if not has_cached_send:
+            if not self.verify_user_sent_funds(swap, my_source_address):
+                bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
+                return False
+        else:
+            bt.logging.debug(f'Swap {swap.id}: skipping source verification (cached send exists)')
 
         # Step 3: Send destination funds (with double-send prevention)
-        if swap.id in self._sent:
+        if has_cached_send:
             dest_tx_hash, dest_tx_block = self._sent[swap.id]
             bt.logging.info(f'Swap {swap.id}: using cached send result (tx: {dest_tx_hash}, block: {dest_tx_block})')
         else:
@@ -221,8 +331,21 @@ class SwapFulfiller:
             )
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             self._sent.pop(swap.id, None)
+            self._terminal_failures.discard(swap.id)
             self._save_sent_cache()
             return True
         except ContractError as e:
+            if self._is_terminal_mark_fulfilled_error(e):
+                self._terminal_failures.add(swap.id)
+                self._append_recovery_log(
+                    swap=swap,
+                    dest_tx_hash=dest_tx_hash,
+                    dest_tx_block=dest_tx_block,
+                    dest_amount=dest_amount,
+                    reason=str(e),
+                    event='terminal_mark_fulfilled_failure',
+                )
+                return True
+
             bt.logging.error(f'Swap {swap.id}: failed to mark fulfilled on contract: {e}')
             return False
