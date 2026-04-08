@@ -131,8 +131,7 @@ class ScoringWindowStore:
             if isinstance(v, int):
                 voted_ids.add(v)
 
-        valid_voted_count = sum(1 for v in raw_voted if isinstance(v, int))
-        if len(window) != len(raw_window) or len(voted_ids) != valid_voted_count:
+        if len(window) != len(raw_window) or len(voted_ids) != len(raw_voted):
             self.save(window, voted_ids)
 
         if window:
