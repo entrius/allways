@@ -168,10 +168,8 @@ class BitcoinProvider(ChainProvider):
             if block_info:
                 block_number = block_info.get('height')
 
-        # Parse vout for matching output
         for vout in raw_tx.get('vout', []):
             addresses = vout.get('scriptPubKey', {}).get('addresses', [])
-            # Also check 'address' field (newer Bitcoin Core versions)
             if not addresses:
                 addr = vout.get('scriptPubKey', {}).get('address')
                 if addr:
@@ -180,23 +178,7 @@ class BitcoinProvider(ChainProvider):
             amount_sat = int(round(vout.get('value', 0) * BTC_TO_SAT))
 
             if expected_recipient in addresses and amount_sat >= expected_amount:
-                # Get sender from first vin
-                sender = ''
-                if raw_tx.get('vin'):
-                    vin = raw_tx['vin'][0]
-                    if 'txid' in vin:
-                        prev_tx = self._rpc_call('getrawtransaction', [vin['txid'], True])
-                        vout_idx = vin.get('vout', 0)
-                        if prev_tx and prev_tx.get('vout') and vout_idx < len(prev_tx['vout']):
-                            prev_vout = prev_tx['vout'][vout_idx]
-                            prev_addrs = prev_vout.get('scriptPubKey', {}).get('addresses', [])
-                            if not prev_addrs:
-                                prev_addr = prev_vout.get('scriptPubKey', {}).get('address')
-                                if prev_addr:
-                                    prev_addrs = [prev_addr]
-                            if prev_addrs:
-                                sender = prev_addrs[0]
-
+                sender = self._rpc_resolve_sender(raw_tx)
                 return TransactionInfo(
                     tx_hash=tx_hash,
                     confirmed=confirmed,
@@ -209,8 +191,40 @@ class BitcoinProvider(ChainProvider):
 
         return None
 
+    def _rpc_resolve_sender(self, raw_tx: dict) -> str:
+        """Extract sender address from the first vin of a raw transaction."""
+        if not raw_tx.get('vin'):
+            return ''
+        vin = raw_tx['vin'][0]
+        if 'txid' not in vin:
+            return ''
+        prev_tx = self._rpc_call('getrawtransaction', [vin['txid'], True])
+        if not prev_tx or not prev_tx.get('vout'):
+            return ''
+        vout_idx = vin.get('vout', 0)
+        if vout_idx >= len(prev_tx['vout']):
+            return ''
+        prev_vout = prev_tx['vout'][vout_idx]
+        prev_addrs = prev_vout.get('scriptPubKey', {}).get('addresses', [])
+        if not prev_addrs:
+            prev_addr = prev_vout.get('scriptPubKey', {}).get('address')
+            if prev_addr:
+                prev_addrs = [prev_addr]
+        return prev_addrs[0] if prev_addrs else ''
+
     # --- Blockstream API methods ---
     # Used as primary data source in lightweight mode, and as fallback in node mode.
+
+    def _blockstream_calc_confirmations(self, block_number: int) -> int:
+        """Fetch the chain tip from Blockstream and calculate confirmations for a block."""
+        try:
+            tip_resp = requests.get(f'{self._blockstream_api_url()}/blocks/tip/height', timeout=10)
+            if tip_resp.ok:
+                tip_height = int(tip_resp.text.strip())
+                return tip_height - block_number + 1
+        except Exception:
+            pass
+        return 0
 
     def _blockstream_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
@@ -229,10 +243,7 @@ class BitcoinProvider(ChainProvider):
             confirmations = 0
 
             if confirmed and block_number:
-                tip_resp = requests.get(f'{self._blockstream_api_url()}/blocks/tip/height', timeout=10)
-                if tip_resp.ok:
-                    tip_height = int(tip_resp.text.strip())
-                    confirmations = tip_height - block_number + 1
+                confirmations = self._blockstream_calc_confirmations(block_number)
 
             min_confs = self.get_chain().min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False

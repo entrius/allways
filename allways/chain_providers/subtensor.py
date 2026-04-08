@@ -184,42 +184,11 @@ class SubtensorProvider(ChainProvider):
                 is_raw = block.get('_raw', False)
 
                 for ext in block['extrinsics']:
-                    if is_raw:
-                        ext_hash = ext.get('extrinsic_hash', '')
-                        if ext_hash != tx_hash:
-                            continue
-                        dest = ext.get('dest', '')
-                        amount = ext.get('amount', 0)
-                        sender = ext.get('sender', '')
-                    else:
-                        ext_hash = getattr(ext, 'extrinsic_hash', None) or (
-                            ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
-                        )
-                        if isinstance(ext_hash, bytes):
-                            ext_hash = '0x' + ext_hash.hex()
-                        if ext_hash != tx_hash:
-                            continue
+                    match = self._match_transfer(ext, tx_hash, is_raw)
+                    if match is None:
+                        continue
 
-                        ext_data = ext.value if hasattr(ext, 'value') else ext
-                        call = ext_data.get('call', {}) if isinstance(ext_data, dict) else {}
-                        call_function = call.get('call_function', '')
-                        call_args = call.get('call_args', [])
-
-                        if 'transfer' not in call_function.lower():
-                            continue
-
-                        dest = ''
-                        amount = 0
-                        sender = ext_data.get('address', '') if isinstance(ext_data, dict) else ''
-
-                        for arg in call_args:
-                            name = arg.get('name', '') if isinstance(arg, dict) else ''
-                            val = arg.get('value', '') if isinstance(arg, dict) else ''
-                            if name in ('dest', 'destination'):
-                                dest = val.get('Id', val) if isinstance(val, dict) else val
-                            elif name == 'value':
-                                amount = int(val)
-
+                    dest, amount, sender = match
                     confs = current_block - block_num
                     if dest == expected_recipient and amount >= expected_amount:
                         return TransactionInfo(
@@ -237,6 +206,45 @@ class SubtensorProvider(ChainProvider):
             raise
         except Exception as e:
             raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
+
+    @staticmethod
+    def _match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
+        """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
+        if is_raw:
+            ext_hash = ext.get('extrinsic_hash', '')
+            if ext_hash != tx_hash:
+                return None
+            return ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
+
+        ext_hash = getattr(ext, 'extrinsic_hash', None) or (
+            ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
+        )
+        if isinstance(ext_hash, bytes):
+            ext_hash = '0x' + ext_hash.hex()
+        if ext_hash != tx_hash:
+            return None
+
+        ext_data = ext.value if hasattr(ext, 'value') else ext
+        call = ext_data.get('call', {}) if isinstance(ext_data, dict) else {}
+        call_function = call.get('call_function', '')
+        call_args = call.get('call_args', [])
+
+        if 'transfer' not in call_function.lower():
+            return None
+
+        dest = ''
+        amount = 0
+        sender = ext_data.get('address', '') if isinstance(ext_data, dict) else ''
+
+        for arg in call_args:
+            name = arg.get('name', '') if isinstance(arg, dict) else ''
+            val = arg.get('value', '') if isinstance(arg, dict) else ''
+            if name in ('dest', 'destination'):
+                dest = val.get('Id', val) if isinstance(val, dict) else val
+            elif name == 'value':
+                amount = int(val)
+
+        return dest, amount, sender
 
     def get_balance(self, address: str) -> int:
         """Get balance for a TAO address in rao."""
