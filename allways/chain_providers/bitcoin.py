@@ -417,83 +417,24 @@ class BitcoinProvider(ChainProvider):
             pubkey = privkey.get_public_key()
             segwit_script = p2wpkh(pubkey)
 
-            # Derive address type: if from_address is known, match it directly.
-            # Otherwise probe all types to find where UTXOs exist.
             type_to_script = {
                 ADDR_TYPE_P2WPKH: ('p2wpkh', segwit_script, segwit_script.address(network)),
                 ADDR_TYPE_P2SH_P2WPKH: ('p2sh-p2wpkh', p2sh(segwit_script), p2sh(segwit_script).address(network)),
                 ADDR_TYPE_P2PKH: ('p2pkh', p2pkh(pubkey), p2pkh(pubkey).address(network)),
             }
 
-            if from_address:
-                detected = detect_address_type(from_address)
-                if detected in type_to_script:
-                    atype, script, addr = type_to_script[detected]
-                    if addr != from_address:
-                        bt.logging.error(
-                            f'WIF key derives {addr} but committed address is {from_address} — key mismatch'
-                        )
-                        return None
-                    utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
-                    resp = requests.get(utxo_url, timeout=15)
-                    resp.raise_for_status()
-                    utxos = resp.json()
-                    my_script, my_address, addr_type = script, addr, atype
-                else:
-                    bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
-                    return None
-            else:
-                # Probe all address types
-                candidates = [type_to_script[t] for t in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2SH_P2WPKH, ADDR_TYPE_P2PKH)]
-                my_script = None
-                my_address = None
-                utxos = None
-                addr_type = None
-                import time as _time
-
-                for idx, (atype, script, addr) in enumerate(candidates):
-                    try:
-                        if idx > 0:
-                            _time.sleep(1)  # avoid Blockstream rate limiting
-                        utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
-                        resp = requests.get(utxo_url, timeout=15)
-                        resp.raise_for_status()
-                        candidate_utxos = resp.json()
-                        if candidate_utxos:
-                            my_script, my_address, utxos, addr_type = script, addr, candidate_utxos, atype
-                            bt.logging.debug(f'Found UTXOs on {atype} address: {addr}')
-                            break
-                    except Exception:
-                        continue
-
-            if not utxos:
-                bt.logging.error(f'No UTXOs found for {from_address or "any address type"}')
+            result = self._resolve_sender_utxos(from_address, type_to_script)
+            if result is None:
                 return None
+            my_script, my_address, utxos, addr_type = result
 
             is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            # Select UTXOs (simple greedy: accumulate until we cover amount + fee estimate)
-            fee_rate = self._estimate_fee_rate()
-            # vsize per input: ~68 for segwit, ~148 for legacy
-            input_vsize = 68 if is_segwit else 148
-            selected = []
-            total_in = 0
-            for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
-                selected.append(utxo)
-                total_in += utxo['value']
-                est_vsize = 11 + len(selected) * input_vsize + 2 * 31
-                fee = est_vsize * fee_rate
-                if total_in >= amount + fee:
-                    break
-
-            # Final fee calculation
-            est_vsize = 11 + len(selected) * input_vsize + 2 * 31
-            fee = est_vsize * fee_rate
-            if total_in < amount + fee:
-                bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            coin_selection = self._select_utxos(utxos, amount, is_segwit)
+            if coin_selection is None:
                 return None
-
+            selected, total_in, fee = coin_selection
             change = total_in - amount - fee
 
             # Build transaction
@@ -546,20 +487,85 @@ class BitcoinProvider(ChainProvider):
                             bytes([len(sig_bytes)]) + sig_bytes + bytes([len(pub_bytes)]) + pub_bytes
                         )
 
-            # Broadcast
             raw_tx = final_tx.serialize().hex()
-            broadcast_url = f'{self._blockstream_api_url()}/tx'
-            broadcast_resp = requests.post(broadcast_url, data=raw_tx, timeout=15)
-            if broadcast_resp.status_code != 200:
-                bt.logging.error(f'Broadcast rejected ({broadcast_resp.status_code}): {broadcast_resp.text.strip()}')
+            tx_hash = self._broadcast_tx(raw_tx)
+            if tx_hash is None:
                 return None
-            tx_hash = broadcast_resp.text.strip()
 
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
             return (tx_hash, 0)
         except Exception as e:
             bt.logging.error(f'embit send failed: {e}')
             return None
+
+    def _resolve_sender_utxos(self, from_address, type_to_script):
+        """Match from_address to address type and fetch UTXOs, or probe all types."""
+        if from_address:
+            detected = detect_address_type(from_address)
+            if detected not in type_to_script:
+                bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
+                return None
+            atype, script, addr = type_to_script[detected]
+            if addr != from_address:
+                bt.logging.error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
+                return None
+            utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
+            resp = requests.get(utxo_url, timeout=15)
+            resp.raise_for_status()
+            utxos = resp.json()
+            if not utxos:
+                bt.logging.error(f'No UTXOs found for {from_address}')
+                return None
+            return script, addr, utxos, atype
+
+        import time as _time
+
+        for idx, (atype, script, addr) in enumerate(type_to_script.values()):
+            try:
+                if idx > 0:
+                    _time.sleep(1)
+                utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
+                resp = requests.get(utxo_url, timeout=15)
+                resp.raise_for_status()
+                candidate_utxos = resp.json()
+                if candidate_utxos:
+                    bt.logging.debug(f'Found UTXOs on {atype} address: {addr}')
+                    return script, addr, candidate_utxos, atype
+            except Exception:
+                continue
+
+        bt.logging.error('No UTXOs found for any address type')
+        return None
+
+    def _select_utxos(self, utxos, amount: int, is_segwit: bool):
+        """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
+        fee_rate = self._estimate_fee_rate()
+        input_vsize = 68 if is_segwit else 148
+        selected = []
+        total_in = 0
+        for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
+            selected.append(utxo)
+            total_in += utxo['value']
+            est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+            fee = est_vsize * fee_rate
+            if total_in >= amount + fee:
+                break
+
+        est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+        fee = est_vsize * fee_rate
+        if total_in < amount + fee:
+            bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            return None
+        return selected, total_in, fee
+
+    def _broadcast_tx(self, raw_hex: str) -> Optional[str]:
+        """Broadcast a raw transaction via Blockstream. Returns tx_hash or None."""
+        url = f'{self._blockstream_api_url()}/tx'
+        resp = requests.post(url, data=raw_hex, timeout=15)
+        if resp.status_code != 200:
+            bt.logging.error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
+            return None
+        return resp.text.strip()
 
     def _estimate_fee_rate(self) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream/mempool. Falls back to 5 sat/vb.
