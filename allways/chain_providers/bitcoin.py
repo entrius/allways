@@ -215,11 +215,7 @@ class BitcoinProvider(ChainProvider):
     def _blockstream_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction using Blockstream API.
-
-        Raises ProviderUnreachableError if Blockstream is down or unreachable,
-        so callers know the tx wasn't actually checked.
-        """
+        """Verify via Blockstream API; raises ProviderUnreachableError if unreachable."""
         try:
             url = f'{self._blockstream_api_url()}/tx/{tx_hash}'
             resp = requests.get(url, timeout=15)

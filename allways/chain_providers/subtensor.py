@@ -161,11 +161,9 @@ class SubtensorProvider(ChainProvider):
     def verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a TAO transfer by querying the extrinsic.
+        """Verify a TAO transfer; raises ProviderUnreachableError if subtensor is unreachable.
 
-        If block_hint > 0, checks a small window around the hinted block (O(1)).
-        Otherwise falls back to scanning the last 150 blocks.
-        Raises ProviderUnreachableError if subtensor is unreachable.
+        If block_hint > 0, checks hinted block ±2. Otherwise scans last 150 blocks.
         """
         try:
             current_block = self.subtensor.get_current_block()

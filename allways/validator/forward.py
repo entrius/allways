@@ -216,11 +216,7 @@ async def _verify_fulfilled(
     voter: SwapVoter,
     current_block: int,
 ) -> Set[int]:
-    """Verify FULFILLED swaps and confirm complete ones.
-
-    Returns swap IDs where verification was skipped due to provider outages,
-    so _timeout_expired can avoid penalizing those miners.
-    """
+    """Verify FULFILLED swaps; returns IDs where provider was unreachable so _timeout_expired skips them."""
     uncertain: Set[int] = set()
     fulfilled = [s for s in tracker.get_fulfilled(current_block) if not tracker.is_voted(s.id)]
     if not fulfilled:
@@ -303,12 +299,7 @@ def _extend_near_timeout_fulfilled(self: Validator) -> None:
 
 
 def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
-    """Timeout ACTIVE/FULFILLED swaps past their timeout block.
-
-    Skips swaps in uncertain_swaps — those are FULFILLED swaps where the
-    provider was unreachable this cycle.  Timing them out would slash a miner
-    who may have legitimately sent funds.
-    """
+    """Timeout expired swaps, skipping uncertain_swaps where the provider was unreachable this cycle."""
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
             continue
