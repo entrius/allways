@@ -2,6 +2,7 @@
 
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import click
 from rich.live import Live
@@ -23,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     read_miner_commitments,
 )
 from allways.constants import FEE_DIVISOR
+from allways.cli.swap_commands.history_store import get_history, get_receipt, upsert_history
 from allways.contract_client import ContractError
 
 
@@ -314,6 +316,29 @@ def display_swap(swap, chain_info=True):
     console.print(build_swap_text(swap, chain_info=chain_info))
 
 
+def _persist_swap_state(swap) -> None:
+    upsert_history(
+        swap_id=swap.id,
+        data={
+            'status': swap.status.name,
+            'source_chain': swap.from_chain,
+            'dest_chain': swap.to_chain,
+            'source_amount': swap.from_amount,
+            'dest_amount': swap.to_amount,
+            'tao_amount': swap.tao_amount,
+            'user_source_address': swap.user_from_address,
+            'user_dest_address': swap.user_to_address,
+            'miner_hotkey': swap.miner_hotkey,
+            'source_tx_hash': swap.from_tx_hash,
+            'dest_tx_hash': swap.to_tx_hash,
+            'initiated_block': swap.initiated_block,
+            'fulfilled_block': swap.fulfilled_block,
+            'completed_block': swap.completed_block,
+            'timeout_block': swap.timeout_block,
+        },
+    )
+
+
 @view_group.command('swap')
 @click.argument('swap_id', type=int)
 @click.option('--watch', '-w', is_flag=True, help='Poll and refresh until swap completes or times out')
@@ -352,6 +377,7 @@ def view_swap(swap_id: int, watch: bool):
 
     if not watch:
         display_swap(swap)
+        _persist_swap_state(swap)
         return
 
     watch_swap(client, swap_id, swap)
@@ -376,6 +402,7 @@ def watch_swap(client, swap_id: int, swap=None):
     terminal = (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
     if swap.status in terminal:
         display_swap(swap)
+        _persist_swap_state(swap)
         return swap
 
     def render(s, chain_info=True, watching=True):
@@ -409,15 +436,101 @@ def watch_swap(client, swap_id: int, swap=None):
                             completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
                         )
                     live.update(render(final, chain_info=False, watching=False))
+                    live.update(render(final, chain_info=False, watching=False))
+                    _persist_swap_state(final)
                     return final
                 last_swap = swap
                 live.update(render(swap))
                 if swap.status in terminal:
                     live.update(render(swap, watching=False))
+                    _persist_swap_state(swap)
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
         return None
+
+
+def _fmt_ts(ts: int) -> str:
+    if not ts:
+        return '—'
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+
+@view_group.command('history')
+@click.option('--limit', default=20, type=int, help='Max records to show')
+@click.option(
+    '--status',
+    default=None,
+    type=click.Choice(
+        ['reserved', 'confirm_submitted', 'active', 'fulfilled', 'completed', 'timed_out'],
+        case_sensitive=False,
+    ),
+    help='Filter by status',
+)
+def view_history(limit: int, status: str):
+    """View locally persisted swap history.
+
+    [dim]Examples:
+        $ alw view history
+        $ alw view history --status completed --limit 50[/dim]
+    """
+    records = get_history(limit=max(1, limit), status=status)
+    if not records:
+        console.print('[yellow]No local swap history found.[/yellow]')
+        console.print('[dim]History is recorded as you run swap commands in this CLI.[/dim]\n')
+        return
+
+    table = Table(show_header=True)
+    table.add_column('Swap ID', style='cyan')
+    table.add_column('Pair', style='green')
+    table.add_column('Amount', style='yellow')
+    table.add_column('Status', style='bold')
+    table.add_column('Updated', style='dim')
+
+    for rec in records:
+        swap_id = rec.get('swap_id')
+        pair = f'{rec.get("source_chain", "?").upper()}/{rec.get("dest_chain", "?").upper()}'
+        amount = rec.get('source_amount', 0)
+        amount_str = str(amount) if amount else '—'
+        table.add_row(
+            str(swap_id) if swap_id is not None else 'pending',
+            pair,
+            amount_str,
+            str(rec.get('status', 'UNKNOWN')).upper(),
+            _fmt_ts(int(rec.get('updated_at', 0))),
+        )
+
+    console.print()
+    console.print(table)
+    console.print(f'\n[dim]Showing {len(records)} record(s)[/dim]\n')
+
+
+@view_group.command('receipt')
+@click.argument('swap_id', type=int)
+def view_receipt(swap_id: int):
+    """View a local receipt for a swap ID.
+
+    [dim]Examples:
+        $ alw view receipt 42[/dim]
+    """
+    rec = get_receipt(swap_id)
+    if not rec:
+        console.print(f'[yellow]No local receipt found for swap {swap_id}.[/yellow]')
+        console.print('[dim]Try `alw view swap <id>` first to cache it locally.[/dim]\n')
+        return
+
+    status = str(rec.get('status', 'UNKNOWN')).upper()
+    console.print(f'\n[bold]Swap Receipt #{swap_id}[/bold] — {status}\n')
+    console.print(f'  Pair:       {rec.get("source_chain", "?").upper()} -> {rec.get("dest_chain", "?").upper()}')
+    console.print(f'  Sent:       {rec.get("source_amount", "—")}')
+    console.print(f'  Received:   {rec.get("dest_amount", "—")}')
+    console.print(f'  Source TX:  {rec.get("source_tx_hash") or "—"}')
+    console.print(f'  Dest TX:    {rec.get("dest_tx_hash") or "—"}')
+    console.print(f'  Initiated:  Block {rec.get("initiated_block", 0) or "—"}')
+    console.print(f'  Fulfilled:  Block {rec.get("fulfilled_block", 0) or "—"}')
+    console.print(f'  Completed:  Block {rec.get("completed_block", 0) or "—"}')
+    console.print(f'  Timeout:    Block {rec.get("timeout_block", 0) or "—"}')
+    console.print(f'  Updated:    {_fmt_ts(int(rec.get("updated_at", 0)))}\n')
 
 
 @view_group.command('contract')

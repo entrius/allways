@@ -26,6 +26,7 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
     save_pending_swap,
 )
+from allways.cli.swap_commands.history_store import make_pending_key, upsert_history
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
@@ -313,6 +314,21 @@ def display_receipt(swap):
     console.print()
     console.print(Panel(receipt, title='[bold green]Swap Complete[/bold green]', expand=False))
     console.print()
+
+
+def _record_swap_final_state(swap) -> None:
+    """Persist terminal swap state into local history."""
+    upsert_history(
+        swap_id=swap.id,
+        data={
+            'status': swap.status.name,
+            'source_tx_hash': swap.from_tx_hash,
+            'dest_tx_hash': swap.to_tx_hash,
+            'fulfilled_block': swap.fulfilled_block,
+            'completed_block': swap.completed_block,
+            'timeout_block': swap.timeout_block,
+        },
+    )
 
 
 def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
@@ -739,6 +755,24 @@ def swap_now_command(
         created_at=time.time(),
     )
     save_pending_swap(state)
+    pending_key = make_pending_key(selected_pair.hotkey, state.created_at)
+    upsert_history(
+        pending_key=pending_key,
+        data={
+            'status': 'RESERVED',
+            'source_chain': from_chain,
+            'dest_chain': to_chain,
+            'source_amount': from_amount,
+            'dest_amount': to_amount,
+            'tao_amount': tao_amount,
+            'user_receives': user_receives,
+            'miner_uid': selected_pair.uid,
+            'miner_hotkey': selected_pair.hotkey,
+            'user_source_address': user_from_address,
+            'user_dest_address': receive_address,
+            'created_at': int(state.created_at),
+        },
+    )
 
     # Step 9: Send funds (or use pre-provided tx hash)
     if from_tx_hash_opt:
@@ -809,6 +843,13 @@ def swap_now_command(
         from_chain=from_chain,
         to_chain=to_chain,
     )
+    upsert_history(
+        pending_key=pending_key,
+        data={
+            'status': 'CONFIRM_SUBMITTED',
+            'source_tx_hash': from_tx_hash,
+        },
+    )
 
     if accepted == 0:
         console.print('[yellow]No validators accepted. Resume with: alw swap post-tx <tx_hash>[/yellow]')
@@ -850,6 +891,24 @@ def swap_now_command(
 
     clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
+    upsert_history(
+        swap_id=swap_id,
+        pending_key=pending_key,
+        data={
+            'status': 'ACTIVE',
+            'source_chain': from_chain,
+            'dest_chain': to_chain,
+            'source_amount': from_amount,
+            'dest_amount': to_amount,
+            'tao_amount': tao_amount,
+            'user_receives': user_receives,
+            'miner_uid': selected_pair.uid,
+            'miner_hotkey': selected_pair.hotkey,
+            'user_source_address': user_from_address,
+            'user_dest_address': receive_address,
+            'source_tx_hash': from_tx_hash,
+        },
+    )
 
     # In non-interactive mode, just print the ID and exit (let caller handle watching)
     if skip_confirm:
@@ -859,6 +918,8 @@ def swap_now_command(
     from allways.cli.swap_commands.view import watch_swap
 
     final_swap = watch_swap(client, swap_id)
+    if final_swap:
+        _record_swap_final_state(final_swap)
 
     # Show completion receipt
     if final_swap and final_swap.status == SwapStatus.COMPLETED:

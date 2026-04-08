@@ -13,6 +13,7 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
+from allways.cli.swap_commands.history_store import make_pending_key, upsert_history
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
@@ -74,6 +75,7 @@ def post_tx_command(tx_hash: str, netuid: int):
         return
 
     tx_hash = tx_hash.strip()
+    pending_key = make_pending_key(state.miner_hotkey, state.created_at)
 
     # Set up chain provider and signing key
     chain_providers = create_chain_providers(subtensor=subtensor)
@@ -105,6 +107,23 @@ def post_tx_command(tx_hash: str, netuid: int):
         from_chain=state.from_chain,
         to_chain=state.to_chain,
     )
+    upsert_history(
+        pending_key=pending_key,
+        data={
+            'status': 'CONFIRM_SUBMITTED',
+            'source_tx_hash': tx_hash,
+            'source_chain': state.from_chain,
+            'dest_chain': state.to_chain,
+            'source_amount': state.from_amount,
+            'dest_amount': state.to_amount,
+            'tao_amount': state.tao_amount,
+            'user_receives': state.user_receives,
+            'miner_uid': state.miner_uid,
+            'miner_hotkey': state.miner_hotkey,
+            'user_source_address': state.user_from_address,
+            'user_dest_address': state.receive_address,
+        },
+    )
 
     if accepted == 0:
         console.print('[yellow]No validators accepted. You can retry this command.[/yellow]')
@@ -122,6 +141,24 @@ def post_tx_command(tx_hash: str, netuid: int):
         clear_pending_swap()
         console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
         console.print(f'[dim]Track with: alw view swap {swap_id}[/dim]\n')
+        upsert_history(
+            swap_id=swap_id,
+            pending_key=pending_key,
+            data={
+                'status': 'ACTIVE',
+                'source_tx_hash': tx_hash,
+                'source_chain': state.from_chain,
+                'dest_chain': state.to_chain,
+                'source_amount': state.from_amount,
+                'dest_amount': state.to_amount,
+                'tao_amount': state.tao_amount,
+                'user_receives': state.user_receives,
+                'miner_uid': state.miner_uid,
+                'miner_hotkey': state.miner_hotkey,
+                'user_source_address': state.user_from_address,
+                'user_dest_address': state.receive_address,
+            },
+        )
     else:
         console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view swaps[/yellow]')
         console.print('[dim]State file kept — you can retry this command.[/dim]\n')

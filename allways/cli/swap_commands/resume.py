@@ -21,8 +21,10 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
+    _record_swap_final_state,
     sign_and_broadcast_confirm,
 )
+from allways.cli.swap_commands.history_store import make_pending_key, upsert_history
 from allways.contract_client import ContractError
 
 
@@ -149,6 +151,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
             return
 
     from_tx_hash = from_tx_hash_opt.strip()
+    pending_key = make_pending_key(state.miner_hotkey, state.created_at)
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued = sign_and_broadcast_confirm(
@@ -162,6 +165,23 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         ephemeral_wallet,
         from_chain=state.from_chain,
         to_chain=state.to_chain,
+    )
+    upsert_history(
+        pending_key=pending_key,
+        data={
+            'status': 'CONFIRM_SUBMITTED',
+            'source_tx_hash': from_tx_hash,
+            'source_chain': state.from_chain,
+            'dest_chain': state.to_chain,
+            'source_amount': state.from_amount,
+            'dest_amount': state.to_amount,
+            'tao_amount': state.tao_amount,
+            'user_receives': state.user_receives,
+            'miner_uid': state.miner_uid,
+            'miner_hotkey': state.miner_hotkey,
+            'user_source_address': state.user_from_address,
+            'user_dest_address': state.receive_address,
+        },
     )
 
     if accepted == 0:
@@ -195,6 +215,24 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
 
     clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
+    upsert_history(
+        swap_id=swap_id,
+        pending_key=pending_key,
+        data={
+            'status': 'ACTIVE',
+            'source_tx_hash': from_tx_hash,
+            'source_chain': state.from_chain,
+            'dest_chain': state.to_chain,
+            'source_amount': state.from_amount,
+            'dest_amount': state.to_amount,
+            'tao_amount': state.tao_amount,
+            'user_receives': state.user_receives,
+            'miner_uid': state.miner_uid,
+            'miner_hotkey': state.miner_hotkey,
+            'user_source_address': state.user_from_address,
+            'user_dest_address': state.receive_address,
+        },
+    )
 
     if skip_confirm:
         return
@@ -202,6 +240,8 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
     from allways.cli.swap_commands.view import watch_swap
 
     final_swap = watch_swap(client, swap_id)
+    if final_swap:
+        _record_swap_final_state(final_swap)
 
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
         from allways.cli.swap_commands.swap import display_receipt
