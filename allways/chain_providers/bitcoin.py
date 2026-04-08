@@ -7,7 +7,7 @@ import bittensor as bt
 import requests
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
-from allways.chain_providers.base import ChainProvider, TransactionInfo
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_BTC, ChainDefinition
 from allways.constants import BTC_TO_SAT
 
@@ -215,10 +215,16 @@ class BitcoinProvider(ChainProvider):
     def _blockstream_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction using Blockstream API."""
+        """Verify a Bitcoin transaction using Blockstream API.
+
+        Raises ProviderUnreachableError if Blockstream is down or unreachable,
+        so callers know the tx wasn't actually checked.
+        """
         try:
             url = f'{self._blockstream_api_url()}/tx/{tx_hash}'
             resp = requests.get(url, timeout=15)
+            if resp.status_code == 404:
+                return None
             resp.raise_for_status()
             data = resp.json()
 
@@ -227,7 +233,6 @@ class BitcoinProvider(ChainProvider):
             confirmations = 0
 
             if confirmed and block_number:
-                # Get current tip to calculate confirmations
                 tip_resp = requests.get(f'{self._blockstream_api_url()}/blocks/tip/height', timeout=10)
                 if tip_resp.ok:
                     tip_height = int(tip_resp.text.strip())
@@ -256,6 +261,10 @@ class BitcoinProvider(ChainProvider):
                     )
 
             return None
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ProviderUnreachableError(f'Blockstream API unreachable: {e}') from e
+        except requests.HTTPError as e:
+            raise ProviderUnreachableError(f'Blockstream API error: {e}') from e
         except Exception as e:
             bt.logging.error(f'Blockstream tx lookup failed for {tx_hash}: {e}')
             return None

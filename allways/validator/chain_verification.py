@@ -5,7 +5,7 @@ from typing import Dict, Optional
 
 import bittensor as bt
 
-from allways.chain_providers.base import ChainProvider
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
 from allways.utils.rate import expected_swap_amounts
 
@@ -82,6 +82,8 @@ class SwapVerifier:
                 )
                 return False
             return True
+        except ProviderUnreachableError:
+            raise
         except Exception as e:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False

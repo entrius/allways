@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Dict, Set, Tuple
 import bittensor as bt
 import numpy as np
 
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerScoringStats, SwapStatus
 from allways.constants import (
     EXTEND_THRESHOLD_BLOCKS,
@@ -55,9 +56,9 @@ async def forward(self: Validator) -> None:
     _clear_provider_caches(self)
     _process_pending_confirms(self)
     await tracker.poll()
-    await _verify_fulfilled(tracker, verifier, voter, self.block)
+    uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
-    _timeout_expired(self, tracker, voter)
+    _timeout_expired(self, tracker, voter, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
         _score_miners(self, tracker)
@@ -114,6 +115,9 @@ def _process_pending_confirms(self: Validator) -> None:
                 expected_recipient=item.miner_deposit_address,
                 expected_amount=item.source_amount,
             )
+        except ProviderUnreachableError as e:
+            bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
+            continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
             continue
@@ -211,17 +215,26 @@ async def _verify_fulfilled(
     verifier: SwapVerifier,
     voter: SwapVoter,
     current_block: int,
-) -> None:
-    """Verify FULFILLED swaps and confirm complete ones."""
+) -> Set[int]:
+    """Verify FULFILLED swaps and confirm complete ones.
+
+    Returns swap IDs where verification was skipped due to provider outages,
+    so _timeout_expired can avoid penalizing those miners.
+    """
+    uncertain: Set[int] = set()
     fulfilled = [s for s in tracker.get_fulfilled(current_block) if not tracker.is_voted(s.id)]
     if not fulfilled:
-        return
+        return uncertain
 
     results = await asyncio.gather(
         *[verifier.is_swap_complete(swap) for swap in fulfilled],
         return_exceptions=True,
     )
     for swap, result in zip(fulfilled, results):
+        if isinstance(result, ProviderUnreachableError):
+            bt.logging.warning(f'Swap {swap.id}: provider unreachable, deferring verification')
+            uncertain.add(swap.id)
+            continue
         if isinstance(result, Exception):
             bt.logging.error(f'Swap {swap.id}: verification error: {result}')
             continue
@@ -229,6 +242,7 @@ async def _verify_fulfilled(
             if voter.confirm_swap(swap.id):
                 tracker.mark_voted(swap.id)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+    return uncertain
 
 
 def _extend_near_timeout_fulfilled(self: Validator) -> None:
@@ -288,10 +302,18 @@ def _extend_near_timeout_fulfilled(self: Validator) -> None:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')
 
 
-def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter) -> None:
-    """Timeout ACTIVE/FULFILLED swaps past their timeout block."""
+def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
+    """Timeout ACTIVE/FULFILLED swaps past their timeout block.
+
+    Skips swaps in uncertain_swaps — those are FULFILLED swaps where the
+    provider was unreachable this cycle.  Timing them out would slash a miner
+    who may have legitimately sent funds.
+    """
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
+            continue
+        if swap.id in uncertain_swaps:
+            bt.logging.warning(f'Swap {swap.id}: deferring timeout, provider was unreachable')
             continue
 
         if voter.timeout_swap(swap.id):
