@@ -40,8 +40,10 @@ mod allways_swap_manager {
         swaps: Mapping<u64, SwapData>,
         swap_confirm_votes: Mapping<(u64, AccountId), bool>,
         swap_confirm_vote_count: Mapping<u64, u32>,
+        swap_confirm_voters: Mapping<u64, Vec<AccountId>>,
         swap_timeout_votes: Mapping<(u64, AccountId), bool>,
         swap_timeout_vote_count: Mapping<u64, u32>,
+        swap_timeout_voters: Mapping<u64, Vec<AccountId>>,
         used_source_tx: Mapping<String, bool>,
 
         // Miner state
@@ -57,6 +59,7 @@ mod allways_swap_manager {
         next_request_id: u64,
         request_votes: Mapping<(u64, AccountId), bool>,
         request_vote_count: Mapping<u64, u32>,
+        request_voters: Mapping<u64, Vec<AccountId>>,
         request_created: Mapping<u64, u32>,
         request_hash: Mapping<u64, Hash>,
 
@@ -192,6 +195,9 @@ mod allways_swap_manager {
                 return Err(Error::AlreadyVoted);
             }
             self.request_votes.insert((request_id, caller), &true);
+            let mut voters = self.request_voters.get(request_id).unwrap_or_default();
+            voters.push(caller);
+            self.request_voters.insert(request_id, &voters);
             let count = self.request_vote_count.get(request_id).unwrap_or(0).saturating_add(1);
             self.request_vote_count.insert(request_id, &count);
             Ok(count)
@@ -220,9 +226,33 @@ mod allways_swap_manager {
 
         /// Remove scalar metadata for a completed/expired request.
         fn clear_request_data(&mut self, request_id: u64) {
+            if let Some(voters) = self.request_voters.get(request_id) {
+                for v in voters.iter() {
+                    self.request_votes.remove((request_id, *v));
+                }
+                self.request_voters.remove(request_id);
+            }
             self.request_vote_count.remove(request_id);
             self.request_created.remove(request_id);
             self.request_hash.remove(request_id);
+        }
+
+        /// Remove all per-validator vote entries and vote counts for a swap.
+        fn clean_swap_votes(&mut self, swap_id: u64) {
+            if let Some(voters) = self.swap_confirm_voters.get(swap_id) {
+                for v in voters.iter() {
+                    self.swap_confirm_votes.remove((swap_id, *v));
+                }
+                self.swap_confirm_voters.remove(swap_id);
+            }
+            if let Some(voters) = self.swap_timeout_voters.get(swap_id) {
+                for v in voters.iter() {
+                    self.swap_timeout_votes.remove((swap_id, *v));
+                }
+                self.swap_timeout_voters.remove(swap_id);
+            }
+            self.swap_confirm_vote_count.remove(swap_id);
+            self.swap_timeout_vote_count.remove(swap_id);
         }
     }
 
@@ -262,8 +292,10 @@ mod allways_swap_manager {
                 swaps: Mapping::default(),
                 swap_confirm_votes: Mapping::default(),
                 swap_confirm_vote_count: Mapping::default(),
+                swap_confirm_voters: Mapping::default(),
                 swap_timeout_votes: Mapping::default(),
                 swap_timeout_vote_count: Mapping::default(),
+                swap_timeout_voters: Mapping::default(),
                 used_source_tx: Mapping::default(),
 
                 collateral: Mapping::default(),
@@ -276,6 +308,7 @@ mod allways_swap_manager {
                 next_request_id: 1,
                 request_votes: Mapping::default(),
                 request_vote_count: Mapping::default(),
+                request_voters: Mapping::default(),
                 request_created: Mapping::default(),
                 request_hash: Mapping::default(),
                 miner_active_request: Mapping::default(),
@@ -716,6 +749,9 @@ mod allways_swap_manager {
             }
 
             self.swap_confirm_votes.insert((swap_id, caller), &true);
+            let mut voters = self.swap_confirm_voters.get(swap_id).unwrap_or_default();
+            voters.push(caller);
+            self.swap_confirm_voters.insert(swap_id, &voters);
             let vote_count = self.swap_confirm_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
             self.swap_confirm_vote_count.insert(swap_id, &vote_count);
 
@@ -755,8 +791,7 @@ mod allways_swap_manager {
                 });
 
                 self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
+                self.clean_swap_votes(swap_id);
                 self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
             } else {
                 self.swaps.insert(swap_id, &swap);
@@ -782,6 +817,9 @@ mod allways_swap_manager {
             }
 
             self.swap_timeout_votes.insert((swap_id, caller), &true);
+            let mut voters = self.swap_timeout_voters.get(swap_id).unwrap_or_default();
+            voters.push(caller);
+            self.swap_timeout_voters.insert(swap_id, &voters);
             let vote_count = self.swap_timeout_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
             self.swap_timeout_vote_count.insert(swap_id, &vote_count);
 
@@ -837,8 +875,7 @@ mod allways_swap_manager {
                 });
 
                 self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
+                self.clean_swap_votes(swap_id);
                 self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
             } else {
                 self.swaps.insert(swap_id, &swap);
@@ -1329,6 +1366,117 @@ mod allways_swap_manager {
                 self.address_strike_count.get(&source_address).unwrap_or(0),
                 self.address_last_expired.get(&source_address).unwrap_or(0),
             )
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::test;
+        use ink::env::DefaultEnvironment;
+
+        fn setup() -> AllwaysSwapManager {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            AllwaysSwapManager::new(
+                accounts.charlie,
+                accounts.charlie,
+                7,
+                50,
+                100,
+                10,
+                1_000_000,
+                1,
+                1_000_000,
+                51,
+            )
+        }
+
+        fn add_validator_as_owner(contract: &mut AllwaysSwapManager, validator: AccountId) {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            contract.add_validator(validator).unwrap();
+        }
+
+        fn post_collateral_for(contract: &mut AllwaysSwapManager, miner: AccountId, amount: u128) {
+            test::set_caller::<DefaultEnvironment>(miner);
+            test::set_value_transferred::<DefaultEnvironment>(amount);
+            contract.post_collateral().unwrap();
+            test::set_value_transferred::<DefaultEnvironment>(0);
+        }
+
+        fn create_active_swap(
+            contract: &mut AllwaysSwapManager,
+            validator: AccountId,
+            user: AccountId,
+            miner: AccountId,
+            tao_amount: u128,
+        ) -> u64 {
+            let source_addr = b"tb1qtest".to_vec();
+            let source_amount = 100_000u128;
+            let dest_amount = 50_000u128;
+
+            test::advance_block::<DefaultEnvironment>();
+
+            let reserve_hash = AllwaysSwapManager::compute_reserve_hash(
+                &miner, &source_addr, tao_amount, source_amount, dest_amount,
+            );
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_reserve(
+                reserve_hash, miner, source_addr, tao_amount, source_amount, dest_amount,
+            ).unwrap();
+
+            let source_tx = String::from("abc123");
+            let initiate_hash = AllwaysSwapManager::compute_initiate_hash(
+                &miner, &source_tx, tao_amount, source_amount, dest_amount,
+            );
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_initiate(
+                initiate_hash, user, miner,
+                String::from("btc"), String::from("tao"),
+                source_amount, tao_amount,
+                String::from("tb1quser"), String::from("5Guser"),
+                source_tx, 10, dest_amount,
+                String::from("tb1qminer"), String::from("5Gminer"),
+                String::from("0.5"),
+            ).unwrap();
+
+            contract.get_next_swap_id() - 1
+        }
+
+        #[ink::test]
+        fn test_timeout_cleans_up_vote_data() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            let validator = accounts.bob;
+            let miner = accounts.django;
+            let user = accounts.eve;
+            let tao_amount = 100u128;
+
+            add_validator_as_owner(&mut contract, validator);
+            post_collateral_for(&mut contract, miner, 500);
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_activate(miner).unwrap();
+
+            let swap_id = create_active_swap(&mut contract, validator, user, miner, tao_amount);
+
+            for _ in 0..60 {
+                test::advance_block::<DefaultEnvironment>();
+            }
+
+            let contract_addr = test::callee::<DefaultEnvironment>();
+            test::set_account_balance::<DefaultEnvironment>(contract_addr, 1_000_000_000);
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.timeout_swap(swap_id).unwrap();
+
+            // Per-validator vote entries must be cleaned up
+            assert!(!contract.swap_timeout_votes.get((swap_id, validator)).unwrap_or(false));
+            assert!(contract.swap_timeout_voters.get(swap_id).is_none());
+            assert!(contract.swap_confirm_voters.get(swap_id).is_none());
+            assert_eq!(contract.swap_timeout_vote_count.get(swap_id).unwrap_or(0), 0);
+            assert_eq!(contract.swap_confirm_vote_count.get(swap_id).unwrap_or(0), 0);
         }
     }
 }
