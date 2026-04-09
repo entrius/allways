@@ -926,6 +926,28 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        /// Owner rescue for stuck pending slashes. If the original user's account
+        /// cannot receive transfers (destroyed, reaped, etc.), the owner can redirect
+        /// the payout to an alternative recipient to prevent permanent fund lock.
+        #[ink(message)]
+        pub fn rescue_pending_slash(&mut self, swap_id: u64, recipient: AccountId) -> Result<(), Error> {
+            self.ensure_owner()?;
+            let (_user, amount) = self.pending_slashes.get(swap_id).ok_or(Error::NoPendingSlash)?;
+
+            self.pending_slashes.remove(swap_id);
+            self.env().transfer(recipient, amount).map_err(|_| {
+                self.pending_slashes.insert(swap_id, &(_user, amount));
+                Error::TransferFailed
+            })?;
+
+            self.env().emit_event(SlashClaimed {
+                swap_id,
+                user: recipient,
+                amount,
+            });
+            Ok(())
+        }
+
         // =====================================================================
         // Miner Activation / Deactivation
         // =====================================================================
@@ -1329,6 +1351,260 @@ mod allways_swap_manager {
                 self.address_strike_count.get(&source_address).unwrap_or(0),
                 self.address_last_expired.get(&source_address).unwrap_or(0),
             )
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::test;
+        use ink::env::DefaultEnvironment;
+
+        fn setup() -> AllwaysSwapManager {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            AllwaysSwapManager::new(
+                accounts.charlie,  // treasury_hotkey
+                accounts.charlie,  // recycle_address
+                7,                 // netuid
+                50,                // fulfillment_timeout_blocks
+                100,               // reservation_ttl
+                10,                // min_collateral
+                1_000_000,         // max_collateral
+                1,                 // min_swap_amount
+                1_000_000,         // max_swap_amount
+                51,                // consensus_threshold_percent
+            )
+        }
+
+        fn add_validator_as_owner(contract: &mut AllwaysSwapManager, validator: AccountId) {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            contract.add_validator(validator).unwrap();
+        }
+
+        fn post_collateral_for(contract: &mut AllwaysSwapManager, miner: AccountId, amount: u128) {
+            test::set_caller::<DefaultEnvironment>(miner);
+            test::set_value_transferred::<DefaultEnvironment>(amount);
+            contract.post_collateral().unwrap();
+            test::set_value_transferred::<DefaultEnvironment>(0);
+        }
+
+        fn create_active_swap(
+            contract: &mut AllwaysSwapManager,
+            validator: AccountId,
+            user: AccountId,
+            miner: AccountId,
+            tao_amount: u128,
+        ) -> u64 {
+            let source_addr = b"tb1qtest".to_vec();
+            let source_amount = 100_000u128;
+            let dest_amount = 50_000u128;
+
+            // Advance past block 0 so reserved_until(0) < current_block(1)
+            test::advance_block::<DefaultEnvironment>();
+
+            let reserve_hash = AllwaysSwapManager::compute_reserve_hash(
+                &miner, &source_addr, tao_amount, source_amount, dest_amount,
+            );
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_reserve(
+                reserve_hash, miner, source_addr, tao_amount, source_amount, dest_amount,
+            ).unwrap();
+
+            let source_tx = String::from("abc123");
+            let initiate_hash = AllwaysSwapManager::compute_initiate_hash(
+                &miner, &source_tx, tao_amount, source_amount, dest_amount,
+            );
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_initiate(
+                initiate_hash, user, miner,
+                String::from("btc"), String::from("tao"),
+                source_amount, tao_amount,
+                String::from("tb1quser"), String::from("5Guser"),
+                source_tx, 10, dest_amount,
+                String::from("tb1qminer"), String::from("5Gminer"),
+                String::from("0.5"),
+            ).unwrap();
+
+            contract.get_next_swap_id() - 1
+        }
+
+        // =================================================================
+        // Timeout slash — happy path (transfer succeeds)
+        // =================================================================
+
+        #[ink::test]
+        fn test_timeout_slash_transfer_succeeds() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            let validator = accounts.bob;
+            let miner = accounts.django;
+            let user = accounts.eve;
+            let tao_amount = 100u128;
+
+            add_validator_as_owner(&mut contract, validator);
+            post_collateral_for(&mut contract, miner, 500);
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_activate(miner).unwrap();
+
+            let swap_id = create_active_swap(&mut contract, validator, user, miner, tao_amount);
+
+            for _ in 0..60 {
+                test::advance_block::<DefaultEnvironment>();
+            }
+
+            let contract_addr = test::callee::<DefaultEnvironment>();
+            test::set_account_balance::<DefaultEnvironment>(contract_addr, 1_000_000_000);
+
+            let user_before = test::get_account_balance::<DefaultEnvironment>(user).unwrap();
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.timeout_swap(swap_id).unwrap();
+
+            assert!(contract.get_swap(swap_id).is_none());
+            assert_eq!(contract.get_pending_slash(swap_id), 0);
+            assert_eq!(contract.get_collateral(miner), 500 - tao_amount);
+
+            let user_after = test::get_account_balance::<DefaultEnvironment>(user).unwrap();
+            assert_eq!(user_after - user_before, tao_amount);
+        }
+
+        #[ink::test]
+        fn test_timeout_slash_depletes_collateral_deactivates_miner() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            let validator = accounts.bob;
+            let miner = accounts.django;
+            let user = accounts.eve;
+            let tao_amount = 100u128;
+
+            add_validator_as_owner(&mut contract, validator);
+            post_collateral_for(&mut contract, miner, 100);
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.vote_activate(miner).unwrap();
+
+            let swap_id = create_active_swap(&mut contract, validator, user, miner, tao_amount);
+
+            for _ in 0..60 {
+                test::advance_block::<DefaultEnvironment>();
+            }
+
+            let contract_addr = test::callee::<DefaultEnvironment>();
+            test::set_account_balance::<DefaultEnvironment>(contract_addr, 1_000_000_000);
+
+            test::set_caller::<DefaultEnvironment>(validator);
+            contract.timeout_swap(swap_id).unwrap();
+
+            assert_eq!(contract.get_collateral(miner), 0);
+            assert!(!contract.get_miner_active(miner));
+        }
+
+        // =================================================================
+        // claim_slash
+        // =================================================================
+
+        #[ink::test]
+        fn test_claim_slash_pays_out() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            let user = accounts.eve;
+            let swap_id = 42u64;
+            let amount = 200u128;
+
+            contract.pending_slashes.insert(swap_id, &(user, amount));
+
+            let contract_addr = test::callee::<DefaultEnvironment>();
+            test::set_account_balance::<DefaultEnvironment>(contract_addr, 1_000_000_000);
+
+            let before = test::get_account_balance::<DefaultEnvironment>(user).unwrap();
+
+            test::set_caller::<DefaultEnvironment>(user);
+            contract.claim_slash(swap_id).unwrap();
+
+            assert_eq!(contract.get_pending_slash(swap_id), 0);
+            let after = test::get_account_balance::<DefaultEnvironment>(user).unwrap();
+            assert_eq!(after - before, amount);
+        }
+
+        #[ink::test]
+        fn test_claim_slash_wrong_user_rejected() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            contract.pending_slashes.insert(42, &(accounts.eve, 200));
+
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            assert_eq!(contract.claim_slash(42), Err(Error::InvalidStatus));
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(contract.claim_slash(42), Err(Error::InvalidStatus));
+
+            assert_eq!(contract.get_pending_slash(42), 200);
+        }
+
+        #[ink::test]
+        fn test_claim_slash_nonexistent() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            test::set_caller::<DefaultEnvironment>(accounts.eve);
+            assert_eq!(contract.claim_slash(999), Err(Error::NoPendingSlash));
+        }
+
+        // =================================================================
+        // rescue_pending_slash (critical issue #1 fix)
+        // =================================================================
+
+        #[ink::test]
+        fn test_owner_rescue_pending_slash() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            let user = accounts.eve;
+            let recipient = accounts.django;
+            let swap_id = 42u64;
+            let amount = 200u128;
+
+            contract.pending_slashes.insert(swap_id, &(user, amount));
+
+            let contract_addr = test::callee::<DefaultEnvironment>();
+            test::set_account_balance::<DefaultEnvironment>(contract_addr, 1_000_000_000);
+
+            let before = test::get_account_balance::<DefaultEnvironment>(recipient).unwrap();
+
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            contract.rescue_pending_slash(swap_id, recipient).unwrap();
+
+            assert_eq!(contract.get_pending_slash(swap_id), 0);
+            let after = test::get_account_balance::<DefaultEnvironment>(recipient).unwrap();
+            assert_eq!(after - before, amount);
+        }
+
+        #[ink::test]
+        fn test_rescue_pending_slash_not_owner() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            contract.pending_slashes.insert(42, &(accounts.eve, 200));
+
+            test::set_caller::<DefaultEnvironment>(accounts.bob);
+            assert_eq!(contract.rescue_pending_slash(42, accounts.bob), Err(Error::NotOwner));
+
+            assert_eq!(contract.get_pending_slash(42), 200);
+        }
+
+        #[ink::test]
+        fn test_rescue_nonexistent() {
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            let mut contract = setup();
+
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            assert_eq!(contract.rescue_pending_slash(999, accounts.bob), Err(Error::NoPendingSlash));
         }
     }
 }
