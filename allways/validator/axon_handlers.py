@@ -215,10 +215,37 @@ async def handle_swap_reserve(
     ctx = f'SwapReserve({miner})'
 
     try:
+        # Cheap, local checks BEFORE axon_lock — invalid signatures and missing
+        # fields are rejected without serializing on the substrate websocket.
         if not synapse.source_address or not synapse.source_address_proof:
             _reject(synapse, 'Missing source address or proof', ctx)
             return synapse
 
+        provider = None
+        if synapse.source_chain:
+            provider = validator.axon_chain_providers.get(synapse.source_chain)
+            if provider is None:
+                _reject(synapse, f'Unsupported chain: {synapse.source_chain}', ctx)
+                return synapse
+            proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
+            if not provider.verify_source_proof(synapse.source_address, proof_message, synapse.source_address_proof):
+                _reject(synapse, 'Invalid source address proof', ctx)
+                return synapse
+
+        # Pure-local crypto — no substrate dependency, compute outside the lock.
+        source_addr_bytes = synapse.source_address.encode('utf-8')
+        miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
+        request_hash = _keccak256(
+            _scale_encode_reserve_hash_input(
+                miner_bytes,
+                source_addr_bytes,
+                synapse.tao_amount,
+                synapse.source_amount,
+                synapse.dest_amount,
+            )
+        )
+
+        # Everything below touches substrate (commitment read, contract reads, vote).
         with validator.axon_lock:
             commitment = read_miner_commitment(
                 subtensor=validator.axon_subtensor,
@@ -233,17 +260,20 @@ async def handle_swap_reserve(
                 _reject(synapse, 'Source and destination chains must be different', ctx)
                 return synapse
 
-            swap_source_chain = synapse.source_chain or commitment.source_chain
-
-            provider = validator.axon_chain_providers.get(swap_source_chain)
+            # Fallback path for callers that omit source_chain — derive from
+            # commitment and run the cheap checks now.
             if provider is None:
-                _reject(synapse, f'Unsupported chain: {swap_source_chain}', ctx)
-                return synapse
-
-            proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
-            if not provider.verify_source_proof(synapse.source_address, proof_message, synapse.source_address_proof):
-                _reject(synapse, 'Invalid source address proof', ctx)
-                return synapse
+                swap_source_chain = commitment.source_chain
+                provider = validator.axon_chain_providers.get(swap_source_chain)
+                if provider is None:
+                    _reject(synapse, f'Unsupported chain: {swap_source_chain}', ctx)
+                    return synapse
+                proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
+                if not provider.verify_source_proof(
+                    synapse.source_address, proof_message, synapse.source_address_proof
+                ):
+                    _reject(synapse, 'Invalid source address proof', ctx)
+                    return synapse
 
             balance = provider.get_balance(synapse.source_address)
             if balance < synapse.source_amount:
@@ -282,24 +312,12 @@ async def handle_swap_reserve(
                 _reject(synapse, f'Swap amount above maximum ({synapse.tao_amount} > {max_swap} rao)', ctx)
                 return synapse
 
-            source_addr_bytes = synapse.source_address.encode('utf-8')
             strike_count, last_expired = contract.get_cooldown(source_addr_bytes)
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
                 if validator.block < last_expired + cooldown:
                     _reject(synapse, f'Address on cooldown ({cooldown} blocks remaining)', ctx)
                     return synapse
-
-            miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
-            request_hash = _keccak256(
-                _scale_encode_reserve_hash_input(
-                    miner_bytes,
-                    source_addr_bytes,
-                    synapse.tao_amount,
-                    synapse.source_amount,
-                    synapse.dest_amount,
-                )
-            )
 
             contract.vote_reserve(
                 wallet=validator.wallet,
