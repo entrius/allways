@@ -71,6 +71,33 @@ def _clear_provider_caches(self: Validator) -> None:
             provider.clear_cache()
 
 
+def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
+    """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
+    from substrateinterface import Keypair
+
+    try:
+        reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
+        blocks_left = reserved_until - current_block
+        if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
+            miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
+            extend_hash = _keccak256(_scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
+            self.contract_client.vote_extend_reservation(
+                wallet=self.wallet,
+                request_hash=extend_hash,
+                miner_hotkey=item.miner_hotkey,
+                source_tx_hash=item.source_tx_hash,
+            )
+            bt.logging.info(
+                f'PendingConfirm [{swap_label} {miner_short}]: '
+                f'voted to extend reservation ({blocks_left} blocks remaining)'
+            )
+    except ContractError as e:
+        if 'AlreadyVoted' not in str(e):
+            bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
+
+
 def _process_pending_confirms(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
     from substrateinterface import Keypair
@@ -117,6 +144,7 @@ def _process_pending_confirms(self: Validator) -> None:
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
+            _try_extend_reservation(self, item, current_block, swap_label, miner_short)
             continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
@@ -136,29 +164,7 @@ def _process_pending_confirms(self: Validator) -> None:
             f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.source_tx_hash[:16]}...',
         )
 
-        # Vote to extend reservation if nearing expiry (tx exists but may not be confirmed yet)
-        try:
-            reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
-            blocks_left = reserved_until - current_block
-            if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
-                miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-                extend_hash_input = _scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash)
-                extend_hash = _keccak256(extend_hash_input)
-                self.contract_client.vote_extend_reservation(
-                    wallet=self.wallet,
-                    request_hash=extend_hash,
-                    miner_hotkey=item.miner_hotkey,
-                    source_tx_hash=item.source_tx_hash,
-                )
-                bt.logging.info(
-                    f'PendingConfirm [{swap_label} {miner_short}]: '
-                    f'voted to extend reservation ({blocks_left} blocks remaining)'
-                )
-        except ContractError as e:
-            if 'AlreadyVoted' not in str(e):
-                bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
-        except Exception as e:
-            bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
+        _try_extend_reservation(self, item, current_block, swap_label, miner_short)
 
         if not tx_info.confirmed:
             continue
