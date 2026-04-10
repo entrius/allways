@@ -20,9 +20,7 @@ mod allways_swap_manager {
     pub struct AllwaysSwapManager {
         // Configuration
         owner: AccountId,
-        treasury_hotkey: AccountId,
         recycle_address: AccountId,
-        netuid: u16,
         fulfillment_timeout_blocks: u32,
         reservation_ttl: u32,
         min_collateral: Balance,
@@ -256,9 +254,7 @@ mod allways_swap_manager {
         /// Initialize the contract
         #[ink(constructor)]
         pub fn new(
-            treasury_hotkey: AccountId,
             recycle_address: AccountId,
-            netuid: u16,
             fulfillment_timeout_blocks: u32,
             reservation_ttl: u32,
             min_collateral: Balance,
@@ -269,9 +265,7 @@ mod allways_swap_manager {
         ) -> Self {
             Self {
                 owner: Self::env().caller(),
-                treasury_hotkey,
                 recycle_address,
-                netuid,
                 fulfillment_timeout_blocks,
                 reservation_ttl,
                 min_collateral,
