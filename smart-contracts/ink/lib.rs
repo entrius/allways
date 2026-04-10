@@ -128,13 +128,23 @@ mod allways_swap_manager {
         fn compute_reserve_hash(
             miner: &AccountId,
             user_source_address: &[u8],
+            source_chain: &str,
+            dest_chain: &str,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
         ) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, user_source_address, tao_amount, source_amount, dest_amount),
+                &(
+                    miner,
+                    user_source_address,
+                    source_chain,
+                    dest_chain,
+                    tao_amount,
+                    source_amount,
+                    dest_amount,
+                ),
                 &mut output,
             );
             Hash::from(output)
@@ -143,13 +153,29 @@ mod allways_swap_manager {
         fn compute_initiate_hash(
             miner: &AccountId,
             source_tx_hash: &str,
+            source_chain: &str,
+            dest_chain: &str,
+            miner_source_address: &str,
+            miner_dest_address: &str,
+            rate: &str,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
         ) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, source_tx_hash, tao_amount, source_amount, dest_amount),
+                &(
+                    miner,
+                    source_tx_hash,
+                    source_chain,
+                    dest_chain,
+                    miner_source_address,
+                    miner_dest_address,
+                    rate,
+                    tao_amount,
+                    source_amount,
+                    dest_amount,
+                ),
                 &mut output,
             );
             Hash::from(output)
@@ -376,6 +402,8 @@ mod allways_swap_manager {
             request_hash: Hash,
             miner: AccountId,
             user_source_address: Vec<u8>,
+            source_chain: String,
+            dest_chain: String,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
@@ -385,9 +413,16 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let current_block = self.env().block_number();
 
-            // Verify hash
+            // Verify hash — source_chain and dest_chain are included in the hash,
+            // so validators must agree on the direction. No separate check needed.
             let computed = Self::compute_reserve_hash(
-                &miner, &user_source_address, tao_amount, source_amount, dest_amount,
+                &miner,
+                &user_source_address,
+                &source_chain,
+                &dest_chain,
+                tao_amount,
+                source_amount,
+                dest_amount,
             );
             if computed != request_hash {
                 return Err(Error::HashMismatch);
@@ -559,9 +594,19 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let current_block = self.env().block_number();
 
-            // Verify hash
+            // Verify hash — covers the full swap shape so no field can be substituted
+            // by a malicious validator casting the quorum-reaching vote.
             let computed = Self::compute_initiate_hash(
-                &miner, &source_tx_hash, tao_amount, source_amount, dest_amount,
+                &miner,
+                &source_tx_hash,
+                &source_chain,
+                &dest_chain,
+                &miner_source_address,
+                &miner_dest_address,
+                &rate,
+                tao_amount,
+                source_amount,
+                dest_amount,
             );
             if computed != request_hash {
                 return Err(Error::HashMismatch);
@@ -584,7 +629,10 @@ mod allways_swap_manager {
                 return Err(Error::DuplicateSourceTx);
             }
 
-            // Reservation must exist and match
+            // Reservation must exist and match.
+            // Note: direction is bound via the reserve hash + initiate hash, not
+            // via stored state — both hashes cover source_chain/dest_chain, so
+            // validator consensus agrees on the direction at both steps.
             let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
             if reserved_until < current_block {
                 return Err(Error::NoReservation);
