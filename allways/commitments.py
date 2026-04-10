@@ -4,7 +4,7 @@ from typing import List, Optional
 
 import bittensor as bt
 
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
 from allways.constants import COMMITMENT_VERSION
 
@@ -12,13 +12,13 @@ from allways.constants import COMMITMENT_VERSION
 def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[MinerPair]:
     """Parse a commitment string into a MinerPair.
 
-    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}
-    Rate is TAO per 1 non-TAO asset (e.g. 345 means 1 BTC = 345 TAO).
-    Example: v2:btc:bc1q...:tao:5C...:345
+    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{counter_rate}
+    Both rates are 'canonical_dest per 1 canonical_source'. rate is for source→dest, counter_rate for dest→source.
+    Example: v3:btc:bc1q...:tao:5C...:340:350
     """
     try:
         parts = raw.split(':')
-        if len(parts) != 6:
+        if len(parts) != 7:
             return None
 
         version_str = parts[0]
@@ -35,6 +35,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         dst_addr = parts[4]
         rate_str = parts[5]
         rate = float(rate_str)
+        counter_rate_str = parts[6]
+        counter_rate = float(counter_rate_str)
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
@@ -42,12 +44,14 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         if src_chain == dst_chain:
             return None
 
-        # Normalize to canonical direction: non-TAO → TAO.
-        # Rate is always "TAO per 1 non-TAO asset" regardless of posted direction,
-        # so swapping source/dest doesn't change rate interpretation.
-        if src_chain == 'tao' and dst_chain != 'tao':
+        # Normalize to canonical direction (alphabetical ordering).
+        # When swapping direction, swap rates too: the posted "forward" rate becomes "reverse".
+        canon_src, _ = canonical_pair(src_chain, dst_chain)
+        if src_chain != canon_src:
             src_chain, dst_chain = dst_chain, src_chain
             src_addr, dst_addr = dst_addr, src_addr
+            rate, counter_rate = counter_rate, rate
+            rate_str, counter_rate_str = counter_rate_str, rate_str
 
         return MinerPair(
             uid=uid,
@@ -58,6 +62,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
             dest_address=dst_addr,
             rate=rate,
             rate_str=rate_str,
+            counter_rate=counter_rate,
+            counter_rate_str=counter_rate_str,
         )
     except (ValueError, IndexError):
         return None

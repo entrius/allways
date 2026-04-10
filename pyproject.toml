@@ -32,7 +32,6 @@ dependencies = [
     "bitcoin-message-tool",
     "click",
     "rich",
-    "rich-click",
     "embit",
     "base58",
     "bech32",

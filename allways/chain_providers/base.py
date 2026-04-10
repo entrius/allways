@@ -5,6 +5,10 @@ from typing import Any, Optional, Tuple
 from allways.chains import ChainDefinition
 
 
+class ProviderUnreachableError(Exception):
+    """Raised when a chain provider cannot reach its backend during verification."""
+
+
 @dataclass
 class TransactionInfo:
     tx_hash: str
@@ -41,10 +45,11 @@ class ChainProvider(ABC):
     def verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a transaction. Uses >= for amount (overpayment is acceptable on-chain).
+        """Verify a transaction; returns TransactionInfo if found, None if not found,
+        raises ProviderUnreachableError on transient failures.
 
-        block_hint: If > 0, the block number where the tx is expected to be found.
-        Providers can use this for O(1) lookup instead of scanning.
+        Uses >= for amount (overpayment is acceptable on-chain).
+        block_hint: If > 0, providers can use this for O(1) lookup instead of scanning.
         """
         ...
 

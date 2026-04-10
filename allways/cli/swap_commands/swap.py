@@ -5,14 +5,15 @@ import time
 from typing import Optional
 
 import bittensor as bt
-import rich_click as click
+import click
 from rich.panel import Panel
 from rich.table import Table
 
 from allways.chain_providers import create_chain_providers
-from allways.chains import CHAIN_TAO, SUPPORTED_CHAINS, get_chain
+from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import MinerPair, SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     PendingSwapState,
@@ -391,18 +392,12 @@ def _send_btc(chain_providers, config, to_address: str, amount_sat: int, from_ad
 # =========================================================================
 
 
-@click.group('swap')
+@click.group('swap', cls=StyledGroup, show_disclaimer=True)
 def swap_group():
-    """Execute and manage cross-chain swaps.
-
-    \b
-    Subcommands:
-        now       Execute a swap (guided interactive)
-        post-tx   Submit source transaction hash for a pending swap
-    """
+    """Execute and manage cross-chain swaps."""
 
 
-@swap_group.command('now')
+@swap_group.command('now', show_disclaimer=True)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
 @click.option('--src', 'source_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--dest', 'dest_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
@@ -425,22 +420,19 @@ def swap_now_command(
 ):
     """Guided interactive swap - step by step.
 
-    \b
-    Walks through a complete swap from start to finish:
+    [dim]Walks through a complete swap from start to finish:
     - Select swap direction and miner
     - Enter amount and addresses
     - Funds are sent automatically when possible
-    - Transaction hash is posted to validators automatically
+    - Transaction hash is posted to validators automatically[/dim]
 
-    \b
-    Non-interactive mode (for scripting/testing):
-        alw swap now --src btc --dest tao --amount 0.001 \\
+    [dim]Non-interactive mode (for scripting/testing):
+        $ alw swap now --src btc --dest tao --amount 0.001 \\
             --receive-address 5C... --source-address bc1q... \\
-            --source-tx-hash abc123... --auto --yes
+            --source-tx-hash abc123... --auto --yes[/dim]
 
-    \b
-    Interactive mode:
-        alw swap now
+    [dim]Interactive mode:
+        $ alw swap now[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     if netuid is None:
@@ -538,20 +530,23 @@ def swap_now_command(
     matching_pairs = []
     for p in all_pairs:
         if p.source_chain == source_chain and p.dest_chain == dest_chain:
-            matching_pairs.append(p)
+            if p.rate > 0:
+                matching_pairs.append(p)
         elif p.source_chain == dest_chain and p.dest_chain == source_chain:
-            matching_pairs.append(
-                MinerPair(
-                    uid=p.uid,
-                    hotkey=p.hotkey,
-                    source_chain=p.dest_chain,
-                    source_address=p.dest_address,
-                    dest_chain=p.source_chain,
-                    dest_address=p.source_address,
-                    rate=p.rate,
-                    rate_str=p.rate_str,
+            rev_rate, rev_rate_str = p.get_rate_for_direction(source_chain)
+            if rev_rate > 0:
+                matching_pairs.append(
+                    MinerPair(
+                        uid=p.uid,
+                        hotkey=p.hotkey,
+                        source_chain=p.dest_chain,
+                        source_address=p.dest_address,
+                        dest_chain=p.source_chain,
+                        dest_address=p.source_address,
+                        rate=rev_rate,
+                        rate_str=rev_rate_str,
+                    )
                 )
-            )
 
     if not matching_pairs:
         console.print('[yellow]No miners found for this pair[/yellow]\n')
@@ -588,9 +583,11 @@ def swap_now_command(
     console.print(table)
 
     # Step 3: Select miner (default to best rate)
-    non_tao = dest_chain if source_chain == 'tao' else source_chain
+    canon_src, canon_dest = canonical_pair(source_chain, dest_chain)
     best_pair = available_miners[0][0]
-    console.print(f'\n  Best rate: 1 {non_tao.upper()} = {best_pair.rate:g} TAO (Miner UID {best_pair.uid})')
+    console.print(
+        f'\n  Best rate: send 1 {source_chain.upper()}, get {best_pair.rate:g} {dest_chain.upper()} (Miner UID {best_pair.uid})'
+    )
 
     if auto_select or len(available_miners) == 1:
         selected_pair, selected_collateral = available_miners[0]
@@ -610,14 +607,13 @@ def swap_now_command(
         return
 
     source_amount = _to_smallest_unit(amount, source_chain)
-    source_is_tao = source_chain == 'tao'
-    asset_decimals = get_chain(non_tao).decimals
+    is_reverse = source_chain != canon_src
     dest_amount = calculate_dest_amount(
         source_amount,
         selected_pair.rate_str,
-        source_is_tao,
-        CHAIN_TAO.decimals,
-        asset_decimals,
+        is_reverse,
+        get_chain(canon_dest).decimals,
+        get_chain(canon_src).decimals,
     )
 
     # Show estimated receive inline
@@ -704,13 +700,12 @@ def swap_now_command(
 
     # Step 7: Confirm summary
     fee_in_dest = dest_amount - user_receives
-    non_tao_ticker = non_tao.upper()
 
     summary = (
         f'  Send:    [red]{amount} {source_chain.upper()}[/red]\n'
         f'  Receive: [green]{_from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
         f'  Fee:     {fee_percent:g}% ({_from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
-        f'  Rate:    1 {non_tao_ticker} = {selected_pair.rate:g} TAO\n'
+        f'  Rate:    send 1 {source_chain.upper()}, get {selected_pair.rate:g} {dest_chain.upper()}\n'
         f'  Miner:   UID {selected_pair.uid}\n'
         f'  To:      {receive_address}'
     )

@@ -82,7 +82,8 @@ class Validator(BaseValidatorNeuron):
         )
 
         # Pending confirmation queue (axon handler thread → forward loop thread)
-        self.pending_confirms = PendingConfirmQueue()
+        # Exposes current block so the queue can purge expired reservations on read.
+        self.pending_confirms = PendingConfirmQueue(current_block_fn=lambda: self.block)
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
@@ -117,6 +118,12 @@ class Validator(BaseValidatorNeuron):
     async def forward(self):
         """Validator forward pass - delegates to allways.validator.forward."""
         return await forward(self)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.pending_confirms.close()
 
 
 # Main entry point

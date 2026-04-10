@@ -4,6 +4,8 @@ from allways.cli.swap_commands.collateral import collateral_group
 from allways.cli.swap_commands.miner_commands import miner_group
 from allways.cli.swap_commands.pair import post_pair
 from allways.cli.swap_commands.post_tx import post_tx_command
+from allways.cli.swap_commands.quote import quote_command
+from allways.cli.swap_commands.resume import resume_command
 from allways.cli.swap_commands.status import status_command
 from allways.cli.swap_commands.swap import swap_group
 from allways.cli.swap_commands.view import view_group
@@ -11,8 +13,10 @@ from allways.cli.swap_commands.view import view_group
 # Register post under the miner group
 miner_group.add_command(post_pair, 'post')
 
-# Register post-tx under the swap group
+# Register post-tx, quote, resume under the swap group
 swap_group.add_command(post_tx_command, 'post-tx')
+swap_group.add_command(quote_command, 'quote')
+swap_group.add_command(resume_command, 'resume')
 
 
 def register_commands(cli):

@@ -48,6 +48,22 @@ def get_chain(chain_id: str) -> ChainDefinition:
     return SUPPORTED_CHAINS[chain_id]
 
 
+def canonical_pair(chain_a: str, chain_b: str) -> tuple:
+    """Return (source, dest) in canonical order for consistent commitment storage.
+
+    Determines the rate unit: rate is always 'dest per 1 source' in this ordering.
+
+    Ordering rules:
+    1. If TAO is in the pair, TAO is always dest — rates are denominated in TAO.
+    2. Otherwise, alphabetical — deterministic fallback for non-TAO pairs (e.g. BTC-ETH).
+    """
+    if chain_b == 'tao':
+        return (chain_a, chain_b)
+    if chain_a == 'tao':
+        return (chain_b, chain_a)
+    return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)
+
+
 def confirmations_to_subtensor_blocks(chain_id: str) -> int:
     """How many subtensor blocks a chain's min_confirmations take."""
     chain = get_chain(chain_id)

@@ -3,13 +3,14 @@
 import time
 from dataclasses import replace
 
-import rich_click as click
+import click
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.classes import SwapStatus
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
@@ -24,17 +25,9 @@ from allways.cli.swap_commands.helpers import (
 from allways.contract_client import ContractError
 
 
-@click.group('view')
+@click.group('view', cls=StyledGroup)
 def view_group():
-    """View swaps, miners, and rates.
-
-    \b
-    Subcommands:
-        miners      View active miners and their pairs
-        rates       View exchange rates
-        swaps       View active swaps
-        swap <id>   View a specific swap
-    """
+    """View swaps, miners, and rates."""
     pass
 
 
@@ -42,8 +35,8 @@ def view_group():
 def view_miners():
     """View active miners and their trading pairs.
 
-    Example:
-        alw view miners
+    [dim]Examples:
+        $ alw view miners[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -56,27 +49,36 @@ def view_miners():
         console.print('[yellow]No miner commitments found[/yellow]\n')
         return
 
+    src_up = pairs[0].source_chain.upper()
+    dst_up = pairs[0].dest_chain.upper()
+
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
-    table.add_column('Pair', style='green')
-    table.add_column('Rate (TAO)', style='yellow')
+    table.add_column(f'{src_up}→{dst_up}', style='green')
+    table.add_column(f'{dst_up}→{src_up}', style='green')
     table.add_column('Collateral (TAO)', style='magenta')
     table.add_column('Active', style='bold')
-    table.add_column(f'{pairs[0].source_chain.upper()} Addr', style='dim')
-    table.add_column(f'{pairs[0].dest_chain.upper()} Addr', style='dim')
+    table.add_column(f'{src_up} Addr', style='dim')
+    table.add_column(f'{dst_up} Addr', style='dim')
 
     try:
         for pair in pairs:
             collateral_rao = client.get_miner_collateral(pair.hotkey)
             is_active = client.get_miner_active_flag(pair.hotkey)
-
-            pair_str = f'{pair.source_chain.upper()} <-> {pair.dest_chain.upper()}'
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
+
+            fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
+            if pair.counter_rate > 0:
+                ctr_display = f'{pair.counter_rate:g}'
+            elif pair.counter_rate_str:
+                ctr_display = '[dim]—[/dim]'
+            else:
+                ctr_display = f'{pair.rate:g}'
 
             table.add_row(
                 str(pair.uid),
-                pair_str,
-                f'{pair.rate:g}',
+                fwd_display,
+                ctr_display,
                 f'{from_rao(collateral_rao):.4f}',
                 active_str,
                 pair.source_address[:16] + '...',
@@ -95,10 +97,9 @@ def view_miners():
 def view_rates(pair: str):
     """View current exchange rates.
 
-    \b
-    Examples:
-        alw view rates
-        alw view rates --pair btc-tao
+    [dim]Examples:
+        $ alw view rates
+        $ alw view rates --pair btc-tao[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -147,16 +148,24 @@ def view_rates(pair: str):
         src_name = SUPPORTED_CHAINS.get(src, src).name if src in SUPPORTED_CHAINS else src
         dst_name = SUPPORTED_CHAINS.get(dst, dst).name if dst in SUPPORTED_CHAINS else dst
 
-        console.print(f'[bold]{src_name} <-> {dst_name}[/bold]')
+        console.print(f'[bold]{src_name} ↔ {dst_name}[/bold]')
 
         table = Table(show_header=True)
         table.add_column('UID', style='cyan')
-        table.add_column('Rate (TAO)', style='green')
+        table.add_column(f'{src.upper()}→{dst.upper()}', style='green')
+        table.add_column(f'{dst.upper()}→{src.upper()}', style='green')
         table.add_column('Hotkey', style='dim')
 
         pair_list.sort(key=lambda x: x.rate, reverse=True)
         for p in pair_list:
-            table.add_row(str(p.uid), f'{p.rate:g}', p.hotkey[:16] + '...')
+            fwd = f'{p.rate:g}' if p.rate > 0 else '—'
+            if p.counter_rate > 0:
+                rev = f'{p.counter_rate:g}'
+            elif p.counter_rate_str:
+                rev = '—'
+            else:
+                rev = fwd
+            table.add_row(str(p.uid), fwd, rev, p.hotkey[:16] + '...')
 
         console.print(table)
 
@@ -170,13 +179,18 @@ def view_rates(pair: str):
 
 
 @view_group.command('swaps')
-@click.option('--status', default=None, type=str, help='Filter by status (active, fulfilled, completed, timed_out)')
+@click.option(
+    '--status',
+    default=None,
+    type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
+    help='Filter by status (active, fulfilled, completed, timed_out)',
+)
 def view_swaps(status: str):
     """View active swaps on the contract.
 
-    Example:
-        alw view swaps
-        alw view swaps --status pending
+    [dim]Examples:
+        $ alw view swaps
+        $ alw view swaps --status active[/dim]
     """
     _, _, _, client = get_cli_context(need_wallet=False)
 
@@ -292,10 +306,9 @@ def _display_swap(swap, chain_info=True):
 def view_swap(swap_id: int, watch: bool):
     """View details of a specific swap.
 
-    \b
-    Examples:
-        alw view swap 42
-        alw view swap 42 --watch
+    [dim]Examples:
+        $ alw view swap 42
+        $ alw view swap 42 --watch[/dim]
     """
     _, _, subtensor, client = get_cli_context(need_wallet=False)
 
@@ -397,8 +410,8 @@ def watch_swap(client, swap_id: int, swap=None):
 def view_contract():
     """View contract parameters.
 
-    Example:
-        alw view contract
+    [dim]Examples:
+        $ alw view contract[/dim]
     """
     config, wallet, _, client = get_cli_context(need_wallet=False)
 
@@ -468,11 +481,10 @@ def view_contract():
 def view_reservation():
     """View your active swap reservation.
 
-    \b
-    Reads local state file and validates against on-chain data.
+    [dim]Reads local state file and validates against on-chain data.[/dim]
 
-    Example:
-        alw view reservation
+    [dim]Examples:
+        $ alw view reservation[/dim]
     """
     _, _, subtensor, client = get_cli_context(need_wallet=False)
 

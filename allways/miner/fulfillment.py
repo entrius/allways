@@ -6,7 +6,7 @@ from typing import Dict, Optional, Set, Tuple
 
 import bittensor as bt
 
-from allways.chain_providers.base import ChainProvider
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap, SwapStatus
 from allways.constants import FULFILLMENT_TIMEOUT_MARGIN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, ContractErrorKind
@@ -229,6 +229,9 @@ class SwapFulfiller:
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} to {tx_info.recipient})')
             return True
 
+        except ProviderUnreachableError as e:
+            bt.logging.warning(f'Swap {swap.id}: provider unreachable, will retry: {e}')
+            return False
         except Exception as e:
             bt.logging.error(f'Swap {swap.id}: verification error: {e}')
             return False
@@ -242,9 +245,9 @@ class SwapFulfiller:
 
         key = self.wallet if swap.dest_chain == 'tao' else None
 
-        # For BTC sends, read the miner's commitment to get their BTC address.
-        # Commitments are normalized to non-TAO→TAO, so the BTC address is
-        # always source_address regardless of swap direction.
+        # For non-TAO sends, read the miner's commitment to get the sending address.
+        # Commitments are normalized to canonical order, so source_address is
+        # always the canonical source chain's address.
         from_address = None
         if swap.dest_chain != 'tao':
             try:

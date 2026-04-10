@@ -1,8 +1,9 @@
 """alw post - Post a trading pair commitment to chain."""
 
-import rich_click as click
+import click
 
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
 
@@ -10,6 +11,9 @@ from allways.constants import COMMITMENT_VERSION
 def _prompt_chain(label: str, exclude: str | None = None) -> str:
     """Prompt the user to pick a chain from SUPPORTED_CHAINS."""
     chains = [c for c in SUPPORTED_CHAINS if c != exclude]
+    if len(chains) == 1:
+        console.print(f'{label}: [cyan]{chains[0]}[/cyan]')
+        return chains[0]
     choices = ', '.join(chains)
     while True:
         value = click.prompt(f'{label} ({choices})').strip().lower()
@@ -19,21 +23,30 @@ def _prompt_chain(label: str, exclude: str | None = None) -> str:
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
 
 
-def _prompt_rate() -> float:
-    """Prompt for a positive rate."""
+def _prompt_rates(canon_src: str, canon_dest: str) -> tuple:
+    """Prompt for direction-specific rates. Counter rate defaults to forward; 0 = direction not supported."""
+    src_up, dst_up = canon_src.upper(), canon_dest.upper()
     while True:
-        value = click.prompt('Rate (TAO per 1 non-TAO asset)', type=float)
-        if value > 0:
-            return value
+        fwd = click.prompt(f'Rate for {src_up} -> {dst_up} ({dst_up} per 1 {src_up})', type=float)
+        if fwd > 0:
+            break
         console.print('[red]Rate must be positive[/red]')
+    rev = click.prompt(
+        f'Rate for {dst_up} -> {src_up} ({dst_up} per 1 {src_up}, 0 = not supported)', type=float, default=fwd
+    )
+    if rev < 0:
+        console.print('[red]Rate cannot be negative, using 0 (not supported)[/red]')
+        rev = 0.0
+    return fwd, rev
 
 
-@click.command('pair')
+@click.command('pair', cls=StyledCommand)
 @click.argument('src_chain', required=False, default=None, type=str)
 @click.argument('src_addr', required=False, default=None, type=str)
 @click.argument('dst_chain', required=False, default=None, type=str)
 @click.argument('dst_addr', required=False, default=None, type=str)
 @click.argument('rate', required=False, default=None, type=float)
+@click.argument('counter_rate', required=False, default=None, type=float)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
     src_chain: str | None,
@@ -41,29 +54,29 @@ def post_pair(
     dst_chain: str | None,
     dst_addr: str | None,
     rate: float | None,
+    counter_rate: float | None,
     yes: bool,
 ):
     """Post a trading pair to chain via commitment.
 
-    \b
-    All arguments are optional — if omitted, you'll be prompted interactively.
+    [dim]All arguments are optional — if omitted, you'll be prompted interactively.[/dim]
 
-    \b
-    Arguments:
-        SRC_CHAIN   Source chain ID (e.g. btc, tao)
-        SRC_ADDR    Your receiving address on source chain
-        DST_CHAIN   Destination chain ID (e.g. tao, btc)
-        DST_ADDR    Your sending address on destination chain
-        RATE        TAO per 1 non-TAO asset (e.g. 345 means 1 BTC = 345 TAO)
+    [dim]Arguments:
+        SRC_CHAIN       Source chain ID (e.g. btc, tao)
+        SRC_ADDR        Your receiving address on source chain
+        DST_CHAIN       Destination chain ID (e.g. tao, btc)
+        DST_ADDR        Your sending address on destination chain
+        RATE            source→dest rate (e.g. TAO per 1 BTC for btc-tao pair)
+        COUNTER_RATE    dest→source rate (optional, defaults to RATE)[/dim]
 
-    \b
-    Examples:
-        alw miner post                                        (interactive wizard)
-        alw miner post btc bc1q...abc tao 5Cxyz...def 345    (all at once)
+    [dim]Examples:
+        $ alw miner post                                            (interactive wizard)
+        $ alw miner post btc bc1q...abc tao 5Cxyz...def 340 350     (direction-specific rates)
+        $ alw miner post btc bc1q...abc tao 5Cxyz...def 345         (same rate both ways)[/dim]
     """
     # --- Prompt for any missing arguments ---
     if src_chain is None:
-        src_chain = _prompt_chain('Source chain')
+        src_chain = _prompt_chain('Source chain (you receive on this chain)')
     else:
         src_chain = src_chain.lower()
         if src_chain not in SUPPORTED_CHAINS:
@@ -75,7 +88,7 @@ def post_pair(
         src_addr = click.prompt(f'Your receiving address on {SUPPORTED_CHAINS[src_chain].name}')
 
     if dst_chain is None:
-        dst_chain = _prompt_chain('Destination chain', exclude=src_chain)
+        dst_chain = _prompt_chain('Destination chain (you send on this chain)', exclude=src_chain)
     else:
         dst_chain = dst_chain.lower()
         if dst_chain not in SUPPORTED_CHAINS:
@@ -89,32 +102,64 @@ def post_pair(
     if dst_addr is None:
         dst_addr = click.prompt(f'Your sending address on {SUPPORTED_CHAINS[dst_chain].name}')
 
+    canon_src, canon_dest = canonical_pair(src_chain, dst_chain)
+    rates_from_args = rate is not None
+
     if rate is None:
-        rate = _prompt_rate()
+        rate, counter_rate = _prompt_rates(canon_src, canon_dest)
     elif rate <= 0:
         console.print('[red]Rate must be positive[/red]')
         return
+    else:
+        if counter_rate is None:
+            counter_rate = rate
+        elif counter_rate < 0:
+            console.print('[red]Rate cannot be negative[/red]')
+            return
 
-    # Normalize to canonical direction: non-TAO → TAO.
-    # Rate is always "TAO per 1 non-TAO asset" regardless of direction.
-    if src_chain == 'tao' and dst_chain != 'tao':
-        console.print('[dim]Normalizing pair direction to canonical form (non-TAO -> TAO).[/dim]')
+    # Normalize to canonical direction.
+    # Positional args: RATE = user's source→dest, so swap rates to match canonical order.
+    # Interactive prompts: already asked in canonical order, no rate swap needed.
+    if src_chain != canon_src:
+        console.print(f'[dim]Normalizing pair direction to canonical form ({canon_src} -> {canon_dest}).[/dim]')
         src_chain, dst_chain = dst_chain, src_chain
         src_addr, dst_addr = dst_addr, src_addr
+        if rates_from_args:
+            rate, counter_rate = counter_rate, rate
 
     config, wallet, subtensor, _ = get_cli_context(need_client=False)
     netuid = config['netuid']
 
     rate_str = f'{rate:g}'
-    commitment_data = f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}'
+    counter_rate_str = f'{counter_rate:g}'
+    commitment_data = (
+        f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{counter_rate_str}'
+    )
 
-    non_tao = src_chain if src_chain != 'tao' else dst_chain
-    non_tao_ticker = non_tao.upper()
+    data_bytes = commitment_data.encode('utf-8')
+    if len(data_bytes) > 128:
+        console.print(
+            f'[red]Commitment too long ({len(data_bytes)} bytes, max 128). '
+            f'Try a shorter address format (e.g. P2WPKH instead of P2TR).[/red]'
+        )
+        return
+
+    src_up, dst_up = src_chain.upper(), dst_chain.upper()
 
     console.print('\n[bold]Posting trading pair commitment[/bold]\n')
     console.print(f'  Source:      [cyan]{SUPPORTED_CHAINS[src_chain].name}[/cyan] ({src_addr})')
     console.print(f'  Destination: [cyan]{SUPPORTED_CHAINS[dst_chain].name}[/cyan] ({dst_addr})')
-    console.print(f'  Rate:        [green]1 {non_tao_ticker} = {rate:g} TAO[/green]')
+    if rate == counter_rate and rate > 0:
+        console.print(f'  Rate:        [green]send 1 {src_up}, get {rate:g} {dst_up} (both directions)[/green]')
+    else:
+        if rate > 0:
+            console.print(f'  {src_up} → {dst_up}:  [green]send 1 {src_up}, get {rate:g} {dst_up}[/green]')
+        else:
+            console.print(f'  {src_up} → {dst_up}:  [yellow]not supported[/yellow]')
+        if counter_rate > 0:
+            console.print(f'  {dst_up} → {src_up}:  [green]send {counter_rate:g} {dst_up}, get 1 {src_up}[/green]')
+        else:
+            console.print(f'  {dst_up} → {src_up}:  [yellow]not supported[/yellow]')
     console.print(f'  Netuid:      {netuid}')
     console.print(f'  Data:        [dim]{commitment_data}[/dim]\n')
 
@@ -123,7 +168,6 @@ def post_pair(
         return
 
     try:
-        data_bytes = commitment_data.encode('utf-8')
         with loading('Submitting commitment...'):
             call = subtensor.substrate.compose_call(
                 call_module='Commitments',
