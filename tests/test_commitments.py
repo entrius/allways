@@ -5,7 +5,7 @@ from allways.commitments import parse_commitment_data
 
 class TestParseCommitmentData:
     def test_valid_two_rates(self):
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:340:350'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:350'
         pair = parse_commitment_data(raw, uid=1, hotkey='hk1')
         assert pair is not None
         assert pair.uid == 1
@@ -20,7 +20,7 @@ class TestParseCommitmentData:
         assert pair.counter_rate_str == '350'
 
     def test_valid_same_rate_both_directions(self):
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:345:345'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345:345'
         pair = parse_commitment_data(raw)
         assert pair is not None
         assert pair.rate == 345.0
@@ -28,7 +28,7 @@ class TestParseCommitmentData:
 
     def test_normalization_swaps_rates(self):
         """When posted as tao->btc, normalization flips to btc->tao and swaps rates."""
-        raw = 'v3:tao:5Caddr:btc:bc1qaddr:340:350'
+        raw = 'v1:tao:5Caddr:btc:bc1qaddr:340:350'
         pair = parse_commitment_data(raw)
         assert pair is not None
         assert pair.source_chain == 'btc'
@@ -42,7 +42,7 @@ class TestParseCommitmentData:
         assert pair.counter_rate_str == '340'
 
     def test_fractional_rates(self):
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:345.12:350.45'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345.12:350.45'
         pair = parse_commitment_data(raw)
         assert pair is not None
         assert pair.rate == 345.12
@@ -51,7 +51,7 @@ class TestParseCommitmentData:
         assert pair.counter_rate_str == '350.45'
 
     def test_get_rate_for_direction(self):
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:340:350'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:350'
         pair = parse_commitment_data(raw)
         # Forward (btc -> tao)
         rate, rate_str = pair.get_rate_for_direction('btc')
@@ -64,7 +64,7 @@ class TestParseCommitmentData:
 
     def test_get_rate_for_direction_after_normalization(self):
         """Full pipeline: tao->btc commitment normalizes, then direction lookup works."""
-        raw = 'v3:tao:5Caddr:btc:bc1qaddr:340:350'
+        raw = 'v1:tao:5Caddr:btc:bc1qaddr:340:350'
         pair = parse_commitment_data(raw)
         # After normalization: source=btc, dest=tao
         # Original 340 was tao->btc (now reverse), 350 was btc->tao (now forward)
@@ -76,10 +76,10 @@ class TestParseCommitmentData:
         assert rev_str == '340'
 
     def test_wrong_part_count_too_few(self):
-        assert parse_commitment_data('v3:btc:addr:tao:addr:345') is None
+        assert parse_commitment_data('v1:btc:addr:tao:addr:345') is None
 
     def test_wrong_part_count_too_many(self):
-        assert parse_commitment_data('v3:btc:addr:tao:addr:340:350:extra') is None
+        assert parse_commitment_data('v1:btc:addr:tao:addr:340:350:extra') is None
 
     def test_wrong_version(self):
         assert parse_commitment_data('v2:btc:addr:tao:addr:340:350') is None
@@ -88,22 +88,22 @@ class TestParseCommitmentData:
         assert parse_commitment_data('3:btc:addr:tao:addr:340:350') is None
 
     def test_unsupported_source_chain(self):
-        assert parse_commitment_data('v3:eth:addr:tao:addr:340:350') is None
+        assert parse_commitment_data('v1:eth:addr:tao:addr:340:350') is None
 
     def test_unsupported_dest_chain(self):
-        assert parse_commitment_data('v3:btc:addr:eth:addr:340:350') is None
+        assert parse_commitment_data('v1:btc:addr:eth:addr:340:350') is None
 
     def test_invalid_rate_not_a_number(self):
-        assert parse_commitment_data('v3:btc:addr:tao:addr:abc:350') is None
+        assert parse_commitment_data('v1:btc:addr:tao:addr:abc:350') is None
 
     def test_invalid_reverse_rate_not_a_number(self):
-        assert parse_commitment_data('v3:btc:addr:tao:addr:340:abc') is None
+        assert parse_commitment_data('v1:btc:addr:tao:addr:340:abc') is None
 
     def test_empty_string(self):
         assert parse_commitment_data('') is None
 
     def test_rate_zero(self):
-        pair = parse_commitment_data('v3:btc:addr:tao:addr:0:0')
+        pair = parse_commitment_data('v1:btc:addr:tao:addr:0:0')
         assert pair is not None
         assert pair.rate == 0.0
         assert pair.counter_rate == 0.0
@@ -112,7 +112,7 @@ class TestParseCommitmentData:
         """Full guard chain: disabled direction → rate=0 → dest_amount=0 → contract rejects."""
         from allways.utils.rate import calculate_dest_amount
 
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:345:0'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345:0'
         pair = parse_commitment_data(raw)
         # Validator calls get_rate_for_direction for the disabled direction
         rate, rate_str = pair.get_rate_for_direction('tao')
@@ -126,7 +126,7 @@ class TestParseCommitmentData:
 
     def test_single_direction_forward_only(self):
         """Miner supports only BTC→TAO (counter_rate=0 means TAO→BTC not offered)."""
-        raw = 'v3:btc:bc1qaddr:tao:5Caddr:345:0'
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345:0'
         pair = parse_commitment_data(raw)
         assert pair is not None
         assert pair.rate == 345.0
@@ -140,7 +140,7 @@ class TestParseCommitmentData:
 
     def test_single_direction_counter_only(self):
         """Miner posts tao→btc only. After normalization, rate=0, counter_rate has the value."""
-        raw = 'v3:tao:5Caddr:btc:bc1qaddr:345:0'
+        raw = 'v1:tao:5Caddr:btc:bc1qaddr:345:0'
         pair = parse_commitment_data(raw)
         assert pair is not None
         # Normalization flips: btc→tao becomes source→dest
@@ -155,9 +155,9 @@ class TestParseCommitmentData:
         assert rate == 345.0
 
     def test_default_uid_and_hotkey(self):
-        pair = parse_commitment_data('v3:btc:addr:tao:addr:1.0:2.0')
+        pair = parse_commitment_data('v1:btc:addr:tao:addr:1.0:2.0')
         assert pair.uid == 0
         assert pair.hotkey == ''
 
     def test_same_chain(self):
-        assert parse_commitment_data('v3:btc:addr:btc:addr:340:350') is None
+        assert parse_commitment_data('v1:btc:addr:btc:addr:340:350') is None
