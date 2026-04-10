@@ -7,7 +7,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
-from allways.validator.scoring_store import ScoringWindowStore, resolved_block
+from allways.validator.scoring_store import ScoringWindowStore
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -20,7 +20,8 @@ class SwapTracker:
     - Monitoring: re-fetch all tracked ACTIVE/FULFILLED swaps each poll
 
     Resolved swaps are no longer stored on-chain, so cold start only recovers
-    active swaps. The scoring window populates naturally as swaps complete.
+    active swaps from chain. When a store is configured, the scoring window and
+    voted IDs are restored from disk before active-swap reconciliation.
     """
 
     def __init__(
@@ -162,7 +163,7 @@ class SwapTracker:
         """Remove resolved swaps older than the scoring window."""
         window_start = current_block - self.window_blocks
         before = len(self.window)
-        self.window = [s for s in self.window if resolved_block(s) >= window_start]
+        self.window = [s for s in self.window if _resolved_block(s) >= window_start]
         pruned = before - len(self.window)
         if pruned > 0:
             bt.logging.debug(f'SwapTracker: pruned {pruned} expired swaps from window')
@@ -198,4 +199,13 @@ class SwapTracker:
         """Save window and voted set to disk if a store is configured."""
         if self._store:
             self._store.save(self.window, self.voted_ids)
+
+
+def _resolved_block(swap: Swap) -> int:
+    """Block when a terminal swap was resolved."""
+    if swap.completed_block > 0:
+        return swap.completed_block
+    if swap.timeout_block > 0:
+        return swap.timeout_block
+    return swap.initiated_block
 
