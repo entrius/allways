@@ -6,7 +6,7 @@ from typing import Dict, Optional, Set, Tuple
 
 import bittensor as bt
 
-from allways.chain_providers.base import ChainProvider
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.utils.rate import expected_swap_amounts
@@ -128,6 +128,9 @@ class SwapFulfiller:
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} to {tx_info.recipient})')
             return True
 
+        except ProviderUnreachableError as e:
+            bt.logging.warning(f'Swap {swap.id}: provider unreachable, will retry: {e}')
+            return False
         except Exception as e:
             bt.logging.error(f'Swap {swap.id}: verification error: {e}')
             return False

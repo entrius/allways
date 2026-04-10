@@ -6,7 +6,7 @@ import bittensor as bt
 from substrateinterface import Keypair
 from substrateinterface.utils.ss58 import ss58_encode
 
-from allways.chain_providers.base import ChainProvider, TransactionInfo
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition
 
 
@@ -161,21 +161,21 @@ class SubtensorProvider(ChainProvider):
     def verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a TAO transfer by querying the extrinsic.
+        """Verify a TAO transfer; raises ProviderUnreachableError if subtensor is unreachable.
 
-        If block_hint > 0, checks a small window around the hinted block (O(1)).
-        Otherwise falls back to scanning the last 150 blocks.
+        If block_hint > 0, checks hinted block ±2. Otherwise scans last 150 blocks.
         """
         try:
             current_block = self.subtensor.get_current_block()
+        except Exception as e:
+            raise ProviderUnreachableError(f'Subtensor unreachable: {e}') from e
 
-            if block_hint > 0:
-                # O(1): check hinted block ±2 for minor reorg tolerance
-                blocks_to_check = [block_hint + offset for offset in range(-2, 3) if block_hint + offset >= 0]
-            else:
-                # Fallback: scan recent blocks
-                blocks_to_check = [current_block - offset for offset in range(150) if current_block - offset >= 0]
+        if block_hint > 0:
+            blocks_to_check = [block_hint + offset for offset in range(-2, 3) if block_hint + offset >= 0]
+        else:
+            blocks_to_check = [current_block - offset for offset in range(150) if current_block - offset >= 0]
 
+        try:
             for block_num in blocks_to_check:
                 block = self._get_block(block_num)
                 if not block or 'extrinsics' not in block:
@@ -185,7 +185,6 @@ class SubtensorProvider(ChainProvider):
 
                 for ext in block['extrinsics']:
                     if is_raw:
-                        # Raw-parsed dict format from _get_block_raw
                         ext_hash = ext.get('extrinsic_hash', '')
                         if ext_hash != tx_hash:
                             continue
@@ -193,7 +192,6 @@ class SubtensorProvider(ChainProvider):
                         amount = ext.get('amount', 0)
                         sender = ext.get('sender', '')
                     else:
-                        # SDK GenericExtrinsic format — hash may be bytes or hex string
                         ext_hash = getattr(ext, 'extrinsic_hash', None) or (
                             ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
                         )
@@ -235,9 +233,10 @@ class SubtensorProvider(ChainProvider):
                         )
 
             return None
+        except ProviderUnreachableError:
+            raise
         except Exception as e:
-            bt.logging.error(f'TAO verify_transaction failed: {e}')
-            return None
+            raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
 
     def get_balance(self, address: str) -> int:
         """Get balance for a TAO address in rao."""
