@@ -1,10 +1,10 @@
 {
   "source": {
-    "hash": "0xa9366ce46778c703549e625adf39d154f87dce58dded686937c0e2630cb1052e",
+    "hash": "0xa02fffcf387e8c5062f763674de78a068f33aedc5e1e762bd088fe6291ec3734",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
-      "build_mode": "Release",
+      "build_mode": "Debug",
       "cargo_contract_version": "5.0.3",
       "rust_toolchain": "stable-x86_64-unknown-linux-gnu",
       "wasm_opt_settings": {
@@ -26,15 +26,6 @@
       {
         "args": [
           {
-            "label": "treasury_hotkey",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
             "label": "recycle_address",
             "type": {
               "displayName": [
@@ -44,21 +35,12 @@
             }
           },
           {
-            "label": "netuid",
-            "type": {
-              "displayName": [
-                "u16"
-              ],
-              "type": 3
-            }
-          },
-          {
             "label": "fulfillment_timeout_blocks",
             "type": {
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           },
           {
@@ -67,7 +49,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           },
           {
@@ -76,7 +58,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -85,7 +67,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -94,7 +76,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -103,7 +85,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -127,7 +109,7 @@
             "ink_primitives",
             "ConstructorResult"
           ],
-          "type": 97
+          "type": 95
         },
         "selector": "0x9bae9d5e"
       }
@@ -144,25 +126,25 @@
         "displayName": [
           "Balance"
         ],
-        "type": 5
+        "type": 4
       },
       "blockNumber": {
         "displayName": [
           "BlockNumber"
         ],
-        "type": 4
+        "type": 3
       },
       "chainExtension": {
         "displayName": [
           "ChainExtension"
         ],
-        "type": 116
+        "type": 114
       },
       "hash": {
         "displayName": [
           "Hash"
         ],
-        "type": 62
+        "type": 61
       },
       "maxEventTopics": 4,
       "staticBufferSize": 16384,
@@ -170,7 +152,7 @@
         "displayName": [
           "Timestamp"
         ],
-        "type": 12
+        "type": 11
       }
     },
     "events": [
@@ -184,7 +166,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -205,7 +187,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -227,7 +209,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -248,7 +230,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -270,7 +252,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -291,7 +273,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -313,7 +295,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -324,7 +306,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -348,7 +330,7 @@
                 "string",
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -359,7 +341,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -391,7 +373,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -412,7 +394,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -434,7 +416,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -445,7 +427,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -466,7 +448,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -491,7 +473,7 @@
                 "string",
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           }
         ],
@@ -512,7 +494,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -545,7 +527,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -556,7 +538,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -588,7 +570,7 @@
               "displayName": [
                 "bool"
               ],
-              "type": 6
+              "type": 5
             }
           }
         ],
@@ -620,7 +602,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -631,7 +613,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -663,7 +645,7 @@
               "displayName": [
                 "bool"
               ],
-              "type": 6
+              "type": 5
             }
           }
         ],
@@ -695,7 +677,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -738,7 +720,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -749,7 +731,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -781,7 +763,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -802,7 +784,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -813,7 +795,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -887,7 +869,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -911,7 +893,7 @@
                 "types",
                 "VoteType"
               ],
-              "type": 115
+              "type": 113
             }
           },
           {
@@ -922,7 +904,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -939,7 +921,7 @@
         "ink",
         "LangError"
       ],
-      "type": 98
+      "type": 96
     },
     "messages": [
       {
@@ -954,7 +936,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x31b3f423"
       },
@@ -966,7 +948,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -980,7 +962,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xe098e62d"
       },
@@ -992,7 +974,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 62
+              "type": 61
             }
           },
           {
@@ -1008,9 +990,9 @@
             "label": "user_source_address",
             "type": {
               "displayName": [
-                "Vec"
+                "String"
               ],
-              "type": 73
+              "type": 12
             }
           },
           {
@@ -1019,7 +1001,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1028,7 +1010,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1037,7 +1019,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -1046,7 +1028,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -1055,7 +1037,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1069,7 +1051,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xff3b86a0"
       },
@@ -1095,7 +1077,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xc4cb59cb"
       },
@@ -1107,7 +1089,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 62
+              "type": 61
             }
           },
           {
@@ -1125,7 +1107,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           }
         ],
@@ -1139,7 +1121,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xf668d950"
       },
@@ -1151,7 +1133,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 62
+              "type": 61
             }
           },
           {
@@ -1178,7 +1160,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1187,7 +1169,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1196,7 +1178,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -1205,7 +1187,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -1214,7 +1196,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1223,7 +1205,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1232,7 +1214,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1241,7 +1223,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           },
           {
@@ -1250,7 +1232,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           },
           {
@@ -1259,7 +1241,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1268,7 +1250,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1277,7 +1259,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           }
         ],
@@ -1291,7 +1273,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x90c444d8"
       },
@@ -1303,7 +1285,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           },
           {
@@ -1312,7 +1294,7 @@
               "displayName": [
                 "String"
               ],
-              "type": 13
+              "type": 12
             }
           },
           {
@@ -1321,7 +1303,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           },
           {
@@ -1330,7 +1312,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1346,7 +1328,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x2dbeeb8d"
       },
@@ -1358,7 +1340,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -1374,7 +1356,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xd0065335"
       },
@@ -1386,7 +1368,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -1402,7 +1384,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x5325f39c"
       },
@@ -1414,7 +1396,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -1432,7 +1414,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x0fb2d2e5"
       },
@@ -1444,7 +1426,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -1460,7 +1442,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xcf3c3dd9"
       },
@@ -1488,7 +1470,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x339db2a5"
       },
@@ -1516,7 +1498,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x00088a2d"
       },
@@ -1542,7 +1524,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x107e33ea"
       },
@@ -1568,7 +1550,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x82f48fa6"
       },
@@ -1594,7 +1576,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x62135acd"
       },
@@ -1606,7 +1588,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -1620,7 +1602,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xe9cb777b"
       },
@@ -1632,7 +1614,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1646,7 +1628,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xb3f48b5e"
       },
@@ -1658,7 +1640,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1672,7 +1654,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xb7fae7fd"
       },
@@ -1698,7 +1680,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0xc0d8ec47"
       },
@@ -1710,7 +1692,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1724,7 +1706,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x800e1573"
       },
@@ -1736,7 +1718,7 @@
               "displayName": [
                 "Balance"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1750,7 +1732,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x3e868f32"
       },
@@ -1776,7 +1758,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x50dfe685"
       },
@@ -1788,7 +1770,7 @@
               "displayName": [
                 "u32"
               ],
-              "type": 4
+              "type": 3
             }
           }
         ],
@@ -1802,7 +1784,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x3143d9e3"
       },
@@ -1814,7 +1796,7 @@
               "displayName": [
                 "u128"
               ],
-              "type": 5
+              "type": 4
             }
           }
         ],
@@ -1828,7 +1810,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x8832de41"
       },
@@ -1840,7 +1822,7 @@
               "displayName": [
                 "bool"
               ],
-              "type": 6
+              "type": 5
             }
           }
         ],
@@ -1854,7 +1836,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x8fe1c210"
       },
@@ -1870,7 +1852,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 99
+          "type": 97
         },
         "selector": "0x97756ea1"
       },
@@ -1882,7 +1864,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -1896,7 +1878,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 100
         },
         "selector": "0xa35f1bbf"
       },
@@ -1922,7 +1904,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0xf48343ad"
       },
@@ -1948,7 +1930,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 105
+          "type": 103
         },
         "selector": "0x25652be8"
       },
@@ -1974,7 +1956,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 105
+          "type": 103
         },
         "selector": "0x1d07dec1"
       },
@@ -2000,7 +1982,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xa4b68d1f"
       },
@@ -2026,7 +2008,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 105
+          "type": 103
         },
         "selector": "0xf844fc5f"
       },
@@ -2042,7 +2024,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 107
+          "type": 105
         },
         "selector": "0xd80244d2"
       },
@@ -2058,7 +2040,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xe820174a"
       },
@@ -2074,7 +2056,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x233a7832"
       },
@@ -2090,7 +2072,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x54945717"
       },
@@ -2106,7 +2088,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xfe07130d"
       },
@@ -2122,7 +2104,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0xbf3b5d4e"
       },
@@ -2138,7 +2120,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x9910e939"
       },
@@ -2154,7 +2136,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 108
+          "type": 106
         },
         "selector": "0x07fcd0b1"
       },
@@ -2170,7 +2152,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 105
+          "type": 103
         },
         "selector": "0xec540804"
       },
@@ -2186,7 +2168,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 108
+          "type": 106
         },
         "selector": "0x3847e06c"
       },
@@ -2198,7 +2180,7 @@
               "displayName": [
                 "u64"
               ],
-              "type": 12
+              "type": 11
             }
           }
         ],
@@ -2212,7 +2194,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x48c78c4a"
       },
@@ -2228,7 +2210,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0xfca7daa4"
       },
@@ -2244,7 +2226,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x97826e04"
       },
@@ -2270,7 +2252,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xd5ed7150"
       },
@@ -2286,7 +2268,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xf7e24a31"
       },
@@ -2302,7 +2284,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 102
         },
         "selector": "0x41afd8bc"
       },
@@ -2328,7 +2310,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0x361acc31"
       },
@@ -2344,7 +2326,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 109
+          "type": 107
         },
         "selector": "0x2c283460"
       },
@@ -2360,7 +2342,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0xa30ab5c4"
       },
@@ -2386,7 +2368,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0x154595d0"
       },
@@ -2412,7 +2394,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 110
+          "type": 108
         },
         "selector": "0x79fe2717"
       },
@@ -2438,7 +2420,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0x3781315a"
       },
@@ -2464,7 +2446,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 104
         },
         "selector": "0x24fa0aae"
       },
@@ -2474,9 +2456,9 @@
             "label": "source_address",
             "type": {
               "displayName": [
-                "Vec"
+                "String"
               ],
-              "type": 73
+              "type": 12
             }
           }
         ],
@@ -2490,7 +2472,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 113
+          "type": 111
         },
         "selector": "0x19a837c6"
       }
@@ -2517,15 +2499,6 @@
                   "ty": 0
                 }
               },
-              "name": "treasury_hotkey"
-            },
-            {
-              "layout": {
-                "leaf": {
-                  "key": "0x00000000",
-                  "ty": 0
-                }
-              },
               "name": "recycle_address"
             },
             {
@@ -2535,22 +2508,13 @@
                   "ty": 3
                 }
               },
-              "name": "netuid"
-            },
-            {
-              "layout": {
-                "leaf": {
-                  "key": "0x00000000",
-                  "ty": 4
-                }
-              },
               "name": "fulfillment_timeout_blocks"
             },
             {
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 4
+                  "ty": 3
                 }
               },
               "name": "reservation_ttl"
@@ -2559,7 +2523,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "min_collateral"
@@ -2568,7 +2532,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "max_collateral"
@@ -2577,7 +2541,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "min_swap_amount"
@@ -2586,7 +2550,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "max_swap_amount"
@@ -2604,7 +2568,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 4
+                  "ty": 3
                 }
               },
               "name": "validator_count"
@@ -2613,7 +2577,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "fee_divisor"
@@ -2622,7 +2586,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 6
+                  "ty": 5
                 }
               },
               "name": "halted"
@@ -2633,11 +2597,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x8fb2fd51",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0x8fb2fd51",
-                  "ty": 7
+                  "ty": 6
                 }
               },
               "name": "validators"
@@ -2646,7 +2610,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 12
+                  "ty": 11
                 }
               },
               "name": "next_swap_id"
@@ -2661,7 +2625,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 12
+                              "ty": 11
                             }
                           },
                           "name": "id"
@@ -2688,7 +2652,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "source_chain"
@@ -2697,7 +2661,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "dest_chain"
@@ -2706,7 +2670,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 5
+                              "ty": 4
                             }
                           },
                           "name": "source_amount"
@@ -2715,7 +2679,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 5
+                              "ty": 4
                             }
                           },
                           "name": "dest_amount"
@@ -2724,7 +2688,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 5
+                              "ty": 4
                             }
                           },
                           "name": "tao_amount"
@@ -2733,7 +2697,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "user_source_address"
@@ -2742,7 +2706,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "user_dest_address"
@@ -2751,7 +2715,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "miner_source_address"
@@ -2760,7 +2724,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "miner_dest_address"
@@ -2769,7 +2733,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "rate"
@@ -2778,7 +2742,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "source_tx_hash"
@@ -2787,7 +2751,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "source_tx_block"
@@ -2796,7 +2760,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 13
+                              "ty": 12
                             }
                           },
                           "name": "dest_tx_hash"
@@ -2805,7 +2769,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "dest_tx_block"
@@ -2841,7 +2805,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "initiated_block"
@@ -2850,7 +2814,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "timeout_block"
@@ -2859,7 +2823,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "fulfilled_block"
@@ -2868,7 +2832,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x2b1d1362",
-                              "ty": 4
+                              "ty": 3
                             }
                           },
                           "name": "completed_block"
@@ -2878,7 +2842,7 @@
                     }
                   },
                   "root_key": "0x2b1d1362",
-                  "ty": 14
+                  "ty": 13
                 }
               },
               "name": "swaps"
@@ -2889,11 +2853,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xe9ec6cd5",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0xe9ec6cd5",
-                  "ty": 19
+                  "ty": 18
                 }
               },
               "name": "swap_confirm_votes"
@@ -2904,11 +2868,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xaf897260",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0xaf897260",
-                  "ty": 23
+                  "ty": 22
                 }
               },
               "name": "swap_confirm_vote_count"
@@ -2919,11 +2883,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xc6e30f20",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0xc6e30f20",
-                  "ty": 26
+                  "ty": 25
                 }
               },
               "name": "swap_timeout_votes"
@@ -2934,11 +2898,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xbde6b9bf",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0xbde6b9bf",
-                  "ty": 29
+                  "ty": 28
                 }
               },
               "name": "swap_timeout_vote_count"
@@ -2949,11 +2913,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x7a197e1a",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0x7a197e1a",
-                  "ty": 32
+                  "ty": 31
                 }
               },
               "name": "used_source_tx"
@@ -2964,11 +2928,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xf62525e8",
-                      "ty": 5
+                      "ty": 4
                     }
                   },
                   "root_key": "0xf62525e8",
-                  "ty": 35
+                  "ty": 34
                 }
               },
               "name": "collateral"
@@ -2979,11 +2943,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x67d295fa",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0x67d295fa",
-                  "ty": 38
+                  "ty": 37
                 }
               },
               "name": "miner_active"
@@ -2994,11 +2958,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x236f4565",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0x236f4565",
-                  "ty": 41
+                  "ty": 40
                 }
               },
               "name": "miner_has_active_swap"
@@ -3009,11 +2973,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x6ff1c750",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0x6ff1c750",
-                  "ty": 44
+                  "ty": 43
                 }
               },
               "name": "miner_reserved_until"
@@ -3024,11 +2988,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x80e900bc",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0x80e900bc",
-                  "ty": 47
+                  "ty": 46
                 }
               },
               "name": "miner_last_resolved_block"
@@ -3039,11 +3003,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x8e2b6134",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0x8e2b6134",
-                  "ty": 50
+                  "ty": 49
                 }
               },
               "name": "miner_deactivation_block"
@@ -3052,7 +3016,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 12
+                  "ty": 11
                 }
               },
               "name": "next_request_id"
@@ -3063,11 +3027,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x26e30584",
-                      "ty": 6
+                      "ty": 5
                     }
                   },
                   "root_key": "0x26e30584",
-                  "ty": 53
+                  "ty": 52
                 }
               },
               "name": "request_votes"
@@ -3078,11 +3042,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xd6c62dcd",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0xd6c62dcd",
-                  "ty": 56
+                  "ty": 55
                 }
               },
               "name": "request_vote_count"
@@ -3093,11 +3057,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x681b05e3",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0x681b05e3",
-                  "ty": 59
+                  "ty": 58
                 }
               },
               "name": "request_created"
@@ -3108,11 +3072,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x57f4431e",
-                      "ty": 62
+                      "ty": 61
                     }
                   },
                   "root_key": "0x57f4431e",
-                  "ty": 63
+                  "ty": 62
                 }
               },
               "name": "request_hash"
@@ -3123,11 +3087,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x7467cc7b",
-                      "ty": 12
+                      "ty": 11
                     }
                   },
                   "root_key": "0x7467cc7b",
-                  "ty": 66
+                  "ty": 65
                 }
               },
               "name": "miner_active_request"
@@ -3138,11 +3102,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x278e3f4b",
-                      "ty": 62
+                      "ty": 61
                     }
                   },
                   "root_key": "0x278e3f4b",
-                  "ty": 70
+                  "ty": 69
                 }
               },
               "name": "reservation_hash"
@@ -3153,11 +3117,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x903da210",
-                      "ty": 73
+                      "ty": 12
                     }
                   },
                   "root_key": "0x903da210",
-                  "ty": 74
+                  "ty": 72
                 }
               },
               "name": "reservation_source_addr"
@@ -3168,11 +3132,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x696675ed",
-                      "ty": 5
+                      "ty": 4
                     }
                   },
                   "root_key": "0x696675ed",
-                  "ty": 77
+                  "ty": 75
                 }
               },
               "name": "reservation_tao_amount"
@@ -3183,11 +3147,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xda515005",
-                      "ty": 5
+                      "ty": 4
                     }
                   },
                   "root_key": "0xda515005",
-                  "ty": 80
+                  "ty": 78
                 }
               },
               "name": "reservation_source_amount"
@@ -3198,11 +3162,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0xef4d66a0",
-                      "ty": 5
+                      "ty": 4
                     }
                   },
                   "root_key": "0xef4d66a0",
-                  "ty": 83
+                  "ty": 81
                 }
               },
               "name": "reservation_dest_amount"
@@ -3217,7 +3181,7 @@
                     }
                   },
                   "root_key": "0xebebacef",
-                  "ty": 86
+                  "ty": 84
                 }
               },
               "name": "address_strike_count"
@@ -3228,11 +3192,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x936b90dc",
-                      "ty": 4
+                      "ty": 3
                     }
                   },
                   "root_key": "0x936b90dc",
-                  "ty": 89
+                  "ty": 87
                 }
               },
               "name": "address_last_expired"
@@ -3241,7 +3205,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "accumulated_fees"
@@ -3250,7 +3214,7 @@
               "layout": {
                 "leaf": {
                   "key": "0x00000000",
-                  "ty": 5
+                  "ty": 4
                 }
               },
               "name": "total_recycled_fees"
@@ -3274,7 +3238,7 @@
                           "layout": {
                             "leaf": {
                               "key": "0x0a1285bc",
-                              "ty": 5
+                              "ty": 4
                             }
                           },
                           "name": "1"
@@ -3284,7 +3248,7 @@
                     }
                   },
                   "root_key": "0x0a1285bc",
-                  "ty": 92
+                  "ty": 90
                 }
               },
               "name": "pending_slashes"
@@ -3294,7 +3258,7 @@
         }
       },
       "root_key": "0x00000000",
-      "ty": 96
+      "ty": 94
     }
   },
   "types": [
@@ -3341,7 +3305,7 @@
       "id": 3,
       "type": {
         "def": {
-          "primitive": "u16"
+          "primitive": "u32"
         }
       }
     },
@@ -3349,7 +3313,7 @@
       "id": 4,
       "type": {
         "def": {
-          "primitive": "u32"
+          "primitive": "u128"
         }
       }
     },
@@ -3357,20 +3321,12 @@
       "id": 5,
       "type": {
         "def": {
-          "primitive": "u128"
-        }
-      }
-    },
-    {
-      "id": 6,
-      "type": {
-        "def": {
           "primitive": "bool"
         }
       }
     },
     {
-      "id": 7,
+      "id": 6,
       "type": {
         "def": {
           "composite": {}
@@ -3382,11 +3338,11 @@
           },
           {
             "name": "V",
-            "type": 6
+            "type": 5
           },
           {
             "name": "KeyType",
-            "type": 8
+            "type": 7
           }
         ],
         "path": [
@@ -3398,7 +3354,7 @@
       }
     },
     {
-      "id": 8,
+      "id": 7,
       "type": {
         "def": {
           "composite": {}
@@ -3406,11 +3362,11 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 10
+            "type": 9
           }
         ],
         "path": [
@@ -3421,7 +3377,7 @@
       }
     },
     {
-      "id": 9,
+      "id": 8,
       "type": {
         "def": {
           "composite": {}
@@ -3434,7 +3390,7 @@
       }
     },
     {
-      "id": 10,
+      "id": 9,
       "type": {
         "def": {
           "composite": {}
@@ -3442,7 +3398,7 @@
         "params": [
           {
             "name": "ParentKey",
-            "type": 11
+            "type": 10
           }
         ],
         "path": [
@@ -3453,7 +3409,7 @@
       }
     },
     {
-      "id": 11,
+      "id": 10,
       "type": {
         "def": {
           "tuple": []
@@ -3461,7 +3417,7 @@
       }
     },
     {
-      "id": 12,
+      "id": 11,
       "type": {
         "def": {
           "primitive": "u64"
@@ -3469,7 +3425,7 @@
       }
     },
     {
-      "id": 13,
+      "id": 12,
       "type": {
         "def": {
           "primitive": "str"
@@ -3477,7 +3433,7 @@
       }
     },
     {
-      "id": 14,
+      "id": 13,
       "type": {
         "def": {
           "composite": {}
@@ -3485,15 +3441,15 @@
         "params": [
           {
             "name": "K",
-            "type": 12
+            "type": 11
           },
           {
             "name": "V",
-            "type": 15
+            "type": 14
           },
           {
             "name": "KeyType",
-            "type": 17
+            "type": 16
           }
         ],
         "path": [
@@ -3505,14 +3461,14 @@
       }
     },
     {
-      "id": 15,
+      "id": 14,
       "type": {
         "def": {
           "composite": {
             "fields": [
               {
                 "name": "id",
-                "type": 12,
+                "type": 11,
                 "typeName": "u64"
               },
               {
@@ -3527,97 +3483,97 @@
               },
               {
                 "name": "source_chain",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "dest_chain",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "source_amount",
-                "type": 5,
+                "type": 4,
                 "typeName": "Balance"
               },
               {
                 "name": "dest_amount",
-                "type": 5,
+                "type": 4,
                 "typeName": "Balance"
               },
               {
                 "name": "tao_amount",
-                "type": 5,
+                "type": 4,
                 "typeName": "Balance"
               },
               {
                 "name": "user_source_address",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "user_dest_address",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "miner_source_address",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "miner_dest_address",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "rate",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "source_tx_hash",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "source_tx_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               },
               {
                 "name": "dest_tx_hash",
-                "type": 13,
+                "type": 12,
                 "typeName": "String"
               },
               {
                 "name": "dest_tx_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               },
               {
                 "name": "status",
-                "type": 16,
+                "type": 15,
                 "typeName": "SwapStatus"
               },
               {
                 "name": "initiated_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               },
               {
                 "name": "timeout_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               },
               {
                 "name": "fulfilled_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               },
               {
                 "name": "completed_block",
-                "type": 4,
+                "type": 3,
                 "typeName": "u32"
               }
             ]
@@ -3631,7 +3587,7 @@
       }
     },
     {
-      "id": 16,
+      "id": 15,
       "type": {
         "def": {
           "variant": {
@@ -3663,7 +3619,7 @@
       }
     },
     {
-      "id": 17,
+      "id": 16,
       "type": {
         "def": {
           "composite": {}
@@ -3671,17 +3627,36 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 18
+            "type": 17
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
           "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -3693,35 +3668,16 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 19,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 20
+            "type": 19
           },
           {
             "name": "V",
-            "type": 6
+            "type": 5
           },
           {
             "name": "KeyType",
-            "type": 21
+            "type": 20
           }
         ],
         "path": [
@@ -3733,14 +3689,37 @@
       }
     },
     {
-      "id": 20,
+      "id": 19,
       "type": {
         "def": {
           "tuple": [
-            12,
+            11,
             0
           ]
         }
+      }
+    },
+    {
+      "id": 20,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 21
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
       }
     },
     {
@@ -3751,18 +3730,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 22
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -3774,14 +3749,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
+            "name": "K",
             "type": 11
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 23
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -3793,23 +3777,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 12
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 24
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -3821,18 +3800,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 25
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -3844,14 +3819,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 19
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 26
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -3863,23 +3847,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 20
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 6
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 27
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -3891,18 +3870,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 28
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -3914,14 +3889,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
+            "name": "K",
             "type": 11
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 29
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -3933,23 +3917,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 12
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 30
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -3961,18 +3940,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 31
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -3984,35 +3959,16 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 32,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 13
+            "type": 12
           },
           {
             "name": "V",
-            "type": 6
+            "type": 5
           },
           {
             "name": "KeyType",
-            "type": 33
+            "type": 32
           }
         ],
         "path": [
@@ -4024,7 +3980,7 @@
       }
     },
     {
-      "id": 33,
+      "id": 32,
       "type": {
         "def": {
           "composite": {}
@@ -4032,17 +3988,36 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 34
+            "type": 33
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
           "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4054,8 +4029,59 @@
         },
         "params": [
           {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 35
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 35,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 36
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 36,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
             "name": "ParentKey",
-            "type": 11
+            "type": 10
           }
         ],
         "path": [
@@ -4066,7 +4092,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 37,
       "type": {
         "def": {
           "composite": {}
@@ -4082,7 +4108,7 @@
           },
           {
             "name": "KeyType",
-            "type": 36
+            "type": 38
           }
         ],
         "path": [
@@ -4090,48 +4116,6 @@
           "lazy",
           "mapping",
           "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 36,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 37
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 37,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
         ]
       }
     },
@@ -4143,23 +4127,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 6
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 39
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4171,18 +4150,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 40
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4194,14 +4169,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 41
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4213,23 +4197,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 6
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 42
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4241,18 +4220,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 43
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4264,14 +4239,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 44
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4283,23 +4267,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 45
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4311,18 +4290,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 46
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4334,14 +4309,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 47
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4353,23 +4337,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 48
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4381,18 +4360,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 49
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4404,14 +4379,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 50
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4423,23 +4407,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 51
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4451,18 +4430,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 52
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4474,14 +4449,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 19
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 53
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4493,23 +4477,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 20
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 6
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 54
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4521,18 +4500,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 55
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4544,14 +4519,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
+            "name": "K",
             "type": 11
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 56
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4563,23 +4547,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 12
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 57
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4591,18 +4570,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 58
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4614,35 +4589,16 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 59,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 12
+            "type": 11
           },
           {
             "name": "V",
-            "type": 4
+            "type": 3
           },
           {
             "name": "KeyType",
-            "type": 60
+            "type": 59
           }
         ],
         "path": [
@@ -4654,7 +4610,7 @@
       }
     },
     {
-      "id": 60,
+      "id": 59,
       "type": {
         "def": {
           "composite": {}
@@ -4662,11 +4618,11 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 61
+            "type": 60
           }
         ],
         "path": [
@@ -4677,7 +4633,7 @@
       }
     },
     {
-      "id": 61,
+      "id": 60,
       "type": {
         "def": {
           "composite": {}
@@ -4685,7 +4641,7 @@
         "params": [
           {
             "name": "ParentKey",
-            "type": 11
+            "type": 10
           }
         ],
         "path": [
@@ -4696,7 +4652,7 @@
       }
     },
     {
-      "id": 62,
+      "id": 61,
       "type": {
         "def": {
           "composite": {
@@ -4716,7 +4672,7 @@
       }
     },
     {
-      "id": 63,
+      "id": 62,
       "type": {
         "def": {
           "composite": {}
@@ -4724,15 +4680,15 @@
         "params": [
           {
             "name": "K",
-            "type": 12
+            "type": 11
           },
           {
             "name": "V",
-            "type": 62
+            "type": 61
           },
           {
             "name": "KeyType",
-            "type": 64
+            "type": 63
           }
         ],
         "path": [
@@ -4740,6 +4696,29 @@
           "lazy",
           "mapping",
           "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 63,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 64
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4751,18 +4730,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 65
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4774,35 +4749,16 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 66,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 67
+            "type": 66
           },
           {
             "name": "V",
-            "type": 12
+            "type": 11
           },
           {
             "name": "KeyType",
-            "type": 68
+            "type": 67
           }
         ],
         "path": [
@@ -4814,7 +4770,7 @@
       }
     },
     {
-      "id": 67,
+      "id": 66,
       "type": {
         "def": {
           "tuple": [
@@ -4825,7 +4781,7 @@
       }
     },
     {
-      "id": 68,
+      "id": 67,
       "type": {
         "def": {
           "composite": {}
@@ -4833,17 +4789,36 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 69
+            "type": 68
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
           "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 68,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4855,14 +4830,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 61
+          },
+          {
+            "name": "KeyType",
+            "type": 70
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4874,23 +4858,18 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
+            "name": "L",
+            "type": 8
           },
           {
-            "name": "V",
-            "type": 62
-          },
-          {
-            "name": "KeyType",
+            "name": "R",
             "type": 71
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4902,18 +4881,14 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 72
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
@@ -4925,14 +4900,23 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 12
+          },
+          {
+            "name": "KeyType",
+            "type": 73
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4940,10 +4924,23 @@
       "id": 73,
       "type": {
         "def": {
-          "sequence": {
-            "type": 2
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 74
           }
-        }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
       }
     },
     {
@@ -4954,23 +4951,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 73
-          },
-          {
-            "name": "KeyType",
-            "type": 75
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4982,18 +4970,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
+            "name": "K",
+            "type": 0
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
             "type": 76
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -5005,14 +4998,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 77
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -5024,23 +5021,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 5
-          },
-          {
-            "name": "KeyType",
-            "type": 78
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -5052,18 +5040,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
+            "name": "K",
+            "type": 0
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
             "type": 79
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -5075,14 +5068,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 80
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -5094,23 +5091,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 5
-          },
-          {
-            "name": "KeyType",
-            "type": 81
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -5122,18 +5110,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
+            "name": "K",
+            "type": 0
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
             "type": 82
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -5145,14 +5138,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 83
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -5164,23 +5161,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 5
-          },
-          {
-            "name": "KeyType",
-            "type": 84
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -5192,18 +5180,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
+            "name": "K",
+            "type": 12
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 2
+          },
+          {
+            "name": "KeyType",
             "type": 85
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -5215,14 +5208,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 86
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -5234,23 +5231,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 73
-          },
-          {
-            "name": "V",
-            "type": 2
-          },
-          {
-            "name": "KeyType",
-            "type": 87
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -5262,18 +5250,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
+            "name": "K",
+            "type": 12
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
             "type": 88
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -5285,14 +5278,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 11
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 89
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -5304,23 +5301,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 73
-          },
-          {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
-            "type": 90
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -5332,58 +5320,16 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 9
-          },
-          {
-            "name": "R",
-            "type": 91
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 91,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 11
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 92,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 12
+            "type": 11
           },
           {
             "name": "V",
-            "type": 93
+            "type": 91
           },
           {
             "name": "KeyType",
-            "type": 94
+            "type": 92
           }
         ],
         "path": [
@@ -5395,18 +5341,18 @@
       }
     },
     {
-      "id": 93,
+      "id": 91,
       "type": {
         "def": {
           "tuple": [
             0,
-            5
+            4
           ]
         }
       }
     },
     {
-      "id": 94,
+      "id": 92,
       "type": {
         "def": {
           "composite": {}
@@ -5414,11 +5360,11 @@
         "params": [
           {
             "name": "L",
-            "type": 9
+            "type": 8
           },
           {
             "name": "R",
-            "type": 95
+            "type": 93
           }
         ],
         "path": [
@@ -5429,7 +5375,7 @@
       }
     },
     {
-      "id": 95,
+      "id": 93,
       "type": {
         "def": {
           "composite": {}
@@ -5437,7 +5383,7 @@
         "params": [
           {
             "name": "ParentKey",
-            "type": 11
+            "type": 10
           }
         ],
         "path": [
@@ -5448,7 +5394,7 @@
       }
     },
     {
-      "id": 96,
+      "id": 94,
       "type": {
         "def": {
           "composite": {
@@ -5459,48 +5405,38 @@
                 "typeName": "<AccountId as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<2833659908u32, ()>,>>::Type"
               },
               {
-                "name": "treasury_hotkey",
-                "type": 0,
-                "typeName": "<AccountId as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3597031972u32, ()>,>>::Type"
-              },
-              {
                 "name": "recycle_address",
                 "type": 0,
                 "typeName": "<AccountId as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3462413410u32, ()>,>>::Type"
               },
               {
-                "name": "netuid",
-                "type": 3,
-                "typeName": "<u16 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<2503007889u32, ()>,>>::Type"
-              },
-              {
                 "name": "fulfillment_timeout_blocks",
-                "type": 4,
+                "type": 3,
                 "typeName": "<u32 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<140410277u32, ()>,>>::Type"
               },
               {
                 "name": "reservation_ttl",
-                "type": 4,
+                "type": 3,
                 "typeName": "<u32 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<196722775u32, ()>,>>::Type"
               },
               {
                 "name": "min_collateral",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<1188786366u32, ()>,>>::Type"
               },
               {
                 "name": "max_collateral",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<948383453u32, ()>,>>::Type"
               },
               {
                 "name": "min_swap_amount",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<1125021002u32, ()>,>>::Type"
               },
               {
                 "name": "max_swap_amount",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3490700323u32, ()>,>>::Type"
               },
               {
@@ -5510,167 +5446,167 @@
               },
               {
                 "name": "validator_count",
-                "type": 4,
+                "type": 3,
                 "typeName": "<u32 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<1735615909u32, ()>,>>::Type"
               },
               {
                 "name": "fee_divisor",
-                "type": 5,
+                "type": 4,
                 "typeName": "<u128 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<2803259442u32, ()>,>>::Type"
               },
               {
                 "name": "halted",
-                "type": 6,
+                "type": 5,
                 "typeName": "<bool as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<3271630610u32, ()>,>>::Type"
               },
               {
                 "name": "validators",
-                "type": 7,
+                "type": 6,
                 "typeName": "<Mapping<AccountId, bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1375580815u32,\n()>,>>::Type"
               },
               {
                 "name": "next_swap_id",
-                "type": 12,
+                "type": 11,
                 "typeName": "<u64 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<3204266513u32, ()>,>>::Type"
               },
               {
                 "name": "swaps",
-                "type": 14,
+                "type": 13,
                 "typeName": "<Mapping<u64, SwapData> as::ink::storage::traits::AutoStorableHint\n<::ink::storage::traits::ManualKey<1645419819u32, ()>,>>::Type"
               },
               {
                 "name": "swap_confirm_votes",
-                "type": 19,
+                "type": 18,
                 "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3580685545u32,\n()>,>>::Type"
               },
               {
                 "name": "swap_confirm_vote_count",
-                "type": 23,
+                "type": 22,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<1618119087u32, ()>,>>::Type"
               },
               {
                 "name": "swap_timeout_votes",
-                "type": 26,
+                "type": 25,
                 "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<537912262u32, ()\n>,>>::Type"
               },
               {
                 "name": "swap_timeout_vote_count",
-                "type": 29,
+                "type": 28,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3216631485u32, ()>,>>::Type"
               },
               {
                 "name": "used_source_tx",
-                "type": 32,
+                "type": 31,
                 "typeName": "<Mapping<String, bool> as::ink::storage::traits::AutoStorableHint\n<::ink::storage::traits::ManualKey<444471674u32, ()>,>>::Type"
               },
               {
                 "name": "collateral",
-                "type": 35,
+                "type": 34,
                 "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3894748662u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_active",
-                "type": 38,
+                "type": 37,
                 "typeName": "<Mapping<AccountId, bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<4204122727u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_has_active_swap",
-                "type": 41,
+                "type": 40,
                 "typeName": "<Mapping<AccountId, bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1699049251u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_reserved_until",
-                "type": 44,
+                "type": 43,
                 "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1355280751u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_last_resolved_block",
-                "type": 47,
+                "type": 46,
                 "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3154176384u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_deactivation_block",
-                "type": 50,
+                "type": 49,
                 "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<878783374u32, ()\n>,>>::Type"
               },
               {
                 "name": "next_request_id",
-                "type": 12,
+                "type": 11,
                 "typeName": "<u64 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<3094324075u32, ()>,>>::Type"
               },
               {
                 "name": "request_votes",
-                "type": 53,
+                "type": 52,
                 "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2214978342u32,\n()>,>>::Type"
               },
               {
                 "name": "request_vote_count",
-                "type": 56,
+                "type": 55,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3442329302u32, ()>,>>::Type"
               },
               {
                 "name": "request_created",
-                "type": 59,
+                "type": 58,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3808762728u32, ()>,>>::Type"
               },
               {
                 "name": "request_hash",
-                "type": 63,
+                "type": 62,
                 "typeName": "<Mapping<u64, Hash> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<507769943u32, ()>,>>::Type"
               },
               {
                 "name": "miner_active_request",
-                "type": 66,
+                "type": 65,
                 "typeName": "<Mapping<(AccountId, u8), u64> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2076993396u32,\n()>,>>::Type"
               },
               {
                 "name": "reservation_hash",
-                "type": 70,
+                "type": 69,
                 "typeName": "<Mapping<AccountId, Hash> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1262456359u32,\n()>,>>::Type"
               },
               {
                 "name": "reservation_source_addr",
-                "type": 74,
-                "typeName": "<Mapping<AccountId, Vec<u8>> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<279068048u32, ()\n>,>>::Type"
+                "type": 72,
+                "typeName": "<Mapping<AccountId, String> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<279068048u32, ()\n>,>>::Type"
               },
               {
                 "name": "reservation_tao_amount",
-                "type": 77,
+                "type": 75,
                 "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3983894121u32,\n()>,>>::Type"
               },
               {
                 "name": "reservation_source_amount",
-                "type": 80,
+                "type": 78,
                 "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<89149914u32, ()\n>,>>::Type"
               },
               {
                 "name": "reservation_dest_amount",
-                "type": 83,
+                "type": 81,
                 "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2691059183u32,\n()>,>>::Type"
               },
               {
                 "name": "address_strike_count",
-                "type": 86,
-                "typeName": "<Mapping<Vec<u8>, u8> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<4021087211u32,\n()>,>>::Type"
+                "type": 84,
+                "typeName": "<Mapping<String, u8> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<4021087211u32, ()>,>>::Type"
               },
               {
                 "name": "address_last_expired",
-                "type": 89,
-                "typeName": "<Mapping<Vec<u8>, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3700452243u32,\n()>,>>::Type"
+                "type": 87,
+                "typeName": "<Mapping<String, u32> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<3700452243u32, ()>,>>::Type"
               },
               {
                 "name": "accumulated_fees",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3593079788u32, ()>,>>::Type"
               },
               {
                 "name": "total_recycled_fees",
-                "type": 5,
+                "type": 4,
                 "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<259358120u32, ()>,>>::Type"
               },
               {
                 "name": "pending_slashes",
-                "type": 92,
+                "type": 90,
                 "typeName": "<Mapping<u64, (AccountId, Balance)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3162837514u32,\n()>,>>::Type"
               }
             ]
@@ -5684,7 +5620,7 @@
       }
     },
     {
-      "id": 97,
+      "id": 95,
       "type": {
         "def": {
           "variant": {
@@ -5692,7 +5628,7 @@
               {
                 "fields": [
                   {
-                    "type": 11
+                    "type": 10
                   }
                 ],
                 "index": 0,
@@ -5701,7 +5637,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -5713,11 +5649,11 @@
         "params": [
           {
             "name": "T",
-            "type": 11
+            "type": 10
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -5726,7 +5662,7 @@
       }
     },
     {
-      "id": 98,
+      "id": 96,
       "type": {
         "def": {
           "variant": {
@@ -5745,26 +5681,26 @@
       }
     },
     {
-      "id": 99,
+      "id": 97,
       "type": {
         "def": {
           "variant": {
             "variants": [
-              {
-                "fields": [
-                  {
-                    "type": 100
-                  }
-                ],
-                "index": 0,
-                "name": "Ok"
-              },
               {
                 "fields": [
                   {
                     "type": 98
                   }
                 ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 96
+                  }
+                ],
                 "index": 1,
                 "name": "Err"
               }
@@ -5774,11 +5710,11 @@
         "params": [
           {
             "name": "T",
-            "type": 100
+            "type": 98
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -5787,7 +5723,7 @@
       }
     },
     {
-      "id": 100,
+      "id": 98,
       "type": {
         "def": {
           "variant": {
@@ -5795,7 +5731,7 @@
               {
                 "fields": [
                   {
-                    "type": 11
+                    "type": 10
                   }
                 ],
                 "index": 0,
@@ -5804,7 +5740,7 @@
               {
                 "fields": [
                   {
-                    "type": 101
+                    "type": 99
                   }
                 ],
                 "index": 1,
@@ -5816,11 +5752,11 @@
         "params": [
           {
             "name": "T",
-            "type": 11
+            "type": 10
           },
           {
             "name": "E",
-            "type": 101
+            "type": 99
           }
         ],
         "path": [
@@ -5829,7 +5765,7 @@
       }
     },
     {
-      "id": 101,
+      "id": 99,
       "type": {
         "def": {
           "variant": {
@@ -5957,7 +5893,7 @@
       }
     },
     {
-      "id": 102,
+      "id": 100,
       "type": {
         "def": {
           "variant": {
@@ -5965,7 +5901,7 @@
               {
                 "fields": [
                   {
-                    "type": 103
+                    "type": 101
                   }
                 ],
                 "index": 0,
@@ -5974,7 +5910,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -5986,11 +5922,11 @@
         "params": [
           {
             "name": "T",
-            "type": 103
+            "type": 101
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -5999,7 +5935,7 @@
       }
     },
     {
-      "id": 103,
+      "id": 101,
       "type": {
         "def": {
           "variant": {
@@ -6011,7 +5947,7 @@
               {
                 "fields": [
                   {
-                    "type": 15
+                    "type": 14
                   }
                 ],
                 "index": 1,
@@ -6023,7 +5959,7 @@
         "params": [
           {
             "name": "T",
-            "type": 15
+            "type": 14
           }
         ],
         "path": [
@@ -6032,91 +5968,7 @@
       }
     },
     {
-      "id": 104,
-      "type": {
-        "def": {
-          "variant": {
-            "variants": [
-              {
-                "fields": [
-                  {
-                    "type": 5
-                  }
-                ],
-                "index": 0,
-                "name": "Ok"
-              },
-              {
-                "fields": [
-                  {
-                    "type": 98
-                  }
-                ],
-                "index": 1,
-                "name": "Err"
-              }
-            ]
-          }
-        },
-        "params": [
-          {
-            "name": "T",
-            "type": 5
-          },
-          {
-            "name": "E",
-            "type": 98
-          }
-        ],
-        "path": [
-          "Result"
-        ]
-      }
-    },
-    {
-      "id": 105,
-      "type": {
-        "def": {
-          "variant": {
-            "variants": [
-              {
-                "fields": [
-                  {
-                    "type": 6
-                  }
-                ],
-                "index": 0,
-                "name": "Ok"
-              },
-              {
-                "fields": [
-                  {
-                    "type": 98
-                  }
-                ],
-                "index": 1,
-                "name": "Err"
-              }
-            ]
-          }
-        },
-        "params": [
-          {
-            "name": "T",
-            "type": 6
-          },
-          {
-            "name": "E",
-            "type": 98
-          }
-        ],
-        "path": [
-          "Result"
-        ]
-      }
-    },
-    {
-      "id": 106,
+      "id": 102,
       "type": {
         "def": {
           "variant": {
@@ -6133,7 +5985,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6149,7 +6001,7 @@
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6158,7 +6010,7 @@
       }
     },
     {
-      "id": 107,
+      "id": 103,
       "type": {
         "def": {
           "variant": {
@@ -6166,7 +6018,7 @@
               {
                 "fields": [
                   {
-                    "type": 12
+                    "type": 5
                   }
                 ],
                 "index": 0,
@@ -6175,7 +6027,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6187,11 +6039,11 @@
         "params": [
           {
             "name": "T",
-            "type": 12
+            "type": 5
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6200,7 +6052,91 @@
       }
     },
     {
-      "id": 108,
+      "id": 104,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 3
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 96
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 3
+          },
+          {
+            "name": "E",
+            "type": 96
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 105,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 11
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 96
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 11
+          },
+          {
+            "name": "E",
+            "type": 96
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 106,
       "type": {
         "def": {
           "variant": {
@@ -6217,7 +6153,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6233,7 +6169,7 @@
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6242,7 +6178,7 @@
       }
     },
     {
-      "id": 109,
+      "id": 107,
       "type": {
         "def": {
           "variant": {
@@ -6259,7 +6195,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6275,7 +6211,7 @@
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6284,7 +6220,7 @@
       }
     },
     {
-      "id": 110,
+      "id": 108,
       "type": {
         "def": {
           "variant": {
@@ -6292,7 +6228,7 @@
               {
                 "fields": [
                   {
-                    "type": 111
+                    "type": 109
                   }
                 ],
                 "index": 0,
@@ -6301,7 +6237,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6313,11 +6249,11 @@
         "params": [
           {
             "name": "T",
-            "type": 111
+            "type": 109
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6326,7 +6262,7 @@
       }
     },
     {
-      "id": 111,
+      "id": 109,
       "type": {
         "def": {
           "variant": {
@@ -6338,7 +6274,7 @@
               {
                 "fields": [
                   {
-                    "type": 112
+                    "type": 110
                   }
                 ],
                 "index": 1,
@@ -6350,7 +6286,7 @@
         "params": [
           {
             "name": "T",
-            "type": 112
+            "type": 110
           }
         ],
         "path": [
@@ -6359,21 +6295,21 @@
       }
     },
     {
-      "id": 112,
+      "id": 110,
       "type": {
         "def": {
           "tuple": [
-            73,
-            5,
-            5,
-            5,
-            4
+            12,
+            4,
+            4,
+            4,
+            3
           ]
         }
       }
     },
     {
-      "id": 113,
+      "id": 111,
       "type": {
         "def": {
           "variant": {
@@ -6381,7 +6317,7 @@
               {
                 "fields": [
                   {
-                    "type": 114
+                    "type": 112
                   }
                 ],
                 "index": 0,
@@ -6390,7 +6326,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 96
                   }
                 ],
                 "index": 1,
@@ -6402,11 +6338,11 @@
         "params": [
           {
             "name": "T",
-            "type": 114
+            "type": 112
           },
           {
             "name": "E",
-            "type": 98
+            "type": 96
           }
         ],
         "path": [
@@ -6415,18 +6351,18 @@
       }
     },
     {
-      "id": 114,
+      "id": 112,
       "type": {
         "def": {
           "tuple": [
             2,
-            4
+            3
           ]
         }
       }
     },
     {
-      "id": 115,
+      "id": 113,
       "type": {
         "def": {
           "variant": {
@@ -6454,7 +6390,7 @@
       }
     },
     {
-      "id": 116,
+      "id": 114,
       "type": {
         "def": {
           "variant": {}

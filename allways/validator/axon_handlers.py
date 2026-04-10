@@ -36,7 +36,7 @@ def _scale_encode_reserve_hash_input(
     source_amount: int,
     dest_amount: int,
 ) -> bytes:
-    """SCALE-encode the reserve hash input tuple: (AccountId, Vec<u8>, String, String, u128, u128, u128).
+    """SCALE-encode the reserve hash input tuple: (AccountId, String, String, String, u128, u128, u128).
 
     Matches ink::env::hash_encoded::<Keccak256, _>(
         &(miner, user_source_address, source_chain, dest_chain, tao_amount, source_amount, dest_amount)
@@ -47,11 +47,11 @@ def _scale_encode_reserve_hash_input(
     return (
         miner_bytes  # AccountId: 32 bytes raw
         + compact_encode_len(len(source_addr_bytes))
-        + source_addr_bytes  # Vec<u8>: compact length + data
+        + source_addr_bytes  # String: compact length + UTF-8 bytes
         + compact_encode_len(len(src_bytes))
-        + src_bytes  # String: compact length + utf-8
+        + src_bytes  # String: compact length + UTF-8 bytes
         + compact_encode_len(len(dst_bytes))
-        + dst_bytes
+        + dst_bytes  # String: compact length + UTF-8 bytes
         + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + source_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + dest_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
@@ -340,7 +340,7 @@ async def handle_swap_reserve(
                 _reject(synapse, f'Swap amount above maximum ({synapse.tao_amount} > {max_swap} rao)', ctx)
                 return synapse
 
-            strike_count, last_expired = contract.get_cooldown(source_addr_bytes)
+            strike_count, last_expired = contract.get_cooldown(synapse.source_address)
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
                 if validator.block < last_expired + cooldown:
@@ -351,7 +351,7 @@ async def handle_swap_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,
                 miner_hotkey=miner,
-                user_source_address=source_addr_bytes,
+                user_source_address=synapse.source_address,
                 source_chain=synapse.source_chain,
                 dest_chain=synapse.dest_chain,
                 tao_amount=synapse.tao_amount,

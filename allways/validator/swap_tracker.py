@@ -67,6 +67,21 @@ class SwapTracker:
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
+    def resolve(self, swap_id: int, status: SwapStatus, block: int):
+        """Move a swap from active tracking to the scoring window with its terminal state.
+
+        Called when the validator's vote reaches quorum (confirm or timeout).
+        The contract removes swap data on resolution, so get_swap() returns None
+        after this point — we must capture the terminal state here for scoring.
+        """
+        swap = self.active.pop(swap_id, None)
+        if swap is None:
+            return
+        swap.status = status
+        swap.completed_block = block
+        self.window.append(swap)
+        self.voted_ids.discard(swap_id)
+
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant vote extrinsics."""
         self.voted_ids.add(swap_id)
@@ -75,8 +90,9 @@ class SwapTracker:
         """Check if we've already voted on this swap."""
         return swap_id in self.voted_ids
 
-    async def poll(self):
+    async def poll(self, current_block: int = 0):
         """Incremental update — called every forward step (~12s)."""
+        self._current_block = current_block
         try:
             await self._poll_inner()
         except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
@@ -117,6 +133,14 @@ class SwapTracker:
         resolved_ids = []
         for sid, swap in zip(stale_ids, swaps):
             if swap is None:
+                # Swap removed from contract (resolved by another validator's quorum vote).
+                # If resolve() already captured it, active won't have it; otherwise infer state.
+                last_known = self.active.get(sid)
+                if last_known is not None and sid not in self.voted_ids:
+                    was_past_timeout = last_known.timeout_block > 0 and self._current_block > last_known.timeout_block
+                    last_known.status = SwapStatus.TIMED_OUT if was_past_timeout else SwapStatus.COMPLETED
+                    last_known.completed_block = self._current_block
+                    self.window.append(last_known)
                 resolved_ids.append(sid)
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
