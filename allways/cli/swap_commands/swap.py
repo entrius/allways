@@ -545,6 +545,8 @@ def swap_now_command(
                         dest_address=p.source_address,
                         rate=rev_rate,
                         rate_str=rev_rate_str,
+                        counter_rate=p.rate,
+                        counter_rate_str=p.rate_str,
                     )
                 )
 

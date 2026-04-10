@@ -108,13 +108,19 @@ def status_command(netuid: int):
                 if my_pairs:
                     for p in my_pairs:
                         src_up, dst_up = p.source_chain.upper(), p.dest_chain.upper()
-                        if p.rate > 0 and p.counter_rate > 0 and p.rate_str != p.counter_rate_str:
-                            rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                        if p.rate > 0 and p.counter_rate > 0:
+                            glyph = '↔'
+                            if p.rate_str != p.counter_rate_str:
+                                rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                            else:
+                                rate_display = f'{p.rate:g}'
                         elif p.rate > 0:
+                            glyph = '→'
                             rate_display = f'{p.rate:g}'
                         else:
+                            glyph = '←'
                             rate_display = f'{p.counter_rate:g}'
-                        table.add_row('Miner Pair', f'{src_up} ↔ {dst_up} @ {rate_display}')
+                        table.add_row('Miner Pair', f'{src_up} {glyph} {dst_up} @ {rate_display}')
         except ContractError:
             table.add_row('Miner Status', '[dim]unable to read[/dim]')
 

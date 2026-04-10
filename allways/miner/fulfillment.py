@@ -145,8 +145,9 @@ class SwapFulfiller:
         key = self.wallet if swap.dest_chain == 'tao' else None
 
         # For non-TAO sends, read the miner's commitment to get the sending address.
-        # Commitments are normalized to canonical order, so source_address is
-        # always the canonical source chain's address.
+        # Commitments are in canonical order, so pick whichever commitment address
+        # matches the swap's dest_chain — source_address for canonical-reverse swaps
+        # (e.g. TAO→BTC where BTC is canonical source), dest_address otherwise.
         from_address = None
         if swap.dest_chain != 'tao':
             try:
@@ -159,10 +160,11 @@ class SwapFulfiller:
                     metagraph=self.metagraph,
                 )
                 if commitment:
-                    from_address = commitment.source_address
-                    bt.logging.debug(
-                        f'Swap {swap.id}: sending from committed {commitment.source_chain} address {from_address}'
-                    )
+                    if swap.dest_chain == commitment.source_chain:
+                        from_address = commitment.source_address
+                    elif swap.dest_chain == commitment.dest_chain:
+                        from_address = commitment.dest_address
+                    bt.logging.debug(f'Swap {swap.id}: sending from committed {swap.dest_chain} address {from_address}')
             except Exception as e:
                 bt.logging.warning(f'Swap {swap.id}: could not read commitment for from_address, will probe: {e}')
 

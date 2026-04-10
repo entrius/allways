@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0xd107a94d3c007dbe3fb4dc7767535b674cea6eaa098611a98906f248322f73a2",
+    "hash": "0xa9366ce46778c703549e625adf39d154f87dce58dded686937c0e2630cb1052e",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -1011,6 +1011,24 @@
                 "Vec"
               ],
               "type": 73
+            }
+          },
+          {
+            "label": "source_chain",
+            "type": {
+              "displayName": [
+                "String"
+              ],
+              "type": 13
+            }
+          },
+          {
+            "label": "dest_chain",
+            "type": {
+              "displayName": [
+                "String"
+              ],
+              "type": 13
             }
           },
           {

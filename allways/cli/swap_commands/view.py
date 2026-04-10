@@ -156,7 +156,9 @@ def view_rates(pair: str):
         table.add_column(f'{dst.upper()}→{src.upper()}', style='green')
         table.add_column('Hotkey', style='dim')
 
-        pair_list.sort(key=lambda x: x.rate, reverse=True)
+        # Sort by the stronger of the two rates so reverse-only miners aren't
+        # buried at the bottom with rate=0.
+        pair_list.sort(key=lambda x: max(x.rate, x.counter_rate), reverse=True)
         for p in pair_list:
             fwd = f'{p.rate:g}' if p.rate > 0 else '—'
             if p.counter_rate > 0:
@@ -169,11 +171,23 @@ def view_rates(pair: str):
 
         console.print(table)
 
-        if len(pair_list) > 1:
-            rates = [p.rate for p in pair_list]
-            console.print(
-                f'  [dim]Best: {max(rates):g} | Worst: {min(rates):g} | Avg: {sum(rates) / len(rates):.4f}[/dim]'
+        # Per-direction stats — excluding miners that don't quote that direction,
+        # so a single reverse-only miner doesn't drag the forward average to zero.
+        fwd_rates = [p.rate for p in pair_list if p.rate > 0]
+        rev_rates = [p.counter_rate for p in pair_list if p.counter_rate > 0]
+        stat_lines = []
+        if len(fwd_rates) > 1:
+            stat_lines.append(
+                f'{src.upper()}→{dst.upper()}: best {max(fwd_rates):g} | worst {min(fwd_rates):g} | '
+                f'avg {sum(fwd_rates) / len(fwd_rates):.4f}'
             )
+        if len(rev_rates) > 1:
+            stat_lines.append(
+                f'{dst.upper()}→{src.upper()}: best {max(rev_rates):g} | worst {min(rev_rates):g} | '
+                f'avg {sum(rev_rates) / len(rev_rates):.4f}'
+            )
+        for line in stat_lines:
+            console.print(f'  [dim]{line}[/dim]')
 
         console.print()
 

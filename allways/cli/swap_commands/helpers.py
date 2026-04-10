@@ -213,7 +213,10 @@ def find_matching_miners(all_pairs, source_chain: str, dest_chain: str):
     """Filter and normalize miner pairs for a given swap direction (bilateral matching).
 
     Handles both direct matches and reverse-direction pairs (using counter_rate for the
-    reverse direction). Returns list of MinerPair with source/dest matching the requested direction.
+    reverse direction). Returns list of MinerPair with source/dest matching the requested
+    direction. For reverse-direction matches, the returned MinerPair carries the full
+    bidirectional view: `rate` is the selected-direction rate, `counter_rate` preserves
+    the original canonical rate so `get_rate_for_direction` still works on the result.
     """
     matching = []
     for p in all_pairs:
@@ -233,6 +236,8 @@ def find_matching_miners(all_pairs, source_chain: str, dest_chain: str):
                         dest_address=p.source_address,
                         rate=rev_rate,
                         rate_str=rev_rate_str,
+                        counter_rate=p.rate,
+                        counter_rate_str=p.rate_str,
                     )
                 )
     return matching

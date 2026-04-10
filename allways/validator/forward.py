@@ -176,6 +176,11 @@ def _process_pending_confirms(self: Validator) -> None:
             hash_input = _scale_encode_initiate_hash_input(
                 miner_bytes,
                 item.source_tx_hash,
+                item.source_chain,
+                item.dest_chain,
+                item.miner_deposit_address,
+                item.miner_dest_address,
+                item.rate_str,
                 item.tao_amount,
                 item.source_amount,
                 item.dest_amount,
