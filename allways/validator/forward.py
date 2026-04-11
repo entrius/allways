@@ -382,11 +382,9 @@ def calculate_miner_rewards(
 
     # Per-chain fastest averages: compare miners only against others
     # fulfilling on the same dest chain (BTC vs BTC, TAO vs TAO, etc.)
-    all_chains: set = set()
     avg_speeds_by_chain: Dict[str, Dict[int, float]] = {}
     for uid, s in active_stats.items():
         for chain, times in s.fulfillment_times_by_chain.items():
-            all_chains.add(chain)
             if chain not in avg_speeds_by_chain:
                 avg_speeds_by_chain[chain] = {}
             avg_speeds_by_chain[chain][uid] = mean(times)
@@ -422,6 +420,10 @@ def _chain_weighted_speed(
 
     Each chain's speed score = fastest_avg / miner_avg (within that chain).
     Final score is a weighted average by swap count per chain.
+
+    Returns 1.0 (neutral baseline) when the miner has completed swaps but none
+    recorded fulfillment-block timing (fulfilled_block was 0 for all of them),
+    so they are not penalised to a zero reward solely due to missing timing data.
     """
     total_swaps = 0
     weighted_sum = 0.0
@@ -435,4 +437,10 @@ def _chain_weighted_speed(
             weighted_sum += chain_score * count
             total_swaps += count
 
-    return weighted_sum / total_swaps if total_swaps > 0 else 0.0
+    if total_swaps > 0:
+        return weighted_sum / total_swaps
+    # No timing data recorded, but the miner completed swaps — return a neutral
+    # baseline of 1.0 so the reward is not zeroed out by the missing timing.
+    if s.completed > 0:
+        return 1.0
+    return 0.0
