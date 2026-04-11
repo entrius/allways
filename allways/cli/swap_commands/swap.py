@@ -277,7 +277,7 @@ def broadcast_reserve_with_retry(
 # =========================================================================
 
 
-def _display_receipt(swap):
+def _display_receipt(swap, fee_divisor: int = DEFAULT_FEE_DIVISOR):
     """Show a rich completion receipt after a successful swap."""
     src_chain_def = get_chain(swap.source_chain)
     dst_chain_def = get_chain(swap.dest_chain)
@@ -286,13 +286,13 @@ def _display_receipt(swap):
     tao_human = swap.tao_amount / (10**9)
 
     # Calculate fee
-    fee_divisor = 100  # 1% fee
     if swap.dest_chain == 'tao':
         fee_human = tao_human / fee_divisor
         fee_unit = 'TAO'
     else:
         fee_human = dst_human / fee_divisor
         fee_unit = swap.dest_chain.upper()
+    fee_percent = 100 / fee_divisor
 
     src_tx = swap.source_tx_hash[:20] + '...' if len(swap.source_tx_hash) > 20 else swap.source_tx_hash
     dst_tx = swap.dest_tx_hash[:20] + '...' if len(swap.dest_tx_hash) > 20 else swap.dest_tx_hash
@@ -300,7 +300,7 @@ def _display_receipt(swap):
     receipt = (
         f'  [green]Sent:      {src_human:g} {swap.source_chain.upper()}[/green]\n'
         f'  [green]Received:  {dst_human:.8f} {swap.dest_chain.upper()}[/green]\n'
-        f'  [dim]Fee:       {fee_human:.8f} {fee_unit} (1%)[/dim]\n'
+        f'  [dim]Fee:       {fee_human:.8f} {fee_unit} ({fee_percent:g}%)[/dim]\n'
         f'\n'
         f'  Source TX: [cyan]{src_tx}[/cyan]\n'
         f'  Dest TX:   [cyan]{dst_tx}[/cyan]\n'
@@ -877,4 +877,4 @@ def swap_now_command(
 
     # Show completion receipt
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
-        _display_receipt(final_swap)
+        _display_receipt(final_swap, fee_divisor)
