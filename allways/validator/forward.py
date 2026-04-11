@@ -78,7 +78,7 @@ def _try_extend_reservation(self: Validator, item, current_block: int, swap_labe
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
         blocks_left = reserved_until - current_block
-        if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
+        if 0 < blocks_left < EXTEND_THRESHOLD_BLOCKS:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
             extend_hash = _keccak256(_scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
             self.contract_client.vote_extend_reservation(
