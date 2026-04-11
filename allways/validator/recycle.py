@@ -47,8 +47,10 @@ def apply_recycle(
     try:
         alpha_price_tao = self.subtensor.get_subnet_price(self.config.netuid).tao
     except Exception as e:
-        bt.logging.warning(f'Recycle: failed to get subnet price, skipping: {e}')
-        return rewards, uids
+        bt.logging.warning(
+            f'Recycle: failed to get subnet price, routing all weight to recycle_uid to avoid silent emission drop: {e}'
+        )
+        return np.array([1.0], dtype=np.float32), {recycle_uid}
     window_fraction = SCORING_WINDOW_BLOCKS / 7200
     emission_alpha = DAILY_EMISSION_ALPHA * window_fraction
     emission_tao = emission_alpha * alpha_price_tao
