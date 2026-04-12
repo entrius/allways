@@ -11,7 +11,7 @@ from rich.table import Table
 
 from allways.chain_providers import create_chain_providers
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
-from allways.classes import MinerPair, SwapStatus
+from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
@@ -19,6 +19,7 @@ from allways.cli.swap_commands.helpers import (
     PendingSwapState,
     clear_pending_swap,
     console,
+    find_matching_miners,
     from_rao,
     get_cli_context,
     is_local_network,
@@ -527,26 +528,7 @@ def swap_now_command(
     console.print('\n[dim]Reading miner commitments...[/dim]')
     all_pairs = read_miner_commitments(subtensor, netuid)
 
-    matching_pairs = []
-    for p in all_pairs:
-        if p.source_chain == source_chain and p.dest_chain == dest_chain:
-            if p.rate > 0:
-                matching_pairs.append(p)
-        elif p.source_chain == dest_chain and p.dest_chain == source_chain:
-            rev_rate, rev_rate_str = p.get_rate_for_direction(source_chain)
-            if rev_rate > 0:
-                matching_pairs.append(
-                    MinerPair(
-                        uid=p.uid,
-                        hotkey=p.hotkey,
-                        source_chain=p.dest_chain,
-                        source_address=p.dest_address,
-                        dest_chain=p.source_chain,
-                        dest_address=p.source_address,
-                        rate=rev_rate,
-                        rate_str=rev_rate_str,
-                    )
-                )
+    matching_pairs = find_matching_miners(all_pairs, source_chain, dest_chain)
 
     if not matching_pairs:
         console.print('[yellow]No miners found for this pair[/yellow]\n')

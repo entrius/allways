@@ -93,7 +93,9 @@ CONTRACT_ARG_TYPES = {
     'vote_reserve': [
         ('request_hash', 'hash'),
         ('miner', 'AccountId'),
-        ('user_source_address', 'bytes'),
+        ('user_source_address', 'str'),
+        ('source_chain', 'str'),
+        ('dest_chain', 'str'),
         ('tao_amount', 'u128'),
         ('source_amount', 'u128'),
         ('dest_amount', 'u128'),
@@ -159,7 +161,7 @@ CONTRACT_ARG_TYPES = {
     ],
     'get_extend_vote_count': [('miner', 'AccountId')],
     'vote_extend_timeout': [('swap_id', 'u64')],
-    'get_cooldown': [('source_address', 'bytes')],
+    'get_cooldown': [('source_address', 'str')],
     'set_halted': [('halted', 'bool')],
     'get_halted': [],
     'get_accumulated_fees': [],
@@ -818,7 +820,7 @@ class AllwaysContractClient:
     def get_extend_vote_count(self, miner_hotkey: str) -> int:
         return self._read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
-    def get_cooldown(self, source_address: bytes) -> Tuple[int, int]:
+    def get_cooldown(self, source_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""
         self._ensure_initialized()
         data = self._raw_contract_read('get_cooldown', {'source_address': source_address})
@@ -861,7 +863,7 @@ class AllwaysContractClient:
     def get_fee_divisor(self) -> int:
         return self._read_u128('get_fee_divisor')
 
-    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[bytes, int, int, int, int]]:
+    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
         """Get reservation data for a miner.
 
         Returns (source_addr, tao_amount, source_amount, dest_amount, reserved_until) or None.
@@ -876,7 +878,7 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # Vec<u8> source_addr: compact length + bytes
+        # String source_addr: compact length + UTF-8 bytes
         first = data[o]
         mode = first & 0x03
         if mode == 0:
@@ -887,7 +889,7 @@ class AllwaysContractClient:
             o += 2
         else:
             return None
-        source_addr = data[o : o + addr_len]
+        source_addr = data[o : o + addr_len].decode('utf-8')
         o += addr_len
         # 3 x u128 + 1 x u32
         tao_lo = struct.unpack_from('<Q', data, o)[0]
@@ -927,7 +929,9 @@ class AllwaysContractClient:
         wallet: bt.Wallet,
         request_hash: bytes,
         miner_hotkey: str,
-        user_source_address: bytes,
+        user_source_address: str,
+        source_chain: str,
+        dest_chain: str,
         tao_amount: int,
         source_amount: int,
         dest_amount: int,
@@ -939,6 +943,8 @@ class AllwaysContractClient:
                 'request_hash': request_hash,
                 'miner': miner_hotkey,
                 'user_source_address': user_source_address,
+                'source_chain': source_chain,
+                'dest_chain': dest_chain,
                 'tao_amount': tao_amount,
                 'source_amount': source_amount,
                 'dest_amount': dest_amount,

@@ -20,9 +20,7 @@ mod allways_swap_manager {
     pub struct AllwaysSwapManager {
         // Configuration
         owner: AccountId,
-        treasury_hotkey: AccountId,
         recycle_address: AccountId,
-        netuid: u16,
         fulfillment_timeout_blocks: u32,
         reservation_ttl: u32,
         min_collateral: Balance,
@@ -65,14 +63,14 @@ mod allways_swap_manager {
 
         // Confirmed reservation data (post-quorum)
         reservation_hash: Mapping<AccountId, Hash>,
-        reservation_source_addr: Mapping<AccountId, Vec<u8>>,
+        reservation_source_addr: Mapping<AccountId, String>,
         reservation_tao_amount: Mapping<AccountId, Balance>,
         reservation_source_amount: Mapping<AccountId, Balance>,
         reservation_dest_amount: Mapping<AccountId, Balance>,
 
         // Cooldown strike tracking (lazy eval)
-        address_strike_count: Mapping<Vec<u8>, u8>,
-        address_last_expired: Mapping<Vec<u8>, u32>,
+        address_strike_count: Mapping<String, u8>,
+        address_last_expired: Mapping<String, u32>,
         // Financials
         accumulated_fees: Balance,
         total_recycled_fees: Balance,
@@ -127,14 +125,24 @@ mod allways_swap_manager {
 
         fn compute_reserve_hash(
             miner: &AccountId,
-            user_source_address: &[u8],
+            user_source_address: &str,
+            source_chain: &str,
+            dest_chain: &str,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
         ) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, user_source_address, tao_amount, source_amount, dest_amount),
+                &(
+                    miner,
+                    user_source_address,
+                    source_chain,
+                    dest_chain,
+                    tao_amount,
+                    source_amount,
+                    dest_amount,
+                ),
                 &mut output,
             );
             Hash::from(output)
@@ -143,13 +151,29 @@ mod allways_swap_manager {
         fn compute_initiate_hash(
             miner: &AccountId,
             source_tx_hash: &str,
+            source_chain: &str,
+            dest_chain: &str,
+            miner_source_address: &str,
+            miner_dest_address: &str,
+            rate: &str,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
         ) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, source_tx_hash, tao_amount, source_amount, dest_amount),
+                &(
+                    miner,
+                    source_tx_hash,
+                    source_chain,
+                    dest_chain,
+                    miner_source_address,
+                    miner_dest_address,
+                    rate,
+                    tao_amount,
+                    source_amount,
+                    dest_amount,
+                ),
                 &mut output,
             );
             Hash::from(output)
@@ -230,9 +254,7 @@ mod allways_swap_manager {
         /// Initialize the contract
         #[ink(constructor)]
         pub fn new(
-            treasury_hotkey: AccountId,
             recycle_address: AccountId,
-            netuid: u16,
             fulfillment_timeout_blocks: u32,
             reservation_ttl: u32,
             min_collateral: Balance,
@@ -243,9 +265,7 @@ mod allways_swap_manager {
         ) -> Self {
             Self {
                 owner: Self::env().caller(),
-                treasury_hotkey,
                 recycle_address,
-                netuid,
                 fulfillment_timeout_blocks,
                 reservation_ttl,
                 min_collateral,
@@ -375,7 +395,9 @@ mod allways_swap_manager {
             &mut self,
             request_hash: Hash,
             miner: AccountId,
-            user_source_address: Vec<u8>,
+            user_source_address: String,
+            source_chain: String,
+            dest_chain: String,
             tao_amount: Balance,
             source_amount: Balance,
             dest_amount: Balance,
@@ -385,9 +407,16 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let current_block = self.env().block_number();
 
-            // Verify hash
+            // Verify hash — source_chain and dest_chain are included in the hash,
+            // so validators must agree on the direction. No separate check needed.
             let computed = Self::compute_reserve_hash(
-                &miner, &user_source_address, tao_amount, source_amount, dest_amount,
+                &miner,
+                &user_source_address,
+                &source_chain,
+                &dest_chain,
+                tao_amount,
+                source_amount,
+                dest_amount,
             );
             if computed != request_hash {
                 return Err(Error::HashMismatch);
@@ -559,9 +588,19 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let current_block = self.env().block_number();
 
-            // Verify hash
+            // Verify hash — covers the full swap shape so no field can be substituted
+            // by a malicious validator casting the quorum-reaching vote.
             let computed = Self::compute_initiate_hash(
-                &miner, &source_tx_hash, tao_amount, source_amount, dest_amount,
+                &miner,
+                &source_tx_hash,
+                &source_chain,
+                &dest_chain,
+                &miner_source_address,
+                &miner_dest_address,
+                &rate,
+                tao_amount,
+                source_amount,
+                dest_amount,
             );
             if computed != request_hash {
                 return Err(Error::HashMismatch);
@@ -584,7 +623,10 @@ mod allways_swap_manager {
                 return Err(Error::DuplicateSourceTx);
             }
 
-            // Reservation must exist and match
+            // Reservation must exist and match.
+            // Note: direction is bound via the reserve hash + initiate hash, not
+            // via stored state — both hashes cover source_chain/dest_chain, so
+            // validator consensus agrees on the direction at both steps.
             let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
             if reserved_until < current_block {
                 return Err(Error::NoReservation);
@@ -743,9 +785,8 @@ mod allways_swap_manager {
                 self.miner_has_active_swap.insert(swap.miner, &false);
                 self.miner_last_resolved_block.insert(swap.miner, &swap.completed_block);
 
-                let source_addr = swap.user_source_address.as_bytes().to_vec();
-                self.address_strike_count.remove(&source_addr);
-                self.address_last_expired.remove(&source_addr);
+                self.address_strike_count.remove(&swap.user_source_address);
+                self.address_last_expired.remove(&swap.user_source_address);
 
                 self.env().emit_event(SwapCompleted {
                     swap_id,
@@ -1293,7 +1334,7 @@ mod allways_swap_manager {
         pub fn get_reservation_data(
             &self,
             miner: AccountId,
-        ) -> Option<(Vec<u8>, Balance, Balance, Balance, u32)> {
+        ) -> Option<(String, Balance, Balance, Balance, u32)> {
             let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
             if reserved_until == 0 {
                 return None;
@@ -1324,7 +1365,7 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn get_cooldown(&self, source_address: Vec<u8>) -> (u8, u32) {
+        pub fn get_cooldown(&self, source_address: String) -> (u8, u32) {
             (
                 self.address_strike_count.get(&source_address).unwrap_or(0),
                 self.address_last_expired.get(&source_address).unwrap_or(0),

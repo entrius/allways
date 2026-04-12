@@ -61,32 +61,36 @@ def view_miners():
     table.add_column(f'{src_up} Addr', style='dim')
     table.add_column(f'{dst_up} Addr', style='dim')
 
-    try:
-        for pair in pairs:
+    for pair in pairs:
+        try:
             collateral_rao = client.get_miner_collateral(pair.hotkey)
+            collateral_str = f'{from_rao(collateral_rao):.4f}'
+        except ContractError:
+            collateral_str = '[dim]—[/dim]'
+
+        try:
             is_active = client.get_miner_active_flag(pair.hotkey)
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
+        except ContractError:
+            active_str = '[dim]—[/dim]'
 
-            fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
-            if pair.counter_rate > 0:
-                ctr_display = f'{pair.counter_rate:g}'
-            elif pair.counter_rate_str:
-                ctr_display = '[dim]—[/dim]'
-            else:
-                ctr_display = f'{pair.rate:g}'
+        fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
+        if pair.counter_rate > 0:
+            ctr_display = f'{pair.counter_rate:g}'
+        elif pair.counter_rate_str:
+            ctr_display = '[dim]—[/dim]'
+        else:
+            ctr_display = f'{pair.rate:g}'
 
-            table.add_row(
-                str(pair.uid),
-                fwd_display,
-                ctr_display,
-                f'{from_rao(collateral_rao):.4f}',
-                active_str,
-                pair.source_address[:16] + '...',
-                pair.dest_address[:16] + '...',
-            )
-    except ContractError as e:
-        console.print(f'[red]Failed to read miner data: {e}[/red]')
-        return
+        table.add_row(
+            str(pair.uid),
+            fwd_display,
+            ctr_display,
+            collateral_str,
+            active_str,
+            pair.source_address[:16] + '...',
+            pair.dest_address[:16] + '...',
+        )
 
     console.print(table)
     console.print(f'\n[dim]Total miners: {len(pairs)}[/dim]\n')
@@ -111,7 +115,6 @@ def view_rates(pair: str):
 
         # Only show miners that are active and have collateral (i.e. swappable)
         pairs = []
-        skipped = 0
         for p in all_pairs:
             try:
                 is_active = client.get_miner_active_flag(p.hotkey)
@@ -119,11 +122,7 @@ def view_rates(pair: str):
                 if is_active and collateral > 0:
                     pairs.append(p)
             except ContractError:
-                skipped += 1
                 continue
-
-    if skipped:
-        console.print(f'[yellow]{skipped} miner(s) skipped (contract read error)[/yellow]')
 
     if pair:
         parts = pair.lower().split('-')
@@ -156,7 +155,9 @@ def view_rates(pair: str):
         table.add_column(f'{dst.upper()}→{src.upper()}', style='green')
         table.add_column('Hotkey', style='dim')
 
-        pair_list.sort(key=lambda x: x.rate, reverse=True)
+        # Sort by the stronger of the two rates so reverse-only miners aren't
+        # buried at the bottom with rate=0.
+        pair_list.sort(key=lambda x: max(x.rate, x.counter_rate), reverse=True)
         for p in pair_list:
             fwd = f'{p.rate:g}' if p.rate > 0 else '—'
             if p.counter_rate > 0:
@@ -169,11 +170,23 @@ def view_rates(pair: str):
 
         console.print(table)
 
-        if len(pair_list) > 1:
-            rates = [p.rate for p in pair_list]
-            console.print(
-                f'  [dim]Best: {max(rates):g} | Worst: {min(rates):g} | Avg: {sum(rates) / len(rates):.4f}[/dim]'
+        # Per-direction stats — excluding miners that don't quote that direction,
+        # so a single reverse-only miner doesn't drag the forward average to zero.
+        fwd_rates = [p.rate for p in pair_list if p.rate > 0]
+        rev_rates = [p.counter_rate for p in pair_list if p.counter_rate > 0]
+        stat_lines = []
+        if len(fwd_rates) > 1:
+            stat_lines.append(
+                f'{src.upper()}→{dst.upper()}: best {max(fwd_rates):g} | worst {min(fwd_rates):g} | '
+                f'avg {sum(fwd_rates) / len(fwd_rates):.4f}'
             )
+        if len(rev_rates) > 1:
+            stat_lines.append(
+                f'{dst.upper()}→{src.upper()}: best {max(rev_rates):g} | worst {min(rev_rates):g} | '
+                f'avg {sum(rev_rates) / len(rev_rates):.4f}'
+            )
+        for line in stat_lines:
+            console.print(f'  [dim]{line}[/dim]')
 
         console.print()
 
