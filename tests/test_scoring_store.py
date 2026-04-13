@@ -201,6 +201,41 @@ class TestSwapTrackerIntegration:
         restarted.initialize(current_block=201)
         assert 1 in restarted.voted_ids
 
+    def test_resolve_persists_window_for_restart(self, tmp_path):
+        path = tmp_path / 'window.json'
+        store = ScoringWindowStore(path)
+
+        active = _make_swap(1, SwapStatus.FULFILLED, initiated=190, timeout=230)
+
+        init_client = MagicMock()
+        init_client.get_next_swap_id.return_value = 2
+        init_client.get_swap.return_value = active
+
+        tracker = SwapTracker(
+            client=init_client,
+            fulfillment_timeout_blocks=30,
+            window_blocks=3600,
+            store=store,
+        )
+        tracker.initialize(current_block=200)
+
+        tracker.resolve(tracker.active[1], status=SwapStatus.COMPLETED, current_block=205)
+
+        restart_client = MagicMock()
+        restart_client.get_next_swap_id.return_value = 1
+
+        restarted = SwapTracker(
+            client=restart_client,
+            fulfillment_timeout_blocks=30,
+            window_blocks=3600,
+            store=store,
+        )
+        restarted.initialize(current_block=206)
+
+        assert [s.id for s in restarted.window] == [1]
+        assert restarted.window[0].status == SwapStatus.COMPLETED
+        assert restarted.window[0].completed_block == 205
+
     def test_initialize_intersects_voted_ids_with_active_swaps(self, tmp_path):
         path = tmp_path / 'window.json'
         store = ScoringWindowStore(path)

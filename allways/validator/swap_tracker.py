@@ -7,7 +7,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
-from allways.validator.scoring_store import ScoringWindowStore
+from allways.validator.scoring_store import ScoringWindowStore, resolved_block
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -98,6 +98,31 @@ class SwapTracker:
         self.voted_ids.add(swap_id)
         self._persist()
 
+    def resolve(self, swap: Swap, status: Optional[SwapStatus] = None, current_block: Optional[int] = None) -> None:
+        """Move a terminal swap from active tracking into the scoring window and persist."""
+        if status is not None:
+            swap.status = status
+
+        if swap.status == SwapStatus.COMPLETED and swap.completed_block <= 0 and current_block is not None:
+            swap.completed_block = current_block
+        if swap.status == SwapStatus.TIMED_OUT and swap.timeout_block <= 0 and current_block is not None:
+            swap.timeout_block = current_block
+
+        if swap.status not in (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT):
+            return
+
+        self.active.pop(swap.id, None)
+        self.voted_ids.discard(swap.id)
+
+        for i, existing in enumerate(self.window):
+            if existing.id == swap.id:
+                self.window[i] = swap
+                break
+        else:
+            self.window.append(swap)
+
+        self._persist()
+
     def is_voted(self, swap_id: int) -> bool:
         """Check if we've already voted on this swap."""
         return swap_id in self.voted_ids
@@ -141,29 +166,33 @@ class SwapTracker:
 
         swaps = await asyncio.gather(*[asyncio.to_thread(self.client.get_swap, sid) for sid in stale_ids])
 
-        resolved_ids = []
+        resolved_without_payload = []
+        resolved_with_payload = 0
         for sid, swap in zip(stale_ids, swaps):
             if swap is None:
-                resolved_ids.append(sid)
+                resolved_without_payload.append(sid)
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
             else:
-                resolved_ids.append(sid)
-                self.window.append(swap)
+                self.resolve(swap)
+                resolved_with_payload += 1
 
-        for sid in resolved_ids:
+        for sid in resolved_without_payload:
             self.active.pop(sid, None)
             self.voted_ids.discard(sid)
 
-        if resolved_ids:
-            bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
+        if resolved_without_payload:
             self._persist()
+
+        resolved_total = resolved_with_payload + len(resolved_without_payload)
+        if resolved_total:
+            bt.logging.debug(f'SwapTracker: resolved {resolved_total}, {len(self.active)} still active')
 
     def prune_window(self, current_block: int):
         """Remove resolved swaps older than the scoring window."""
         window_start = current_block - self.window_blocks
         before = len(self.window)
-        self.window = [s for s in self.window if _resolved_block(s) >= window_start]
+        self.window = [s for s in self.window if resolved_block(s) >= window_start]
         pruned = before - len(self.window)
         if pruned > 0:
             bt.logging.debug(f'SwapTracker: pruned {pruned} expired swaps from window')
@@ -199,13 +228,4 @@ class SwapTracker:
         """Save window and voted set to disk if a store is configured."""
         if self._store:
             self._store.save(self.window, self.voted_ids)
-
-
-def _resolved_block(swap: Swap) -> int:
-    """Block when a terminal swap was resolved."""
-    if swap.completed_block > 0:
-        return swap.completed_block
-    if swap.timeout_block > 0:
-        return swap.timeout_block
-    return swap.initiated_block
 

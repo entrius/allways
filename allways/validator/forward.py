@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from statistics import mean
 from typing import TYPE_CHECKING, Dict, Set, Tuple
 
@@ -228,7 +229,30 @@ async def _verify_fulfilled(
         if result:
             if voter.confirm_swap(swap.id):
                 tracker.mark_voted(swap.id)
+                _resolve_after_vote(tracker, swap, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+
+
+def _resolve_after_vote(tracker: SwapTracker, swap, terminal_status: SwapStatus, current_block: int) -> None:
+    """Persist terminal outcomes promptly after a successful vote.
+
+    If the contract still returns the swap, prefer that payload. If the swap is
+    no longer queryable (resolved entries are pruned on-chain), persist a local
+    terminal snapshot to preserve scoring continuity across restarts.
+    """
+    latest = None
+    try:
+        latest = tracker.client.get_swap(swap.id)
+    except Exception as e:
+        bt.logging.debug(f'Swap {swap.id}: post-vote refresh failed, deferring resolve persistence: {e}')
+        return
+
+    if latest is not None:
+        if latest.status in (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT):
+            tracker.resolve(latest)
+        return
+
+    tracker.resolve(replace(swap), status=terminal_status, current_block=current_block)
 
 
 def _extend_near_timeout_fulfilled(self: Validator) -> None:
@@ -296,6 +320,7 @@ def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter) ->
 
         if voter.timeout_swap(swap.id):
             tracker.mark_voted(swap.id)
+            _resolve_after_vote(tracker, swap, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
 
 
