@@ -14,7 +14,7 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
 
     Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{counter_rate}
     Both rates are 'canonical_dest per 1 canonical_source'. rate is for source→dest, counter_rate for dest→source.
-    Example: v3:btc:bc1q...:tao:5C...:340:350
+    Example: v1:btc:bc1q...:tao:5C...:340:350
     """
     try:
         parts = raw.split(':')

@@ -56,7 +56,7 @@ async def forward(self: Validator) -> None:
 
     _clear_provider_caches(self)
     _process_pending_confirms(self)
-    await tracker.poll()
+    await tracker.poll(self.block)
     uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
     _timeout_expired(self, tracker, voter, uncertain)
@@ -177,6 +177,11 @@ def _process_pending_confirms(self: Validator) -> None:
             hash_input = _scale_encode_initiate_hash_input(
                 miner_bytes,
                 item.source_tx_hash,
+                item.source_chain,
+                item.dest_chain,
+                item.miner_deposit_address,
+                item.miner_dest_address,
+                item.rate_str,
                 item.tao_amount,
                 item.source_amount,
                 item.dest_amount,

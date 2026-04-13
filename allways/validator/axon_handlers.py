@@ -30,20 +30,28 @@ def _keccak256(data: bytes) -> bytes:
 def _scale_encode_reserve_hash_input(
     miner_bytes: bytes,
     source_addr_bytes: bytes,
+    source_chain: str,
+    dest_chain: str,
     tao_amount: int,
     source_amount: int,
     dest_amount: int,
 ) -> bytes:
-    """SCALE-encode the reserve hash input tuple: (AccountId, Vec<u8>, u128, u128, u128).
+    """SCALE-encode the reserve hash input tuple: (AccountId, String, String, String, u128, u128, u128).
 
     Matches ink::env::hash_encoded::<Keccak256, _>(
-        &(miner, user_source_address, tao_amount, source_amount, dest_amount)
+        &(miner, user_source_address, source_chain, dest_chain, tao_amount, source_amount, dest_amount)
     ).
     """
+    src_bytes = source_chain.encode('utf-8')
+    dst_bytes = dest_chain.encode('utf-8')
     return (
         miner_bytes  # AccountId: 32 bytes raw
         + compact_encode_len(len(source_addr_bytes))
-        + source_addr_bytes  # Vec<u8>: compact length + data
+        + source_addr_bytes  # String: compact length + UTF-8 bytes
+        + compact_encode_len(len(src_bytes))
+        + src_bytes  # String: compact length + UTF-8 bytes
+        + compact_encode_len(len(dst_bytes))
+        + dst_bytes  # String: compact length + UTF-8 bytes
         + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + source_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + dest_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
@@ -69,23 +77,72 @@ def _scale_encode_extend_hash_input(
 def _scale_encode_initiate_hash_input(
     miner_bytes: bytes,
     source_tx_hash: str,
+    source_chain: str,
+    dest_chain: str,
+    miner_source_address: str,
+    miner_dest_address: str,
+    rate: str,
     tao_amount: int,
     source_amount: int,
     dest_amount: int,
 ) -> bytes:
-    """SCALE-encode the initiate hash input tuple: (AccountId, &str, u128, u128, u128).
+    """SCALE-encode the initiate hash input tuple.
 
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, source_tx_hash, tao_amount, source_amount, dest_amount)).
+    Matches ink::env::hash_encoded::<Keccak256, _>(
+        &(miner, source_tx_hash, source_chain, dest_chain,
+          miner_source_address, miner_dest_address, rate,
+          tao_amount, source_amount, dest_amount)
+    ).
+
+    Including the chains, miner addresses, and rate in the hash forces validator
+    consensus on the full swap shape — the quorum-reaching vote cannot substitute
+    any of these fields without invalidating the hash.
     """
-    tx_bytes = source_tx_hash.encode('utf-8')
+
+    def _str(s: str) -> bytes:
+        raw = s.encode('utf-8')
+        return compact_encode_len(len(raw)) + raw
+
     return (
         miner_bytes  # AccountId: 32 bytes raw
-        + compact_encode_len(len(tx_bytes))
-        + tx_bytes  # &str (SCALE: compact length + bytes)
+        + _str(source_tx_hash)
+        + _str(source_chain)
+        + _str(dest_chain)
+        + _str(miner_source_address)
+        + _str(miner_dest_address)
+        + _str(rate)
         + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + source_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + dest_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
     )
+
+
+def _resolve_swap_direction(commitment, synapse_source_chain: str, synapse_dest_chain: str):
+    """Resolve deposit/fulfillment addresses and rate from commitment and requested direction.
+
+    Returns (source_chain, dest_chain, deposit_addr, fulfillment_addr, rate, rate_str) or None.
+    """
+    source_chain = synapse_source_chain or commitment.source_chain
+    dest_chain = synapse_dest_chain or commitment.dest_chain
+    is_canonical = source_chain == commitment.source_chain
+    deposit_addr = commitment.source_address if is_canonical else commitment.dest_address
+    fulfillment_addr = commitment.dest_address if is_canonical else commitment.source_address
+    rate, rate_str = commitment.get_rate_for_direction(source_chain)
+    if rate <= 0:
+        return None
+    return source_chain, dest_chain, deposit_addr, fulfillment_addr, rate, rate_str
+
+
+def _load_swap_commitment(validator, miner_hotkey: str):
+    """Read miner commitment and validate chains differ. Returns commitment or None."""
+    commitment = read_miner_commitment(
+        subtensor=validator.axon_subtensor,
+        netuid=validator.config.netuid,
+        hotkey=miner_hotkey,
+    )
+    if commitment is None or commitment.source_chain == commitment.dest_chain:
+        return None
+    return commitment
 
 
 def _reject(synapse, reason: str, context: str = '') -> None:
@@ -215,30 +272,36 @@ async def handle_swap_reserve(
     ctx = f'SwapReserve({miner})'
 
     try:
-        # Cheap, local checks BEFORE axon_lock — invalid signatures and missing
-        # fields are rejected without serializing on the substrate websocket.
+        # Cheap, local checks BEFORE axon_lock — invalid signatures, missing fields,
+        # and bad direction are rejected without serializing on the substrate websocket.
         if not synapse.source_address or not synapse.source_address_proof:
             _reject(synapse, 'Missing source address or proof', ctx)
             return synapse
+        if not synapse.source_chain or not synapse.dest_chain:
+            _reject(synapse, 'Missing source_chain or dest_chain', ctx)
+            return synapse
+        if synapse.source_chain == synapse.dest_chain:
+            _reject(synapse, 'Source and destination chains must be different', ctx)
+            return synapse
 
-        provider = None
-        if synapse.source_chain:
-            provider = validator.axon_chain_providers.get(synapse.source_chain)
-            if provider is None:
-                _reject(synapse, f'Unsupported chain: {synapse.source_chain}', ctx)
-                return synapse
-            proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
-            if not provider.verify_source_proof(synapse.source_address, proof_message, synapse.source_address_proof):
-                _reject(synapse, 'Invalid source address proof', ctx)
-                return synapse
+        provider = validator.axon_chain_providers.get(synapse.source_chain)
+        if provider is None:
+            _reject(synapse, f'Unsupported chain: {synapse.source_chain}', ctx)
+            return synapse
+        proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
+        if not provider.verify_source_proof(synapse.source_address, proof_message, synapse.source_address_proof):
+            _reject(synapse, 'Invalid source address proof', ctx)
+            return synapse
 
-        # Pure-local crypto — no substrate dependency, compute outside the lock.
+        # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
         source_addr_bytes = synapse.source_address.encode('utf-8')
         miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
         request_hash = _keccak256(
             _scale_encode_reserve_hash_input(
                 miner_bytes,
                 source_addr_bytes,
+                synapse.source_chain,
+                synapse.dest_chain,
                 synapse.tao_amount,
                 synapse.source_amount,
                 synapse.dest_amount,
@@ -247,33 +310,22 @@ async def handle_swap_reserve(
 
         # Everything below touches substrate (commitment read, contract reads, vote).
         with validator.axon_lock:
-            commitment = read_miner_commitment(
-                subtensor=validator.axon_subtensor,
-                netuid=validator.config.netuid,
-                hotkey=miner,
-            )
+            commitment = _load_swap_commitment(validator, miner)
             if commitment is None:
-                _reject(synapse, 'Miner has no commitment', ctx)
+                _reject(synapse, 'No valid commitment', ctx)
                 return synapse
 
-            if commitment.source_chain == commitment.dest_chain:
-                _reject(synapse, 'Source and destination chains must be different', ctx)
+            # The requested direction must match one of the commitment's chains
+            # and the miner must quote a non-zero rate for it. This blocks a DoS
+            # where a user could lock a miner for the reservation TTL on a
+            # direction that would only fail at confirm time.
+            if synapse.source_chain not in (commitment.source_chain, commitment.dest_chain):
+                _reject(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
-
-            # Fallback path for callers that omit source_chain — derive from
-            # commitment and run the cheap checks now.
-            if provider is None:
-                swap_source_chain = commitment.source_chain
-                provider = validator.axon_chain_providers.get(swap_source_chain)
-                if provider is None:
-                    _reject(synapse, f'Unsupported chain: {swap_source_chain}', ctx)
-                    return synapse
-                proof_message = f'allways-reserve:{synapse.source_address}:{synapse.block_anchor}'
-                if not provider.verify_source_proof(
-                    synapse.source_address, proof_message, synapse.source_address_proof
-                ):
-                    _reject(synapse, 'Invalid source address proof', ctx)
-                    return synapse
+            reserve_rate, _ = commitment.get_rate_for_direction(synapse.source_chain)
+            if reserve_rate <= 0:
+                _reject(synapse, 'Miner does not support this swap direction', ctx)
+                return synapse
 
             balance = provider.get_balance(synapse.source_address)
             if balance < synapse.source_amount:
@@ -312,7 +364,7 @@ async def handle_swap_reserve(
                 _reject(synapse, f'Swap amount above maximum ({synapse.tao_amount} > {max_swap} rao)', ctx)
                 return synapse
 
-            strike_count, last_expired = contract.get_cooldown(source_addr_bytes)
+            strike_count, last_expired = contract.get_cooldown(synapse.source_address)
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
                 if validator.block < last_expired + cooldown:
@@ -323,7 +375,9 @@ async def handle_swap_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,
                 miner_hotkey=miner,
-                user_source_address=source_addr_bytes,
+                user_source_address=synapse.source_address,
+                source_chain=synapse.source_chain,
+                dest_chain=synapse.dest_chain,
                 tao_amount=synapse.tao_amount,
                 source_amount=synapse.source_amount,
                 dest_amount=synapse.dest_amount,
@@ -395,32 +449,23 @@ async def handle_swap_confirm(
 
             res_tao_amount, res_source_amount, res_dest_amount = res_data[1], res_data[2], res_data[3]
 
-            commitment = read_miner_commitment(
-                subtensor=validator.axon_subtensor,
-                netuid=validator.config.netuid,
-                hotkey=miner,
-            )
+            commitment = _load_swap_commitment(validator, miner)
             if commitment is None:
-                _reject(synapse, 'Miner commitment not found', ctx)
+                _reject(synapse, 'No valid commitment', ctx)
                 return synapse
 
-            if commitment.source_chain == commitment.dest_chain:
-                _reject(synapse, 'Source and destination chains must be different', ctx)
-                return synapse
-
-            swap_source_chain = synapse.source_chain or commitment.source_chain
-            swap_dest_chain = synapse.dest_chain or commitment.dest_chain
-
-            miner_deposit_address = (
-                commitment.source_address if swap_source_chain == commitment.source_chain else commitment.dest_address
-            )
-            miner_fulfillment_address = (
-                commitment.dest_address if swap_source_chain == commitment.source_chain else commitment.source_address
-            )
-            selected_rate, selected_rate_str = commitment.get_rate_for_direction(swap_source_chain)
-            if selected_rate <= 0:
+            direction = _resolve_swap_direction(commitment, synapse.source_chain, synapse.dest_chain)
+            if direction is None:
                 _reject(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
+            (
+                swap_source_chain,
+                swap_dest_chain,
+                miner_deposit_address,
+                miner_fulfillment_address,
+                _,
+                selected_rate_str,
+            ) = direction
 
             provider = validator.axon_chain_providers.get(swap_source_chain)
             if provider is None:
@@ -467,6 +512,11 @@ async def handle_swap_confirm(
                 _scale_encode_initiate_hash_input(
                     miner_bytes,
                     synapse.source_tx_hash,
+                    swap_source_chain,
+                    swap_dest_chain,
+                    miner_deposit_address,
+                    miner_fulfillment_address,
+                    selected_rate_str,
                     res_tao_amount,
                     res_source_amount,
                     res_dest_amount,

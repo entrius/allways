@@ -93,11 +93,6 @@ class SwapTracker:
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
-    def mark_voted(self, swap_id: int):
-        """Mark a swap as voted on to prevent redundant vote extrinsics."""
-        self.voted_ids.add(swap_id)
-        self._persist()
-
     def resolve(self, swap: Swap, status: Optional[SwapStatus] = None, current_block: Optional[int] = None) -> None:
         """Move a terminal swap from active tracking into the scoring window and persist."""
         if status is not None:
@@ -123,12 +118,18 @@ class SwapTracker:
 
         self._persist()
 
+    def mark_voted(self, swap_id: int):
+        """Mark a swap as voted on to prevent redundant vote extrinsics."""
+        self.voted_ids.add(swap_id)
+        self._persist()
+
     def is_voted(self, swap_id: int) -> bool:
         """Check if we've already voted on this swap."""
         return swap_id in self.voted_ids
 
-    async def poll(self):
+    async def poll(self, current_block: int = 0):
         """Incremental update — called every forward step (~12s)."""
+        self._current_block = current_block
         try:
             await self._poll_inner()
         except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
@@ -170,7 +171,16 @@ class SwapTracker:
         resolved_with_payload = 0
         for sid, swap in zip(stale_ids, swaps):
             if swap is None:
-                resolved_without_payload.append(sid)
+                # Swap removed from contract (resolved by quorum): infer terminal state
+                # from timeout relation and persist immediately for restart safety.
+                last_known = self.active.get(sid)
+                if last_known is not None:
+                    was_past_timeout = last_known.timeout_block > 0 and self._current_block > last_known.timeout_block
+                    inferred_status = SwapStatus.TIMED_OUT if was_past_timeout else SwapStatus.COMPLETED
+                    self.resolve(last_known, status=inferred_status, current_block=self._current_block)
+                    resolved_with_payload += 1
+                else:
+                    resolved_without_payload.append(sid)
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
             else:
