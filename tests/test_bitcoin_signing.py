@@ -34,6 +34,15 @@ class TestDetectAddressType:
     def test_regtest_p2tr(self):
         assert detect_address_type('bcrt1pxyz') == ADDR_TYPE_P2TR
 
+    def test_testnet_p2sh(self):
+        assert detect_address_type('2N5kNSLz3bMPFuAuTrack4RVVDi8Grv3p3F') == ADDR_TYPE_P2SH_P2WPKH
+
+    def test_testnet_p2pkh_m(self):
+        assert detect_address_type('mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn') == ADDR_TYPE_P2PKH
+
+    def test_testnet_p2pkh_n(self):
+        assert detect_address_type('n1C8nsmi4sc4hjBfMKrRmL75MjcRYheJEF') == ADDR_TYPE_P2PKH
+
     def test_testnet_p2wpkh(self):
         assert detect_address_type('tb1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvtest') == ADDR_TYPE_P2WPKH
 

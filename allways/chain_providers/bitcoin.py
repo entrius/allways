@@ -32,7 +32,9 @@ def detect_address_type(address: str) -> str:
         return ADDR_TYPE_P2WPKH
     if address.startswith('bcrt1p') or address.startswith('tb1p'):
         return ADDR_TYPE_P2TR
-    if address.startswith('2') or address.startswith('m') or address.startswith('n'):
+    if address.startswith('2'):
+        return ADDR_TYPE_P2SH_P2WPKH
+    if address.startswith('m') or address.startswith('n'):
         return ADDR_TYPE_P2PKH
     return 'unknown'
 
