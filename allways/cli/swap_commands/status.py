@@ -1,8 +1,9 @@
 """alw status - Quick dashboard showing network, wallet, and swap state."""
 
-import rich_click as click
+import click
 from rich.table import Table
 
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     console,
@@ -16,17 +17,16 @@ from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
 
-@click.command('status')
+@click.command('status', cls=StyledCommand)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
 def status_command(netuid: int):
     """Show a quick dashboard of your current state.
 
-    \b
-    Displays network info, wallet balance, active swaps,
-    pending reservations, and miner status (if applicable).
+    [dim]Displays network info, wallet balance, active swaps,
+    pending reservations, and miner status (if applicable).[/dim]
 
-    Example:
-        alw status
+    [dim]Examples:
+        $ alw status[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     if netuid is None:
@@ -107,7 +107,14 @@ def status_command(netuid: int):
                 my_pairs = [p for p in pairs if p.hotkey == hotkey]
                 if my_pairs:
                     for p in my_pairs:
-                        table.add_row('Miner Pair', f'{p.source_chain.upper()}/{p.dest_chain.upper()} @ {p.rate:g}')
+                        src_up, dst_up = p.source_chain.upper(), p.dest_chain.upper()
+                        if p.rate > 0 and p.counter_rate > 0 and p.rate_str != p.counter_rate_str:
+                            rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                        elif p.rate > 0:
+                            rate_display = f'{p.rate:g}'
+                        else:
+                            rate_display = f'{p.counter_rate:g}'
+                        table.add_row('Miner Pair', f'{src_up} ↔ {dst_up} @ {rate_display}')
         except ContractError:
             table.add_row('Miner Status', '[dim]unable to read[/dim]')
 

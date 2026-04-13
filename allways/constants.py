@@ -14,7 +14,7 @@ MINER_POLL_INTERVAL_SECONDS = 12  # Match Bittensor block time for lowest latenc
 VALIDATOR_POLL_INTERVAL_SECONDS = 12  # Match Bittensor block time for lowest latency
 
 # ─── Commitment Format ────────────────────────────────────
-COMMITMENT_VERSION = 2
+COMMITMENT_VERSION = 3
 COMMITMENT_REVEAL_BLOCKS = 360  # ~72 min at 12s/block
 
 # ─── Unit Conversions ────────────────────────────────────

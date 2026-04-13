@@ -1,43 +1,25 @@
 """alw admin - Contract administration commands (owner-only)."""
 
-import rich_click as click
+import click
 
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
 from allways.contract_client import ContractError
 
 
-@click.group('admin')
+@click.group('admin', cls=StyledGroup, show_disclaimer=True)
 def admin_group():
-    """Contract administration commands (owner-only).
-
-    \b
-    Subcommands:
-        set-timeout <blocks>            Set fulfillment timeout
-        set-reservation-ttl <blocks>    Set reservation TTL
-        set-fee-divisor <divisor>       Set fee divisor (100 = 1%, 50 = 2%)
-        set-min-collateral <amount_tao> Set minimum collateral
-        set-max-collateral <amount_tao> Set maximum collateral (0 = unlimited)
-        set-min-swap <amount_tao>       Set minimum swap amount (0 = no minimum)
-        set-max-swap <amount_tao>       Set maximum swap amount (0 = no maximum)
-        set-votes <count>               Set required validator votes
-        set-recycle-address <account_id> Set address for fee recycling transfers
-        add-vali <hotkey>               Add a validator
-        remove-vali <hotkey>            Remove a validator
-        recycle-fees                    Recycle accumulated fees (stake + burn alpha)
-        transfer-ownership <account_id> Transfer contract ownership
-        danger halt                     Halt the system (block new reservations)
-        danger resume                   Resume the system (allow new reservations)
-    """
+    """Contract administration commands (owner-only)."""
     pass
 
 
-@admin_group.command('set-timeout')
+@admin_group.command('set-timeout', show_disclaimer=True)
 @click.argument('blocks', type=int)
 def set_timeout(blocks: int):
     """Set the fulfillment timeout in blocks (minimum 10).
 
-    Example:
-        alw admin set-timeout 300
+    [dim]Examples:
+        $ alw admin set-timeout 300[/dim]
     """
     if blocks < 10:
         console.print('[red]Blocks must be >= 10 (contract minimum)[/red]')
@@ -70,13 +52,13 @@ def set_timeout(blocks: int):
         console.print(f'[red]Failed to set fulfillment timeout: {e}[/red]\n')
 
 
-@admin_group.command('set-reservation-ttl')
+@admin_group.command('set-reservation-ttl', show_disclaimer=True)
 @click.argument('blocks', type=int)
 def set_reservation_ttl(blocks: int):
     """Set the reservation TTL in blocks (how long a user has to send funds).
 
-    Example:
-        alw admin set-reservation-ttl 50
+    [dim]Examples:
+        $ alw admin set-reservation-ttl 50[/dim]
     """
     if blocks <= 0:
         console.print('[red]Blocks must be positive[/red]')
@@ -109,13 +91,13 @@ def set_reservation_ttl(blocks: int):
         console.print(f'[red]Failed to set reservation TTL: {e}[/red]\n')
 
 
-@admin_group.command('set-fee-divisor')
+@admin_group.command('set-fee-divisor', show_disclaimer=True)
 @click.argument('divisor', type=int)
 def set_fee_divisor(divisor: int):
     """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 20 = 5% fee max).
 
-    Example:
-        alw admin set-fee-divisor 100
+    [dim]Examples:
+        $ alw admin set-fee-divisor 100[/dim]
     """
     if divisor < 20:
         console.print('[red]Divisor must be at least 20 (max 5% fee)[/red]')
@@ -148,13 +130,13 @@ def set_fee_divisor(divisor: int):
         console.print(f'[red]Failed to set fee divisor: {e}[/red]\n')
 
 
-@admin_group.command('set-min-collateral')
+@admin_group.command('set-min-collateral', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_min_collateral(amount_tao: float):
     """Set the minimum collateral amount (in TAO).
 
-    Example:
-        alw admin set-min-collateral 2.0
+    [dim]Examples:
+        $ alw admin set-min-collateral 2.0[/dim]
     """
     if amount_tao <= 0:
         console.print('[red]Amount must be positive[/red]')
@@ -186,14 +168,14 @@ def set_min_collateral(amount_tao: float):
         console.print(f'[red]Failed to set minimum collateral: {e}[/red]\n')
 
 
-@admin_group.command('set-max-collateral')
+@admin_group.command('set-max-collateral', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_max_collateral(amount_tao: float):
     """Set the maximum collateral amount (in TAO). Use 0 to remove the cap.
 
-    Example:
-        alw admin set-max-collateral 100.0
-        alw admin set-max-collateral 0
+    [dim]Examples:
+        $ alw admin set-max-collateral 100.0
+        $ alw admin set-max-collateral 0[/dim]
     """
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
@@ -225,14 +207,14 @@ def set_max_collateral(amount_tao: float):
         console.print(f'[red]Failed to set maximum collateral: {e}[/red]\n')
 
 
-@admin_group.command('set-min-swap')
+@admin_group.command('set-min-swap', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_min_swap(amount_tao: float):
     """Set the minimum swap amount in TAO. Use 0 to remove the minimum.
 
-    Example:
-        alw admin set-min-swap 1.0
-        alw admin set-min-swap 0
+    [dim]Examples:
+        $ alw admin set-min-swap 1.0
+        $ alw admin set-min-swap 0[/dim]
     """
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
@@ -264,14 +246,14 @@ def set_min_swap(amount_tao: float):
         console.print(f'[red]Failed to set minimum swap amount: {e}[/red]\n')
 
 
-@admin_group.command('set-max-swap')
+@admin_group.command('set-max-swap', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_max_swap(amount_tao: float):
     """Set the maximum swap amount in TAO. Use 0 to remove the maximum.
 
-    Example:
-        alw admin set-max-swap 50.0
-        alw admin set-max-swap 0
+    [dim]Examples:
+        $ alw admin set-max-swap 50.0
+        $ alw admin set-max-swap 0[/dim]
     """
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
@@ -303,13 +285,13 @@ def set_max_swap(amount_tao: float):
         console.print(f'[red]Failed to set maximum swap amount: {e}[/red]\n')
 
 
-@admin_group.command('set-threshold')
+@admin_group.command('set-threshold', show_disclaimer=True)
 @click.argument('percent', type=int)
 def set_threshold(percent: int):
     """Set the consensus threshold percentage (1-100).
 
-    Example:
-        alw admin set-threshold 67
+    [dim]Examples:
+        $ alw admin set-threshold 67[/dim]
     """
     if percent <= 0 or percent > 100:
         console.print('[red]Threshold must be 1-100[/red]')
@@ -339,13 +321,13 @@ def set_threshold(percent: int):
         console.print(f'[red]Failed to set consensus threshold: {e}[/red]\n')
 
 
-@admin_group.command('add-vali')
+@admin_group.command('add-vali', show_disclaimer=True)
 @click.argument('hotkey', type=str)
 def add_vali(hotkey: str):
     """Add a validator to the contract.
 
-    Example:
-        alw admin add-vali 5Cxyz...
+    [dim]Examples:
+        $ alw admin add-vali 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -375,13 +357,13 @@ def add_vali(hotkey: str):
         console.print(f'[red]Failed to add validator: {e}[/red]\n')
 
 
-@admin_group.command('remove-vali')
+@admin_group.command('remove-vali', show_disclaimer=True)
 @click.argument('hotkey', type=str)
 def remove_vali(hotkey: str):
     """Remove a validator from the contract.
 
-    Example:
-        alw admin remove-vali 5Cxyz...
+    [dim]Examples:
+        $ alw admin remove-vali 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -411,13 +393,13 @@ def remove_vali(hotkey: str):
         console.print(f'[red]Failed to remove validator: {e}[/red]\n')
 
 
-@admin_group.command('set-recycle-address')
+@admin_group.command('set-recycle-address', show_disclaimer=True)
 @click.argument('account_id', type=str)
 def set_recycle_address(account_id: str):
     """Set the address where recycled fees are transferred.
 
-    Example:
-        alw admin set-recycle-address 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+    [dim]Examples:
+        $ alw admin set-recycle-address 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -436,12 +418,12 @@ def set_recycle_address(account_id: str):
         console.print(f'[red]Failed to set recycle address: {e}[/red]\n')
 
 
-@admin_group.command('recycle-fees')
+@admin_group.command('recycle-fees', show_disclaimer=True)
 def recycle_fees():
     """Transfer accumulated fees to the designated recycle address.
 
-    Example:
-        alw admin recycle-fees
+    [dim]Examples:
+        $ alw admin recycle-fees[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -460,13 +442,13 @@ def recycle_fees():
         console.print(f'[red]Failed to recycle fees: {e}[/red]\n')
 
 
-@admin_group.command('transfer-ownership')
+@admin_group.command('transfer-ownership', show_disclaimer=True)
 @click.argument('account_id', type=str)
 def transfer_ownership(account_id: str):
     """Transfer contract ownership to a new account. This is irreversible.
 
-    Example:
-        alw admin transfer-ownership 5Cxyz...
+    [dim]Examples:
+        $ alw admin transfer-ownership 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -494,26 +476,20 @@ def transfer_ownership(account_id: str):
         console.print(f'[red]Failed to transfer ownership: {e}[/red]\n')
 
 
-@click.group('danger')
+@click.group('danger', cls=StyledGroup, show_disclaimer=True)
 def danger_group():
-    """Dangerous operations that affect system availability.
-
-    \b
-    Subcommands:
-        halt      Halt the system (block new reservations)
-        resume    Resume the system (allow new reservations)
-    """
+    """Dangerous operations that affect system availability."""
     pass
 
 
-@danger_group.command('halt')
+@danger_group.command('halt', show_disclaimer=True)
 def halt_system():
     """Halt the system — blocks all new swap reservations.
 
-    Existing in-flight swaps will continue through their lifecycle.
+    [dim]Existing in-flight swaps will continue through their lifecycle.[/dim]
 
-    Example:
-        alw admin danger halt
+    [dim]Examples:
+        $ alw admin danger halt[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -543,12 +519,12 @@ def halt_system():
         console.print(f'[red]Failed to halt system: {e}[/red]\n')
 
 
-@danger_group.command('resume')
+@danger_group.command('resume', show_disclaimer=True)
 def resume_system():
     """Resume the system — allows new swap reservations again.
 
-    Example:
-        alw admin danger resume
+    [dim]Examples:
+        $ alw admin danger resume[/dim]
     """
     _, wallet, _, client = get_cli_context()
 

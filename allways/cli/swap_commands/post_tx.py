@@ -1,9 +1,10 @@
 """alw swap post-tx - Submit source transaction hash for a pending swap reservation."""
 
-import rich_click as click
+import click
 
 from allways.chain_providers import create_chain_providers
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     clear_pending_swap,
@@ -16,19 +17,17 @@ from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
 
-@click.command('post-tx')
+@click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
 @click.argument('tx_hash', required=False, default=None, type=str)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
 def post_tx_command(tx_hash: str, netuid: int):
     """Submit your source transaction hash for a pending swap reservation.
 
-    \b
-    Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).
+    [dim]Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).[/dim]
 
-    \b
-    Examples:
-        alw swap post-tx abc123def...
-        alw swap post-tx            (prompts for tx hash)
+    [dim]Examples:
+        $ alw swap post-tx abc123def...
+        $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     if netuid is None:

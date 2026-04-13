@@ -19,18 +19,13 @@ _sys.argv = [_sys.argv[0]]
 
 import json  # noqa: E402
 
-import rich_click as click  # noqa: E402
+import click  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-click.rich_click.USE_RICH_MARKUP = True
-click.rich_click.SHOW_ARGUMENTS = True
-click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
-click.rich_click.STYLE_EPILOG = 'dim'
-click.rich_click.FOOTER_TEXT = '\u2764 Ventura Labs'
-
 load_dotenv()
 
+from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
 from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, console, parse_global_flags  # noqa: E402
 
 # Restore original argv now that bittensor has been imported
@@ -41,30 +36,19 @@ _sys.argv = _saved_argv
 parse_global_flags()
 
 
-DISCLAIMER = (
-    'Allways is permissionless, open-source, beta software. The protocol facilitates trustless'
-    ' peer-to-peer transactions — the creators and contributors do not custody, control, or'
-    ' intermediate any funds. Use at your own risk. No warranty. Not financial advice.'
-)
-
-
-@click.group(epilog=DISCLAIMER)
+@click.group(cls=StyledAliasGroup, show_disclaimer=True)
 @click.version_option(version=__import__('allways').__version__, prog_name='allways')
 def cli():
     """Universal Transaction Layer"""
     pass
 
 
-@click.group(name='config', invoke_without_command=True)
+@click.group(name='config', invoke_without_command=True, cls=StyledGroup)
 @click.pass_context
 def config_group(ctx):
     """CLI configuration management.
 
-    Show current configuration (default) or set config values.
-
-    \b
-    Subcommands:
-        set <key> <value>    Set a config value
+    [dim]Show current configuration (default) or set config values.[/dim]
     """
     if ctx.invoked_subcommand is None:
         show_config()
@@ -114,27 +98,24 @@ KNOWN_NETWORKS = {
 def config_set(key: str, value: str):
     """Set a configuration value.
 
-    \b
-    Common keys:
+    [dim]Common keys:
         wallet              Wallet name
         hotkey              Hotkey name
         contract-address    Contract address
         network             Network name or endpoint URL
-        netuid              Subnet UID
+        netuid              Subnet UID[/dim]
 
-    \b
-    Networks:
+    [dim]Networks:
         finney              Production  (wss://entrypoint-finney.opentensor.ai:443)
         test                Test        (wss://test.finney.opentensor.ai:443)
         local               Local dev   (ws://127.0.0.1:9944)
-        ws://...            Custom endpoint
+        ws://...            Custom endpoint[/dim]
 
-    \b
-    Examples:
-        alw config set wallet alice
-        alw config set contract-address 5Cxxx...
-        alw config set network finney
-        alw config set network local
+    [dim]Examples:
+        $ alw config set wallet alice
+        $ alw config set contract-address 5Cxxx...
+        $ alw config set network finney
+        $ alw config set network local[/dim]
     """
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
 
