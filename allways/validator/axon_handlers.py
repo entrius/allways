@@ -117,6 +117,34 @@ def _scale_encode_initiate_hash_input(
     )
 
 
+def _resolve_swap_direction(commitment, synapse_source_chain: str, synapse_dest_chain: str):
+    """Resolve deposit/fulfillment addresses and rate from commitment and requested direction.
+
+    Returns (source_chain, dest_chain, deposit_addr, fulfillment_addr, rate, rate_str) or None.
+    """
+    source_chain = synapse_source_chain or commitment.source_chain
+    dest_chain = synapse_dest_chain or commitment.dest_chain
+    is_canonical = source_chain == commitment.source_chain
+    deposit_addr = commitment.source_address if is_canonical else commitment.dest_address
+    fulfillment_addr = commitment.dest_address if is_canonical else commitment.source_address
+    rate, rate_str = commitment.get_rate_for_direction(source_chain)
+    if rate <= 0:
+        return None
+    return source_chain, dest_chain, deposit_addr, fulfillment_addr, rate, rate_str
+
+
+def _load_swap_commitment(validator, miner_hotkey: str):
+    """Read miner commitment and validate chains differ. Returns commitment or None."""
+    commitment = read_miner_commitment(
+        subtensor=validator.axon_subtensor,
+        netuid=validator.config.netuid,
+        hotkey=miner_hotkey,
+    )
+    if commitment is None or commitment.source_chain == commitment.dest_chain:
+        return None
+    return commitment
+
+
 def _reject(synapse, reason: str, context: str = '') -> None:
     """Mark a synapse as rejected with a reason and debug log."""
     synapse.accepted = False
@@ -282,13 +310,9 @@ async def handle_swap_reserve(
 
         # Everything below touches substrate (commitment read, contract reads, vote).
         with validator.axon_lock:
-            commitment = read_miner_commitment(
-                subtensor=validator.axon_subtensor,
-                netuid=validator.config.netuid,
-                hotkey=miner,
-            )
+            commitment = _load_swap_commitment(validator, miner)
             if commitment is None:
-                _reject(synapse, 'Miner has no commitment', ctx)
+                _reject(synapse, 'No valid commitment', ctx)
                 return synapse
 
             # The requested direction must match one of the commitment's chains
@@ -425,32 +449,23 @@ async def handle_swap_confirm(
 
             res_tao_amount, res_source_amount, res_dest_amount = res_data[1], res_data[2], res_data[3]
 
-            commitment = read_miner_commitment(
-                subtensor=validator.axon_subtensor,
-                netuid=validator.config.netuid,
-                hotkey=miner,
-            )
+            commitment = _load_swap_commitment(validator, miner)
             if commitment is None:
-                _reject(synapse, 'Miner commitment not found', ctx)
+                _reject(synapse, 'No valid commitment', ctx)
                 return synapse
 
-            if commitment.source_chain == commitment.dest_chain:
-                _reject(synapse, 'Source and destination chains must be different', ctx)
-                return synapse
-
-            swap_source_chain = synapse.source_chain or commitment.source_chain
-            swap_dest_chain = synapse.dest_chain or commitment.dest_chain
-
-            miner_deposit_address = (
-                commitment.source_address if swap_source_chain == commitment.source_chain else commitment.dest_address
-            )
-            miner_fulfillment_address = (
-                commitment.dest_address if swap_source_chain == commitment.source_chain else commitment.source_address
-            )
-            selected_rate, selected_rate_str = commitment.get_rate_for_direction(swap_source_chain)
-            if selected_rate <= 0:
+            direction = _resolve_swap_direction(commitment, synapse.source_chain, synapse.dest_chain)
+            if direction is None:
                 _reject(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
+            (
+                swap_source_chain,
+                swap_dest_chain,
+                miner_deposit_address,
+                miner_fulfillment_address,
+                _,
+                selected_rate_str,
+            ) = direction
 
             provider = validator.axon_chain_providers.get(swap_source_chain)
             if provider is None:
