@@ -7,6 +7,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
+from allways.validator.rate_state import RateStateStore
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -27,8 +28,10 @@ class SwapTracker:
         client: AllwaysContractClient,
         fulfillment_timeout_blocks: int,
         window_blocks: int,
+        rate_state_store: RateStateStore,
     ):
         self.client = client
+        self.rate_state_store = rate_state_store
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.window: List[Swap] = []
@@ -36,6 +39,15 @@ class SwapTracker:
 
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
         self.window_blocks = window_blocks
+
+    def _record_outcome(self, swap: Swap) -> None:
+        """Persist the terminal state of ``swap`` to the credibility ledger."""
+        self.rate_state_store.insert_swap_outcome(
+            swap_id=swap.id,
+            miner_hotkey=swap.miner_hotkey,
+            completed=(swap.status == SwapStatus.COMPLETED),
+            resolved_block=swap.completed_block or 0,
+        )
 
     def initialize(self, current_block: int):
         """Cold start — scan backward from latest swap to populate active set."""
@@ -80,6 +92,7 @@ class SwapTracker:
         swap.status = status
         swap.completed_block = block
         self.window.append(swap)
+        self._record_outcome(swap)
         self.voted_ids.discard(swap_id)
 
     def mark_voted(self, swap_id: int):
@@ -141,12 +154,14 @@ class SwapTracker:
                     last_known.status = SwapStatus.TIMED_OUT if was_past_timeout else SwapStatus.COMPLETED
                     last_known.completed_block = self._current_block
                     self.window.append(last_known)
+                    self._record_outcome(last_known)
                 resolved_ids.append(sid)
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
             else:
                 resolved_ids.append(sid)
                 self.window.append(swap)
+                self._record_outcome(swap)
 
         for sid in resolved_ids:
             self.active.pop(sid, None)

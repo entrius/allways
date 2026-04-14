@@ -61,10 +61,26 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.warning(f'Failed to read fee_divisor, using default {DEFAULT_FEE_DIVISOR}: {e}')
             self.fee_divisor = DEFAULT_FEE_DIVISOR
+
+        # V1 crown-time scoring state. Must be created before SwapTracker so the
+        # tracker can persist swap outcomes into the credibility ledger.
+        self.rate_state_store = RateStateStore()
+        self._last_known_rates: dict[tuple[str, str, str], float] = {}
+        self._last_known_collaterals: dict[str, int] = {}
+        self._last_commitment_poll_block: int = 0
+        self._last_collateral_poll_block: int = 0
+        try:
+            self._min_collateral_rao: int = self.contract_client.get_min_collateral() or 0
+        except Exception as e:
+            bt.logging.warning(f'Initial min_collateral read failed, using 0: {e}')
+            self._min_collateral_rao = 0
+        self._last_min_collateral_refresh_block: int = self.block
+
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
             window_blocks=SCORING_WINDOW_BLOCKS,
+            rate_state_store=self.rate_state_store,
         )
         self.swap_tracker.initialize(self.block)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
@@ -85,19 +101,6 @@ class Validator(BaseValidatorNeuron):
         # Pending confirmation queue (axon handler thread → forward loop thread)
         # Exposes current block so the queue can purge expired reservations on read.
         self.pending_confirms = PendingConfirmQueue(current_block_fn=lambda: self.block)
-
-        # V1 crown-time scoring state.
-        self.rate_state_store = RateStateStore()
-        self._last_known_rates: dict[tuple[str, str, str], float] = {}
-        self._last_known_collaterals: dict[str, int] = {}
-        self._last_commitment_poll_block: int = 0
-        self._last_collateral_poll_block: int = 0
-        try:
-            self._min_collateral_rao: int = self.contract_client.get_min_collateral() or 0
-        except Exception as e:
-            bt.logging.warning(f'Initial min_collateral read failed, using 0: {e}')
-            self._min_collateral_rao = 0
-        self._last_min_collateral_refresh_block: int = self.block
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
