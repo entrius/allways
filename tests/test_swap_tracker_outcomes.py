@@ -1,12 +1,11 @@
-"""C4 — verify SwapTracker writes swap_outcomes on terminal-state transitions."""
+"""SwapTracker active-set management (outcome persistence is the event watcher's job)."""
 
 import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.state_store import ValidatorStateStore
-from allways.validator.swap_tracker import SwapTracker
+from allways.validator.swap_tracker import NULL_SWAP_RETRY_LIMIT, SwapTracker
 
 
 def _make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500) -> Swap:
@@ -27,117 +26,100 @@ def _make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 50
     )
 
 
-def _make_tracker(tmp_path: Path) -> SwapTracker:
-    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+def _make_tracker() -> SwapTracker:
     client = MagicMock()
-    tracker = SwapTracker(
-        client=client,
-        fulfillment_timeout_blocks=30,
-        state_store=store,
-    )
-    return tracker
+    return SwapTracker(client=client, fulfillment_timeout_blocks=30)
 
 
-class TestResolveOutcome:
-    def test_resolve_completed_writes_row_with_completed_one(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        swap = _make_swap(swap_id=42, miner_hotkey='hk_miner')
-        tracker.active[swap.id] = swap
-
-        tracker.resolve(swap_id=42, status=SwapStatus.COMPLETED, block=250)
-
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_miner': (1, 0)}
-        tracker.state_store.close()
-
-    def test_resolve_timed_out_writes_row_with_completed_zero(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        swap = _make_swap(swap_id=43, miner_hotkey='hk_miner')
-        tracker.active[swap.id] = swap
-
-        tracker.resolve(swap_id=43, status=SwapStatus.TIMED_OUT, block=260)
-
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_miner': (0, 1)}
-        tracker.state_store.close()
-
-    def test_resolve_idempotent_second_call_noop(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        swap = _make_swap(swap_id=44, miner_hotkey='hk_miner')
-        tracker.active[swap.id] = swap
-
-        tracker.resolve(swap_id=44, status=SwapStatus.COMPLETED, block=270)
-        # Swap is gone from active — second call is a no-op
-        tracker.resolve(swap_id=44, status=SwapStatus.TIMED_OUT, block=280)
-
-        # First outcome wins; second call never wrote anything
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_miner': (1, 0)}
-        tracker.state_store.close()
-
+class TestResolve:
     def test_resolve_drops_swap_from_active(self, tmp_path: Path):
-        """After resolve, the swap is gone from active tracking."""
-        tracker = _make_tracker(tmp_path)
+        tracker = _make_tracker()
         swap = _make_swap(swap_id=45, miner_hotkey='hk_miner')
         tracker.active[swap.id] = swap
 
         tracker.resolve(swap_id=45, status=SwapStatus.COMPLETED, block=290)
 
         assert 45 not in tracker.active
-        tracker.state_store.close()
+
+    def test_resolve_clears_voted_and_retry_state(self, tmp_path: Path):
+        tracker = _make_tracker()
+        swap = _make_swap(swap_id=46)
+        tracker.active[swap.id] = swap
+        tracker.mark_voted(46)
+        tracker._null_retry_count[46] = 2
+
+        tracker.resolve(swap_id=46, status=SwapStatus.COMPLETED, block=300)
+
+        assert not tracker.is_voted(46)
+        assert 46 not in tracker._null_retry_count
+
+    def test_resolve_unknown_swap_is_noop(self, tmp_path: Path):
+        tracker = _make_tracker()
+        tracker.resolve(swap_id=999, status=SwapStatus.COMPLETED, block=300)
+        # No exception, nothing changes
+        assert len(tracker.active) == 0
 
 
-class TestPollInnerRecordsOutcome:
-    """Covers the two paths inside _poll_inner that transition swaps to terminal state."""
-
-    def test_contract_removed_infers_completed_writes_outcome(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        swap = _make_swap(swap_id=50, miner_hotkey='hk_pollinner', timeout_block=1000)
+class TestNullSwapRetry:
+    def test_transient_null_does_not_drop_immediately(self):
+        tracker = _make_tracker()
+        swap = _make_swap(swap_id=50)
         tracker.active[swap.id] = swap
         tracker.last_scanned_id = 50
-        tracker._current_block = 500  # not past timeout → COMPLETED
 
-        # client.get_next_swap_id → no new swaps
         tracker.client.get_next_swap_id.return_value = 51
-        # client.get_swap(50) → None (contract removed it)
         tracker.client.get_swap.return_value = None
 
         asyncio.run(tracker._poll_inner())
 
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_pollinner': (1, 0)}
-        tracker.state_store.close()
+        # First None: swap stays, retry count incremented
+        assert 50 in tracker.active
+        assert tracker._null_retry_count.get(50) == 1
 
-    def test_contract_removed_past_timeout_infers_timed_out(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        swap = _make_swap(swap_id=51, miner_hotkey='hk_late', timeout_block=400)
+    def test_null_drops_after_retry_limit(self):
+        tracker = _make_tracker()
+        swap = _make_swap(swap_id=51)
         tracker.active[swap.id] = swap
         tracker.last_scanned_id = 51
-        tracker._current_block = 500  # past timeout_block=400
 
         tracker.client.get_next_swap_id.return_value = 52
         tracker.client.get_swap.return_value = None
 
-        asyncio.run(tracker._poll_inner())
+        for _ in range(NULL_SWAP_RETRY_LIMIT):
+            asyncio.run(tracker._poll_inner())
 
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_late': (0, 1)}
-        tracker.state_store.close()
+        assert 51 not in tracker.active
+        assert 51 not in tracker._null_retry_count
 
-    def test_contract_returns_terminal_state_writes_outcome(self, tmp_path: Path):
-        tracker = _make_tracker(tmp_path)
-        stale_swap = _make_swap(swap_id=52, miner_hotkey='hk_terminal')
-        tracker.active[stale_swap.id] = stale_swap
+    def test_successful_refetch_resets_retry_count(self):
+        tracker = _make_tracker()
+        swap = _make_swap(swap_id=52)
+        tracker.active[swap.id] = swap
         tracker.last_scanned_id = 52
+        tracker._null_retry_count[52] = 1
 
-        # Contract returns a terminal-state swap (race: resolved but still readable)
-        resolved_swap = _make_swap(swap_id=52, miner_hotkey='hk_terminal')
-        resolved_swap.status = SwapStatus.COMPLETED
+        refreshed = _make_swap(swap_id=52)
+        refreshed.status = SwapStatus.FULFILLED
         tracker.client.get_next_swap_id.return_value = 53
-        tracker.client.get_swap.return_value = resolved_swap
+        tracker.client.get_swap.return_value = refreshed
 
         asyncio.run(tracker._poll_inner())
 
-        rates = tracker.state_store.get_all_time_success_rates()
-        assert rates == {'hk_terminal': (1, 0)}
-        tracker.state_store.close()
+        assert 52 in tracker.active
+        assert tracker.active[52].status == SwapStatus.FULFILLED
+        assert 52 not in tracker._null_retry_count
+
+    def test_terminal_status_drops_without_retry(self):
+        tracker = _make_tracker()
+        swap = _make_swap(swap_id=53)
+        tracker.active[swap.id] = swap
+        tracker.last_scanned_id = 53
+
+        terminal = _make_swap(swap_id=53)
+        terminal.status = SwapStatus.COMPLETED
+        tracker.client.get_next_swap_id.return_value = 54
+        tracker.client.get_swap.return_value = terminal
+
+        asyncio.run(tracker._poll_inner())
+
+        assert 53 not in tracker.active
