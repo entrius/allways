@@ -1,0 +1,327 @@
+"""C5 — crown-time scoring replay tests."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
+from allways.validator.forward import (
+    _crown_holders,
+    _replay_crown_time,
+    _success_rate,
+    calculate_miner_rewards,
+)
+from allways.validator.rate_state import RateStateStore
+
+POOL_TAO_BTC = 0.04
+POOL_BTC_TAO = 0.04
+MIN_COLLATERAL = 100_000_000  # 0.1 TAO
+
+
+def _make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
+    n = SimpleNamespace(item=lambda: len(hotkeys))
+    return SimpleNamespace(n=n, hotkeys=list(hotkeys))
+
+
+def _make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
+    store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+    return SimpleNamespace(
+        block=block,
+        metagraph=_make_metagraph(hotkeys),
+        rate_state_store=store,
+        _min_collateral_rao=MIN_COLLATERAL,
+    )
+
+
+def _pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
+    """Ensure the metagraph is large enough that RECYCLE_UID is in-bounds."""
+    hotkeys = list(seeds)
+    while len(hotkeys) <= RECYCLE_UID:
+        hotkeys.append(f'hk_filler_{len(hotkeys)}')
+    return hotkeys
+
+
+class TestSuccessRateHelper:
+    def test_none_is_optimistic(self):
+        assert _success_rate(None) == 1.0
+
+    def test_zero_total_is_optimistic(self):
+        assert _success_rate((0, 0)) == 1.0
+
+    def test_ratio_is_completed_over_total(self):
+        assert _success_rate((8, 2)) == 0.8
+
+
+class TestCrownHoldersHelper:
+    def test_excludes_rate_zero(self):
+        rates = {'a': 0.0, 'b': 0.00015}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
+
+    def test_excludes_below_min_collateral(self):
+        rates = {'a': 0.00020, 'b': 0.00015}
+        collaterals = {'a': MIN_COLLATERAL - 1, 'b': MIN_COLLATERAL}
+        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
+
+    def test_excludes_not_in_metagraph(self):
+        rates = {'a': 0.00020, 'b': 0.00015}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'b'}) == ['b']
+
+    def test_tied_best_rate_returns_all(self):
+        rates = {'a': 0.00020, 'b': 0.00020}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        holders = set(_crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}))
+        assert holders == {'a', 'b'}
+
+
+class TestReplayCrownTime:
+    def test_single_miner_holds_full_window(self, tmp_path: Path):
+        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        # Rate + collateral set before window_start = 0 via direct SQL to sidestep throttle.
+        conn = store._require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00015, 0),
+        )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL, 0),
+        )
+        conn.commit()
+
+        crown = _replay_crown_time(
+            store=store,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            active_hotkeys={'hk_a'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        assert crown == {'hk_a': 1000.0}
+        store.close()
+
+    def test_two_miners_alternate_rate_leadership(self, tmp_path: Path):
+        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        conn = store._require_connection()
+        # Initial state — both miners have collateral and rates, A is worse to start.
+        for row in (
+            ('hk_a', 'tao', 'btc', 0.00010, 0),
+            ('hk_b', 'tao', 'btc', 0.00020, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        for row in (('hk_a', MIN_COLLATERAL, 0), ('hk_b', MIN_COLLATERAL, 0)):
+            conn.execute('INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)', row)
+        # Mid-window, A jumps to the top.
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00030, 600),
+        )
+        conn.commit()
+
+        crown = _replay_crown_time(
+            store=store,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            active_hotkeys={'hk_a', 'hk_b'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        # B leads blocks (100, 600] → 500 blocks, A leads (600, 1100] → 500 blocks
+        assert crown == {'hk_b': 500.0, 'hk_a': 500.0}
+        store.close()
+
+    def test_tie_splits_credit_evenly(self, tmp_path: Path):
+        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        conn = store._require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', 0.00020, 0),
+            )
+            conn.execute(
+                'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+                (hk, MIN_COLLATERAL, 0),
+            )
+        conn.commit()
+
+        crown = _replay_crown_time(
+            store=store,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            active_hotkeys={'hk_a', 'hk_b'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
+        store.close()
+
+    def test_collateral_drop_mid_window_forfeits_remaining_interval(self, tmp_path: Path):
+        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        conn = store._require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL, 0),
+        )
+        # Mid-window drop below min
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL - 1, 600),
+        )
+        conn.commit()
+
+        crown = _replay_crown_time(
+            store=store,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            active_hotkeys={'hk_a'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        assert crown == {'hk_a': 500.0}
+        store.close()
+
+    def test_window_start_state_reconstruction_from_pre_window_events(self, tmp_path: Path):
+        """A miner posted before window_start and never updated — replay reads initial state."""
+        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        conn = store._require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 5_000),
+        )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL, 5_000),
+        )
+        conn.commit()
+
+        crown = _replay_crown_time(
+            store=store,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=10_000,
+            window_end=11_000,
+            active_hotkeys={'hk_a'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        assert crown == {'hk_a': 1000.0}
+        store.close()
+
+
+class TestCalculateMinerRewards:
+    def test_empty_direction_recycles_full_pool(self, tmp_path: Path):
+        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = _make_validator(tmp_path, hotkeys=hotkeys)
+
+        rewards, uids = calculate_miner_rewards(v, None)
+
+        assert set(uids) == set(range(len(hotkeys)))
+        # Everything recycles since no one posted
+        assert rewards[RECYCLE_UID] == 1.0
+        assert rewards[0] == 0.0  # hk_a
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.rate_state_store.close()
+
+    def test_single_miner_full_pool_with_perfect_success(self, tmp_path: Path):
+        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        conn = v.rate_state_store._require_connection()
+        # Post a rate in both directions with collateral, pre-window
+        for direction in (('tao', 'btc'), ('btc', 'tao')):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                ('hk_a', direction[0], direction[1], 0.00020, 0),
+            )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL, 0),
+        )
+        # Perfect record: 1 completed, 0 timed_out → success_rate = 1.0 → 1^3 = 1.0
+        v.rate_state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
+        conn.commit()
+
+        rewards, _ = calculate_miner_rewards(v, None)
+
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC + POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.rate_state_store.close()
+
+    def test_partial_success_reduces_reward_by_cube(self, tmp_path: Path):
+        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        conn = v.rate_state_store._require_connection()
+        # Rate + collateral pre-window, one direction only
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_a', MIN_COLLATERAL, 0),
+        )
+        # 8 completed, 2 timed_out → success 0.8 → 0.8^3 = 0.512
+        for i in range(8):
+            v.rate_state_store.insert_swap_outcome(i + 1, 'hk_a', True, 100 + i)
+        for i in range(2):
+            v.rate_state_store.insert_swap_outcome(100 + i, 'hk_a', False, 200 + i)
+        conn.commit()
+
+        rewards, _ = calculate_miner_rewards(v, None)
+
+        expected = POOL_TAO_BTC * (0.8**SUCCESS_EXPONENT)
+        np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
+        # Remainder recycles
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.rate_state_store.close()
+
+    def test_dereg_mid_window_forfeits_credit(self, tmp_path: Path):
+        # hk_a was the best rate miner but is no longer in the metagraph
+        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_b'])
+        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        conn = v.rate_state_store._require_connection()
+        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', rate, 0),
+            )
+            conn.execute(
+                'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+                (hk, MIN_COLLATERAL, 0),
+            )
+        conn.commit()
+
+        rewards, _ = calculate_miner_rewards(v, None)
+
+        # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.rate_state_store.close()
+
+    def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
+        # Metagraph smaller than RECYCLE_UID — fallback to uid 0
+        hotkeys = ['hk_a', 'hk_b']
+        v = _make_validator(tmp_path, hotkeys=hotkeys)
+
+        rewards, _ = calculate_miner_rewards(v, None)
+
+        assert rewards[0] == 1.0
+        assert len(rewards) == 2
+        v.rate_state_store.close()
+
+    def test_empty_metagraph_returns_empty(self, tmp_path: Path):
+        v = _make_validator(tmp_path, hotkeys=[])
+        rewards, uids = calculate_miner_rewards(v, None)
+        assert rewards.size == 0
+        assert uids == set()
+        v.rate_state_store.close()

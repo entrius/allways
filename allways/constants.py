@@ -55,6 +55,15 @@ COLLATERAL_POLL_INTERVAL_BLOCKS = 15
 # How often the validator refreshes its cached min_collateral from the contract.
 # ~4 hours at 12s/block — governance changes are rare, so cheap to cache.
 MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS = 1200
+# Emission allocation per swap direction. Sum of values is the portion of each
+# scoring pass allocated to crown-time winners; 1 - sum() recycles to RECYCLE_UID.
+DIRECTION_POOLS: dict[tuple[str, str], float] = {
+    ('tao', 'btc'): 0.04,
+    ('btc', 'tao'): 0.04,
+}
+# Harsh penalty for unreliable miners: success_rate ** SUCCESS_EXPONENT.
+# 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125.
+SUCCESS_EXPONENT: int = 3
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID — emissions recycled on-chain
