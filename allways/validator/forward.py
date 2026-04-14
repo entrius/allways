@@ -80,22 +80,49 @@ def _clear_provider_caches(self: Validator) -> None:
 
 
 def _poll_commitments(self: Validator) -> None:
-    """Read all miner commitments from the local subtensor and persist diffs.
+    """Rate-side validator tick.
 
-    Runs every ``COMMITMENT_POLL_INTERVAL_BLOCKS``. For each miner pair in the
-    metagraph, emits a ``rate_event`` per direction whose rate changed since the
-    cache snapshot. The ``RateStateStore`` enforces the per-hotkey throttle.
-    Also purges deregistered hotkeys from the store and local cache, and prunes
-    aged rate/collateral history beyond ``EVENT_RETENTION_BLOCKS``.
+    Three independent steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
+
+    1. ``_prune_aged_rate_events`` — trim history older than the retention
+       window so the SQLite tables stay bounded.
+    2. ``_refresh_miner_rates`` — read all miner commitments from the local
+       subtensor and persist direction-level diffs.
+    3. ``_purge_deregistered_hotkeys`` — drop any hotkeys that have left the
+       metagraph since the last poll, both from the store and the in-memory
+       cache.
+
+    Kept as a thin orchestrator so each concern can be tested and reasoned
+    about independently.
     """
     if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
         return
     self._last_commitment_poll_block = self.block
 
+    _prune_aged_rate_events(self)
+    _refresh_miner_rates(self)
+    _purge_deregistered_hotkeys(self)
+
+
+def _prune_aged_rate_events(self: Validator) -> None:
+    """Delete rate/collateral events older than ``EVENT_RETENTION_BLOCKS``.
+
+    Retention is deliberately 2× the scoring window so ``get_latest_*_before``
+    calls at the window start can always find prior state to reconstruct from.
+    """
     cutoff = self.block - EVENT_RETENTION_BLOCKS
     if cutoff > 0:
         self.rate_state_store.prune_events_older_than(cutoff)
 
+
+def _refresh_miner_rates(self: Validator) -> None:
+    """Pull all miner commitments and persist direction-level rate diffs.
+
+    Rate events that match the cached ``_last_known_rates`` value are skipped
+    entirely. Rate events accepted by the store update the cache; throttled or
+    deduped inserts still update the cache so we don't repeatedly retry the
+    same blocked write on every subsequent poll.
+    """
     try:
         pairs = read_miner_commitments(self.subtensor, self.config.netuid)
     except Exception as e:
@@ -123,16 +150,18 @@ def _poll_commitments(self: Validator) -> None:
                 rate=r,
                 block=self.block,
             )
-            # Cache the observed value whether or not the store accepted it —
-            # a throttled or deduped insert is still "known state" and we
-            # shouldn't re-attempt it on every subsequent poll.
             self._last_known_rates[key] = r
 
+
+def _purge_deregistered_hotkeys(self: Validator) -> None:
+    """Drop rates/collateral/outcomes for hotkeys that left the metagraph."""
+    current_hotkeys = set(self.metagraph.hotkeys)
     stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
+    if not stale:
+        return
     for hk in stale:
         self.rate_state_store.delete_hotkey(hk)
-    if stale:
-        self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+    self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
 
 
 def _poll_collaterals(self: Validator) -> None:
