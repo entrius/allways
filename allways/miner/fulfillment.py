@@ -125,7 +125,19 @@ class SwapFulfiller:
                 bt.logging.debug(f'Swap {swap.id}: source tx not yet confirmed')
                 return False
 
-            bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} to {tx_info.recipient})')
+            # Miner self-protection: don't send dest funds unless the source tx
+            # actually came from the user address tied to this swap. Validators
+            # check this too at initiation, but the miner shouldn't trust that
+            # alone — an exploited or buggy validator quorum shouldn't cost the
+            # miner their send.
+            if tx_info.sender and tx_info.sender != swap.user_source_address:
+                bt.logging.warning(
+                    f'Swap {swap.id}: source tx sender mismatch '
+                    f'(expected {swap.user_source_address}, got {tx_info.sender}) — refusing to fulfill'
+                )
+                return False
+
+            bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} from {tx_info.sender})')
             return True
 
         except ProviderUnreachableError as e:

@@ -481,6 +481,18 @@ async def handle_swap_confirm(
                 _reject(synapse, 'Source transaction not found or amount mismatch', ctx)
                 return synapse
 
+            # Defend against user-snipes-miner: reject if the source tx wasn't
+            # actually sent by the address the user proved ownership of at reserve
+            # time. Without this, a user could reserve a miner and then submit any
+            # unrelated third-party tx of the right amount to the miner's address.
+            if tx_info.sender and tx_info.sender != synapse.source_address:
+                _reject(
+                    synapse,
+                    f'Source tx sender mismatch (expected {synapse.source_address}, got {tx_info.sender})',
+                    ctx,
+                )
+                return synapse
+
             if not tx_info.confirmed:
                 chain_def = provider.get_chain()
                 pending = PendingConfirm(

@@ -281,6 +281,14 @@ def _process_pending_confirms(self: Validator) -> None:
             )
             continue
 
+        if tx_info.sender and tx_info.sender != item.source_address:
+            self.pending_confirms.remove(item.miner_hotkey)
+            bt.logging.warning(
+                f'PendingConfirm [{swap_label} {miner_short}]: sender mismatch '
+                f'(expected {item.source_address}, got {tx_info.sender}), dropping'
+            )
+            continue
+
         log_on_change(
             f'confs:{item.miner_hotkey}',
             tx_info.confirmations,

@@ -685,6 +685,7 @@ def swap_now_command(
 
     summary = (
         f'  Send:    [red]{amount} {source_chain.upper()}[/red]\n'
+        f'  From:    [yellow]{user_source_address}[/yellow]\n'
         f'  Receive: [green]{_from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
         f'  Fee:     {fee_percent:g}% ({_from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
         f'  Rate:    send 1 {source_chain.upper()}, get {selected_pair.rate:g} {dest_chain.upper()}\n'
@@ -693,6 +694,10 @@ def swap_now_command(
     )
     console.print()
     console.print(Panel(summary, title='[bold]Swap Summary[/bold]', expand=False))
+    console.print(
+        '  [yellow]⚠  You must send the source funds from the "From" address above.[/yellow]\n'
+        '  [dim]Validators reject swaps where the source tx sender does not match the reserved address.[/dim]'
+    )
     console.print()
 
     if not skip_confirm and not click.confirm('Proceed?'):
