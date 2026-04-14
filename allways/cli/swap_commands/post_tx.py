@@ -56,12 +56,12 @@ def post_tx_command(tx_hash: str, netuid: int):
 
     remaining = reserved_until - current_block
     remaining_min = remaining * SECONDS_PER_BLOCK / 60
-    human_amount = from_smallest_unit(state.source_amount, state.source_chain)
+    human_amount = from_smallest_unit(state.from_amount, state.from_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')
-    console.print(f'  Pair:    {state.source_chain.upper()} -> {state.dest_chain.upper()}')
-    console.print(f'  Send:    {human_amount} {state.source_chain.upper()}')
-    console.print(f'  To:      {state.miner_source_address}')
+    console.print(f'  Pair:    {state.from_chain.upper()} -> {state.to_chain.upper()}')
+    console.print(f'  Send:    {human_amount} {state.from_chain.upper()}')
+    console.print(f'  To:      {state.miner_from_address}')
     console.print(f'  Miner:   UID {state.miner_uid}')
     console.print(f'  Expires: ~{remaining} blocks (~{remaining_min:.0f} min)\n')
 
@@ -77,12 +77,12 @@ def post_tx_command(tx_hash: str, netuid: int):
 
     # Set up chain provider and signing key
     chain_providers = create_chain_providers(subtensor=subtensor)
-    provider = chain_providers.get(state.source_chain)
+    provider = chain_providers.get(state.from_chain)
     if not provider:
-        console.print(f'[red]No chain provider for {state.source_chain}[/red]')
+        console.print(f'[red]No chain provider for {state.from_chain}[/red]')
         return
 
-    source_key = wallet.coldkey if state.source_chain == 'tao' else None
+    from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
     # Discover validators
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)
@@ -95,15 +95,15 @@ def post_tx_command(tx_hash: str, netuid: int):
     # Sign and broadcast confirm synapse
     accepted, queued = sign_and_broadcast_confirm(
         provider,
-        state.user_source_address,
-        source_key,
+        state.user_from_address,
+        from_key,
         tx_hash,
         state.miner_hotkey,
         state.receive_address,
         validator_axons,
         ephemeral_wallet,
-        source_chain=state.source_chain,
-        dest_chain=state.dest_chain,
+        from_chain=state.from_chain,
+        to_chain=state.to_chain,
     )
 
     if accepted == 0:

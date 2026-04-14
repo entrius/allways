@@ -66,7 +66,7 @@ def status_command(netuid: int):
             if my_swaps:
                 table.add_row('Your Active Swaps', str(len(my_swaps)))
                 for s in my_swaps:
-                    table.add_row('', f'  #{s.id} {s.source_chain.upper()}->{s.dest_chain.upper()} [{s.status.name}]')
+                    table.add_row('', f'  #{s.id} {s.from_chain.upper()}->{s.to_chain.upper()} [{s.status.name}]')
             else:
                 table.add_row('Your Active Swaps', 'None')
         except ContractError:
@@ -82,7 +82,7 @@ def status_command(netuid: int):
                     remaining_min = remaining * SECONDS_PER_BLOCK / 60
                     table.add_row(
                         'Pending Reservation',
-                        f'{pending.source_chain.upper()}->{pending.dest_chain.upper()} (~{remaining_min:.0f} min left)',
+                        f'{pending.from_chain.upper()}->{pending.to_chain.upper()} (~{remaining_min:.0f} min left)',
                     )
                 else:
                     table.add_row('Pending Reservation', '[dim]Expired[/dim]')
@@ -107,7 +107,7 @@ def status_command(netuid: int):
                 my_pairs = [p for p in pairs if p.hotkey == hotkey]
                 if my_pairs:
                     for p in my_pairs:
-                        src_up, dst_up = p.source_chain.upper(), p.dest_chain.upper()
+                        src_up, dst_up = p.from_chain.upper(), p.to_chain.upper()
                         if p.rate > 0 and p.counter_rate > 0:
                             glyph = '↔'
                             if p.rate_str != p.counter_rate_str:

@@ -60,12 +60,12 @@ class ChainProvider(ABC):
     def is_valid_address(self, address: str) -> bool: ...
 
     @abstractmethod
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a source proof message with the given key. Returns hex signature."""
         ...
 
     @abstractmethod
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify a source proof signature from the given address."""
         ...
 

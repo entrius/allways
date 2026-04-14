@@ -29,25 +29,25 @@ class ReservationStatus(IntEnum):
 class MinerPair:
     """A miner's posted exchange pair from on-chain commitments.
 
-    After normalization, source_chain/dest_chain are in canonical order.
+    After normalization, from_chain/to_chain are in canonical order.
     rate is for source→dest swaps, counter_rate is for dest→source swaps.
     Both rates use the same unit: 'dest per 1 source' in canonical order.
     """
 
     uid: int
     hotkey: str
-    source_chain: str
-    source_address: str
-    dest_chain: str
-    dest_address: str
+    from_chain: str
+    from_address: str
+    to_chain: str
+    to_address: str
     rate: float  # source→dest rate — for display/sorting
-    rate_str: str = ''  # Raw string — for precise dest_amount calculation
+    rate_str: str = ''  # Raw string — for precise to_amount calculation
     counter_rate: float = 0.0  # dest→source rate (same unit as rate)
-    counter_rate_str: str = ''  # Raw string — for precise dest_amount calculation
+    counter_rate_str: str = ''  # Raw string — for precise to_amount calculation
 
-    def get_rate_for_direction(self, swap_source_chain: str) -> tuple:
+    def get_rate_for_direction(self, swap_from_chain: str) -> tuple:
         """Return (rate, rate_str) for the given swap direction."""
-        if swap_source_chain == self.source_chain:
+        if swap_from_chain == self.from_chain:
             return self.rate, self.rate_str
         return self.counter_rate, self.counter_rate_str
 
@@ -67,20 +67,20 @@ class Swap:
     id: int
     user_hotkey: str
     miner_hotkey: str
-    source_chain: str
-    dest_chain: str
-    source_amount: int
-    dest_amount: int
+    from_chain: str
+    to_chain: str
+    from_amount: int
+    to_amount: int
     tao_amount: int
-    user_source_address: str
-    user_dest_address: str
-    miner_source_address: str = ''
-    miner_dest_address: str = ''
+    user_from_address: str
+    user_to_address: str
+    miner_from_address: str = ''
+    miner_to_address: str = ''
     rate: str = ''
-    source_tx_hash: str = ''
-    source_tx_block: int = 0
-    dest_tx_hash: str = ''
-    dest_tx_block: int = 0
+    from_tx_hash: str = ''
+    from_tx_block: int = 0
+    to_tx_hash: str = ''
+    to_tx_block: int = 0
     status: SwapStatus = SwapStatus.ACTIVE
     initiated_block: int = 0
     timeout_block: int = 0
@@ -95,15 +95,15 @@ class SwapRequest:
     request_id: str
     status: SwapRequestStatus = SwapRequestStatus.QUEUED
     miner_hotkey: str = ''
-    source_chain: str = ''
-    dest_chain: str = ''
-    source_amount: int = 0
+    from_chain: str = ''
+    to_chain: str = ''
+    from_amount: int = 0
     tao_amount: int = 0
-    user_source_address: str = ''
-    user_dest_address: str = ''
-    source_tx_hash: str = ''
-    source_tx_block: int = 0
-    source_proof: str = ''
+    user_from_address: str = ''
+    user_to_address: str = ''
+    from_tx_hash: str = ''
+    from_tx_block: int = 0
+    from_proof: str = ''
     swap_id: Optional[int] = None
     reservation_id: str = ''
     reserved_at_block: int = 0
@@ -116,12 +116,12 @@ class SwapRequest:
 class Reservation:
     reservation_id: str
     miner_hotkey: str
-    source_chain: str
-    dest_chain: str
-    source_amount: int
+    from_chain: str
+    to_chain: str
+    from_amount: int
     tao_amount: int
-    user_source_address: str
-    user_dest_address: str
+    user_from_address: str
+    user_to_address: str
     status: ReservationStatus = ReservationStatus.ACTIVE
     reserved_at_block: int = 0
     expires_at_block: int = 0

@@ -273,7 +273,7 @@ class SubtensorProvider(ChainProvider):
         except Exception:
             return False
 
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message using sr25519 keypair. key should be a Keypair."""
         if key is None or not hasattr(key, 'sign'):
             return ''
@@ -281,17 +281,17 @@ class SubtensorProvider(ChainProvider):
             signature = key.sign(message.encode())
             return signature.hex()
         except Exception as e:
-            bt.logging.error(f'TAO sign_source_proof failed: {e}')
+            bt.logging.error(f'TAO sign_from_proof failed: {e}')
             return ''
 
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify an sr25519 signature from the given SS58 address."""
         try:
             keypair = Keypair(ss58_address=address)
             sig_bytes = bytes.fromhex(signature)
             return keypair.verify(message.encode(), sig_bytes)
         except Exception as e:
-            bt.logging.error(f'TAO verify_source_proof failed: {e}')
+            bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
 
     def send_amount(

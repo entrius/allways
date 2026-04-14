@@ -81,7 +81,7 @@ class Miner(BaseMinerNeuron):
             return {}
         if pair is None:
             return {}
-        return {pair.source_chain: pair.source_address, pair.dest_chain: pair.dest_address}
+        return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
 
     def _maybe_reload_my_addresses(self) -> None:
         """If the CLI wrote a rate-posted flag, refresh the address cache."""

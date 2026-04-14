@@ -10,10 +10,10 @@ class TestParseCommitmentData:
         assert pair is not None
         assert pair.uid == 1
         assert pair.hotkey == 'hk1'
-        assert pair.source_chain == 'btc'
-        assert pair.source_address == 'bc1qaddr'
-        assert pair.dest_chain == 'tao'
-        assert pair.dest_address == '5Caddr'
+        assert pair.from_chain == 'btc'
+        assert pair.from_address == 'bc1qaddr'
+        assert pair.to_chain == 'tao'
+        assert pair.to_address == '5Caddr'
         assert pair.rate == 340.0
         assert pair.rate_str == '340'
         assert pair.counter_rate == 350.0
@@ -31,10 +31,10 @@ class TestParseCommitmentData:
         raw = 'v1:tao:5Caddr:btc:bc1qaddr:340:350'
         pair = parse_commitment_data(raw)
         assert pair is not None
-        assert pair.source_chain == 'btc'
-        assert pair.dest_chain == 'tao'
-        assert pair.source_address == 'bc1qaddr'
-        assert pair.dest_address == '5Caddr'
+        assert pair.from_chain == 'btc'
+        assert pair.to_chain == 'tao'
+        assert pair.from_address == 'bc1qaddr'
+        assert pair.to_address == '5Caddr'
         # Original forward rate (340) was for tao->btc, now becomes reverse
         assert pair.rate == 350.0
         assert pair.rate_str == '350'
@@ -109,8 +109,8 @@ class TestParseCommitmentData:
         assert pair.counter_rate == 0.0
 
     def test_disabled_direction_produces_zero_dest_amount(self):
-        """Full guard chain: disabled direction → rate=0 → dest_amount=0 → contract rejects."""
-        from allways.utils.rate import calculate_dest_amount
+        """Full guard chain: disabled direction → rate=0 → to_amount=0 → contract rejects."""
+        from allways.utils.rate import calculate_to_amount
 
         raw = 'v1:btc:bc1qaddr:tao:5Caddr:345:0'
         pair = parse_commitment_data(raw)
@@ -118,11 +118,9 @@ class TestParseCommitmentData:
         rate, rate_str = pair.get_rate_for_direction('tao')
         assert rate == 0.0
         assert rate <= 0  # validator guard: if selected_rate <= 0: reject
-        # Even if the guard were bypassed, calculate_dest_amount returns 0
-        dest_amount = calculate_dest_amount(
-            1_000_000_000, rate_str, is_reverse=True, dest_decimals=9, source_decimals=8
-        )
-        assert dest_amount == 0  # contract would reject with InvalidAmount
+        # Even if the guard were bypassed, calculate_to_amount returns 0
+        to_amount = calculate_to_amount(1_000_000_000, rate_str, is_reverse=True, dest_decimals=9, source_decimals=8)
+        assert to_amount == 0  # contract would reject with InvalidAmount
 
     def test_single_direction_forward_only(self):
         """Miner supports only BTC→TAO (counter_rate=0 means TAO→BTC not offered)."""

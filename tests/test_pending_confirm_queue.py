@@ -10,16 +10,16 @@ from allways.validator.state_store import (
 
 PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
     miner_hotkey='miner-1',
-    source_tx_hash='tx-1',
-    source_chain='btc',
-    dest_chain='tao',
-    source_address='bc1-user',
-    dest_address='5user',
+    from_tx_hash='tx-1',
+    from_chain='btc',
+    to_chain='tao',
+    from_address='bc1-user',
+    to_address='5user',
     tao_amount=123,
-    source_amount=456,
-    dest_amount=789,
-    miner_deposit_address='bc1-miner',
-    miner_dest_address='5miner',
+    from_amount=456,
+    to_amount=789,
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
     rate_str='350',
     reserved_until=100,
     queued_at=1.0,
@@ -28,16 +28,16 @@ PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
 
 PENDING_CONFIRM_SAMPLE2 = PendingConfirm(
     miner_hotkey='miner-2',
-    source_tx_hash='tx-2',
-    source_chain='btc',
-    dest_chain='tao',
-    source_address='bc1-user',
-    dest_address='5user',
+    from_tx_hash='tx-2',
+    from_chain='btc',
+    to_chain='tao',
+    from_address='bc1-user',
+    to_address='5user',
     tao_amount=123,
-    source_amount=456,
-    dest_amount=789,
-    miner_deposit_address='bc1-miner',
-    miner_dest_address='5miner',
+    from_amount=456,
+    to_amount=789,
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
     rate_str='350',
     reserved_until=100,
     queued_at=2.0,
@@ -58,21 +58,21 @@ class TestPendingConfirmQueue:
         assert queue2.pending_size() == 2
         assert len(items) == 2
         assert items[0].miner_hotkey == 'miner-1'
-        assert items[0].source_tx_hash == 'tx-1'
+        assert items[0].from_tx_hash == 'tx-1'
         assert items[1].miner_hotkey == 'miner-2'
-        assert items[1].source_tx_hash == 'tx-2'
+        assert items[1].from_tx_hash == 'tx-2'
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'
         queue = ValidatorStateStore(db_path=db_path)
 
         queue.enqueue(PENDING_CONFIRM_SAMPLE1)
-        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, source_tx_hash='tx-new'))
+        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, from_tx_hash='tx-new'))
 
         items = queue.get_all()
         assert queue.pending_size() == 1
         assert len(items) == 1
-        assert items[0].source_tx_hash == 'tx-new'
+        assert items[0].from_tx_hash == 'tx-new'
 
     def test_has_reflects_enqueue_and_remove(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'

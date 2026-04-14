@@ -72,7 +72,7 @@ def miner_status(hotkey: str):
 
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
-        src_up, dst_up = pair.source_chain.upper(), pair.dest_chain.upper()
+        src_up, dst_up = pair.from_chain.upper(), pair.to_chain.upper()
         fwd_disabled = pair.rate == 0
         ctr_disabled = pair.counter_rate == 0
         if fwd_disabled or ctr_disabled or pair.rate_str != pair.counter_rate_str:
@@ -89,8 +89,8 @@ def miner_status(hotkey: str):
                 )
         else:
             console.print(f'  {src_up} ↔ {dst_up} @ [green]{pair.rate:g}[/green]')
-        console.print(f'  Source address: [dim]{pair.source_address}[/dim]')
-        console.print(f'  Dest address:   [dim]{pair.dest_address}[/dim]')
+        console.print(f'  Source address: [dim]{pair.from_address}[/dim]')
+        console.print(f'  Dest address:   [dim]{pair.to_address}[/dim]')
     else:
         console.print('[yellow]No committed pair found[/yellow]')
 
@@ -115,14 +115,14 @@ def miner_status(hotkey: str):
     swap_table.add_column('Block', style='dim')
 
     for swap in swaps:
-        pair_str = f'{swap.source_chain.upper()}/{swap.dest_chain.upper()}'
+        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
         color = SWAP_STATUS_COLORS.get(swap.status, 'white')
         status_display = f'[{color}]{swap.status.name}[/{color}]'
 
         swap_table.add_row(
             str(swap.id),
             pair_str,
-            str(swap.source_amount),
+            str(swap.from_amount),
             status_display,
             str(swap.initiated_block),
         )
@@ -297,9 +297,9 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, ye
             result = client.mark_fulfilled(
                 wallet=wallet,
                 swap_id=swap_id,
-                dest_tx_hash=tx_hash,
-                dest_amount=amount,
-                dest_tx_block=block,
+                to_tx_hash=tx_hash,
+                to_amount=amount,
+                to_tx_block=block,
             )
         console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
     except ContractError as e:

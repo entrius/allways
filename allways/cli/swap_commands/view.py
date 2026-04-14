@@ -50,8 +50,8 @@ def view_miners():
         console.print('[yellow]No miner commitments found[/yellow]\n')
         return
 
-    src_up = pairs[0].source_chain.upper()
-    dst_up = pairs[0].dest_chain.upper()
+    src_up = pairs[0].from_chain.upper()
+    dst_up = pairs[0].to_chain.upper()
 
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
@@ -89,8 +89,8 @@ def view_miners():
             ctr_display,
             collateral_str,
             active_str,
-            pair.source_address[:16] + '...',
-            pair.dest_address[:16] + '...',
+            pair.from_address[:16] + '...',
+            pair.to_address[:16] + '...',
         )
 
     console.print(table)
@@ -131,7 +131,7 @@ def view_rates(pair: str):
             console.print('[red]Invalid pair format. Use: chain-chain (e.g. btc-tao)[/red]')
             return
         src, dst = parts
-        pairs = [p for p in pairs if p.source_chain == src and p.dest_chain == dst]
+        pairs = [p for p in pairs if p.from_chain == src and p.to_chain == dst]
 
     if not pairs:
         console.print('[yellow]No rates found[/yellow]\n')
@@ -140,7 +140,7 @@ def view_rates(pair: str):
     # Group by pair direction
     grouped = {}
     for p in pairs:
-        key = f'{p.source_chain}-{p.dest_chain}'
+        key = f'{p.from_chain}-{p.to_chain}'
         grouped.setdefault(key, []).append(p)
 
     for pair_key, pair_list in grouped.items():
@@ -243,14 +243,14 @@ def view_swaps(status: str):
     table.add_column('Block', style='dim')
 
     for swap in swaps:
-        pair_str = f'{swap.source_chain.upper()}/{swap.dest_chain.upper()}'
+        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
         color = SWAP_STATUS_COLORS.get(swap.status, 'white')
         status_str = f'[{color}]{swap.status.name}[/{color}]'
 
         table.add_row(
             str(swap.id),
             pair_str,
-            str(swap.source_amount),
+            str(swap.from_amount),
             status_str,
             swap.miner_hotkey[:16] + '...',
             str(swap.initiated_block),
@@ -265,12 +265,12 @@ def build_swap_text(swap, chain_info=True):
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
     parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
 
-    src = swap.source_chain.upper()
-    dst = swap.dest_chain.upper()
-    src_chain_def = get_chain(swap.source_chain)
-    dst_chain_def = get_chain(swap.dest_chain)
-    src_human = swap.source_amount / (10**src_chain_def.decimals)
-    dst_human = swap.dest_amount / (10**dst_chain_def.decimals)
+    src = swap.from_chain.upper()
+    dst = swap.to_chain.upper()
+    src_chain_def = get_chain(swap.from_chain)
+    dst_chain_def = get_chain(swap.to_chain)
+    src_human = swap.from_amount / (10**src_chain_def.decimals)
+    dst_human = swap.to_amount / (10**dst_chain_def.decimals)
     parts.append(f'  {src} -> {dst} | {src_human:g} {src} -> {dst_human:.8f} {dst} | Rate: {swap.rate}')
 
     timed_out = swap.status == SwapStatus.TIMED_OUT
@@ -295,15 +295,15 @@ def build_swap_text(swap, chain_info=True):
         parts.append(f'    [dim]⏱ Timeout       Block {swap.timeout_block}[/dim]')
 
     parts.append('')
-    parts.append(f'  Source TX:  {swap.source_tx_hash or "—"}')
-    parts.append(f'  Dest TX:   {swap.dest_tx_hash or "—"}')
+    parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
+    parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
 
     if chain_info:
         parts.append('')
         parts.append(f'  User:      {swap.user_hotkey}')
         parts.append(f'  Miner:     {swap.miner_hotkey}')
-        parts.append(f'  Send to:   {swap.user_source_address}')
-        parts.append(f'  Receive:   {swap.user_dest_address}')
+        parts.append(f'  Send to:   {swap.user_from_address}')
+        parts.append(f'  Receive:   {swap.user_to_address}')
 
     parts.append('')
     return '\n'.join(parts)
@@ -523,15 +523,15 @@ def view_reservation():
     table.add_column('Field', style='cyan')
     table.add_column('Value', style='green')
 
-    chain = get_chain(state.source_chain)
-    human_send = state.source_amount / (10**chain.decimals)
-    dest_chain_def = get_chain(state.dest_chain)
-    human_receive = state.user_receives / (10**dest_chain_def.decimals)
+    chain = get_chain(state.from_chain)
+    human_send = state.from_amount / (10**chain.decimals)
+    to_chain_def = get_chain(state.to_chain)
+    human_receive = state.user_receives / (10**to_chain_def.decimals)
 
-    table.add_row('Pair', f'{state.source_chain.upper()} -> {state.dest_chain.upper()}')
-    table.add_row('Send', f'{human_send} {state.source_chain.upper()}')
-    table.add_row('To Address', state.miner_source_address)
-    table.add_row('Receive', f'{human_receive:.8f} {state.dest_chain.upper()}')
+    table.add_row('Pair', f'{state.from_chain.upper()} -> {state.to_chain.upper()}')
+    table.add_row('Send', f'{human_send} {state.from_chain.upper()}')
+    table.add_row('To Address', state.miner_from_address)
+    table.add_row('Receive', f'{human_receive:.8f} {state.to_chain.upper()}')
     table.add_row('Receive Address', state.receive_address)
     table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
 
@@ -548,7 +548,7 @@ def view_reservation():
 
     if is_active:
         console.print(
-            f'\n[bold]Next step:[/bold] Send {human_send} {state.source_chain.upper()} to the address above, then run:'
+            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} to the address above, then run:'
         )
         console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
     else:

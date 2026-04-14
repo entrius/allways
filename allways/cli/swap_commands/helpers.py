@@ -161,15 +161,15 @@ def get_cli_context(
 class PendingSwapState:
     miner_hotkey: str
     miner_uid: int
-    source_chain: str
-    dest_chain: str
-    source_amount: int
-    dest_amount: int
+    from_chain: str
+    to_chain: str
+    from_amount: int
+    to_amount: int
     tao_amount: int
     user_receives: int
     rate_str: str
-    miner_source_address: str
-    user_source_address: str
+    miner_from_address: str
+    user_from_address: str
     receive_address: str
     reserved_until_block: int
     netuid: int
@@ -209,7 +209,7 @@ def clear_pending_swap() -> None:
     PENDING_SWAP_FILE.unlink(missing_ok=True)
 
 
-def find_matching_miners(all_pairs, source_chain: str, dest_chain: str):
+def find_matching_miners(all_pairs, from_chain: str, to_chain: str):
     """Filter and normalize miner pairs for a given swap direction (bilateral matching).
 
     Handles both direct matches and reverse-direction pairs (using counter_rate for the
@@ -220,20 +220,20 @@ def find_matching_miners(all_pairs, source_chain: str, dest_chain: str):
     """
     matching = []
     for p in all_pairs:
-        if p.source_chain == source_chain and p.dest_chain == dest_chain:
+        if p.from_chain == from_chain and p.to_chain == to_chain:
             if p.rate > 0:
                 matching.append(p)
-        elif p.source_chain == dest_chain and p.dest_chain == source_chain:
-            rev_rate, rev_rate_str = p.get_rate_for_direction(source_chain)
+        elif p.from_chain == to_chain and p.to_chain == from_chain:
+            rev_rate, rev_rate_str = p.get_rate_for_direction(from_chain)
             if rev_rate > 0:
                 matching.append(
                     MinerPair(
                         uid=p.uid,
                         hotkey=p.hotkey,
-                        source_chain=p.dest_chain,
-                        source_address=p.dest_address,
-                        dest_chain=p.source_chain,
-                        dest_address=p.source_address,
+                        from_chain=p.to_chain,
+                        from_address=p.to_address,
+                        to_chain=p.from_chain,
+                        to_address=p.from_address,
                         rate=rev_rate,
                         rate_str=rev_rate_str,
                         counter_rate=p.rate,

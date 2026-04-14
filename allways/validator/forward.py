@@ -137,8 +137,8 @@ def refresh_miner_rates(self: Validator) -> None:
         if pair.hotkey not in current_hotkeys:
             continue
         for from_c, to_c, r in (
-            (pair.source_chain, pair.dest_chain, pair.rate),
-            (pair.dest_chain, pair.source_chain, pair.counter_rate),
+            (pair.from_chain, pair.to_chain, pair.rate),
+            (pair.to_chain, pair.from_chain, pair.counter_rate),
         ):
             if r <= 0:
                 continue  # miner opted out of this direction
@@ -175,12 +175,12 @@ def try_extend_reservation(self: Validator, item, current_block: int, swap_label
         blocks_left = reserved_until - current_block
         if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
+            extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
             self.contract_client.vote_extend_reservation(
                 wallet=self.wallet,
                 request_hash=extend_hash,
                 miner_hotkey=item.miner_hotkey,
-                source_tx_hash=item.source_tx_hash,
+                from_tx_hash=item.from_tx_hash,
             )
             bt.logging.info(
                 f'PendingConfirm [{swap_label} {miner_short}]: '
@@ -204,13 +204,13 @@ def initialize_pending_user_reservations(self: Validator) -> None:
     current_block = self.block
 
     for item in items:
-        swap_label = f'{item.source_chain.upper()}->{item.dest_chain.upper()}'
+        swap_label = f'{item.from_chain.upper()}->{item.to_chain.upper()}'
         try:
             uid = self.metagraph.hotkeys.index(item.miner_hotkey)
         except ValueError:
             uid = '?'
         miner_short = f'UID {uid} ({item.miner_hotkey[:8]})'
-        chain_def = self.chain_providers.get(item.source_chain)
+        chain_def = self.chain_providers.get(item.from_chain)
         min_confs = chain_def.get_chain().min_confirmations if chain_def else '?'
 
         # Skip if swap already initiated (another validator reached quorum)
@@ -223,19 +223,19 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
 
         # Re-verify tx with main-loop chain provider
-        provider = self.chain_providers.get(item.source_chain)
+        provider = self.chain_providers.get(item.from_chain)
         if provider is None:
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
-                f'PendingConfirm [{swap_label} {miner_short}]: no provider for {item.source_chain}, dropping'
+                f'PendingConfirm [{swap_label} {miner_short}]: no provider for {item.from_chain}, dropping'
             )
             continue
 
         try:
             tx_info = provider.verify_transaction(
-                tx_hash=item.source_tx_hash,
-                expected_recipient=item.miner_deposit_address,
-                expected_amount=item.source_amount,
+                tx_hash=item.from_tx_hash,
+                expected_recipient=item.miner_from_address,
+                expected_amount=item.from_amount,
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
@@ -248,15 +248,15 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         if tx_info is None:
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
-                f'PendingConfirm [{swap_label} {miner_short}]: tx {item.source_tx_hash[:16]}... not found, dropping'
+                f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... not found, dropping'
             )
             continue
 
-        if tx_info.sender and tx_info.sender != item.source_address:
+        if tx_info.sender and tx_info.sender != item.from_address:
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
                 f'PendingConfirm [{swap_label} {miner_short}]: sender mismatch '
-                f'(expected {item.source_address}, got {tx_info.sender}), dropping'
+                f'(expected {item.from_address}, got {tx_info.sender}), dropping'
             )
             continue
 
@@ -264,7 +264,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             f'confs:{item.miner_hotkey}',
             tx_info.confirmations,
             f'PendingConfirm [{swap_label} {miner_short}]: '
-            f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.source_tx_hash[:16]}...',
+            f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.from_tx_hash[:16]}...',
         )
 
         try_extend_reservation(self, item, current_block, swap_label, miner_short)
@@ -280,35 +280,35 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
             hash_input = scale_encode_initiate_hash_input(
                 miner_bytes,
-                item.source_tx_hash,
-                item.source_chain,
-                item.dest_chain,
-                item.miner_deposit_address,
-                item.miner_dest_address,
+                item.from_tx_hash,
+                item.from_chain,
+                item.to_chain,
+                item.miner_from_address,
+                item.miner_to_address,
                 item.rate_str,
                 item.tao_amount,
-                item.source_amount,
-                item.dest_amount,
+                item.from_amount,
+                item.to_amount,
             )
             request_hash = keccak256(hash_input)
 
-            user_tao_address = item.dest_address if item.dest_chain == 'tao' else item.source_address
+            user_tao_address = item.to_address if item.to_chain == 'tao' else item.from_address
             self.contract_client.vote_initiate(
                 wallet=self.wallet,
                 request_hash=request_hash,
                 user_hotkey=user_tao_address,
                 miner_hotkey=item.miner_hotkey,
-                source_chain=item.source_chain,
-                dest_chain=item.dest_chain,
-                source_amount=item.source_amount,
+                from_chain=item.from_chain,
+                to_chain=item.to_chain,
+                from_amount=item.from_amount,
                 tao_amount=item.tao_amount,
-                user_source_address=item.source_address,
-                user_dest_address=item.dest_address,
-                source_tx_hash=item.source_tx_hash,
-                source_tx_block=tx_info.block_number or 0,
-                dest_amount=item.dest_amount,
-                miner_source_address=item.miner_deposit_address,
-                miner_dest_address=item.miner_dest_address,
+                user_from_address=item.from_address,
+                user_to_address=item.to_address,
+                from_tx_hash=item.from_tx_hash,
+                from_tx_block=tx_info.block_number or 0,
+                to_amount=item.to_amount,
+                miner_from_address=item.miner_from_address,
+                miner_to_address=item.miner_to_address,
                 rate=item.rate_str,
             )
             self.state_store.remove(item.miner_hotkey)
@@ -374,20 +374,20 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     current_block = self.block
 
     for swap in tracker.get_near_timeout_fulfilled(current_block, EXTEND_THRESHOLD_BLOCKS):
-        swap_label = f'{swap.source_chain.upper()}->{swap.dest_chain.upper()}'
+        swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
         # Check if dest tx exists on-chain (even if unconfirmed)
-        provider = self.chain_providers.get(swap.dest_chain)
-        if not provider or not swap.dest_tx_hash:
+        provider = self.chain_providers.get(swap.to_chain)
+        if not provider or not swap.to_tx_hash:
             continue
 
         try:
             tx_info = provider.verify_transaction(
-                tx_hash=swap.dest_tx_hash,
-                expected_recipient=swap.user_dest_address,
-                expected_amount=swap.dest_amount,
-                block_hint=swap.dest_tx_block,
+                tx_hash=swap.to_tx_hash,
+                expected_recipient=swap.user_to_address,
+                expected_amount=swap.to_amount,
+                block_hint=swap.to_tx_block,
             )
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend check verify_transaction error: {e}')

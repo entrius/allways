@@ -1,9 +1,9 @@
-"""Tests for allways.utils.rate — dest_amount calculation and fee deduction math."""
+"""Tests for allways.utils.rate — to_amount calculation and fee deduction math."""
 
 from decimal import Decimal
 
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
-from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount
 
 # Chain decimals
 TAO_DEC = 9
@@ -17,31 +17,31 @@ class TestBtcToTao:
     def test_standard_rate(self):
         # 0.01 BTC @ rate 345 (1 BTC = 345 TAO) → 3.45 TAO
         source = int(Decimal('0.01') * BTC_TO_SAT)  # 1_000_000 sat
-        result = calculate_dest_amount(source, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         expected = 3_450_000_000  # 3.45 TAO in rao
         assert result == expected
 
     def test_one_btc(self):
         # 1 BTC @ rate 345 → 345 TAO
         source = BTC_TO_SAT  # 100_000_000 sat
-        result = calculate_dest_amount(source, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 345 * TAO_TO_RAO
 
     def test_round_rate(self):
         # 1 BTC @ rate 100 → 100 TAO
         source = BTC_TO_SAT
-        result = calculate_dest_amount(source, '100', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '100', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 100 * TAO_TO_RAO
 
     def test_small_amount(self):
         # 1 sat @ rate 345 → 3450 rao
-        result = calculate_dest_amount(1, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(1, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 3450
 
     def test_fractional_rate(self):
         # 0.01 BTC @ rate 344.827586 → ~3.44827586 TAO
         source = int(Decimal('0.01') * BTC_TO_SAT)
-        result = calculate_dest_amount(
+        result = calculate_to_amount(
             source, '344.827586', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
         )
         rate_fixed = int(Decimal('344.827586') * RATE_PRECISION)
@@ -55,19 +55,19 @@ class TestTaoToBtc:
     def test_standard_rate(self):
         # 345 TAO @ rate 345 (1 BTC = 345 TAO) → 1 BTC
         source = 345 * TAO_TO_RAO
-        result = calculate_dest_amount(source, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == BTC_TO_SAT  # 100_000_000 sat = 1 BTC
 
     def test_small_amount(self):
         # 3.45 TAO @ rate 345 → 0.01 BTC = 1_000_000 sat
         source = 3_450_000_000  # 3.45 TAO in rao
-        result = calculate_dest_amount(source, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 1_000_000
 
     def test_round_rate(self):
         # 100 TAO @ rate 100 → 1 BTC
         source = 100 * TAO_TO_RAO
-        result = calculate_dest_amount(source, '100', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(source, '100', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == BTC_TO_SAT
 
 
@@ -76,22 +76,18 @@ class TestRoundTrip:
 
     def test_btc_tao_btc_symmetry(self):
         source_sat = int(Decimal('0.01') * BTC_TO_SAT)
-        tao_rao = calculate_dest_amount(
+        tao_rao = calculate_to_amount(
             source_sat, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
         )
-        back_sat = calculate_dest_amount(
-            tao_rao, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
-        )
+        back_sat = calculate_to_amount(tao_rao, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert back_sat == source_sat
 
     def test_tao_btc_tao_symmetry(self):
         source_rao = 345 * TAO_TO_RAO
-        btc_sat = calculate_dest_amount(
+        btc_sat = calculate_to_amount(
             source_rao, '345', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
         )
-        back_rao = calculate_dest_amount(
-            btc_sat, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
-        )
+        back_rao = calculate_to_amount(btc_sat, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert back_rao == source_rao
 
 
@@ -100,17 +96,15 @@ class TestDirectionSpecificRates:
 
     def test_forward_vs_reverse_different_amounts(self):
         # Forward: 0.01 BTC @ 340 → 3.4 TAO
-        fwd = calculate_dest_amount(1_000_000, '340', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        fwd = calculate_to_amount(1_000_000, '340', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert fwd == 3_400_000_000  # 3.4 TAO
 
         # Reverse: 3.5 TAO @ 350 → 0.01 BTC
-        rev = calculate_dest_amount(
-            3_500_000_000, '350', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
-        )
+        rev = calculate_to_amount(3_500_000_000, '350', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert rev == 1_000_000  # 0.01 BTC
 
         # The rates differ, so round-tripping at different rates loses/gains value
-        assert fwd != calculate_dest_amount(
+        assert fwd != calculate_to_amount(
             1_000_000, '350', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
         )
 
@@ -121,23 +115,21 @@ class TestFutureEth:
     def test_eth_to_tao(self):
         # 1 ETH @ rate 2000 → 2000 TAO
         source = 10**ETH_DEC  # 1 ETH in wei
-        result = calculate_dest_amount(source, '2000', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=ETH_DEC)
+        result = calculate_to_amount(source, '2000', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=ETH_DEC)
         assert result == 2000 * TAO_TO_RAO
 
     def test_tao_to_eth(self):
         # 2000 TAO @ rate 2000 → 1 ETH
         source = 2000 * TAO_TO_RAO
-        result = calculate_dest_amount(source, '2000', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=ETH_DEC)
+        result = calculate_to_amount(source, '2000', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=ETH_DEC)
         assert result == 10**ETH_DEC
 
     def test_eth_tao_round_trip(self):
         source_wei = 10**ETH_DEC  # 1 ETH
-        tao_rao = calculate_dest_amount(
+        tao_rao = calculate_to_amount(
             source_wei, '2000', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=ETH_DEC
         )
-        back_wei = calculate_dest_amount(
-            tao_rao, '2000', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=ETH_DEC
-        )
+        back_wei = calculate_to_amount(tao_rao, '2000', is_reverse=True, dest_decimals=TAO_DEC, source_decimals=ETH_DEC)
         assert back_wei == source_wei
 
 
@@ -145,16 +137,16 @@ class TestEdgeCases:
     """Edge cases and invariants."""
 
     def test_zero_source(self):
-        result = calculate_dest_amount(0, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(0, '345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 0
 
     def test_zero_rate(self):
-        result = calculate_dest_amount(1_000_000, '0', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
+        result = calculate_to_amount(1_000_000, '0', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         assert result == 0
 
     def test_negative_rate_string(self):
         # Doesn't crash — contract should reject negative rates
-        result = calculate_dest_amount(
+        result = calculate_to_amount(
             1_000_000, '-345', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
         )
         assert isinstance(result, int)
@@ -172,7 +164,7 @@ class TestEdgeCases:
         results = set()
         for _ in range(100):
             results.add(
-                calculate_dest_amount(
+                calculate_to_amount(
                     1_000_000,
                     '345',
                     is_reverse=False,
@@ -185,16 +177,14 @@ class TestEdgeCases:
     def test_rate_string_not_float(self):
         # Decimal('0.1') is exact; float 0.1 is not
         source = 10 * BTC_TO_SAT  # 10 BTC
-        result = calculate_dest_amount(
-            source, '345.1', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC
-        )
+        result = calculate_to_amount(source, '345.1', is_reverse=False, dest_decimals=TAO_DEC, source_decimals=BTC_DEC)
         rate_fixed = int(Decimal('345.1') * RATE_PRECISION)
         expected = source * rate_fixed * 10 // RATE_PRECISION
         assert result == expected
 
     def test_high_precision_rate(self):
         source = int(Decimal('0.5') * BTC_TO_SAT)
-        result = calculate_dest_amount(
+        result = calculate_to_amount(
             source,
             '345.123456789',
             is_reverse=False,
@@ -212,10 +202,10 @@ class TestFeeDeduction:
     FEE_DIVISOR = 100
 
     def test_standard_fee(self):
-        dest_amount = 3_450_000_000  # 3.45 TAO
-        result = apply_fee_deduction(dest_amount, self.FEE_DIVISOR)
-        fee = dest_amount // self.FEE_DIVISOR  # 34_500_000
-        assert result == dest_amount - fee
+        to_amount = 3_450_000_000  # 3.45 TAO
+        result = apply_fee_deduction(to_amount, self.FEE_DIVISOR)
+        fee = to_amount // self.FEE_DIVISOR  # 34_500_000
+        assert result == to_amount - fee
 
     def test_fee_is_floor_division(self):
         assert 1 // self.FEE_DIVISOR == 0

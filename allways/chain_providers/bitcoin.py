@@ -333,7 +333,7 @@ class BitcoinProvider(ChainProvider):
         result = self._rpc_call('dumpprivkey', [address])
         return result if isinstance(result, str) else None
 
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message proving ownership of a Bitcoin address.
 
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
@@ -358,10 +358,10 @@ class BitcoinProvider(ChainProvider):
             _, _, signature = sign_message(to_mainnet_wif(wif), addr_type, message, deterministic=True)
             return signature
         except Exception as e:
-            bt.logging.error(f'BTC sign_source_proof failed: {e}')
+            bt.logging.error(f'BTC sign_from_proof failed: {e}')
             return ''
 
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify a signed message from a Bitcoin address.
 
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
@@ -379,7 +379,7 @@ class BitcoinProvider(ChainProvider):
             valid, _, _ = verify_message(to_mainnet_address(address), message, signature)
             return valid
         except Exception as e:
-            bt.logging.error(f'BTC verify_source_proof failed: {e}')
+            bt.logging.error(f'BTC verify_from_proof failed: {e}')
             return False
 
     def send_amount_lightweight(

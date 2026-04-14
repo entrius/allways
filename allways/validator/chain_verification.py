@@ -89,24 +89,23 @@ class SwapVerifier:
             return False
 
     async def verify_miner_fulfillment(self, swap: Swap) -> bool:
-        """Verify rate, dest_amount, user send, and miner fulfillment.
+        """Verify rate, to_amount, user send, and miner fulfillment.
 
         Rate and miner source address are read directly from the swap struct
         (snapshotted at initiation), so this works regardless of miner registration.
         """
-        if not swap.rate or not swap.miner_source_address:
-            bt.logging.warning(f'Swap {swap.id}: missing rate or miner_source_address on swap struct')
+        if not swap.rate or not swap.miner_from_address:
+            bt.logging.warning(f'Swap {swap.id}: missing rate or miner_from_address on swap struct')
             return False
 
         _, expected_user_receives = expected_swap_amounts(swap, self.fee_divisor)
         if expected_user_receives == 0:
-            bt.logging.warning(f'Swap {swap.id}: rate produces 0 dest_amount after fees')
+            bt.logging.warning(f'Swap {swap.id}: rate produces 0 to_amount after fees')
             return False
 
-        if int(swap.dest_amount) != expected_user_receives:
+        if int(swap.to_amount) != expected_user_receives:
             bt.logging.warning(
-                f'Swap {swap.id}: dest_amount mismatch — expected {expected_user_receives}, '
-                f'contract has {swap.dest_amount}'
+                f'Swap {swap.id}: to_amount mismatch — expected {expected_user_receives}, contract has {swap.to_amount}'
             )
             return False
 
@@ -115,21 +114,21 @@ class SwapVerifier:
         source_ok = await asyncio.to_thread(
             self._verify_tx,
             swap,
-            swap.source_chain,
-            swap.source_tx_hash,
-            swap.miner_source_address,
-            swap.source_amount,
-            swap.source_tx_block,
+            swap.from_chain,
+            swap.from_tx_hash,
+            swap.miner_from_address,
+            swap.from_amount,
+            swap.from_tx_block,
         )
         dest_ok = await asyncio.to_thread(
             self._verify_tx,
             swap,
-            swap.dest_chain,
-            swap.dest_tx_hash,
-            swap.user_dest_address,
+            swap.to_chain,
+            swap.to_tx_hash,
+            swap.user_to_address,
             expected_user_receives,
-            swap.dest_tx_block,
-            swap.miner_dest_address,
+            swap.to_tx_block,
+            swap.miner_to_address,
         )
 
         return source_ok and dest_ok

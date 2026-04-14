@@ -16,14 +16,14 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
-from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount
 
 
 @click.command('quote')
-@click.option('--from', 'source_chain', required=True, type=str, help='Source chain (e.g. btc, tao)')
-@click.option('--to', 'dest_chain', required=True, type=str, help='Destination chain (e.g. btc, tao)')
+@click.option('--from', 'from_chain', required=True, type=str, help='Source chain (e.g. btc, tao)')
+@click.option('--to', 'to_chain', required=True, type=str, help='Destination chain (e.g. btc, tao)')
 @click.option('--amount', required=True, type=float, help='Amount to send in source chain units')
-def quote_command(source_chain: str, dest_chain: str, amount: float):
+def quote_command(from_chain: str, to_chain: str, amount: float):
     """Preview rates and estimated receive amounts for a swap.
 
     \b
@@ -35,16 +35,16 @@ def quote_command(source_chain: str, dest_chain: str, amount: float):
         alw swap quote --from btc --to tao --amount 0.1
         alw swap quote --from tao --to btc --amount 50
     """
-    source_chain = source_chain.lower()
-    dest_chain = dest_chain.lower()
+    from_chain = from_chain.lower()
+    to_chain = to_chain.lower()
 
-    if source_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {source_chain}[/red]')
+    if from_chain not in SUPPORTED_CHAINS:
+        console.print(f'[red]Unknown source chain: {from_chain}[/red]')
         return
-    if dest_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {dest_chain}[/red]')
+    if to_chain not in SUPPORTED_CHAINS:
+        console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
         return
-    if source_chain == dest_chain:
+    if from_chain == to_chain:
         console.print('[red]Source and destination chains must be different[/red]')
         return
     if amount <= 0:
@@ -55,8 +55,8 @@ def quote_command(source_chain: str, dest_chain: str, amount: float):
     netuid = config['netuid']
 
     # Convert to smallest units
-    src_chain_def = get_chain(source_chain)
-    source_amount = int(Decimal(str(amount)) * (10**src_chain_def.decimals))
+    src_chain_def = get_chain(from_chain)
+    from_amount = int(Decimal(str(amount)) * (10**src_chain_def.decimals))
 
     fee_divisor = FEE_DIVISOR
     fee_pct = 100 / fee_divisor
@@ -64,7 +64,7 @@ def quote_command(source_chain: str, dest_chain: str, amount: float):
     # Find available miners
     with loading('Reading rates...'):
         all_pairs = read_miner_commitments(subtensor, netuid)
-        matching = find_matching_miners(all_pairs, source_chain, dest_chain)
+        matching = find_matching_miners(all_pairs, from_chain, to_chain)
 
         available = []
         for pair in matching:
@@ -84,33 +84,31 @@ def quote_command(source_chain: str, dest_chain: str, amount: float):
     available.sort(key=lambda x: x[0].rate, reverse=True)
 
     # Calculate amounts per miner
-    canon_src, canon_dest = canonical_pair(source_chain, dest_chain)
-    is_reverse = source_chain != canon_src
-    canon_dest_decimals = get_chain(canon_dest).decimals
-    canon_src_decimals = get_chain(canon_src).decimals
-    dst_chain_def = get_chain(dest_chain)
+    canon_src, canon_dest = canonical_pair(from_chain, to_chain)
+    is_reverse = from_chain != canon_src
+    canon_to_decimals = get_chain(canon_dest).decimals
+    canon_from_decimals = get_chain(canon_src).decimals
+    dst_chain_def = get_chain(to_chain)
 
-    console.print(f'\n[bold]Quote: {amount} {source_chain.upper()} -> {dest_chain.upper()}[/bold]\n')
+    console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')
 
     table = Table(show_header=True)
     table.add_column('#', style='dim')
     table.add_column('UID', style='cyan')
-    table.add_column(f'Rate ({dest_chain.upper()}/{source_chain.upper()})', style='green')
+    table.add_column(f'Rate ({to_chain.upper()}/{from_chain.upper()})', style='green')
     table.add_column('You Receive', style='bold green')
     table.add_column('Collateral', style='yellow')
 
     for idx, (pair, collateral) in enumerate(available, 1):
-        dest_amount = calculate_dest_amount(
-            source_amount, pair.rate_str, is_reverse, canon_dest_decimals, canon_src_decimals
-        )
-        user_receives = apply_fee_deduction(dest_amount, fee_divisor)
+        to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
+        user_receives = apply_fee_deduction(to_amount, fee_divisor)
         human_receives = user_receives / (10**dst_chain_def.decimals)
 
         table.add_row(
             str(idx),
             str(pair.uid),
             f'{pair.rate:g}',
-            f'{human_receives:.8f} {dest_chain.upper()}',
+            f'{human_receives:.8f} {to_chain.upper()}',
             f'{from_rao(collateral):.4f} TAO',
         )
 

@@ -27,10 +27,10 @@ from allways.contract_client import ContractError
 
 
 @click.command('resume')
-@click.option('--source-tx-hash', 'source_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
+@click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
-def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: int):
+def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: int):
     """Resume an interrupted swap from where it left off.
 
     \b
@@ -44,7 +44,7 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
     \b
     Non-interactive mode (for scripting/agents):
-        alw swap resume --source-tx-hash abc123... --yes
+        alw swap resume --from-tx-hash abc123... --yes
     """
     state = load_pending_swap()
     if not state:
@@ -66,16 +66,16 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
     # Display pending swap summary
     elapsed_min = (time.time() - state.created_at) / 60
-    human_send = from_smallest_unit(state.source_amount, state.source_chain)
-    human_receive = from_smallest_unit(state.user_receives, state.dest_chain)
-    send_label = f'{human_send} {state.source_chain.upper()}'
+    human_send = from_smallest_unit(state.from_amount, state.from_chain)
+    human_receive = from_smallest_unit(state.user_receives, state.to_chain)
+    send_label = f'{human_send} {state.from_chain.upper()}'
 
     summary = (
-        f'  Direction:  {state.source_chain.upper()} -> {state.dest_chain.upper()}\n'
+        f'  Direction:  {state.from_chain.upper()} -> {state.to_chain.upper()}\n'
         f'  Miner:      UID {state.miner_uid}\n'
         f'  Send:       {send_label}\n'
-        f'  Receive:    ~{human_receive:.8f} {state.dest_chain.upper()}\n'
-        f'  Send to:    {state.miner_source_address}\n'
+        f'  Receive:    ~{human_receive:.8f} {state.to_chain.upper()}\n'
+        f'  Send to:    {state.miner_from_address}\n'
         f'  Started:    {elapsed_min:.0f} min ago'
     )
     console.print()
@@ -86,8 +86,7 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
         if client.get_miner_has_active_swap(state.miner_hotkey):
             for swap in client.get_miner_active_swaps(state.miner_hotkey):
                 is_ours = (
-                    swap.user_source_address == state.user_source_address
-                    or swap.user_dest_address == state.receive_address
+                    swap.user_from_address == state.user_from_address or swap.user_to_address == state.receive_address
                 )
                 if is_ours:
                     clear_pending_swap()
@@ -126,12 +125,12 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
     if 'BTC_MODE' not in os.environ:
         os.environ['BTC_MODE'] = 'lightweight'
     chain_providers = create_chain_providers(subtensor=subtensor)
-    provider = chain_providers.get(state.source_chain)
+    provider = chain_providers.get(state.from_chain)
     if not provider:
-        console.print(f'[red]No chain provider for {state.source_chain}[/red]')
+        console.print(f'[red]No chain provider for {state.from_chain}[/red]')
         return
 
-    source_key = wallet.coldkey if state.source_chain == 'tao' else None
+    from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
     # Discover validators before prompting for tx hash (fail early)
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)
@@ -142,27 +141,27 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
     ephemeral_wallet = get_ephemeral_wallet()
 
     # Prompt for source tx hash if not provided
-    if not source_tx_hash_opt:
-        console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_source_address}[/cyan]\n')
-        source_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
-        if not source_tx_hash_opt or source_tx_hash_opt.lower() == 'skip':
+    if not from_tx_hash_opt:
+        console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
+        from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
+        if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
             console.print('[yellow]Swap paused. Resume later with: alw swap resume[/yellow]')
             return
 
-    source_tx_hash = source_tx_hash_opt.strip()
+    from_tx_hash = from_tx_hash_opt.strip()
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued = sign_and_broadcast_confirm(
         provider,
-        state.user_source_address,
-        source_key,
-        source_tx_hash,
+        state.user_from_address,
+        from_key,
+        from_tx_hash,
         state.miner_hotkey,
         state.receive_address,
         validator_axons,
         ephemeral_wallet,
-        source_chain=state.source_chain,
-        dest_chain=state.dest_chain,
+        from_chain=state.from_chain,
+        to_chain=state.to_chain,
     )
 
     if accepted == 0:
@@ -171,17 +170,17 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
     all_queued = queued > 0 and queued == accepted
     if all_queued:
-        chain_def = get_chain(state.source_chain)
+        chain_def = get_chain(state.from_chain)
         est_min = chain_def.min_confirmations * chain_def.seconds_per_block / 60
         console.print(
-            f'\n  Waiting for [bold]{chain_def.min_confirmations} {state.source_chain.upper()}[/bold]'
+            f'\n  Waiting for [bold]{chain_def.min_confirmations} {state.from_chain.upper()}[/bold]'
             f' confirmation(s) (~{est_min:.0f} min)...'
         )
         console.print('\n  [dim]You can safely exit (Ctrl+C) — validators will continue processing.[/dim]')
 
     max_polls = 600 if all_queued else 60
     try:
-        swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.source_chain, max_polls)
+        swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
     except KeyboardInterrupt:
         clear_pending_swap()
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')

@@ -91,33 +91,33 @@ CONTRACT_ARG_TYPES = {
     'vote_reserve': [
         ('request_hash', 'hash'),
         ('miner', 'AccountId'),
-        ('user_source_address', 'str'),
-        ('source_chain', 'str'),
-        ('dest_chain', 'str'),
+        ('user_from_address', 'str'),
+        ('from_chain', 'str'),
+        ('to_chain', 'str'),
         ('tao_amount', 'u128'),
-        ('source_amount', 'u128'),
-        ('dest_amount', 'u128'),
+        ('from_amount', 'u128'),
+        ('to_amount', 'u128'),
     ],
     'cancel_reservation': [('miner', 'AccountId')],
     'vote_initiate': [
         ('request_hash', 'hash'),
         ('user', 'AccountId'),
         ('miner', 'AccountId'),
-        ('source_chain', 'str'),
-        ('dest_chain', 'str'),
-        ('source_amount', 'u128'),
+        ('from_chain', 'str'),
+        ('to_chain', 'str'),
+        ('from_amount', 'u128'),
         ('tao_amount', 'u128'),
-        ('user_source_address', 'str'),
-        ('user_dest_address', 'str'),
-        ('source_tx_hash', 'str'),
-        ('source_tx_block', 'u32'),
-        ('dest_amount', 'u128'),
-        ('miner_source_address', 'str'),
-        ('miner_dest_address', 'str'),
+        ('user_from_address', 'str'),
+        ('user_to_address', 'str'),
+        ('from_tx_hash', 'str'),
+        ('from_tx_block', 'u32'),
+        ('to_amount', 'u128'),
+        ('miner_from_address', 'str'),
+        ('miner_to_address', 'str'),
         ('rate', 'str'),
     ],
     'vote_activate': [('miner', 'AccountId')],
-    'mark_fulfilled': [('swap_id', 'u64'), ('dest_tx_hash', 'str'), ('dest_tx_block', 'u32'), ('dest_amount', 'u128')],
+    'mark_fulfilled': [('swap_id', 'u64'), ('to_tx_hash', 'str'), ('to_tx_block', 'u32'), ('to_amount', 'u128')],
     'confirm_swap': [('swap_id', 'u64')],
     'timeout_swap': [('swap_id', 'u64')],
     'claim_slash': [('swap_id', 'u64')],
@@ -154,11 +154,11 @@ CONTRACT_ARG_TYPES = {
     'vote_extend_reservation': [
         ('request_hash', 'hash'),
         ('miner', 'AccountId'),
-        ('source_tx_hash', 'str'),
+        ('from_tx_hash', 'str'),
     ],
     'get_extend_vote_count': [('miner', 'AccountId')],
     'vote_extend_timeout': [('swap_id', 'u64')],
-    'get_cooldown': [('source_address', 'str')],
+    'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
     'get_halted': [],
     'get_accumulated_fees': [],
@@ -563,33 +563,33 @@ class AllwaysContractClient:
             o += 32
             miner = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
             o += 32
-            source_chain, o = self.decode_string(data, o)
-            dest_chain, o = self.decode_string(data, o)
-            source_amount_lo = struct.unpack_from('<Q', data, o)[0]
+            from_chain, o = self.decode_string(data, o)
+            to_chain, o = self.decode_string(data, o)
+            from_amount_lo = struct.unpack_from('<Q', data, o)[0]
             o += 8
-            source_amount_hi = struct.unpack_from('<Q', data, o)[0]
+            from_amount_hi = struct.unpack_from('<Q', data, o)[0]
             o += 8
-            source_amount = source_amount_lo + (source_amount_hi << 64)
-            dest_amount_lo = struct.unpack_from('<Q', data, o)[0]
+            from_amount = from_amount_lo + (from_amount_hi << 64)
+            to_amount_lo = struct.unpack_from('<Q', data, o)[0]
             o += 8
-            dest_amount_hi = struct.unpack_from('<Q', data, o)[0]
+            to_amount_hi = struct.unpack_from('<Q', data, o)[0]
             o += 8
-            dest_amount = dest_amount_lo + (dest_amount_hi << 64)
+            to_amount = to_amount_lo + (to_amount_hi << 64)
             tao_amount_lo = struct.unpack_from('<Q', data, o)[0]
             o += 8
             tao_amount_hi = struct.unpack_from('<Q', data, o)[0]
             o += 8
             tao_amount = tao_amount_lo + (tao_amount_hi << 64)
-            user_source_address, o = self.decode_string(data, o)
-            user_dest_address, o = self.decode_string(data, o)
-            miner_source_address, o = self.decode_string(data, o)
-            miner_dest_address, o = self.decode_string(data, o)
+            user_from_address, o = self.decode_string(data, o)
+            user_to_address, o = self.decode_string(data, o)
+            miner_from_address, o = self.decode_string(data, o)
+            miner_to_address, o = self.decode_string(data, o)
             rate, o = self.decode_string(data, o)
-            source_tx_hash, o = self.decode_string(data, o)
-            source_tx_block = struct.unpack_from('<I', data, o)[0]
+            from_tx_hash, o = self.decode_string(data, o)
+            from_tx_block = struct.unpack_from('<I', data, o)[0]
             o += 4
-            dest_tx_hash, o = self.decode_string(data, o)
-            dest_tx_block = struct.unpack_from('<I', data, o)[0]
+            to_tx_hash, o = self.decode_string(data, o)
+            to_tx_block = struct.unpack_from('<I', data, o)[0]
             o += 4
             status_byte = data[o]
             o += 1
@@ -607,20 +607,20 @@ class AllwaysContractClient:
                 id=swap_id,
                 user_hotkey=user,
                 miner_hotkey=miner,
-                source_chain=source_chain,
-                dest_chain=dest_chain,
-                source_amount=source_amount,
-                dest_amount=dest_amount,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                from_amount=from_amount,
+                to_amount=to_amount,
                 tao_amount=tao_amount,
-                user_source_address=user_source_address,
-                user_dest_address=user_dest_address,
-                miner_source_address=miner_source_address,
-                miner_dest_address=miner_dest_address,
+                user_from_address=user_from_address,
+                user_to_address=user_to_address,
+                miner_from_address=miner_from_address,
+                miner_to_address=miner_to_address,
                 rate=rate,
-                source_tx_hash=source_tx_hash,
-                source_tx_block=source_tx_block,
-                dest_tx_hash=dest_tx_hash,
-                dest_tx_block=dest_tx_block,
+                from_tx_hash=from_tx_hash,
+                from_tx_block=from_tx_block,
+                to_tx_hash=to_tx_hash,
+                to_tx_block=to_tx_block,
                 status=status,
                 initiated_block=initiated_block,
                 timeout_block=timeout_block,
@@ -816,10 +816,10 @@ class AllwaysContractClient:
     def get_extend_vote_count(self, miner_hotkey: str) -> int:
         return self._read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
-    def get_cooldown(self, source_address: str) -> Tuple[int, int]:
+    def get_cooldown(self, from_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""
         self._ensure_initialized()
-        data = self._raw_contract_read('get_cooldown', {'source_address': source_address})
+        data = self._raw_contract_read('get_cooldown', {'from_address': from_address})
         if data is None or len(data) < 5:
             return (0, 0)
         strike_count = data[0]
@@ -859,7 +859,7 @@ class AllwaysContractClient:
     def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
         """Get reservation data for a miner.
 
-        Returns (source_addr, tao_amount, source_amount, dest_amount, reserved_until) or None.
+        Returns (from_addr, tao_amount, from_amount, to_amount, reserved_until) or None.
         """
         self._ensure_initialized()
         data = self._raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
@@ -871,7 +871,7 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # String source_addr: compact length + UTF-8 bytes
+        # String from_addr: compact length + UTF-8 bytes
         first = data[o]
         mode = first & 0x03
         if mode == 0:
@@ -882,7 +882,7 @@ class AllwaysContractClient:
             o += 2
         else:
             return None
-        source_addr = data[o : o + addr_len].decode('utf-8')
+        from_addr = data[o : o + addr_len].decode('utf-8')
         o += addr_len
         # 3 x u128 + 1 x u32
         tao_lo = struct.unpack_from('<Q', data, o)[0]
@@ -891,14 +891,14 @@ class AllwaysContractClient:
         o += 16
         src_lo = struct.unpack_from('<Q', data, o)[0]
         src_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        source_amount = src_lo + (src_hi << 64)
+        from_amount = src_lo + (src_hi << 64)
         o += 16
         dst_lo = struct.unpack_from('<Q', data, o)[0]
         dst_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        dest_amount = dst_lo + (dst_hi << 64)
+        to_amount = dst_lo + (dst_hi << 64)
         o += 16
         reserved_until = struct.unpack_from('<I', data, o)[0]
-        return (source_addr, tao_amount, source_amount, dest_amount, reserved_until)
+        return (from_addr, tao_amount, from_amount, to_amount, reserved_until)
 
     # =========================================================================
     # Transaction Functions (Write)
@@ -922,12 +922,12 @@ class AllwaysContractClient:
         wallet: bt.Wallet,
         request_hash: bytes,
         miner_hotkey: str,
-        user_source_address: str,
-        source_chain: str,
-        dest_chain: str,
+        user_from_address: str,
+        from_chain: str,
+        to_chain: str,
         tao_amount: int,
-        source_amount: int,
-        dest_amount: int,
+        from_amount: int,
+        to_amount: int,
     ) -> str:
         self._ensure_initialized()
         tx_hash = self._exec_contract_raw(
@@ -935,12 +935,12 @@ class AllwaysContractClient:
             args={
                 'request_hash': request_hash,
                 'miner': miner_hotkey,
-                'user_source_address': user_source_address,
-                'source_chain': source_chain,
-                'dest_chain': dest_chain,
+                'user_from_address': user_from_address,
+                'from_chain': from_chain,
+                'to_chain': to_chain,
                 'tao_amount': tao_amount,
-                'source_amount': source_amount,
-                'dest_amount': dest_amount,
+                'from_amount': from_amount,
+                'to_amount': to_amount,
             },
             keypair=wallet.hotkey,
         )
@@ -952,7 +952,7 @@ class AllwaysContractClient:
         wallet: bt.Wallet,
         request_hash: bytes,
         miner_hotkey: str,
-        source_tx_hash: str,
+        from_tx_hash: str,
     ) -> str:
         self._ensure_initialized()
         tx_hash = self._exec_contract_raw(
@@ -960,7 +960,7 @@ class AllwaysContractClient:
             args={
                 'request_hash': request_hash,
                 'miner': miner_hotkey,
-                'source_tx_hash': source_tx_hash,
+                'from_tx_hash': from_tx_hash,
             },
             keypair=wallet.hotkey,
         )
@@ -989,17 +989,17 @@ class AllwaysContractClient:
         request_hash: bytes,
         user_hotkey: str,
         miner_hotkey: str,
-        source_chain: str,
-        dest_chain: str,
-        source_amount: int,
+        from_chain: str,
+        to_chain: str,
+        from_amount: int,
         tao_amount: int,
-        user_source_address: str,
-        user_dest_address: str,
-        source_tx_hash: str,
-        source_tx_block: int = 0,
-        dest_amount: int = 0,
-        miner_source_address: str = '',
-        miner_dest_address: str = '',
+        user_from_address: str,
+        user_to_address: str,
+        from_tx_hash: str,
+        from_tx_block: int = 0,
+        to_amount: int = 0,
+        miner_from_address: str = '',
+        miner_to_address: str = '',
         rate: str = '',
     ) -> str:
         """Vote to initiate a swap. On quorum, swap is created on contract."""
@@ -1010,17 +1010,17 @@ class AllwaysContractClient:
                 'request_hash': request_hash,
                 'user': user_hotkey,
                 'miner': miner_hotkey,
-                'source_chain': source_chain,
-                'dest_chain': dest_chain,
-                'source_amount': source_amount,
+                'from_chain': from_chain,
+                'to_chain': to_chain,
+                'from_amount': from_amount,
                 'tao_amount': tao_amount,
-                'user_source_address': user_source_address,
-                'user_dest_address': user_dest_address,
-                'source_tx_hash': source_tx_hash,
-                'source_tx_block': source_tx_block,
-                'dest_amount': dest_amount,
-                'miner_source_address': miner_source_address,
-                'miner_dest_address': miner_dest_address,
+                'user_from_address': user_from_address,
+                'user_to_address': user_to_address,
+                'from_tx_hash': from_tx_hash,
+                'from_tx_block': from_tx_block,
+                'to_amount': to_amount,
+                'miner_from_address': miner_from_address,
+                'miner_to_address': miner_to_address,
                 'rate': rate,
             },
             keypair=wallet.hotkey,
@@ -1039,18 +1039,18 @@ class AllwaysContractClient:
         self,
         wallet: bt.Wallet,
         swap_id: int,
-        dest_tx_hash: str,
-        dest_amount: int,
-        dest_tx_block: int = 0,
+        to_tx_hash: str,
+        to_amount: int,
+        to_tx_block: int = 0,
     ) -> str:
         self._ensure_initialized()
         tx_hash = self._exec_contract_raw(
             'mark_fulfilled',
             args={
                 'swap_id': swap_id,
-                'dest_tx_hash': dest_tx_hash,
-                'dest_tx_block': dest_tx_block,
-                'dest_amount': dest_amount,
+                'to_tx_hash': to_tx_hash,
+                'to_tx_block': to_tx_block,
+                'to_amount': to_amount,
             },
             keypair=wallet.hotkey,
         )

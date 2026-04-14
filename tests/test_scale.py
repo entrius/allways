@@ -262,18 +262,18 @@ class TestDecodeSwapData:
         self,
         client,
         swap_id=1,
-        source_chain='btc',
-        dest_chain='tao',
-        source_amount=100000,
-        dest_amount=0,
+        from_chain='btc',
+        to_chain='tao',
+        from_amount=100000,
+        to_amount=0,
         tao_amount=1_000_000_000,
-        miner_source_address='bc1qminer',
-        miner_dest_address='5Cminer',
+        miner_from_address='bc1qminer',
+        miner_to_address='5Cminer',
         rate='345',
-        source_tx_hash='txhash',
-        source_tx_block=50,
-        dest_tx_hash='',
-        dest_tx_block=0,
+        from_tx_hash='txhash',
+        from_tx_block=50,
+        to_tx_hash='',
+        to_tx_block=0,
         status=0,
         initiated_block=100,
         timeout_block=400,
@@ -290,20 +290,20 @@ class TestDecodeSwapData:
         data += struct.pack('<Q', swap_id)
         data += user_bytes
         data += miner_bytes
-        data += client._encode_value(source_chain, 'str')
-        data += client._encode_value(dest_chain, 'str')
-        data += client._encode_value(source_amount, 'u128')
-        data += client._encode_value(dest_amount, 'u128')
+        data += client._encode_value(from_chain, 'str')
+        data += client._encode_value(to_chain, 'str')
+        data += client._encode_value(from_amount, 'u128')
+        data += client._encode_value(to_amount, 'u128')
         data += client._encode_value(tao_amount, 'u128')
         data += client._encode_value('bc1quser', 'str')
         data += client._encode_value('5Cuser', 'str')
-        data += client._encode_value(miner_source_address, 'str')
-        data += client._encode_value(miner_dest_address, 'str')
+        data += client._encode_value(miner_from_address, 'str')
+        data += client._encode_value(miner_to_address, 'str')
         data += client._encode_value(rate, 'str')
-        data += client._encode_value(source_tx_hash, 'str')
-        data += struct.pack('<I', source_tx_block)
-        data += client._encode_value(dest_tx_hash, 'str')
-        data += struct.pack('<I', dest_tx_block)
+        data += client._encode_value(from_tx_hash, 'str')
+        data += struct.pack('<I', from_tx_block)
+        data += client._encode_value(to_tx_hash, 'str')
+        data += struct.pack('<I', to_tx_block)
         data += bytes([status])
         data += struct.pack('<I', initiated_block)
         data += struct.pack('<I', timeout_block)
@@ -317,12 +317,12 @@ class TestDecodeSwapData:
         swap = c._decode_swap_data(data)
         assert swap is not None
         assert swap.id == 1
-        assert swap.source_chain == 'btc'
-        assert swap.dest_chain == 'tao'
-        assert swap.source_amount == 100000
+        assert swap.from_chain == 'btc'
+        assert swap.to_chain == 'tao'
+        assert swap.from_amount == 100000
         assert swap.tao_amount == 1_000_000_000
-        assert swap.source_tx_hash == 'txhash'
-        assert swap.source_tx_block == 50
+        assert swap.from_tx_hash == 'txhash'
+        assert swap.from_tx_block == 50
         assert swap.initiated_block == 100
         assert swap.timeout_block == 400
         assert swap.status.value == 0
@@ -330,13 +330,13 @@ class TestDecodeSwapData:
     def test_decode_fulfilled(self):
         c = _make_client()
         data = self._encode_swap_bytes(
-            c, status=1, fulfilled_block=150, dest_tx_hash='dtxhash', dest_tx_block=145, dest_amount=990_000_000
+            c, status=1, fulfilled_block=150, to_tx_hash='dtxhash', to_tx_block=145, to_amount=990_000_000
         )
         swap = c._decode_swap_data(data)
         assert swap is not None
         assert swap.status.value == 1
         assert swap.fulfilled_block == 150
-        assert swap.dest_amount == 990_000_000
+        assert swap.to_amount == 990_000_000
 
     def test_decode_truncated(self):
         c = _make_client()
