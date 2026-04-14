@@ -225,7 +225,7 @@ class TestCalculateMinerRewards:
         hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
         v = _make_validator(tmp_path, hotkeys=hotkeys)
 
-        rewards, uids = calculate_miner_rewards(v, None)
+        rewards, uids = calculate_miner_rewards(v)
 
         assert set(uids) == set(range(len(hotkeys)))
         # Everything recycles since no one posted
@@ -252,7 +252,7 @@ class TestCalculateMinerRewards:
         v.rate_state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
         conn.commit()
 
-        rewards, _ = calculate_miner_rewards(v, None)
+        rewards, _ = calculate_miner_rewards(v)
 
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC + POOL_BTC_TAO, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
@@ -278,7 +278,7 @@ class TestCalculateMinerRewards:
             v.rate_state_store.insert_swap_outcome(100 + i, 'hk_a', False, 200 + i)
         conn.commit()
 
-        rewards, _ = calculate_miner_rewards(v, None)
+        rewards, _ = calculate_miner_rewards(v)
 
         expected = POOL_TAO_BTC * (0.8**SUCCESS_EXPONENT)
         np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
@@ -302,7 +302,7 @@ class TestCalculateMinerRewards:
             )
         conn.commit()
 
-        rewards, _ = calculate_miner_rewards(v, None)
+        rewards, _ = calculate_miner_rewards(v)
 
         # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
@@ -313,7 +313,7 @@ class TestCalculateMinerRewards:
         hotkeys = ['hk_a', 'hk_b']
         v = _make_validator(tmp_path, hotkeys=hotkeys)
 
-        rewards, _ = calculate_miner_rewards(v, None)
+        rewards, _ = calculate_miner_rewards(v)
 
         assert rewards[0] == 1.0
         assert len(rewards) == 2
@@ -321,7 +321,7 @@ class TestCalculateMinerRewards:
 
     def test_empty_metagraph_returns_empty(self, tmp_path: Path):
         v = _make_validator(tmp_path, hotkeys=[])
-        rewards, uids = calculate_miner_rewards(v, None)
+        rewards, uids = calculate_miner_rewards(v)
         assert rewards.size == 0
         assert uids == set()
         v.rate_state_store.close()

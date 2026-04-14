@@ -33,7 +33,6 @@ def _make_tracker(tmp_path: Path) -> SwapTracker:
     tracker = SwapTracker(
         client=client,
         fulfillment_timeout_blocks=30,
-        window_blocks=3600,
         rate_state_store=store,
     )
     return tracker
@@ -76,16 +75,15 @@ class TestResolveOutcome:
         assert rates == {'hk_miner': (1, 0)}
         tracker.rate_state_store.close()
 
-    def test_window_still_contains_swap_after_resolve(self, tmp_path: Path):
-        """In-memory window is retained until C6 removes it."""
+    def test_resolve_drops_swap_from_active(self, tmp_path: Path):
+        """After resolve, the swap is gone from active tracking."""
         tracker = _make_tracker(tmp_path)
         swap = _make_swap(swap_id=45, miner_hotkey='hk_miner')
         tracker.active[swap.id] = swap
 
         tracker.resolve(swap_id=45, status=SwapStatus.COMPLETED, block=290)
 
-        assert len(tracker.window) == 1
-        assert tracker.window[0].id == 45
+        assert 45 not in tracker.active
         tracker.rate_state_store.close()
 
 

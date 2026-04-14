@@ -68,7 +68,7 @@ async def forward(self: Validator) -> None:
     _timeout_expired(self, tracker, voter, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
-        _score_miners(self, tracker)
+        _score_miners(self)
 
 
 def _clear_provider_caches(self: Validator) -> None:
@@ -438,21 +438,17 @@ def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, un
             bt.logging.warning(f'Swap {swap.id}: timed out')
 
 
-def _score_miners(self: Validator, tracker: SwapTracker) -> None:
+def _score_miners(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
-        tracker.prune_window(self.block)
-        rewards, miner_uids = calculate_miner_rewards(self, tracker)
+        rewards, miner_uids = calculate_miner_rewards(self)
         if len(miner_uids) > 0 and len(rewards) > 0:
             self.update_scores(rewards, miner_uids)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def calculate_miner_rewards(
-    self: Validator,
-    _tracker: SwapTracker,
-) -> Tuple[np.ndarray, Set[int]]:
+def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Crown-time based reward computation.
 
     For each direction in ``DIRECTION_POOLS``:

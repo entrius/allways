@@ -16,7 +16,7 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
-from allways.constants import DEFAULT_FEE_DIVISOR, DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS, SCORING_WINDOW_BLOCKS
+from allways.constants import DEFAULT_FEE_DIVISOR, DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
@@ -79,7 +79,6 @@ class Validator(BaseValidatorNeuron):
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
-            window_blocks=SCORING_WINDOW_BLOCKS,
             rate_state_store=self.rate_state_store,
         )
         self.swap_tracker.initialize(self.block)
