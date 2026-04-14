@@ -88,7 +88,7 @@ class SwapVerifier:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False
 
-    async def is_swap_complete(self, swap: Swap) -> bool:
+    async def verify_miner_fulfillment(self, swap: Swap) -> bool:
         """Verify rate, dest_amount, user send, and miner fulfillment.
 
         Rate and miner source address are read directly from the swap struct

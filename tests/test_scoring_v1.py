@@ -9,10 +9,10 @@ import numpy as np
 from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
 from allways.validator.event_watcher import CollateralEvent, ContractEventWatcher
 from allways.validator.forward import (
-    _crown_holders,
-    _replay_crown_time,
     _success_rate,
     calculate_miner_rewards,
+    crown_holders_at_instant,
+    replay_crown_time_window,
 )
 from allways.validator.state_store import ValidatorStateStore
 
@@ -81,22 +81,22 @@ class TestCrownHoldersHelper:
     def test_excludes_rate_zero(self):
         rates = {'a': 0.0, 'b': 0.00015}
         collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
-        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
+        assert crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
 
     def test_excludes_below_min_collateral(self):
         rates = {'a': 0.00020, 'b': 0.00015}
         collaterals = {'a': MIN_COLLATERAL - 1, 'b': MIN_COLLATERAL}
-        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
+        assert crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}) == ['b']
 
     def test_excludes_not_eligible(self):
         rates = {'a': 0.00020, 'b': 0.00015}
         collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
-        assert _crown_holders(rates, collaterals, MIN_COLLATERAL, {'b'}) == ['b']
+        assert crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'b'}) == ['b']
 
     def test_tied_best_rate_returns_all(self):
         rates = {'a': 0.00020, 'b': 0.00020}
         collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
-        holders = set(_crown_holders(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}))
+        holders = set(crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}))
         assert holders == {'a', 'b'}
 
 
@@ -112,7 +112,7 @@ class TestReplayCrownTime:
         conn.commit()
         _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
 
-        crown = _replay_crown_time(
+        crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
             from_chain='tao',
@@ -146,7 +146,7 @@ class TestReplayCrownTime:
         _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
         _seed_collateral(watcher, 'hk_b', MIN_COLLATERAL, 0)
 
-        crown = _replay_crown_time(
+        crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
             from_chain='tao',
@@ -172,7 +172,7 @@ class TestReplayCrownTime:
             _seed_collateral(watcher, hk, MIN_COLLATERAL, 0)
         conn.commit()
 
-        crown = _replay_crown_time(
+        crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
             from_chain='tao',
@@ -198,7 +198,7 @@ class TestReplayCrownTime:
         _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
         _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL - 1, 600)
 
-        crown = _replay_crown_time(
+        crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
             from_chain='tao',
@@ -223,7 +223,7 @@ class TestReplayCrownTime:
         conn.commit()
         _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 5_000)
 
-        crown = _replay_crown_time(
+        crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
             from_chain='tao',

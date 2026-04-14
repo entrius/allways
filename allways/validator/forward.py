@@ -58,23 +58,23 @@ async def forward(self: Validator) -> None:
     verifier: SwapVerifier = self.swap_verifier
     voter: SwapVoter = self.swap_voter
 
-    _clear_provider_caches(self)
-    _process_pending_confirms(self)
+    clear_provider_caches(self)
+    initialize_pending_user_reservations(self)
     _poll_commitments(self)
     try:
         self.event_watcher.sync_to(self.block)
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
     await tracker.poll(self.block)
-    uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
-    _extend_near_timeout_fulfilled(self)
-    _timeout_expired(self, tracker, voter, uncertain)
+    uncertain = await confirm_miner_fulfillments(tracker, verifier, voter, self.block)
+    extend_fulfilled_near_timeout(self)
+    enforce_swap_timeouts(self, tracker, voter, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
-        _score_miners(self)
+        run_scoring_pass(self)
 
 
-def _clear_provider_caches(self: Validator) -> None:
+def clear_provider_caches(self: Validator) -> None:
     """Clear per-poll caches on chain providers."""
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
@@ -193,7 +193,7 @@ def _try_extend_reservation(self: Validator, item, current_block: int, swap_labe
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
 
 
-def _process_pending_confirms(self: Validator) -> None:
+def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
     from substrateinterface import Keypair
 
@@ -331,20 +331,20 @@ def _process_pending_confirms(self: Validator) -> None:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: unexpected error: {e}')
 
 
-async def _verify_fulfilled(
+async def confirm_miner_fulfillments(
     tracker: SwapTracker,
     verifier: SwapVerifier,
     voter: SwapVoter,
     current_block: int,
 ) -> Set[int]:
-    """Verify FULFILLED swaps; returns IDs where provider was unreachable so _timeout_expired skips them."""
+    """Verify FULFILLED swaps; returns IDs where provider was unreachable so enforce_swap_timeouts skips them."""
     uncertain: Set[int] = set()
     fulfilled = [s for s in tracker.get_fulfilled(current_block) if not tracker.is_voted(s.id)]
     if not fulfilled:
         return uncertain
 
     results = await asyncio.gather(
-        *[verifier.is_swap_complete(swap) for swap in fulfilled],
+        *[verifier.verify_miner_fulfillment(swap) for swap in fulfilled],
         return_exceptions=True,
     )
     for swap, result in zip(fulfilled, results):
@@ -362,7 +362,7 @@ async def _verify_fulfilled(
     return uncertain
 
 
-def _extend_near_timeout_fulfilled(self: Validator) -> None:
+def extend_fulfilled_near_timeout(self: Validator) -> None:
     """Extend timeout for FULFILLED swaps where dest tx exists but isn't confirmed yet.
 
     Mirrors reservation extension logic: when a swap is nearing timeout but the
@@ -419,7 +419,7 @@ def _extend_near_timeout_fulfilled(self: Validator) -> None:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')
 
 
-def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
+def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
     """Timeout expired swaps, skipping uncertain_swaps where the provider was unreachable this cycle."""
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
@@ -433,7 +433,7 @@ def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, un
             bt.logging.warning(f'Swap {swap.id}: timed out')
 
 
-def _score_miners(self: Validator) -> None:
+def run_scoring_pass(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
         rewards, miner_uids = calculate_miner_rewards(self)
@@ -476,7 +476,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     min_collateral = int(self.event_watcher.min_collateral or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
-        crown_blocks = _replay_crown_time(
+        crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
             from_chain=from_chain,
@@ -521,7 +521,7 @@ def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
     return completed / total
 
 
-def _replay_crown_time(
+def replay_crown_time_window(
     store: ValidatorStateStore,
     event_watcher,
     from_chain: str,
@@ -579,7 +579,7 @@ def _replay_crown_time(
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        holders = _crown_holders(current_rates, current_collateral, min_collateral, eligible_hotkeys)
+        holders = crown_holders_at_instant(current_rates, current_collateral, min_collateral, eligible_hotkeys)
         if not holders:
             return
         split = duration / len(holders)
@@ -598,7 +598,7 @@ def _replay_crown_time(
     return crown_blocks
 
 
-def _crown_holders(
+def crown_holders_at_instant(
     rates: Dict[str, float],
     collaterals: Dict[str, int],
     min_collateral: int,
