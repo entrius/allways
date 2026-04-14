@@ -60,7 +60,8 @@ class SwapFulfiller:
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
         self.timeout_cushion_blocks = _load_timeout_cushion_blocks()
-        self._sent: Dict[int, Tuple[str, int]] = {}
+        # swap_id → (dest_tx_hash, dest_tx_block, marked_fulfilled)
+        self._sent: Dict[int, Tuple[str, int, bool]] = {}
         self._sent_cache_path = sent_cache_path
         self._load_sent_cache()
 
@@ -71,7 +72,10 @@ class SwapFulfiller:
         try:
             data = json.loads(self._sent_cache_path.read_text())
             for swap_id_str, entry in data.items():
-                self._sent[int(swap_id_str)] = (entry[0], entry[1])
+                # Back-compat: old cache entries were 2-tuples. Treat restored
+                # entries as not-yet-marked-fulfilled so the retry path runs.
+                marked = bool(entry[2]) if len(entry) >= 3 else False
+                self._sent[int(swap_id_str)] = (entry[0], entry[1], marked)
             if self._sent:
                 bt.logging.info(f'Restored {len(self._sent)} cached send(s) from disk')
         except Exception as e:
@@ -83,7 +87,7 @@ class SwapFulfiller:
             return
         try:
             self._sent_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {str(k): [v[0], v[1]] for k, v in self._sent.items()}
+            data = {str(k): [v[0], v[1], v[2]] for k, v in self._sent.items()}
             tmp = self._sent_cache_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data))
             tmp.rename(self._sent_cache_path)
@@ -224,8 +228,17 @@ class SwapFulfiller:
     def process_swap(self, swap: Swap) -> bool:
         """Full swap processing flow: verify safety -> verify funds -> send -> mark fulfilled.
 
-        Returns True if swap was successfully fulfilled.
+        Idempotent across forward steps. The ``_sent`` cache records both the
+        dest-tx outcome and whether ``mark_fulfilled`` has already succeeded, so
+        retry polls don't re-send dest funds and don't re-call the contract.
+        Cache entries live until ``cleanup_stale_sends`` clears them when the
+        swap leaves the active set.
         """
+        state = self._sent.get(swap.id)
+        if state is not None and state[2]:
+            # mark_fulfilled already succeeded; contract state will catch up.
+            return True
+
         bt.logging.info(f'Processing swap {swap.id}: {swap.source_chain} -> {swap.dest_chain}')
 
         # Step 1: Verify swap safety (timeout, rate, collateral)
@@ -242,16 +255,16 @@ class SwapFulfiller:
             return False
 
         # Step 3: Send destination funds (with double-send prevention)
-        if swap.id in self._sent:
-            dest_tx_hash, dest_tx_block = self._sent[swap.id]
-            bt.logging.info(f'Swap {swap.id}: using cached send result (tx: {dest_tx_hash}, block: {dest_tx_block})')
+        if state is not None:
+            dest_tx_hash, dest_tx_block, _ = state
+            bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {dest_tx_hash[:16]}...')
         else:
             send_result = self.send_dest_funds(swap, dest_amount)
             if not send_result:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
             dest_tx_hash, dest_tx_block = send_result
-            self._sent[swap.id] = (dest_tx_hash, dest_tx_block)
+            self._sent[swap.id] = (dest_tx_hash, dest_tx_block, False)
             self._save_sent_cache()
 
         # Step 4: Mark fulfilled on contract
@@ -263,9 +276,9 @@ class SwapFulfiller:
                 dest_amount=dest_amount,
                 dest_tx_block=dest_tx_block,
             )
-            bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
-            self._sent.pop(swap.id, None)
+            self._sent[swap.id] = (dest_tx_hash, dest_tx_block, True)
             self._save_sent_cache()
+            bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True
         except ContractError as e:
             bt.logging.error(f'Swap {swap.id}: failed to mark fulfilled on contract: {e}')

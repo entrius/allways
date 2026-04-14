@@ -156,7 +156,7 @@ class Miner(BaseMinerNeuron):
         else:
             self._check_state_changes()
 
-        new_pending, _fulfilled = self.swap_poller.poll()
+        active_swaps, _fulfilled = self.swap_poller.poll()
 
         if not self.swap_poller.last_poll_ok:
             self._consecutive_poll_failures += 1
@@ -173,20 +173,17 @@ class Miner(BaseMinerNeuron):
 
         self.swap_fulfiller.cleanup_stale_sends(set(self.swap_poller.active.keys()))
 
-        if new_pending:
-            bt.logging.info(f'Found {len(new_pending)} new swap(s) to process')
+        if active_swaps:
+            bt.logging.debug(f'Processing {len(active_swaps)} active swap(s)')
         elif active_count > 0:
             bt.logging.debug(f'Tracking {active_count} active swap(s)')
         else:
             bt.logging.debug('Polling... no active swaps')
 
-        for swap in new_pending:
+        for swap in active_swaps:
             try:
                 success = self.swap_fulfiller.process_swap(swap)
-                if success:
-                    bt.logging.success(f'Swap {swap.id} fulfilled successfully')
-                    self.swap_poller.mark_processed(swap.id)
-                else:
+                if not success:
                     bt.logging.debug(f'Swap {swap.id} not ready for fulfillment yet')
             except Exception as e:
                 bt.logging.error(f'Error processing swap {swap.id}: {e}')
