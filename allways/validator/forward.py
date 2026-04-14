@@ -301,8 +301,10 @@ def _process_pending_confirms(self: Validator) -> None:
         if not tx_info.confirmed:
             continue
 
-        # Confirmed — compute hash and vote
-        self.pending_confirms.remove(item.miner_hotkey)
+        # Confirmed — compute hash and vote. Only drop the queued entry once the
+        # vote is accepted (or the contract tells us someone else already
+        # initiated it). On transient RPC/network failure we leave the entry in
+        # place so the next forward step retries instead of silently losing it.
         try:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
             hash_input = _scale_encode_initiate_hash_input(
@@ -338,12 +340,17 @@ def _process_pending_confirms(self: Validator) -> None:
                 miner_dest_address=item.miner_dest_address,
                 rate=item.rate_str,
             )
+            self.pending_confirms.remove(item.miner_hotkey)
             bt.logging.success(
                 f'PendingConfirm [{swap_label} {miner_short}]: '
                 f'confirmed! voted initiate (tao={item.tao_amount / 1e9:.4f})'
             )
         except ContractError as e:
             if 'ContractReverted' in str(e):
+                # Contract rejected — in practice this means another validator
+                # already reached initiate quorum, so the entry is no longer
+                # actionable. Drop it.
+                self.pending_confirms.remove(item.miner_hotkey)
                 bt.logging.info(
                     f'PendingConfirm [{swap_label} {miner_short}]: contract rejected (likely already initiated)'
                 )
