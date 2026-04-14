@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from statistics import mean
-from typing import TYPE_CHECKING, Dict, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 import numpy as np
 
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.classes import MinerScoringStats, SwapStatus
+from allways.classes import SwapStatus
+from allways.commitments import read_miner_commitments
 from allways.constants import (
+    COLLATERAL_POLL_INTERVAL_BLOCKS,
+    COMMITMENT_POLL_INTERVAL_BLOCKS,
+    DIRECTION_POOLS,
+    EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
+    MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
+    RECYCLE_UID,
     SCORING_INTERVAL_STEPS,
-    SCORING_SUCCESS_EXPONENT,
     SCORING_WINDOW_BLOCKS,
+    SUCCESS_EXPONENT,
 )
 from allways.contract_client import ContractError
 from allways.utils.logging import log_on_change
@@ -25,9 +31,8 @@ from allways.validator.axon_handlers import (
     _scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.recycle import apply_recycle
+from allways.validator.rate_state import RateStateStore
 from allways.validator.swap_tracker import SwapTracker
-from allways.validator.utils.fees import swap_fee_rao
 from allways.validator.voting import SwapVoter
 
 if TYPE_CHECKING:
@@ -55,13 +60,16 @@ async def forward(self: Validator) -> None:
 
     _clear_provider_caches(self)
     _process_pending_confirms(self)
+    _poll_commitments(self)
+    _refresh_min_collateral(self)
+    _poll_collaterals(self)
     await tracker.poll(self.block)
     uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
     _timeout_expired(self, tracker, voter, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
-        _score_miners(self, tracker)
+        _score_miners(self)
 
 
 def _clear_provider_caches(self: Validator) -> None:
@@ -69,6 +77,122 @@ def _clear_provider_caches(self: Validator) -> None:
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
+
+
+def _poll_commitments(self: Validator) -> None:
+    """Read all miner commitments from the local subtensor and persist diffs.
+
+    Runs every ``COMMITMENT_POLL_INTERVAL_BLOCKS``. For each miner pair in the
+    metagraph, emits a ``rate_event`` per direction whose rate changed since the
+    cache snapshot. The ``RateStateStore`` enforces the per-hotkey throttle.
+    Also purges deregistered hotkeys from the store and local cache, and prunes
+    aged rate/collateral history beyond ``EVENT_RETENTION_BLOCKS``.
+    """
+    if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
+        return
+    self._last_commitment_poll_block = self.block
+
+    cutoff = self.block - EVENT_RETENTION_BLOCKS
+    if cutoff > 0:
+        self.rate_state_store.prune_events_older_than(cutoff)
+
+    try:
+        pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+    except Exception as e:
+        bt.logging.warning(f'Commitment poll failed: {e}')
+        return
+
+    current_hotkeys = set(self.metagraph.hotkeys)
+
+    for pair in pairs:
+        if pair.hotkey not in current_hotkeys:
+            continue
+        for from_c, to_c, r in (
+            (pair.source_chain, pair.dest_chain, pair.rate),
+            (pair.dest_chain, pair.source_chain, pair.counter_rate),
+        ):
+            if r <= 0:
+                continue  # miner opted out of this direction
+            key = (pair.hotkey, from_c, to_c)
+            if self._last_known_rates.get(key) == r:
+                continue
+            self.rate_state_store.insert_rate_event(
+                hotkey=pair.hotkey,
+                from_chain=from_c,
+                to_chain=to_c,
+                rate=r,
+                block=self.block,
+            )
+            # Cache the observed value whether or not the store accepted it —
+            # a throttled or deduped insert is still "known state" and we
+            # shouldn't re-attempt it on every subsequent poll.
+            self._last_known_rates[key] = r
+
+    stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
+    for hk in stale:
+        self.rate_state_store.delete_hotkey(hk)
+    if stale:
+        self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+
+
+def _poll_collaterals(self: Validator) -> None:
+    """Query each tracked miner's collateral and persist diffs.
+
+    Runs every ``COLLATERAL_POLL_INTERVAL_BLOCKS``. Only miners with a cached
+    rate (i.e. in ``_last_known_rates``) are polled — those are the ones that
+    can hold a crown. The contract stores collateral as a single per-miner
+    balance, so each row has no direction.
+    """
+    if self.block - self._last_collateral_poll_block < COLLATERAL_POLL_INTERVAL_BLOCKS:
+        return
+    self._last_collateral_poll_block = self.block
+
+    tracked_hotkeys = {key[0] for key in self._last_known_rates.keys()}
+    current_hotkeys = set(self.metagraph.hotkeys)
+
+    for hotkey in tracked_hotkeys:
+        if hotkey not in current_hotkeys:
+            continue
+        try:
+            collateral = self.contract_client.get_miner_collateral(hotkey)
+        except Exception as e:
+            bt.logging.debug(f'Collateral read failed for {hotkey[:8]}: {e}')
+            continue
+        if self._last_known_collaterals.get(hotkey) == collateral:
+            continue
+        inserted = self.rate_state_store.insert_collateral_event(
+            hotkey=hotkey,
+            collateral_rao=collateral,
+            block=self.block,
+        )
+        if inserted:
+            self._last_known_collaterals[hotkey] = collateral
+
+    stale = set(self._last_known_collaterals.keys()) - current_hotkeys
+    for hk in stale:
+        self._last_known_collaterals.pop(hk, None)
+
+
+def _refresh_min_collateral(self: Validator) -> None:
+    """Refresh the cached ``min_collateral`` from the contract every ~4h.
+
+    Always advances the refresh block on any terminal outcome (success, no-op,
+    or exception) so a sustained contract outage can't turn every forward pass
+    into an RPC retry. The cached value is preserved on failure.
+    """
+    if self.block - self._last_min_collateral_refresh_block < MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS:
+        return
+    self._last_min_collateral_refresh_block = self.block
+    try:
+        value = self.contract_client.get_min_collateral()
+    except Exception as e:
+        bt.logging.warning(f'min_collateral refresh failed: {e}')
+        return
+    if value is None:
+        return
+    if value != self._min_collateral_rao:
+        bt.logging.info(f'min_collateral changed: {self._min_collateral_rao} -> {value}')
+        self._min_collateral_rao = value
 
 
 def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
@@ -323,116 +447,164 @@ def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, un
             bt.logging.warning(f'Swap {swap.id}: timed out')
 
 
-def _score_miners(self: Validator, tracker: SwapTracker) -> None:
-    """Score miners from the in-memory window and update weights."""
+def _score_miners(self: Validator) -> None:
+    """Run a V1 scoring pass and commit weights."""
     try:
-        tracker.prune_window(self.block)
-        rewards, miner_uids = calculate_miner_rewards(self, tracker)
-        rewards, miner_uids = apply_recycle(self, rewards, miner_uids, tracker)
+        rewards, miner_uids = calculate_miner_rewards(self)
         if len(miner_uids) > 0 and len(rewards) > 0:
             self.update_scores(rewards, miner_uids)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def calculate_miner_rewards(
-    self: Validator,
-    tracker: SwapTracker,
-) -> Tuple[np.ndarray, Set[int]]:
-    """Calculate rewards from the tracker's in-memory scoring window.
+def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
+    """Crown-time based reward computation.
 
-    score = success_rate^8 * volume_weight * speed_score
+    For each direction in ``DIRECTION_POOLS``:
+      1. Replay rate_events and collateral_events chronologically over the window
+      2. At each block boundary, determine crown holders (tied best-rate miners
+         with collateral >= the cached ``_min_collateral_rao`` and still in the
+         metagraph)
+      3. Accumulate crown_blocks per hotkey, splitting evenly on ties
+      4. ``rewards[uid] += pool * (crown_blocks[hk] / total) * success_rate ** SUCCESS_EXPONENT``
+
+    Anything not distributed to miners recycles to ``RECYCLE_UID``.
     """
-    hotkey_to_uid: Dict[str, int] = {}
-    for uid in range(self.metagraph.n.item()):
-        hotkey_to_uid[self.metagraph.hotkeys[uid]] = uid
+    n_uids = self.metagraph.n.item()
+    if n_uids == 0:
+        return np.array([], dtype=np.float32), set()
 
-    stats: Dict[int, MinerScoringStats] = {}
+    window_end = self.block
+    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
 
-    for swap in tracker.window:
-        uid = hotkey_to_uid.get(swap.miner_hotkey)
-        if uid is None:
-            continue
+    active_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
-        if uid not in stats:
-            stats[uid] = MinerScoringStats(uid=uid)
+    rewards = np.zeros(n_uids, dtype=np.float32)
+    success_stats = self.rate_state_store.get_all_time_success_rates()
+    min_collateral = int(getattr(self, '_min_collateral_rao', 0) or 0)
 
-        if swap.status == SwapStatus.COMPLETED:
-            stats[uid].windowed_fees += swap_fee_rao(swap, self.fee_divisor)
-            stats[uid].completed += 1
-            if swap.fulfilled_block > 0:
-                chain = swap.dest_chain
-                if chain not in stats[uid].fulfillment_times_by_chain:
-                    stats[uid].fulfillment_times_by_chain[chain] = []
-                stats[uid].fulfillment_times_by_chain[chain].append(swap.fulfilled_block - swap.initiated_block)
+    for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
+        crown_blocks = _replay_crown_time(
+            store=self.rate_state_store,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            window_start=window_start,
+            window_end=window_end,
+            active_hotkeys=active_hotkeys,
+            min_collateral=min_collateral,
+        )
+        total = sum(crown_blocks.values())
+        if total == 0:
+            continue  # empty bucket — pool recycles via the remainder below
 
-        elif swap.status == SwapStatus.TIMED_OUT:
-            stats[uid].timeouts += 1
+        for hotkey, blocks in crown_blocks.items():
+            uid = hotkey_to_uid.get(hotkey)
+            if uid is None:
+                continue  # dereg'd mid-window; credit forfeited
+            share = blocks / total
+            sr = _success_rate(success_stats.get(hotkey))
+            rewards[uid] += pool * share * (sr**SUCCESS_EXPONENT)
 
-    if not stats:
-        return np.array([]), set()
-
-    active_stats = {uid: s for uid, s in stats.items() if s.completed + s.timeouts > 0}
-    if not active_stats:
-        return np.array([]), set()
-
-    total_fees = sum(s.windowed_fees for s in active_stats.values())
-    if total_fees == 0:
-        total_fees = 1
-
-    # Per-chain fastest averages: compare miners only against others
-    # fulfilling on the same dest chain (BTC vs BTC, TAO vs TAO, etc.)
-    all_chains: set = set()
-    avg_speeds_by_chain: Dict[str, Dict[int, float]] = {}
-    for uid, s in active_stats.items():
-        for chain, times in s.fulfillment_times_by_chain.items():
-            all_chains.add(chain)
-            if chain not in avg_speeds_by_chain:
-                avg_speeds_by_chain[chain] = {}
-            avg_speeds_by_chain[chain][uid] = mean(times)
-
-    fastest_by_chain: Dict[str, float] = {chain: min(speeds.values()) for chain, speeds in avg_speeds_by_chain.items()}
-
-    uids = sorted(active_stats.keys())
-    rewards = np.zeros(len(uids), dtype=np.float32)
-
-    for i, uid in enumerate(uids):
-        s = active_stats[uid]
-        total = s.completed + s.timeouts
-        success_rate = (s.completed / total) ** SCORING_SUCCESS_EXPONENT
-        volume_weight = s.windowed_fees / total_fees
-        speed_score = _chain_weighted_speed(uid, s, fastest_by_chain, avg_speeds_by_chain)
-        rewards[i] = success_rate * volume_weight * speed_score
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
+    distributed = float(rewards.sum())
+    rewards[recycle_uid] += max(0.0, 1.0 - distributed)
 
     bt.logging.info(
-        f'Windowed scoring: {len(uids)} miners, window={SCORING_WINDOW_BLOCKS} blocks, '
-        f'total_fees={total_fees}, fastest_by_chain={fastest_by_chain}'
+        f'V1 scoring: window=[{window_start}, {window_end}], '
+        f'distributed={distributed:.6f}, recycled={max(0.0, 1.0 - distributed):.6f}'
     )
 
-    return rewards, set(uids)
+    return rewards, set(range(n_uids))
 
 
-def _chain_weighted_speed(
-    uid: int,
-    s: MinerScoringStats,
-    fastest_by_chain: Dict[str, float],
-    avg_speeds_by_chain: Dict[str, Dict[int, float]],
-) -> float:
-    """Compute speed score weighted across dest chains.
+def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
+    """All-time success rate. Zero-outcome miners default to 1.0 (optimistic)."""
+    if stats is None:
+        return 1.0
+    completed, timed_out = stats
+    total = completed + timed_out
+    if total == 0:
+        return 1.0
+    return completed / total
 
-    Each chain's speed score = fastest_avg / miner_avg (within that chain).
-    Final score is a weighted average by swap count per chain.
+
+def _replay_crown_time(
+    store: RateStateStore,
+    from_chain: str,
+    to_chain: str,
+    window_start: int,
+    window_end: int,
+    active_hotkeys: Set[str],
+    min_collateral: int,
+) -> Dict[str, float]:
+    """Walk the merged rate + collateral event stream, accumulate crown blocks.
+
+    Returns ``{hotkey: crown_blocks_float}``. Ties split credit evenly across
+    the tied interval.
     """
-    total_swaps = 0
-    weighted_sum = 0.0
+    # 1. Reconstruct state at window_start for every currently-active hotkey.
+    current_rates: Dict[str, float] = {}
+    current_collateral: Dict[str, int] = {}
 
-    for chain, times in s.fulfillment_times_by_chain.items():
-        fastest = fastest_by_chain.get(chain, 0)
-        miner_avg = avg_speeds_by_chain.get(chain, {}).get(uid, 0)
-        if fastest > 0 and miner_avg > 0:
-            chain_score = fastest / miner_avg
-            count = len(times)
-            weighted_sum += chain_score * count
-            total_swaps += count
+    for hotkey in active_hotkeys:
+        latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
+        if latest_rate is not None:
+            current_rates[hotkey] = latest_rate[0]
+        latest_col = store.get_latest_collateral_before(hotkey, window_start)
+        if latest_col is not None:
+            current_collateral[hotkey] = latest_col[0]
 
-    return weighted_sum / total_swaps if total_swaps > 0 else 0.0
+    # 2. Merge rate and collateral events within the window, oldest first.
+    #    Collateral events sort BEFORE rate events at the same block so a
+    #    simultaneous "collateral drops + best rate" transition resolves to
+    #    the post-drop state before rate attribution.
+    rate_events = store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end)
+    col_events = store.get_collateral_events_in_range(window_start, window_end)
+
+    merged: List[Tuple[int, int, str, str, float]] = []
+    for e in rate_events:
+        merged.append((e['block'], 1, 'rate', e['hotkey'], float(e['rate'])))
+    for e in col_events:
+        merged.append((e['block'], 0, 'collateral', e['hotkey'], float(e['collateral_rao'])))
+    merged.sort(key=lambda x: (x[0], x[1]))
+
+    # 3. Walk intervals, crediting current holders.
+    crown_blocks: Dict[str, float] = {}
+    prev_block = window_start
+
+    def attribute(interval_start: int, interval_end: int) -> None:
+        duration = interval_end - interval_start
+        if duration <= 0:
+            return
+        holders = _crown_holders(current_rates, current_collateral, min_collateral, active_hotkeys)
+        if not holders:
+            return
+        split = duration / len(holders)
+        for hk in holders:
+            crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
+
+    for block, _order, kind, hotkey, value in merged:
+        attribute(prev_block, block)
+        if kind == 'rate':
+            current_rates[hotkey] = value
+        else:
+            current_collateral[hotkey] = int(value)
+        prev_block = block
+
+    attribute(prev_block, window_end)
+    return crown_blocks
+
+
+def _crown_holders(
+    rates: Dict[str, float],
+    collaterals: Dict[str, int],
+    min_collateral: int,
+    active: Set[str],
+) -> List[str]:
+    """Hotkeys tied for best rate, with collateral >= min and in the metagraph."""
+    eligible = {hk: r for hk, r in rates.items() if hk in active and collaterals.get(hk, 0) >= min_collateral and r > 0}
+    if not eligible:
+        return []
+    best = max(eligible.values())
+    return [hk for hk, r in eligible.items() if r == best]

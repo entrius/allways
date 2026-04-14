@@ -35,11 +35,37 @@ MINER_STATUS_LOG_INTERVAL_STEPS = 50  # Full status log every ~10 min at 12s pol
 SCORING_WINDOW_BLOCKS = 3600  # ~12 hours at 12s/block
 SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s poll)
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
-SCORING_SUCCESS_EXPONENT = 8  # Harsh failure penalty: 92% → 0.51x, 96% → 0.72x
+
+# ─── V1 Crown-Time Scoring ───────────────────────────────
+# Validator throttle: rate_events for a hotkey are only accepted when this many
+# blocks have elapsed since the previous accepted event. Prevents rate-war games
+# and keeps crown-time attribution stable.
+RATE_UPDATE_MIN_INTERVAL_BLOCKS = 75
+# Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
+# window-start state can always be reconstructed from history.
+EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
+# How often the validator polls miner commitments from its local subtensor.
+# 15 blocks ≈ 3 min — 1/5 of RATE_UPDATE_MIN_INTERVAL_BLOCKS for good responsiveness
+# without hammering the RPC.
+COMMITMENT_POLL_INTERVAL_BLOCKS = 15
+# How often the validator polls miner collateral from the contract. Matches the
+# commitment poll so rate + collateral state update on the same cadence.
+COLLATERAL_POLL_INTERVAL_BLOCKS = 15
+# How often the validator refreshes its cached min_collateral from the contract.
+# ~4 hours at 12s/block — governance changes are rare, so cheap to cache.
+MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS = 1200
+# Emission allocation per swap direction. Sum of values is the portion of each
+# scoring pass allocated to crown-time winners; 1 - sum() recycles to RECYCLE_UID.
+DIRECTION_POOLS: dict[tuple[str, str], float] = {
+    ('tao', 'btc'): 0.04,
+    ('btc', 'tao'): 0.04,
+}
+# Harsh penalty for unreliable miners: success_rate ** SUCCESS_EXPONENT.
+# 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125.
+SUCCESS_EXPONENT: int = 3
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID — emissions recycled on-chain
-DAILY_EMISSION_ALPHA = 7200 * 0.41  # 2952 alpha/day (7200 blocks/day * 0.41 miner share)
 
 # ─── Reservation ─────────────────────────────────────────
 RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation (validator-enforced)

@@ -16,7 +16,12 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
-from allways.constants import DEFAULT_FEE_DIVISOR, DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS, SCORING_WINDOW_BLOCKS
+from allways.constants import (
+    DEFAULT_FEE_DIVISOR,
+    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    MIN_COLLATERAL_TAO,
+    TAO_TO_RAO,
+)
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
@@ -32,6 +37,7 @@ from allways.validator.axon_handlers import (
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.forward import forward
 from allways.validator.pending_confirms import PendingConfirmQueue
+from allways.validator.rate_state import RateStateStore
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
@@ -60,10 +66,35 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.warning(f'Failed to read fee_divisor, using default {DEFAULT_FEE_DIVISOR}: {e}')
             self.fee_divisor = DEFAULT_FEE_DIVISOR
+
+        # V1 crown-time scoring state. Must be created before SwapTracker so the
+        # tracker can persist swap outcomes into the credibility ledger.
+        self.rate_state_store = RateStateStore()
+        self._last_known_rates: dict[tuple[str, str, str], float] = {}
+        self._last_known_collaterals: dict[str, int] = {}
+        self._last_commitment_poll_block: int = 0
+        self._last_collateral_poll_block: int = 0
+        # Falling back to 0 here would let zero-collateral miners hold crowns until
+        # the first successful refresh; fall back to MIN_COLLATERAL_TAO instead.
+        fallback_min_collateral = int(MIN_COLLATERAL_TAO * TAO_TO_RAO)
+        try:
+            raw_min_collateral = self.contract_client.get_min_collateral()
+            if raw_min_collateral and raw_min_collateral > 0:
+                self._min_collateral_rao: int = raw_min_collateral
+            else:
+                bt.logging.warning(
+                    f'min_collateral read returned {raw_min_collateral}, using fallback {fallback_min_collateral} rao'
+                )
+                self._min_collateral_rao = fallback_min_collateral
+        except Exception as e:
+            bt.logging.warning(f'Initial min_collateral read failed, using fallback {fallback_min_collateral} rao: {e}')
+            self._min_collateral_rao = fallback_min_collateral
+        self._last_min_collateral_refresh_block: int = self.block
+
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
-            window_blocks=SCORING_WINDOW_BLOCKS,
+            rate_state_store=self.rate_state_store,
         )
         self.swap_tracker.initialize(self.block)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
@@ -124,6 +155,7 @@ class Validator(BaseValidatorNeuron):
             super().__exit__(exc_type, exc_value, traceback)
         finally:
             self.pending_confirms.close()
+            self.rate_state_store.close()
 
 
 # Main entry point

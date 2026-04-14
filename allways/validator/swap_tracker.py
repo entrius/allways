@@ -7,6 +7,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
+from allways.validator.rate_state import RateStateStore
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -18,24 +19,32 @@ class SwapTracker:
     - Discovery: scan only NEW swap IDs since last poll
     - Monitoring: re-fetch all tracked ACTIVE/FULFILLED swaps each poll
 
-    Resolved swaps are no longer stored on-chain, so cold start only recovers
-    active swaps. The scoring window populates naturally as swaps complete.
+    Resolved swaps flow through ``_record_outcome`` into the ``rate_state_store``
+    credibility ledger; the tracker itself holds no scoring state.
     """
 
     def __init__(
         self,
         client: AllwaysContractClient,
         fulfillment_timeout_blocks: int,
-        window_blocks: int,
+        rate_state_store: RateStateStore,
     ):
         self.client = client
+        self.rate_state_store = rate_state_store
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
-        self.window: List[Swap] = []
         self.voted_ids: Set[int] = set()
 
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
-        self.window_blocks = window_blocks
+
+    def _record_outcome(self, swap: Swap) -> None:
+        """Persist the terminal state of ``swap`` to the credibility ledger."""
+        self.rate_state_store.insert_swap_outcome(
+            swap_id=swap.id,
+            miner_hotkey=swap.miner_hotkey,
+            completed=(swap.status == SwapStatus.COMPLETED),
+            resolved_block=swap.completed_block or 0,
+        )
 
     def initialize(self, current_block: int):
         """Cold start — scan backward from latest swap to populate active set."""
@@ -45,7 +54,7 @@ class SwapTracker:
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
 
-        cutoff_block = current_block - self.window_blocks - self.fulfillment_timeout_blocks
+        cutoff_block = current_block - self.fulfillment_timeout_blocks
         latest_id = next_id - 1
 
         for swap_id in reversed(range(1, next_id)):
@@ -68,18 +77,18 @@ class SwapTracker:
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
-        """Move a swap from active tracking to the scoring window with its terminal state.
+        """Record a swap's terminal state and drop it from active tracking.
 
         Called when the validator's vote reaches quorum (confirm or timeout).
-        The contract removes swap data on resolution, so get_swap() returns None
-        after this point — we must capture the terminal state here for scoring.
+        The contract removes swap data on resolution, so ``get_swap`` returns
+        ``None`` after this point — we must capture the terminal state here.
         """
         swap = self.active.pop(swap_id, None)
         if swap is None:
             return
         swap.status = status
         swap.completed_block = block
-        self.window.append(swap)
+        self._record_outcome(swap)
         self.voted_ids.discard(swap_id)
 
     def mark_voted(self, swap_id: int):
@@ -140,13 +149,13 @@ class SwapTracker:
                     was_past_timeout = last_known.timeout_block > 0 and self._current_block > last_known.timeout_block
                     last_known.status = SwapStatus.TIMED_OUT if was_past_timeout else SwapStatus.COMPLETED
                     last_known.completed_block = self._current_block
-                    self.window.append(last_known)
+                    self._record_outcome(last_known)
                 resolved_ids.append(sid)
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
             else:
                 resolved_ids.append(sid)
-                self.window.append(swap)
+                self._record_outcome(swap)
 
         for sid in resolved_ids:
             self.active.pop(sid, None)
@@ -154,15 +163,6 @@ class SwapTracker:
 
         if resolved_ids:
             bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
-
-    def prune_window(self, current_block: int):
-        """Remove resolved swaps older than the scoring window."""
-        window_start = current_block - self.window_blocks
-        before = len(self.window)
-        self.window = [s for s in self.window if _resolved_block(s) >= window_start]
-        pruned = before - len(self.window)
-        if pruned > 0:
-            bt.logging.debug(f'SwapTracker: pruned {pruned} expired swaps from window')
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""
@@ -189,12 +189,3 @@ class SwapTracker:
             and s.timeout_block > 0
             and current_block > s.timeout_block
         ]
-
-
-def _resolved_block(swap: Swap) -> int:
-    """Block when a terminal swap was resolved."""
-    if swap.completed_block > 0:
-        return swap.completed_block
-    if swap.timeout_block > 0:
-        return swap.timeout_block
-    return swap.initiated_block

@@ -52,6 +52,34 @@ alw --help
 - **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
 - **CLI**: User interface for posting pairs, managing collateral, and executing swaps
 
+## Running a Local Subtensor Lite Node (Validators)
+
+Validators read miner rate commitments every ~3 minutes. Pointing at the public
+`finney` entrypoint works but adds latency and RPC pressure — every validator on
+the network should run its own lite node for this.
+
+```bash
+# Minimal lite-node command (adjust --base-path for storage volume)
+subtensor \
+  --chain finney \
+  --base-path /var/lib/subtensor \
+  --rpc-external \
+  --ws-external \
+  --port 30333 \
+  --rpc-port 9933 \
+  --ws-port 9944 \
+  --pruning 1000
+```
+
+Then point the validator at it via `.env`:
+
+```env
+SUBTENSOR_NETWORK=ws://127.0.0.1:9944
+```
+
+The dev environment in `alw-utils/dev-environment` provisions a local chain
+automatically — no manual lite-node step is required there.
+
 ## License
 
 MIT License

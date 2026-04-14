@@ -1,6 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
-from typing import Dict, List, Optional
+from typing import Optional
 
 
 class SwapStatus(IntEnum):
@@ -126,14 +126,3 @@ class Reservation:
     reserved_at_block: int = 0
     expires_at_block: int = 0
     created_at: float = 0.0
-
-
-@dataclass
-class MinerScoringStats:
-    """Per-miner stats accumulated from the scoring window."""
-
-    uid: int
-    windowed_fees: int = 0
-    completed: int = 0
-    timeouts: int = 0
-    fulfillment_times_by_chain: Dict[str, List[int]] = field(default_factory=dict)
