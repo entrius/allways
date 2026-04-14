@@ -35,8 +35,12 @@ class RateStateStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.execute('PRAGMA journal_mode=WAL')
+        # busy_timeout must be set BEFORE journal_mode: setting WAL mode takes a
+        # brief exclusive lock that a concurrent opener will otherwise hit as an
+        # immediate "database is locked" error (dev env runs two validators
+        # against the same SQLite file).
         self._conn.execute('PRAGMA busy_timeout=5000')
+        self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
