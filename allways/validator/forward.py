@@ -11,8 +11,11 @@ import numpy as np
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerScoringStats, SwapStatus
+from allways.commitments import read_miner_commitments
 from allways.constants import (
+    COMMITMENT_POLL_INTERVAL_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
+    MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     SCORING_INTERVAL_STEPS,
     SCORING_SUCCESS_EXPONENT,
     SCORING_WINDOW_BLOCKS,
@@ -55,6 +58,8 @@ async def forward(self: Validator) -> None:
 
     _clear_provider_caches(self)
     _process_pending_confirms(self)
+    _poll_commitments(self)
+    _refresh_min_collateral(self)
     await tracker.poll(self.block)
     uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
@@ -69,6 +74,76 @@ def _clear_provider_caches(self: Validator) -> None:
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
+
+
+def _poll_commitments(self: Validator) -> None:
+    """Read all miner commitments from the local subtensor and persist diffs.
+
+    Runs every ``COMMITMENT_POLL_INTERVAL_BLOCKS``. For each miner pair in the
+    metagraph, emits a ``rate_event`` per direction whose rate changed since the
+    cache snapshot. The ``RateStateStore`` enforces the per-hotkey throttle.
+    Also purges deregistered hotkeys from the store and local cache.
+    """
+    if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
+        return
+    self._last_commitment_poll_block = self.block
+
+    try:
+        pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+    except Exception as e:
+        bt.logging.warning(f'Commitment poll failed: {e}')
+        return
+
+    current_hotkeys = set(self.metagraph.hotkeys)
+
+    for pair in pairs:
+        if pair.hotkey not in current_hotkeys:
+            continue
+        for from_c, to_c, r in (
+            (pair.source_chain, pair.dest_chain, pair.rate),
+            (pair.dest_chain, pair.source_chain, pair.counter_rate),
+        ):
+            if r <= 0:
+                continue  # miner opted out of this direction
+            key = (pair.hotkey, from_c, to_c)
+            if self._last_known_rates.get(key) == r:
+                continue
+            inserted = self.rate_state_store.insert_rate_event(
+                hotkey=pair.hotkey,
+                from_chain=from_c,
+                to_chain=to_c,
+                rate=r,
+                block=self.block,
+            )
+            if inserted:
+                self._last_known_rates[key] = r
+
+    stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
+    for hk in stale:
+        self.rate_state_store.delete_hotkey(hk)
+    if stale:
+        self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+
+
+def _refresh_min_collateral(self: Validator) -> None:
+    """Refresh the cached ``min_collateral`` from the contract every ~4h.
+
+    The value is read once at validator init and then refreshed on this
+    cadence. The cached value feeds crown eligibility during scoring replay.
+    """
+    if self.block - self._last_min_collateral_refresh_block < MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS:
+        return
+    try:
+        value = self.contract_client.get_min_collateral()
+    except Exception as e:
+        bt.logging.warning(f'min_collateral refresh failed: {e}')
+        return
+    if value is None:
+        return
+    if value != self._min_collateral_rao:
+        bt.logging.info(f'min_collateral changed: {self._min_collateral_rao} -> {value}')
+        self._min_collateral_rao = value
+    self._last_min_collateral_refresh_block = self.block
 
 
 def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:

@@ -45,6 +45,13 @@ RATE_UPDATE_MIN_INTERVAL_BLOCKS = 75
 # Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
 # window-start state can always be reconstructed from history.
 EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
+# How often the validator polls miner commitments from its local subtensor.
+# 15 blocks ≈ 3 min — 1/5 of RATE_UPDATE_MIN_INTERVAL_BLOCKS for good responsiveness
+# without hammering the RPC.
+COMMITMENT_POLL_INTERVAL_BLOCKS = 15
+# How often the validator refreshes its cached min_collateral from the contract.
+# ~4 hours at 12s/block — governance changes are rare, so cheap to cache.
+MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS = 1200
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID — emissions recycled on-chain

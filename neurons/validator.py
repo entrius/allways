@@ -32,6 +32,7 @@ from allways.validator.axon_handlers import (
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.forward import forward
 from allways.validator.pending_confirms import PendingConfirmQueue
+from allways.validator.rate_state import RateStateStore
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
@@ -85,6 +86,17 @@ class Validator(BaseValidatorNeuron):
         # Exposes current block so the queue can purge expired reservations on read.
         self.pending_confirms = PendingConfirmQueue(current_block_fn=lambda: self.block)
 
+        # V1 crown-time scoring state.
+        self.rate_state_store = RateStateStore()
+        self._last_known_rates: dict[tuple[str, str, str], float] = {}
+        self._last_commitment_poll_block: int = 0
+        try:
+            self._min_collateral_rao: int = self.contract_client.get_min_collateral() or 0
+        except Exception as e:
+            bt.logging.warning(f'Initial min_collateral read failed, using 0: {e}')
+            self._min_collateral_rao = 0
+        self._last_min_collateral_refresh_block: int = self.block
+
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
         # to prevent "cannot call recv while another coroutine is already running recv" errors.
@@ -124,6 +136,7 @@ class Validator(BaseValidatorNeuron):
             super().__exit__(exc_type, exc_value, traceback)
         finally:
             self.pending_confirms.close()
+            self.rate_state_store.close()
 
 
 # Main entry point
