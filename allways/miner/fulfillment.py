@@ -1,6 +1,7 @@
 """Swap fulfillment engine - verifies receipt and sends funds."""
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
@@ -8,8 +9,27 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
+from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.utils.rate import expected_swap_amounts
+
+
+def _load_timeout_cushion_blocks() -> int:
+    """Read MINER_TIMEOUT_CUSHION_BLOCKS from env, falling back to the default.
+
+    Values <0 are treated as 0 so operators can't accidentally disable the
+    safety margin by sign-flip typos.
+    """
+    raw = os.environ.get('MINER_TIMEOUT_CUSHION_BLOCKS')
+    if raw is None or raw == '':
+        return DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        bt.logging.warning(
+            f'Invalid MINER_TIMEOUT_CUSHION_BLOCKS={raw!r}, using default {DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS}'
+        )
+        return DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 
 
 class SwapFulfiller:
@@ -39,6 +59,7 @@ class SwapFulfiller:
         self.netuid = netuid
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
+        self.timeout_cushion_blocks = _load_timeout_cushion_blocks()
         self._sent: Dict[int, Tuple[str, int]] = {}
         self._sent_cache_path = sent_cache_path
         self._load_sent_cache()
@@ -80,10 +101,16 @@ class SwapFulfiller:
 
     def _verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill. Returns (dest_amount, miner_source_address) or None."""
-        # Timeout check
+        # Timeout check — bail out `timeout_cushion_blocks` before the hard
+        # deadline so slow dest-chain inclusion can't turn a legitimate
+        # fulfillment into a timeout and a slash.
         current_block = self.subtensor.get_current_block()
-        if current_block >= swap.timeout_block:
-            bt.logging.warning(f'Swap {swap.id}: already timed out (block {current_block} >= {swap.timeout_block})')
+        effective_deadline = swap.timeout_block - self.timeout_cushion_blocks
+        if current_block >= effective_deadline:
+            bt.logging.warning(
+                f'Swap {swap.id}: inside cushion window '
+                f'(block {current_block} >= {swap.timeout_block} - {self.timeout_cushion_blocks})'
+            )
             return None
 
         # Rate and address from swap struct (snapshotted at initiation)

@@ -30,6 +30,10 @@ BTC_MIN_FEE_RATE = 2  # sat/vB — minimum BTC fee rate floor to avoid stuck txs
 
 # ─── Miner Status ────────────────────────────────────────
 MINER_STATUS_LOG_INTERVAL_STEPS = 50  # Full status log every ~10 min at 12s poll
+# Default cushion the miner applies to every swap's timeout_block before
+# deciding to fulfill. Protects against slow dest-chain inclusion eating into
+# the timeout window. Overridable via MINER_TIMEOUT_CUSHION_BLOCKS env var.
+DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS = 5
 
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 3600  # ~12 hours at 12s/block
