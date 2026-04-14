@@ -8,7 +8,7 @@ from allways.constants import (
     EVENT_RETENTION_BLOCKS,
     RATE_UPDATE_MIN_INTERVAL_BLOCKS,
 )
-from allways.validator.forward import _poll_commitments
+from allways.validator.forward import poll_commitments
 from allways.validator.state_store import ValidatorStateStore
 
 
@@ -28,7 +28,7 @@ def _make_pair(hotkey: str, rate: float, counter_rate: float, source='tao', dest
 
 
 def _make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
-    """Construct a validator stub with the fields used by _poll_commitments."""
+    """Construct a validator stub with the fields used by poll_commitments."""
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     metagraph = SimpleNamespace(hotkeys=list(hotkeys or ['hk_a', 'hk_b']))
     config = SimpleNamespace(netuid=2)
@@ -55,7 +55,7 @@ class TestPollCommitmentsBasic:
         ]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # 4 rate_events: 2 miners * 2 directions
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 2000)
@@ -77,7 +77,7 @@ class TestPollCommitmentsBasic:
 
         mock_read = MagicMock(return_value=[])
         with patch('allways.validator.forward.read_miner_commitments', mock_read):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         mock_read.assert_not_called()
         v.state_store.close()
@@ -89,11 +89,11 @@ class TestPollCommitmentsChanges:
         pairs = [_make_pair('hk_a', rate=0.00015, counter_rate=6500.0)]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         v.block += COMMITMENT_POLL_INTERVAL_BLOCKS
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         assert len(tao_btc) == 1
@@ -105,12 +105,12 @@ class TestPollCommitmentsChanges:
         pairs_v2 = [_make_pair('hk_a', rate=0.00020, counter_rate=6500.0)]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v1):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # Advance past both the poll interval AND the rate throttle
         v.block += RATE_UPDATE_MIN_INTERVAL_BLOCKS
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v2):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
@@ -125,12 +125,12 @@ class TestPollCommitmentsChanges:
         pairs_v2 = [_make_pair('hk_a', rate=0.00020, counter_rate=0.0)]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v1):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # Only past poll interval, NOT past rate throttle.
         v.block += COMMITMENT_POLL_INTERVAL_BLOCKS
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v2):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # Throttle blocked the store insert — only the first event lands.
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
@@ -147,7 +147,7 @@ class TestPollCommitmentsZeroRate:
         pairs = [_make_pair('hk_a', rate=0.00015, counter_rate=0.0)]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
@@ -167,13 +167,13 @@ class TestPollCommitmentsDereg:
         ]
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # hk_b deregistered
         v.metagraph.hotkeys = ['hk_a']
         v.block += COMMITMENT_POLL_INTERVAL_BLOCKS
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         assert v.state_store.get_latest_rate_before('hk_b', 'tao', 'btc', block=10_000) is None
         assert v.state_store.get_latest_rate_before('hk_a', 'tao', 'btc', block=10_000) is not None
@@ -189,7 +189,7 @@ class TestPollCommitmentsErrors:
             raise RuntimeError('websocket dead')
 
         with patch('allways.validator.forward.read_miner_commitments', side_effect=_raise):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         # No events, but the poll block WAS advanced so we don't hot-retry
         assert v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) == []
@@ -217,7 +217,7 @@ class TestPollCommitmentsPruning:
         conn.commit()
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
-            _poll_commitments(v)
+            poll_commitments(v)
 
         rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
         surviving_blocks = {e['block'] for e in rate_events}

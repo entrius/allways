@@ -52,30 +52,30 @@ SS58_PREFIX = 42
 # ─── SCALE field decoders (ported from alw-utils watch_contract_events) ─────
 
 
-def _decode_u32(data: bytes, offset: int) -> Tuple[int, int]:
+def decode_u32(data: bytes, offset: int) -> Tuple[int, int]:
     return struct.unpack_from('<I', data, offset)[0], offset + 4
 
 
-def _decode_u64(data: bytes, offset: int) -> Tuple[int, int]:
+def decode_u64(data: bytes, offset: int) -> Tuple[int, int]:
     return struct.unpack_from('<Q', data, offset)[0], offset + 8
 
 
-def _decode_u128(data: bytes, offset: int) -> Tuple[int, int]:
+def decode_u128(data: bytes, offset: int) -> Tuple[int, int]:
     lo = struct.unpack_from('<Q', data, offset)[0]
     hi = struct.unpack_from('<Q', data, offset + 8)[0]
     return lo + (hi << 64), offset + 16
 
 
-def _decode_bool(data: bytes, offset: int) -> Tuple[bool, int]:
+def decode_bool(data: bytes, offset: int) -> Tuple[bool, int]:
     return data[offset] != 0, offset + 1
 
 
-def _decode_account_id(data: bytes, offset: int) -> Tuple[str, int]:
+def decode_account_id(data: bytes, offset: int) -> Tuple[str, int]:
     raw = data[offset : offset + 32]
     return ss58_encode(raw, SS58_PREFIX), offset + 32
 
 
-def _decode_string(data: bytes, offset: int) -> Tuple[str, int]:
+def decode_string(data: bytes, offset: int) -> Tuple[str, int]:
     first = data[offset]
     mode = first & 0x03
     if mode == 0:
@@ -91,32 +91,32 @@ def _decode_string(data: bytes, offset: int) -> Tuple[str, int]:
     return s, offset + str_len
 
 
-_DATA_DECODERS = {
-    'u32': _decode_u32,
-    'u64': _decode_u64,
-    'u128': _decode_u128,
-    'bool': _decode_bool,
-    'AccountId': _decode_account_id,
-    'String': _decode_string,
+DATA_DECODERS = {
+    'u32': decode_u32,
+    'u64': decode_u64,
+    'u128': decode_u128,
+    'bool': decode_bool,
+    'AccountId': decode_account_id,
+    'String': decode_string,
 }
 
 
-def _topic_account_id(topic_bytes: bytes) -> str:
+def topic_account_id(topic_bytes: bytes) -> str:
     return ss58_encode(topic_bytes[:32], SS58_PREFIX)
 
 
-def _topic_u64(topic_bytes: bytes) -> int:
+def topic_u64(topic_bytes: bytes) -> int:
     return struct.unpack_from('<Q', topic_bytes, 0)[0]
 
 
-def _topic_bool(topic_bytes: bytes) -> bool:
+def topic_bool(topic_bytes: bytes) -> bool:
     return topic_bytes[0] != 0
 
 
-_TOPIC_DECODERS = {
-    'AccountId': _topic_account_id,
-    'u64': _topic_u64,
-    'bool': _topic_bool,
+TOPIC_DECODERS = {
+    'AccountId': topic_account_id,
+    'u64': topic_u64,
+    'bool': topic_bool,
 }
 
 
@@ -137,7 +137,7 @@ class EventDef:
     data_fields: List[FieldDef] = field(default_factory=list)
 
 
-def _resolve_type_name(display_name: list) -> str:
+def resolve_type_name(display_name: list) -> str:
     if not display_name:
         return 'unknown'
     last = display_name[-1]
@@ -160,7 +160,7 @@ def load_event_registry(metadata_path: Path) -> Dict[str, EventDef]:
             topic_fields: List[FieldDef] = []
             data_fields: List[FieldDef] = []
             for arg in ev.get('args', []):
-                type_name = _resolve_type_name(arg.get('type', {}).get('displayName', []))
+                type_name = resolve_type_name(arg.get('type', {}).get('displayName', []))
                 fd = FieldDef(name=arg['label'], type_name=type_name)
                 if arg.get('indexed'):
                     topic_fields.append(fd)
@@ -184,7 +184,7 @@ def decode_topic_fields(event_def: EventDef, topics: List[bytes]) -> Dict[str, A
         topic_idx = i + 1
         if topic_idx >= len(topics):
             break
-        decoder = _TOPIC_DECODERS.get(fd.type_name)
+        decoder = TOPIC_DECODERS.get(fd.type_name)
         if decoder is not None:
             values[fd.name] = decoder(topics[topic_idx])
         else:
@@ -202,7 +202,7 @@ def decode_data_fields(event_def: EventDef, data: bytes) -> Dict[str, Any]:
     values: Dict[str, Any] = {}
     offset = 0
     for fd in event_def.topic_fields + event_def.data_fields:
-        decoder = _DATA_DECODERS.get(fd.type_name)
+        decoder = DATA_DECODERS.get(fd.type_name)
         if decoder is None:
             break
         try:
@@ -213,7 +213,7 @@ def decode_data_fields(event_def: EventDef, data: bytes) -> Dict[str, Any]:
     return values
 
 
-def _to_bytes(val: Any) -> bytes:
+def to_bytes(val: Any) -> bytes:
     if isinstance(val, bytes):
         return val
     if isinstance(val, str):
@@ -225,7 +225,7 @@ def _to_bytes(val: Any) -> bytes:
     if isinstance(val, (list, tuple)):
         return bytes(val)
     if isinstance(val, dict):
-        return _to_bytes(val.get('value', val.get('H256', b'')))
+        return to_bytes(val.get('value', val.get('H256', b'')))
     return bytes()
 
 
@@ -345,8 +345,8 @@ class ContractEventWatcher:
 
         record_topics = record.get('topics', []) if isinstance(record, dict) else []
         try:
-            raw_data = _to_bytes(attrs.get('data', ''))
-            topics = [_to_bytes(t) for t in record_topics]
+            raw_data = to_bytes(attrs.get('data', ''))
+            topics = [to_bytes(t) for t in record_topics]
         except Exception:
             return None
 

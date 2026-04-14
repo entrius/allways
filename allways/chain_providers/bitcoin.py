@@ -37,7 +37,7 @@ def detect_address_type(address: str) -> str:
     return 'unknown'
 
 
-def _to_mainnet_wif(wif: str) -> str:
+def to_mainnet_wif(wif: str) -> str:
     """Convert a testnet/regtest WIF (0xef) to mainnet (0x80) for signing libraries."""
     decoded = base58.b58decode_check(wif)
     if decoded[0] == 0xEF:
@@ -45,7 +45,7 @@ def _to_mainnet_wif(wif: str) -> str:
     return wif
 
 
-def _to_mainnet_address(address: str) -> str:
+def to_mainnet_address(address: str) -> str:
     """Convert a testnet/regtest address to mainnet equivalent for verification."""
     if address.startswith('bcrt1') or address.startswith('tb1'):
         hrp, data = bech32.bech32_decode(address)
@@ -355,7 +355,7 @@ class BitcoinProvider(ChainProvider):
             return ''
 
         try:
-            _, _, signature = sign_message(_to_mainnet_wif(wif), addr_type, message, deterministic=True)
+            _, _, signature = sign_message(to_mainnet_wif(wif), addr_type, message, deterministic=True)
             return signature
         except Exception as e:
             bt.logging.error(f'BTC sign_source_proof failed: {e}')
@@ -376,7 +376,7 @@ class BitcoinProvider(ChainProvider):
             return False
 
         try:
-            valid, _, _ = verify_message(_to_mainnet_address(address), message, signature)
+            valid, _, _ = verify_message(to_mainnet_address(address), message, signature)
             return valid
         except Exception as e:
             bt.logging.error(f'BTC verify_source_proof failed: {e}')

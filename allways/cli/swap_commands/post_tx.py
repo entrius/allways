@@ -12,7 +12,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     load_pending_swap,
 )
-from allways.cli.swap_commands.swap import _from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
+from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
@@ -56,7 +56,7 @@ def post_tx_command(tx_hash: str, netuid: int):
 
     remaining = reserved_until - current_block
     remaining_min = remaining * SECONDS_PER_BLOCK / 60
-    human_amount = _from_smallest_unit(state.source_amount, state.source_chain)
+    human_amount = from_smallest_unit(state.source_amount, state.source_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')
     console.print(f'  Pair:    {state.source_chain.upper()} -> {state.dest_chain.upper()}')

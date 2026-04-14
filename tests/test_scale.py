@@ -213,7 +213,7 @@ class TestExtractU128:
 
 
 # =========================================================================
-# _decode_string tests
+# decode_string tests
 # =========================================================================
 
 
@@ -221,26 +221,26 @@ class TestDecodeString:
     def test_roundtrip_short(self):
         c = _make_client()
         encoded = c._encode_value('hello', 'str')
-        s, offset = c._decode_string(encoded, 0)
+        s, offset = c.decode_string(encoded, 0)
         assert s == 'hello'
         assert offset == len(encoded)
 
     def test_roundtrip_empty(self):
         c = _make_client()
         encoded = c._encode_value('', 'str')
-        s, offset = c._decode_string(encoded, 0)
+        s, offset = c.decode_string(encoded, 0)
         assert s == ''
 
     def test_roundtrip_medium(self):
         c = _make_client()
         text = 'x' * 100  # Still in single-byte compact mode
         encoded = c._encode_value(text, 'str')
-        s, offset = c._decode_string(encoded, 0)
+        s, offset = c.decode_string(encoded, 0)
         assert s == text
 
     def test_offset_past_end(self):
         c = _make_client()
-        s, offset = c._decode_string(b'\x00', 10)
+        s, offset = c.decode_string(b'\x00', 10)
         assert s == ''
 
     def test_roundtrip_two_byte_compact(self):
@@ -248,7 +248,7 @@ class TestDecodeString:
         # String of length 64+ triggers two-byte compact mode
         text = 'a' * 64
         encoded = c._encode_value(text, 'str')
-        s, offset = c._decode_string(encoded, 0)
+        s, offset = c.decode_string(encoded, 0)
         assert s == text
 
 

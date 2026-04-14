@@ -131,7 +131,7 @@ def miner_status(hotkey: str):
     console.print(f'\n[dim]Total: {len(swaps)} active swaps[/dim]\n')
 
 
-def _friendly_rejection(reason: str) -> str:
+def friendly_rejection(reason: str) -> str:
     """Convert raw validator rejection reasons into human-readable messages."""
     if not reason:
         return ''
@@ -208,7 +208,7 @@ def miner_activate():
             accepted += 1
         else:
             raw_reason = getattr(resp, 'rejection_reason', '') or ''
-            friendly = _friendly_rejection(raw_reason)
+            friendly = friendly_rejection(raw_reason)
             console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly}')
 
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')

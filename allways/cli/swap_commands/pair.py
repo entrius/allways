@@ -8,7 +8,7 @@ from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
 
 
-def _prompt_chain(label: str, exclude: str | None = None) -> str:
+def prompt_chain(label: str, exclude: str | None = None) -> str:
     """Prompt the user to pick a chain from SUPPORTED_CHAINS."""
     chains = [c for c in SUPPORTED_CHAINS if c != exclude]
     if len(chains) == 1:
@@ -23,7 +23,7 @@ def _prompt_chain(label: str, exclude: str | None = None) -> str:
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
 
 
-def _prompt_rates(canon_src: str, canon_dest: str) -> tuple:
+def prompt_rates(canon_src: str, canon_dest: str) -> tuple:
     """Prompt for direction-specific rates. 0 = don't offer that direction; at least one must be positive."""
     src_up, dst_up = canon_src.upper(), canon_dest.upper()
     console.print(f"\n[dim]Rates in {dst_up} per 1 {src_up} (0 = don't offer)[/dim]")
@@ -88,7 +88,7 @@ def post_pair(
     """
     # --- Determine chains ---
     if src_chain is None:
-        src_chain = _prompt_chain('Chain')
+        src_chain = prompt_chain('Chain')
     else:
         src_chain = src_chain.lower()
         if src_chain not in SUPPORTED_CHAINS:
@@ -101,7 +101,7 @@ def post_pair(
         if len(remaining) == 1:
             dst_chain = remaining[0]
         else:
-            dst_chain = _prompt_chain('Pair with', exclude=src_chain)
+            dst_chain = prompt_chain('Pair with', exclude=src_chain)
     else:
         dst_chain = dst_chain.lower()
         if dst_chain not in SUPPORTED_CHAINS:
@@ -123,7 +123,7 @@ def post_pair(
     rates_from_args = rate is not None
 
     if rate is None:
-        rate, counter_rate = _prompt_rates(canon_src, canon_dest)
+        rate, counter_rate = prompt_rates(canon_src, canon_dest)
     elif rate < 0:
         console.print('[red]Rate cannot be negative[/red]')
         return
@@ -207,7 +207,7 @@ def post_pair(
 
         if receipt.is_success:
             console.print('[green]Pair posted successfully![/green]')
-            _write_rate_posted_flag(wallet.hotkey.ss58_address)
+            write_rate_posted_flag(wallet.hotkey.ss58_address)
         else:
             console.print(f'[red]Failed to post pair: {receipt.error_message}[/red]')
 
@@ -215,7 +215,7 @@ def post_pair(
         console.print(f'[red]Error: {e}[/red]')
 
 
-def _write_rate_posted_flag(hotkey: str) -> None:
+def write_rate_posted_flag(hotkey: str) -> None:
     """Signal to a running miner that its committed pair changed.
 
     A live miner polls this flag at each forward step and reloads its

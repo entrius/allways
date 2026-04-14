@@ -526,7 +526,7 @@ class AllwaysContractClient:
             return None
         return self.subtensor.substrate.ss58_encode(data[:32].hex())
 
-    def _decode_string(self, data: bytes, offset: int) -> Tuple[str, int]:
+    def decode_string(self, data: bytes, offset: int) -> Tuple[str, int]:
         """Decode a SCALE compact-prefixed string. Returns (string, new_offset)."""
         if offset >= len(data):
             return '', offset
@@ -563,8 +563,8 @@ class AllwaysContractClient:
             o += 32
             miner = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
             o += 32
-            source_chain, o = self._decode_string(data, o)
-            dest_chain, o = self._decode_string(data, o)
+            source_chain, o = self.decode_string(data, o)
+            dest_chain, o = self.decode_string(data, o)
             source_amount_lo = struct.unpack_from('<Q', data, o)[0]
             o += 8
             source_amount_hi = struct.unpack_from('<Q', data, o)[0]
@@ -580,15 +580,15 @@ class AllwaysContractClient:
             tao_amount_hi = struct.unpack_from('<Q', data, o)[0]
             o += 8
             tao_amount = tao_amount_lo + (tao_amount_hi << 64)
-            user_source_address, o = self._decode_string(data, o)
-            user_dest_address, o = self._decode_string(data, o)
-            miner_source_address, o = self._decode_string(data, o)
-            miner_dest_address, o = self._decode_string(data, o)
-            rate, o = self._decode_string(data, o)
-            source_tx_hash, o = self._decode_string(data, o)
+            user_source_address, o = self.decode_string(data, o)
+            user_dest_address, o = self.decode_string(data, o)
+            miner_source_address, o = self.decode_string(data, o)
+            miner_dest_address, o = self.decode_string(data, o)
+            rate, o = self.decode_string(data, o)
+            source_tx_hash, o = self.decode_string(data, o)
             source_tx_block = struct.unpack_from('<I', data, o)[0]
             o += 4
-            dest_tx_hash, o = self._decode_string(data, o)
+            dest_tx_hash, o = self.decode_string(data, o)
             dest_tx_block = struct.unpack_from('<I', data, o)[0]
             o += 4
             status_byte = data[o]

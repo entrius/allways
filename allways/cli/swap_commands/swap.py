@@ -33,7 +33,7 @@ from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
 
 
-def _to_smallest_unit(amount: float, chain_id: str) -> int:
+def to_smallest_unit(amount: float, chain_id: str) -> int:
     """Convert a human-readable amount to the smallest unit for a chain.
 
     Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
@@ -44,7 +44,7 @@ def _to_smallest_unit(amount: float, chain_id: str) -> int:
     return int(Decimal(str(amount)) * (10**chain.decimals))
 
 
-def _from_smallest_unit(amount: int, chain_id: str) -> float:
+def from_smallest_unit(amount: int, chain_id: str) -> float:
     """Convert from smallest unit to human-readable amount."""
     chain = get_chain(chain_id)
     return amount / (10**chain.decimals)
@@ -277,7 +277,7 @@ def broadcast_reserve_with_retry(
 # =========================================================================
 
 
-def _display_receipt(swap):
+def display_receipt(swap):
     """Show a rich completion receipt after a successful swap."""
     src_chain_def = get_chain(swap.source_chain)
     dst_chain_def = get_chain(swap.dest_chain)
@@ -315,7 +315,7 @@ def _display_receipt(swap):
     console.print()
 
 
-def _poll_for_swap_with_progress(client, miner_hotkey: str, source_chain: str, max_polls: int = 60):
+def poll_for_swap_with_progress(client, miner_hotkey: str, source_chain: str, max_polls: int = 60):
     """Poll for swap creation with a live progress display."""
     with console.status('') as status:
         errors = 0
@@ -344,7 +344,7 @@ def _poll_for_swap_with_progress(client, miner_hotkey: str, source_chain: str, m
     return None
 
 
-def _send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
+def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
     """Send BTC with fallback: embit lightweight -> RPC -> manual (with retry).
 
     Returns (tx_hash, block_number) or None (manual fallback failed/skipped).
@@ -588,7 +588,7 @@ def swap_now_command(
         console.print('[red]Amount must be positive[/red]')
         return
 
-    source_amount = _to_smallest_unit(amount, source_chain)
+    source_amount = to_smallest_unit(amount, source_chain)
     is_reverse = source_chain != canon_src
     dest_amount = calculate_dest_amount(
         source_amount,
@@ -602,7 +602,7 @@ def swap_now_command(
     preview_receives = apply_fee_deduction(dest_amount, FEE_DIVISOR)
     preview_fee_pct = 100 / FEE_DIVISOR
     console.print(
-        f'  You will receive: ~[green]{_from_smallest_unit(preview_receives, dest_chain):.8f} {dest_chain.upper()}[/green]'
+        f'  You will receive: ~[green]{from_smallest_unit(preview_receives, dest_chain):.8f} {dest_chain.upper()}[/green]'
         f' (after {preview_fee_pct:g}% fee)'
     )
 
@@ -670,8 +670,8 @@ def swap_now_command(
     summary = (
         f'  Send:    [red]{amount} {source_chain.upper()}[/red]\n'
         f'  From:    [yellow]{user_source_address}[/yellow]\n'
-        f'  Receive: [green]{_from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
-        f'  Fee:     {fee_percent:g}% ({_from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
+        f'  Receive: [green]{from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
+        f'  Fee:     {fee_percent:g}% ({from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
         f'  Rate:    send 1 {source_chain.upper()}, get {selected_pair.rate:g} {dest_chain.upper()}\n'
         f'  Miner:   UID {selected_pair.uid}\n'
         f'  To:      {receive_address}'
@@ -750,7 +750,7 @@ def swap_now_command(
         source_tx_hash = source_tx_hash_opt
         console.print(f'[dim]Using provided source tx: {source_tx_hash[:16]}...[/dim]')
     else:
-        human_send = _from_smallest_unit(source_amount, source_chain)
+        human_send = from_smallest_unit(source_amount, source_chain)
         console.print(
             f'\n  Ready to send [bold]{human_send} {source_chain.upper()}[/bold] to miner at [cyan]{selected_pair.source_address}[/cyan]'
         )
@@ -787,7 +787,7 @@ def swap_now_command(
                 console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
                 return
         else:
-            send_result = _send_btc(
+            send_result = send_btc(
                 chain_providers,
                 config,
                 selected_pair.source_address,
@@ -839,7 +839,7 @@ def swap_now_command(
     # Poll for swap creation (longer timeout when queued)
     max_polls = 600 if all_queued else 60
     try:
-        swap_id = _poll_for_swap_with_progress(client, selected_pair.hotkey, source_chain, max_polls)
+        swap_id = poll_for_swap_with_progress(client, selected_pair.hotkey, source_chain, max_polls)
     except KeyboardInterrupt:
         clear_pending_swap()
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
@@ -866,4 +866,4 @@ def swap_now_command(
 
     # Show completion receipt
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
-        _display_receipt(final_swap)
+        display_receipt(final_swap)

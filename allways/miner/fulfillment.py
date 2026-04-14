@@ -14,7 +14,7 @@ from allways.contract_client import AllwaysContractClient, ContractError
 from allways.utils.rate import expected_swap_amounts
 
 
-def _load_timeout_cushion_blocks() -> int:
+def load_timeout_cushion_blocks() -> int:
     """Read MINER_TIMEOUT_CUSHION_BLOCKS from env, falling back to the default.
 
     Values <0 are treated as 0 so operators can't accidentally disable the
@@ -60,7 +60,7 @@ class SwapFulfiller:
         self.netuid = netuid
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
-        self.timeout_cushion_blocks = _load_timeout_cushion_blocks()
+        self.timeout_cushion_blocks = load_timeout_cushion_blocks()
         # Chain → miner's own deposit/fulfillment address, populated at
         # startup from this miner's own commitment and refreshed by the
         # miner loop when a new rate is posted. Shared dict so the miner

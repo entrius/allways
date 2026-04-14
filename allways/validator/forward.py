@@ -24,9 +24,9 @@ from allways.constants import (
 from allways.contract_client import ContractError
 from allways.utils.logging import log_on_change
 from allways.validator.axon_handlers import (
-    _keccak256,
-    _scale_encode_extend_hash_input,
-    _scale_encode_initiate_hash_input,
+    keccak256,
+    scale_encode_extend_hash_input,
+    scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.state_store import ValidatorStateStore
@@ -60,7 +60,7 @@ async def forward(self: Validator) -> None:
 
     clear_provider_caches(self)
     initialize_pending_user_reservations(self)
-    _poll_commitments(self)
+    poll_commitments(self)
     try:
         self.event_watcher.sync_to(self.block)
     except Exception as e:
@@ -81,16 +81,16 @@ def clear_provider_caches(self: Validator) -> None:
             provider.clear_cache()
 
 
-def _poll_commitments(self: Validator) -> None:
+def poll_commitments(self: Validator) -> None:
     """Rate-side validator tick.
 
     Three independent steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
 
-    1. ``_prune_aged_rate_events`` — trim history older than the retention
+    1. ``prune_aged_rate_events`` — trim history older than the retention
        window so the SQLite tables stay bounded.
-    2. ``_refresh_miner_rates`` — read all miner commitments from the local
+    2. ``refresh_miner_rates`` — read all miner commitments from the local
        subtensor and persist direction-level diffs.
-    3. ``_purge_deregistered_hotkeys`` — drop any hotkeys that have left the
+    3. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
        metagraph since the last poll, both from the store and the in-memory
        cache.
 
@@ -101,12 +101,12 @@ def _poll_commitments(self: Validator) -> None:
         return
     self._last_commitment_poll_block = self.block
 
-    _prune_aged_rate_events(self)
-    _refresh_miner_rates(self)
-    _purge_deregistered_hotkeys(self)
+    prune_aged_rate_events(self)
+    refresh_miner_rates(self)
+    purge_deregistered_hotkeys(self)
 
 
-def _prune_aged_rate_events(self: Validator) -> None:
+def prune_aged_rate_events(self: Validator) -> None:
     """Delete rate/collateral events older than ``EVENT_RETENTION_BLOCKS``.
 
     Retention is deliberately 2× the scoring window so ``get_latest_*_before``
@@ -117,7 +117,7 @@ def _prune_aged_rate_events(self: Validator) -> None:
         self.state_store.prune_events_older_than(cutoff)
 
 
-def _refresh_miner_rates(self: Validator) -> None:
+def refresh_miner_rates(self: Validator) -> None:
     """Pull all miner commitments and persist direction-level rate diffs.
 
     Rate events that match the cached ``_last_known_rates`` value are skipped
@@ -155,7 +155,7 @@ def _refresh_miner_rates(self: Validator) -> None:
             self._last_known_rates[key] = r
 
 
-def _purge_deregistered_hotkeys(self: Validator) -> None:
+def purge_deregistered_hotkeys(self: Validator) -> None:
     """Drop rates/collateral/outcomes for hotkeys that left the metagraph."""
     current_hotkeys = set(self.metagraph.hotkeys)
     stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
@@ -166,7 +166,7 @@ def _purge_deregistered_hotkeys(self: Validator) -> None:
     self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
 
 
-def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
+def try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
     from substrateinterface import Keypair
 
@@ -175,7 +175,7 @@ def _try_extend_reservation(self: Validator, item, current_block: int, swap_labe
         blocks_left = reserved_until - current_block
         if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            extend_hash = _keccak256(_scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
+            extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
             self.contract_client.vote_extend_reservation(
                 wallet=self.wallet,
                 request_hash=extend_hash,
@@ -239,7 +239,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
-            _try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(self, item, current_block, swap_label, miner_short)
             continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
@@ -267,7 +267,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.source_tx_hash[:16]}...',
         )
 
-        _try_extend_reservation(self, item, current_block, swap_label, miner_short)
+        try_extend_reservation(self, item, current_block, swap_label, miner_short)
 
         if not tx_info.confirmed:
             continue
@@ -278,7 +278,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         # place so the next forward step retries instead of silently losing it.
         try:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            hash_input = _scale_encode_initiate_hash_input(
+            hash_input = scale_encode_initiate_hash_input(
                 miner_bytes,
                 item.source_tx_hash,
                 item.source_chain,
@@ -290,7 +290,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                 item.source_amount,
                 item.dest_amount,
             )
-            request_hash = _keccak256(hash_input)
+            request_hash = keccak256(hash_input)
 
             user_tao_address = item.dest_address if item.dest_chain == 'tao' else item.source_address
             self.contract_client.vote_initiate(
@@ -495,7 +495,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             share = blocks / total
-            sr = _success_rate(success_stats.get(hotkey))
+            sr = success_rate(success_stats.get(hotkey))
             rewards[uid] += pool * share * (sr**SUCCESS_EXPONENT)
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
@@ -510,7 +510,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     return rewards, set(range(n_uids))
 
 
-def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
+def success_rate(stats: Optional[Tuple[int, int]]) -> float:
     """All-time success rate. Zero-outcome miners default to 1.0 (optimistic)."""
     if stats is None:
         return 1.0

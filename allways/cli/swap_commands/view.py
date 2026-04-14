@@ -260,7 +260,7 @@ def view_swaps(status: str):
     console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def _build_swap_text(swap, chain_info=True):
+def build_swap_text(swap, chain_info=True):
     """Build swap display as a Rich markup string."""
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
     parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
@@ -309,9 +309,9 @@ def _build_swap_text(swap, chain_info=True):
     return '\n'.join(parts)
 
 
-def _display_swap(swap, chain_info=True):
+def display_swap(swap, chain_info=True):
     """Render a single swap with timeline view."""
-    console.print(_build_swap_text(swap, chain_info=chain_info))
+    console.print(build_swap_text(swap, chain_info=chain_info))
 
 
 @view_group.command('swap')
@@ -351,7 +351,7 @@ def view_swap(swap_id: int, watch: bool):
         return
 
     if not watch:
-        _display_swap(swap)
+        display_swap(swap)
         return
 
     watch_swap(client, swap_id, swap)
@@ -375,11 +375,11 @@ def watch_swap(client, swap_id: int, swap=None):
 
     terminal = (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
     if swap.status in terminal:
-        _display_swap(swap)
+        display_swap(swap)
         return swap
 
     def _render(s, chain_info=True, watching=True):
-        markup = _build_swap_text(s, chain_info=chain_info)
+        markup = build_swap_text(s, chain_info=chain_info)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
         return Text.from_markup(markup)

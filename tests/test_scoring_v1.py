@@ -9,10 +9,10 @@ import numpy as np
 from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
 from allways.validator.event_watcher import CollateralEvent, ContractEventWatcher
 from allways.validator.forward import (
-    _success_rate,
     calculate_miner_rewards,
     crown_holders_at_instant,
     replay_crown_time_window,
+    success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
 
@@ -68,13 +68,13 @@ def _pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
 
 class TestSuccessRateHelper:
     def test_none_is_optimistic(self):
-        assert _success_rate(None) == 1.0
+        assert success_rate(None) == 1.0
 
     def test_zero_total_is_optimistic(self):
-        assert _success_rate((0, 0)) == 1.0
+        assert success_rate((0, 0)) == 1.0
 
     def test_ratio_is_completed_over_total(self):
-        assert _success_rate((8, 2)) == 0.8
+        assert success_rate((8, 2)) == 0.8
 
 
 class TestCrownHoldersHelper:

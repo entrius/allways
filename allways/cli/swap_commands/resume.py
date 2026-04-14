@@ -19,8 +19,8 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
 )
 from allways.cli.swap_commands.swap import (
-    _from_smallest_unit,
-    _poll_for_swap_with_progress,
+    from_smallest_unit,
+    poll_for_swap_with_progress,
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
@@ -66,8 +66,8 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
     # Display pending swap summary
     elapsed_min = (time.time() - state.created_at) / 60
-    human_send = _from_smallest_unit(state.source_amount, state.source_chain)
-    human_receive = _from_smallest_unit(state.user_receives, state.dest_chain)
+    human_send = from_smallest_unit(state.source_amount, state.source_chain)
+    human_receive = from_smallest_unit(state.user_receives, state.dest_chain)
     send_label = f'{human_send} {state.source_chain.upper()}'
 
     summary = (
@@ -97,9 +97,9 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
                         final = watch_swap(client, swap.id)
                         if final and final.status == SwapStatus.COMPLETED:
-                            from allways.cli.swap_commands.swap import _display_receipt
+                            from allways.cli.swap_commands.swap import display_receipt
 
-                            _display_receipt(final)
+                            display_receipt(final)
                     return
     except ContractError:
         pass
@@ -181,7 +181,7 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
 
     max_polls = 600 if all_queued else 60
     try:
-        swap_id = _poll_for_swap_with_progress(client, state.miner_hotkey, state.source_chain, max_polls)
+        swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.source_chain, max_polls)
     except KeyboardInterrupt:
         clear_pending_swap()
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
@@ -205,6 +205,6 @@ def resume_command(source_tx_hash_opt: Optional[str], skip_confirm: bool, netuid
     final_swap = watch_swap(client, swap_id)
 
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
-        from allways.cli.swap_commands.swap import _display_receipt
+        from allways.cli.swap_commands.swap import display_receipt
 
-        _display_receipt(final_swap)
+        display_receipt(final_swap)
