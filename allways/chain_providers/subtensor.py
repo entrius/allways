@@ -163,7 +163,9 @@ class SubtensorProvider(ChainProvider):
     ) -> Optional[TransactionInfo]:
         """Verify a TAO transfer; raises ProviderUnreachableError if subtensor is unreachable.
 
-        If block_hint > 0, checks hinted block ±2. Otherwise scans last 150 blocks.
+        If block_hint > 0, checks the hinted block ±3. Otherwise scans the last
+        150 blocks. The ±3 window covers small clock/finality skews between the
+        caller's block_hint and the block the transfer actually landed in.
         """
         try:
             current_block = self.subtensor.get_current_block()
@@ -171,7 +173,7 @@ class SubtensorProvider(ChainProvider):
             raise ProviderUnreachableError(f'Subtensor unreachable: {e}') from e
 
         if block_hint > 0:
-            blocks_to_check = [block_hint + offset for offset in range(-2, 3) if block_hint + offset >= 0]
+            blocks_to_check = [block_hint + offset for offset in range(-3, 4) if block_hint + offset >= 0]
         else:
             blocks_to_check = [current_block - offset for offset in range(150) if current_block - offset >= 0]
 
