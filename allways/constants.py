@@ -28,8 +28,7 @@ RATE_PRECISION = 10**18  # Fixed-point precision for on-chain rate storage
 MIN_BALANCE_FOR_TX_RAO = 250_000_000  # 0.25 TAO minimum for extrinsic fees
 BTC_MIN_FEE_RATE = 2  # sat/vB — minimum BTC fee rate floor to avoid stuck txs
 
-# ─── Miner Status ────────────────────────────────────────
-MINER_STATUS_LOG_INTERVAL_STEPS = 50  # Full status log every ~10 min at 12s poll
+# ─── Miner ───────────────────────────────────────────────
 # Default cushion the miner applies to every swap's timeout_block before
 # deciding to fulfill. Protects against slow dest-chain inclusion eating into
 # the timeout window. Overridable via MINER_TIMEOUT_CUSHION_BLOCKS env var.

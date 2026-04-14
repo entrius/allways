@@ -8,15 +8,15 @@ Usage:
 
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitment
-from allways.constants import FEE_DIVISOR, MINER_STATUS_LOG_INTERVAL_STEPS, TAO_TO_RAO
-from allways.contract_client import AllwaysContractClient, ContractError
+from allways.constants import FEE_DIVISOR
+from allways.contract_client import AllwaysContractClient
 from allways.miner.fulfillment import SwapFulfiller
 from allways.miner.swap_poller import SwapPoller
 from neurons.base.miner import BaseMinerNeuron
@@ -43,8 +43,6 @@ class Miner(BaseMinerNeuron):
             miner_hotkey=self.wallet.hotkey.ss58_address,
         )
 
-        fee_divisor = FEE_DIVISOR
-
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
         self._rate_flag_path = Path.home() / '.allways' / 'miner' / f'rate_posted_{hotkey[:12]}.flag'
@@ -58,19 +56,14 @@ class Miner(BaseMinerNeuron):
             subtensor=self.subtensor,
             netuid=self.config.netuid,
             metagraph=self.metagraph,
-            fee_divisor=fee_divisor,
+            fee_divisor=FEE_DIVISOR,
             sent_cache_path=sent_cache_path,
             my_addresses=self.my_addresses,
         )
 
-        self._last_status_step = 0
         self._consecutive_poll_failures = 0
-        self._last_pair: Optional[str] = None
-        self._last_active: Optional[bool] = None
-        self._last_collateral: Optional[int] = None
 
-        bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address}')
-        self._log_status()
+        bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
 
     def _load_my_addresses(self) -> Dict[str, str]:
         """Read this miner's committed pair once and map chain → address.
@@ -104,63 +97,6 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.debug(f'Rate-posted flag check failed: {e}')
 
-    def _read_current_state(self) -> tuple:
-        """Read current miner state from contract and chain. Returns (pair_key, pair, is_active, collateral_rao)."""
-        hotkey = self.wallet.hotkey.ss58_address
-
-        pair = read_miner_commitment(self.subtensor, self.config.netuid, hotkey, metagraph=self.metagraph)
-        pair_key = f'{pair.source_chain}:{pair.dest_chain}:{pair.rate}' if pair else None
-
-        is_active = None
-        collateral_rao = None
-        try:
-            collateral_rao = self.contract_client.get_miner_collateral(hotkey)
-            is_active = self.contract_client.get_miner_active_flag(hotkey)
-        except ContractError:
-            bt.logging.warning('Could not read contract state')
-
-        return pair_key, pair, is_active, collateral_rao
-
-    def _log_status(self) -> None:
-        """Log full miner state: collateral, active flag, committed pair."""
-        pair_key, pair, is_active, collateral_rao = self._read_current_state()
-
-        if is_active is not None and collateral_rao is not None:
-            collateral_tao = collateral_rao / TAO_TO_RAO
-            status = 'ACTIVE' if is_active else 'INACTIVE'
-            bt.logging.info(f'Status: {status} | collateral: {collateral_tao:.4f} TAO')
-            self._last_active = is_active
-            self._last_collateral = collateral_rao
-
-        if pair:
-            bt.logging.info(f'Committed pair: {pair.source_chain.upper()} -> {pair.dest_chain.upper()} @ {pair.rate}')
-        else:
-            bt.logging.warning('No committed pair found on chain')
-        self._last_pair = pair_key
-
-    def _check_state_changes(self) -> None:
-        """Detect and log commitment/contract state changes since last check."""
-        pair_key, pair, is_active, collateral_rao = self._read_current_state()
-
-        if pair_key != self._last_pair:
-            if pair:
-                bt.logging.info(f'Pair updated: {pair.source_chain.upper()} -> {pair.dest_chain.upper()} @ {pair.rate}')
-            else:
-                bt.logging.warning('Committed pair removed')
-            self._last_pair = pair_key
-
-        if is_active is not None:
-            if is_active != self._last_active and self._last_active is not None:
-                action = 'Activated' if is_active else 'Deactivated'
-                bt.logging.info(f'Miner {action}')
-            self._last_active = is_active
-
-        if collateral_rao is not None:
-            if collateral_rao != self._last_collateral and self._last_collateral is not None:
-                collateral_tao = collateral_rao / TAO_TO_RAO
-                bt.logging.info(f'Collateral changed: {collateral_tao:.4f} TAO')
-            self._last_collateral = collateral_rao
-
     def _reconnect_and_propagate(self):
         """Reconnect subtensor and propagate the new connection to all dependents."""
         self._reconnect_subtensor()
@@ -173,11 +109,6 @@ class Miner(BaseMinerNeuron):
     async def forward(self):
         """Main miner forward pass — polls for swaps and processes each one."""
         self._maybe_reload_my_addresses()
-        if self.step - self._last_status_step >= MINER_STATUS_LOG_INTERVAL_STEPS:
-            self._log_status()
-            self._last_status_step = self.step
-        else:
-            self._check_state_changes()
 
         active_swaps, _fulfilled = self.swap_poller.poll()
 
