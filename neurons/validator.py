@@ -16,7 +16,12 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
-from allways.constants import DEFAULT_FEE_DIVISOR, DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+from allways.constants import (
+    DEFAULT_FEE_DIVISOR,
+    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    MIN_COLLATERAL_TAO,
+    TAO_TO_RAO,
+)
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
@@ -69,11 +74,21 @@ class Validator(BaseValidatorNeuron):
         self._last_known_collaterals: dict[str, int] = {}
         self._last_commitment_poll_block: int = 0
         self._last_collateral_poll_block: int = 0
+        # Falling back to 0 here would let zero-collateral miners hold crowns until
+        # the first successful refresh; fall back to MIN_COLLATERAL_TAO instead.
+        fallback_min_collateral = int(MIN_COLLATERAL_TAO * TAO_TO_RAO)
         try:
-            self._min_collateral_rao: int = self.contract_client.get_min_collateral() or 0
+            raw_min_collateral = self.contract_client.get_min_collateral()
+            if raw_min_collateral and raw_min_collateral > 0:
+                self._min_collateral_rao: int = raw_min_collateral
+            else:
+                bt.logging.warning(
+                    f'min_collateral read returned {raw_min_collateral}, using fallback {fallback_min_collateral} rao'
+                )
+                self._min_collateral_rao = fallback_min_collateral
         except Exception as e:
-            bt.logging.warning(f'Initial min_collateral read failed, using 0: {e}')
-            self._min_collateral_rao = 0
+            bt.logging.warning(f'Initial min_collateral read failed, using fallback {fallback_min_collateral} rao: {e}')
+            self._min_collateral_rao = fallback_min_collateral
         self._last_min_collateral_refresh_block: int = self.block
 
         self.swap_tracker = SwapTracker(
