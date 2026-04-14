@@ -13,6 +13,7 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerScoringStats, SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
+    COLLATERAL_POLL_INTERVAL_BLOCKS,
     COMMITMENT_POLL_INTERVAL_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
     MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
@@ -60,6 +61,7 @@ async def forward(self: Validator) -> None:
     _process_pending_confirms(self)
     _poll_commitments(self)
     _refresh_min_collateral(self)
+    _poll_collaterals(self)
     await tracker.poll(self.block)
     uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
@@ -123,6 +125,44 @@ def _poll_commitments(self: Validator) -> None:
         self.rate_state_store.delete_hotkey(hk)
     if stale:
         self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+
+
+def _poll_collaterals(self: Validator) -> None:
+    """Query each tracked miner's collateral and persist diffs.
+
+    Runs every ``COLLATERAL_POLL_INTERVAL_BLOCKS``. Only miners with a cached
+    rate (i.e. in ``_last_known_rates``) are polled — those are the ones that
+    can hold a crown. The contract stores collateral as a single per-miner
+    balance, so each row has no direction.
+    """
+    if self.block - self._last_collateral_poll_block < COLLATERAL_POLL_INTERVAL_BLOCKS:
+        return
+    self._last_collateral_poll_block = self.block
+
+    tracked_hotkeys = {key[0] for key in self._last_known_rates.keys()}
+    current_hotkeys = set(self.metagraph.hotkeys)
+
+    for hotkey in tracked_hotkeys:
+        if hotkey not in current_hotkeys:
+            continue
+        try:
+            collateral = self.contract_client.get_miner_collateral(hotkey)
+        except Exception as e:
+            bt.logging.debug(f'Collateral read failed for {hotkey[:8]}: {e}')
+            continue
+        if self._last_known_collaterals.get(hotkey) == collateral:
+            continue
+        inserted = self.rate_state_store.insert_collateral_event(
+            hotkey=hotkey,
+            collateral_rao=collateral,
+            block=self.block,
+        )
+        if inserted:
+            self._last_known_collaterals[hotkey] = collateral
+
+    stale = set(self._last_known_collaterals.keys()) - current_hotkeys
+    for hk in stale:
+        self._last_known_collaterals.pop(hk, None)
 
 
 def _refresh_min_collateral(self: Validator) -> None:

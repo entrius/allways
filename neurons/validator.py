@@ -89,7 +89,9 @@ class Validator(BaseValidatorNeuron):
         # V1 crown-time scoring state.
         self.rate_state_store = RateStateStore()
         self._last_known_rates: dict[tuple[str, str, str], float] = {}
+        self._last_known_collaterals: dict[str, int] = {}
         self._last_commitment_poll_block: int = 0
+        self._last_collateral_poll_block: int = 0
         try:
             self._min_collateral_rao: int = self.contract_client.get_min_collateral() or 0
         except Exception as e:

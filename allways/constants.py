@@ -49,6 +49,9 @@ EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
 # 15 blocks ≈ 3 min — 1/5 of RATE_UPDATE_MIN_INTERVAL_BLOCKS for good responsiveness
 # without hammering the RPC.
 COMMITMENT_POLL_INTERVAL_BLOCKS = 15
+# How often the validator polls miner collateral from the contract. Matches the
+# commitment poll so rate + collateral state update on the same cadence.
+COLLATERAL_POLL_INTERVAL_BLOCKS = 15
 # How often the validator refreshes its cached min_collateral from the contract.
 # ~4 hours at 12s/block — governance changes are rare, so cheap to cache.
 MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS = 1200
