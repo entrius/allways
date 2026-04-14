@@ -23,12 +23,12 @@ MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
 
 
-def _make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
+def make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
     n = SimpleNamespace(item=lambda: len(hotkeys))
     return SimpleNamespace(n=n, hotkeys=list(hotkeys))
 
 
-def _make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEventWatcher:
+def make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEventWatcher:
     w = ContractEventWatcher(
         substrate=MagicMock(),
         contract_address='5contract',
@@ -41,24 +41,24 @@ def _make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEvent
     return w
 
 
-def _seed_collateral(watcher: ContractEventWatcher, hotkey: str, collateral_rao: int, block: int) -> None:
+def seed_collateral(watcher: ContractEventWatcher, hotkey: str, collateral_rao: int, block: int) -> None:
     """Insert a collateral event directly into the watcher's in-memory state."""
     watcher.collateral[hotkey] = collateral_rao
     watcher.collateral_events.append(CollateralEvent(hotkey=hotkey, collateral_rao=collateral_rao, block=block))
 
 
-def _make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
+def make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-    watcher = _make_watcher(store, active=set(hotkeys))
+    watcher = make_watcher(store, active=set(hotkeys))
     return SimpleNamespace(
         block=block,
-        metagraph=_make_metagraph(hotkeys),
+        metagraph=make_metagraph(hotkeys),
         state_store=store,
         event_watcher=watcher,
     )
 
 
-def _pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
+def pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
     """Ensure the metagraph is large enough that RECYCLE_UID is in-bounds."""
     hotkeys = list(seeds)
     while len(hotkeys) <= RECYCLE_UID:
@@ -103,14 +103,14 @@ class TestCrownHoldersHelper:
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = _make_watcher(store, active={'hk_a'})
-        conn = store._require_connection()
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00015, 0),
         )
         conn.commit()
-        _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
 
         crown = replay_crown_time_window(
             store=store,
@@ -127,8 +127,8 @@ class TestReplayCrownTime:
 
     def test_two_miners_alternate_rate_leadership(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = _make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store._require_connection()
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
         for row in (
             ('hk_a', 'tao', 'btc', 0.00010, 0),
             ('hk_b', 'tao', 'btc', 0.00020, 0),
@@ -143,8 +143,8 @@ class TestReplayCrownTime:
             ('hk_a', 'tao', 'btc', 0.00030, 600),
         )
         conn.commit()
-        _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
-        _seed_collateral(watcher, 'hk_b', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_b', MIN_COLLATERAL, 0)
 
         crown = replay_crown_time_window(
             store=store,
@@ -162,14 +162,14 @@ class TestReplayCrownTime:
 
     def test_tie_splits_credit_evenly(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = _make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store._require_connection()
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hk, 'tao', 'btc', 0.00020, 0),
             )
-            _seed_collateral(watcher, hk, MIN_COLLATERAL, 0)
+            seed_collateral(watcher, hk, MIN_COLLATERAL, 0)
         conn.commit()
 
         crown = replay_crown_time_window(
@@ -187,16 +187,16 @@ class TestReplayCrownTime:
 
     def test_collateral_drop_mid_window_forfeits_remaining_interval(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = _make_watcher(store, active={'hk_a'})
-        conn = store._require_connection()
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
         # Initial collateral at block 0, drop at block 600
-        _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
-        _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL - 1, 600)
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL - 1, 600)
 
         crown = replay_crown_time_window(
             store=store,
@@ -214,14 +214,14 @@ class TestReplayCrownTime:
     def test_window_start_state_reconstruction_from_pre_window_events(self, tmp_path: Path):
         """A miner posted before window_start and never updated — replay reads initial state."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = _make_watcher(store, active={'hk_a'})
-        conn = store._require_connection()
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00020, 5_000),
         )
         conn.commit()
-        _seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 5_000)
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 5_000)
 
         crown = replay_crown_time_window(
             store=store,
@@ -239,8 +239,8 @@ class TestReplayCrownTime:
 
 class TestCalculateMinerRewards:
     def test_empty_direction_recycles_full_pool(self, tmp_path: Path):
-        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys)
 
         rewards, uids = calculate_miner_rewards(v)
 
@@ -251,16 +251,16 @@ class TestCalculateMinerRewards:
         v.state_store.close()
 
     def test_single_miner_full_pool_with_perfect_success(self, tmp_path: Path):
-        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
-        conn = v.state_store._require_connection()
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys)
+        conn = v.state_store.require_connection()
         for direction in (('tao', 'btc'), ('btc', 'tao')):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 ('hk_a', direction[0], direction[1], 0.00020, 0),
             )
         conn.commit()
-        _seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
         v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
 
         rewards, _ = calculate_miner_rewards(v)
@@ -270,15 +270,15 @@ class TestCalculateMinerRewards:
         v.state_store.close()
 
     def test_partial_success_reduces_reward_by_cube(self, tmp_path: Path):
-        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
-        conn = v.state_store._require_connection()
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys)
+        conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        _seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
         for i in range(8):
             v.state_store.insert_swap_outcome(i + 1, 'hk_a', True, 100 + i)
         for i in range(2):
@@ -293,17 +293,17 @@ class TestCalculateMinerRewards:
 
     def test_dereg_mid_window_forfeits_credit(self, tmp_path: Path):
         # hk_a was the best rate miner but is no longer in the metagraph
-        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_b'])
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_b'])
+        v = make_validator(tmp_path, hotkeys=hotkeys)
         # Ensure hk_a is still marked active on the watcher even if out of metagraph
         v.event_watcher.active_miners.add('hk_a')
-        conn = v.state_store._require_connection()
+        conn = v.state_store.require_connection()
         for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hk, 'tao', 'btc', rate, 0),
             )
-            _seed_collateral(v.event_watcher, hk, MIN_COLLATERAL, 0)
+            seed_collateral(v.event_watcher, hk, MIN_COLLATERAL, 0)
         conn.commit()
 
         rewards, _ = calculate_miner_rewards(v)
@@ -314,7 +314,7 @@ class TestCalculateMinerRewards:
 
     def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
         hotkeys = ['hk_a', 'hk_b']
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        v = make_validator(tmp_path, hotkeys=hotkeys)
 
         rewards, _ = calculate_miner_rewards(v)
 
@@ -323,7 +323,7 @@ class TestCalculateMinerRewards:
         v.state_store.close()
 
     def test_empty_metagraph_returns_empty(self, tmp_path: Path):
-        v = _make_validator(tmp_path, hotkeys=[])
+        v = make_validator(tmp_path, hotkeys=[])
         rewards, uids = calculate_miner_rewards(v)
         assert rewards.size == 0
         assert uids == set()
@@ -331,17 +331,17 @@ class TestCalculateMinerRewards:
 
     def test_inactive_miner_gets_no_credit(self, tmp_path: Path):
         """Even with best rate and collateral, a deactivated miner earns nothing."""
-        hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = _make_validator(tmp_path, hotkeys=hotkeys)
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys)
         # Remove hk_a from active set — simulates MinerActivated(false) event
         v.event_watcher.active_miners.discard('hk_a')
-        conn = v.state_store._require_connection()
+        conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        _seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
 
         rewards, _ = calculate_miner_rewards(v)
 

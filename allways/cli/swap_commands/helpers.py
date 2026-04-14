@@ -76,7 +76,7 @@ def load_cli_config() -> dict:
         return {}
 
 
-def _parse_global_flags() -> dict:
+def parse_global_flags() -> dict:
     """Extract global flags (--network, --wallet, etc.) from sys.argv.
 
     Strips matched flags and their values from sys.argv so Click
@@ -109,13 +109,13 @@ def _parse_global_flags() -> dict:
 _CLI_OVERRIDES: dict = {}
 
 
-def parse_global_flags():
+def apply_global_flags():
     """Parse and strip global flags from sys.argv. Must be called after argv is restored."""
     global _CLI_OVERRIDES
-    _CLI_OVERRIDES = _parse_global_flags()
+    _CLI_OVERRIDES = parse_global_flags()
 
 
-def _get_effective_config() -> dict:
+def get_effective_config() -> dict:
     """Merge file config with CLI global overrides (CLI flags win)."""
     config = load_cli_config()
     config.update(_CLI_OVERRIDES)
@@ -130,7 +130,7 @@ def get_cli_context(
 
     CLI flags (--network, --wallet, --hotkey, --netuid) override config file values.
     """
-    config = _get_effective_config()
+    config = get_effective_config()
     network = config.get('network', 'finney')
     with console.status(
         f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'

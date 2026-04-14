@@ -97,9 +97,9 @@ def poll_commitments(self: Validator) -> None:
     Kept as a thin orchestrator so each concern can be tested and reasoned
     about independently.
     """
-    if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
+    if self.block - self.last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
         return
-    self._last_commitment_poll_block = self.block
+    self.last_commitment_poll_block = self.block
 
     prune_aged_rate_events(self)
     refresh_miner_rates(self)
@@ -143,7 +143,7 @@ def refresh_miner_rates(self: Validator) -> None:
             if r <= 0:
                 continue  # miner opted out of this direction
             key = (pair.hotkey, from_c, to_c)
-            if self._last_known_rates.get(key) == r:
+            if self.last_known_rates.get(key) == r:
                 continue
             self.state_store.insert_rate_event(
                 hotkey=pair.hotkey,
@@ -152,18 +152,18 @@ def refresh_miner_rates(self: Validator) -> None:
                 rate=r,
                 block=self.block,
             )
-            self._last_known_rates[key] = r
+            self.last_known_rates[key] = r
 
 
 def purge_deregistered_hotkeys(self: Validator) -> None:
     """Drop rates/collateral/outcomes for hotkeys that left the metagraph."""
     current_hotkeys = set(self.metagraph.hotkeys)
-    stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
+    stale = {hk for (hk, _, _) in self.last_known_rates.keys()} - current_hotkeys
     if not stale:
         return
     for hk in stale:
         self.state_store.delete_hotkey(hk)
-    self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+    self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
 
 
 def try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:

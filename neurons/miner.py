@@ -45,9 +45,9 @@ class Miner(BaseMinerNeuron):
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
-        self._rate_flag_path = Path.home() / '.allways' / 'miner' / f'rate_posted_{hotkey[:12]}.flag'
+        self.rate_flag_path = Path.home() / '.allways' / 'miner' / f'rate_posted_{hotkey[:12]}.flag'
 
-        self.my_addresses: Dict[str, str] = self._load_my_addresses()
+        self.my_addresses: Dict[str, str] = self.load_my_addresses()
 
         self.swap_fulfiller = SwapFulfiller(
             contract_client=self.contract_client,
@@ -61,11 +61,11 @@ class Miner(BaseMinerNeuron):
             my_addresses=self.my_addresses,
         )
 
-        self._consecutive_poll_failures = 0
+        self.consecutive_poll_failures = 0
 
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
 
-    def _load_my_addresses(self) -> Dict[str, str]:
+    def load_my_addresses(self) -> Dict[str, str]:
         """Read this miner's committed pair once and map chain → address.
 
         Stored as ``self.my_addresses`` and shared with ``SwapFulfiller`` so
@@ -83,23 +83,23 @@ class Miner(BaseMinerNeuron):
             return {}
         return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
 
-    def _maybe_reload_my_addresses(self) -> None:
+    def maybe_reload_my_addresses(self) -> None:
         """If the CLI wrote a rate-posted flag, refresh the address cache."""
         try:
-            if not self._rate_flag_path.exists():
+            if not self.rate_flag_path.exists():
                 return
-            fresh = self._load_my_addresses()
+            fresh = self.load_my_addresses()
             if fresh:
                 self.my_addresses.clear()
                 self.my_addresses.update(fresh)
                 bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
-            self._rate_flag_path.unlink(missing_ok=True)
+            self.rate_flag_path.unlink(missing_ok=True)
         except Exception as e:
             bt.logging.debug(f'Rate-posted flag check failed: {e}')
 
-    def _reconnect_and_propagate(self):
+    def reconnect_and_propagate(self):
         """Reconnect subtensor and propagate the new connection to all dependents."""
-        self._reconnect_subtensor()
+        self.reconnect_subtensor()
         self.contract_client.subtensor = self.subtensor
         self.swap_fulfiller.subtensor = self.subtensor
         tao_provider = self.chain_providers.get('tao')
@@ -108,20 +108,20 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self):
         """Main miner forward pass — polls for swaps and processes each one."""
-        self._maybe_reload_my_addresses()
+        self.maybe_reload_my_addresses()
 
         active_swaps, _fulfilled = self.swap_poller.poll()
 
         if not self.swap_poller.last_poll_ok:
-            self._consecutive_poll_failures += 1
-            if self._consecutive_poll_failures >= 3:
+            self.consecutive_poll_failures += 1
+            if self.consecutive_poll_failures >= 3:
                 bt.logging.warning(
-                    f'{self._consecutive_poll_failures} consecutive poll failures, reconnecting subtensor'
+                    f'{self.consecutive_poll_failures} consecutive poll failures, reconnecting subtensor'
                 )
-                self._reconnect_and_propagate()
-                self._consecutive_poll_failures = 0
+                self.reconnect_and_propagate()
+                self.consecutive_poll_failures = 0
             return
-        self._consecutive_poll_failures = 0
+        self.consecutive_poll_failures = 0
 
         active_count = len(self.swap_poller.active)
 

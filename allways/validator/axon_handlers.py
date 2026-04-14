@@ -99,18 +99,18 @@ def scale_encode_initiate_hash_input(
     any of these fields without invalidating the hash.
     """
 
-    def _str(s: str) -> bytes:
+    def encode_str(s: str) -> bytes:
         raw = s.encode('utf-8')
         return compact_encode_len(len(raw)) + raw
 
     return (
         miner_bytes  # AccountId: 32 bytes raw
-        + _str(from_tx_hash)
-        + _str(from_chain)
-        + _str(to_chain)
-        + _str(miner_from_address)
-        + _str(miner_to_address)
-        + _str(rate)
+        + encode_str(from_tx_hash)
+        + encode_str(from_chain)
+        + encode_str(to_chain)
+        + encode_str(miner_from_address)
+        + encode_str(miner_to_address)
+        + encode_str(rate)
         + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + from_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
         + to_amount.to_bytes(16, 'little')  # u128: 16 bytes LE

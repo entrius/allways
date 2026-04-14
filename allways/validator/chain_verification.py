@@ -30,9 +30,9 @@ class SwapVerifier:
         self.netuid = netuid
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
-        self._last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
+        self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
 
-    def _verify_tx(
+    def verify_tx(
         self,
         swap: Swap,
         chain: str,
@@ -66,9 +66,9 @@ class SwapVerifier:
                 )
             elif not tx_info.confirmed:
                 log_key = f'{swap.id}:{chain}'
-                prev_confs = self._last_logged_confs.get(log_key)
+                prev_confs = self.last_logged_confs.get(log_key)
                 if prev_confs != tx_info.confirmations:
-                    self._last_logged_confs[log_key] = tx_info.confirmations
+                    self.last_logged_confs[log_key] = tx_info.confirmations
                     bt.logging.debug(
                         f'Swap {swap.id}: tx found but not confirmed on {chain} '
                         f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
@@ -112,7 +112,7 @@ class SwapVerifier:
         # Verify sequentially — parallel threads cause WebSocket contention
         # with the API server thread sharing the same substrate connection
         source_ok = await asyncio.to_thread(
-            self._verify_tx,
+            self.verify_tx,
             swap,
             swap.from_chain,
             swap.from_tx_hash,
@@ -121,7 +121,7 @@ class SwapVerifier:
             swap.from_tx_block,
         )
         dest_ok = await asyncio.to_thread(
-            self._verify_tx,
+            self.verify_tx,
             swap,
             swap.to_chain,
             swap.to_tx_hash,

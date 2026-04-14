@@ -378,7 +378,7 @@ def watch_swap(client, swap_id: int, swap=None):
         display_swap(swap)
         return swap
 
-    def _render(s, chain_info=True, watching=True):
+    def render(s, chain_info=True, watching=True):
         markup = build_swap_text(s, chain_info=chain_info)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
@@ -386,7 +386,7 @@ def watch_swap(client, swap_id: int, swap=None):
 
     last_swap = swap
     try:
-        with Live(_render(swap), console=console, refresh_per_second=1) as live:
+        with Live(render(swap), console=console, refresh_per_second=1) as live:
             while True:
                 time.sleep(SECONDS_PER_BLOCK)
                 try:
@@ -408,12 +408,12 @@ def watch_swap(client, swap_id: int, swap=None):
                             status=SwapStatus.COMPLETED,
                             completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
                         )
-                    live.update(_render(final, chain_info=False, watching=False))
+                    live.update(render(final, chain_info=False, watching=False))
                     return final
                 last_swap = swap
-                live.update(_render(swap))
+                live.update(render(swap))
                 if swap.status in terminal:
-                    live.update(_render(swap, watching=False))
+                    live.update(render(swap, watching=False))
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
@@ -431,7 +431,7 @@ def view_contract():
 
     console.print('\n[bold]Contract Parameters[/bold]\n')
 
-    def _read(fn, default=None):
+    def read_safe(fn, default=None):
         try:
             return fn()
         except ContractError:
@@ -441,22 +441,22 @@ def view_contract():
 
     try:
         with loading('Reading contract parameters...'):
-            timeout_blocks = _read(client.get_fulfillment_timeout)
+            timeout_blocks = read_safe(client.get_fulfillment_timeout)
             timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
-            reservation_ttl_blocks = _read(client.get_reservation_ttl)
+            reservation_ttl_blocks = read_safe(client.get_reservation_ttl)
             reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
-            consensus_threshold = _read(client.get_consensus_threshold)
-            min_collateral_rao = _read(client.get_min_collateral)
-            max_collateral_rao = _read(client.get_max_collateral)
-            required_votes = _read(client.get_required_votes_count)
-            validator_count = _read(client.get_validator_count)
-            next_swap_id = _read(client.get_next_swap_id)
-            min_swap_rao = _read(client.get_min_swap_amount)
-            max_swap_rao = _read(client.get_max_swap_amount)
-            accumulated_fees_rao = _read(client.get_accumulated_fees)
-            total_recycled_rao = _read(client.get_total_recycled_fees)
-            owner = _read(client.get_owner)
-            recycle_address = _read(client.get_recycle_address, default=None)
+            consensus_threshold = read_safe(client.get_consensus_threshold)
+            min_collateral_rao = read_safe(client.get_min_collateral)
+            max_collateral_rao = read_safe(client.get_max_collateral)
+            required_votes = read_safe(client.get_required_votes_count)
+            validator_count = read_safe(client.get_validator_count)
+            next_swap_id = read_safe(client.get_next_swap_id)
+            min_swap_rao = read_safe(client.get_min_swap_amount)
+            max_swap_rao = read_safe(client.get_max_swap_amount)
+            accumulated_fees_rao = read_safe(client.get_accumulated_fees)
+            total_recycled_rao = read_safe(client.get_total_recycled_fees)
+            owner = read_safe(client.get_owner)
+            recycle_address = read_safe(client.get_recycle_address, default=None)
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
         return

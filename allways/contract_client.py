@@ -270,26 +270,26 @@ class AllwaysContractClient:
     ):
         self.contract_address = contract_address or get_contract_address() or ''
         self.subtensor = subtensor
-        self._readonly_keypair = Keypair.create_from_uri('//Alice')
-        self._initialized = False
+        self.readonly_keypair = Keypair.create_from_uri('//Alice')
+        self.initialized = False
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if not self.contract_address:
             raise ContractError(ContractErrorKind.NOT_INITIALIZED, 'contract address not set')
         if not self.subtensor:
             raise ContractError(ContractErrorKind.NOT_INITIALIZED, 'subtensor not available')
-        if not self._initialized:
+        if not self.initialized:
             bt.logging.info(f'Contract client ready for {self.contract_address}')
-            self._initialized = True
+            self.initialized = True
 
     # =========================================================================
     # Raw RPC layer
     # =========================================================================
 
-    def _raw_contract_read(
+    def raw_contract_read(
         self,
         method: str,
         args: Optional[dict] = None,
@@ -306,10 +306,10 @@ class AllwaysContractClient:
             if not selector:
                 return None
 
-            encoded_args = self._encode_args(method, args or {})
+            encoded_args = self.encode_args(method, args or {})
             input_data = selector + encoded_args
 
-            kp = caller or self._readonly_keypair
+            kp = caller or self.readonly_keypair
             substrate = self.subtensor.substrate
 
             origin = bytes.fromhex(substrate.ss58_decode(kp.ss58_address))
@@ -361,7 +361,7 @@ class AllwaysContractClient:
             # REVERT flag means the contract returned Err — decode the error variant.
             # Data layout: [LangError discriminant] [Result discriminant] [Error variant byte]
             if is_revert:
-                raise self._decode_contract_error(method, r, data_start, data_len)
+                raise self.decode_contract_error(method, r, data_start, data_len)
 
             # First byte is ink! LangError discriminant (0x00 = Ok)
             if r[data_start] != 0x00:
@@ -376,7 +376,7 @@ class AllwaysContractClient:
             return None
 
     @staticmethod
-    def _decode_contract_error(method: str, r: bytes, data_start: int, data_len: int) -> ContractError:
+    def decode_contract_error(method: str, r: bytes, data_start: int, data_len: int) -> ContractError:
         """Decode an ink! contract error variant from the REVERT payload.
 
         Data layout: [LangError discriminant (1)] [Result Err discriminant (1)] [Error variant (1)]
@@ -394,7 +394,7 @@ class AllwaysContractClient:
             )
         return ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: contract rejected')
 
-    def _exec_contract_raw(
+    def exec_contract_raw(
         self,
         method: str,
         args: Optional[dict] = None,
@@ -408,7 +408,7 @@ class AllwaysContractClient:
         if not selector:
             raise ContractError(ContractErrorKind.CALL_FAILED, f'{method}: unknown method')
 
-        encoded_args = self._encode_args(method, args or {})
+        encoded_args = self.encode_args(method, args or {})
         call_data = selector + encoded_args
 
         substrate = self.subtensor.substrate
@@ -453,17 +453,17 @@ class AllwaysContractClient:
     # SCALE encoding / decoding helpers
     # =========================================================================
 
-    def _encode_args(self, method: str, args: dict) -> bytes:
+    def encode_args(self, method: str, args: dict) -> bytes:
         arg_types = CONTRACT_ARG_TYPES.get(method, [])
         encoded = b''
         for arg_name, type_tag in arg_types:
             if arg_name not in args:
                 raise ValueError(f'Missing argument: {arg_name}')
             v = args[arg_name]
-            encoded += self._encode_value(v, type_tag)
+            encoded += self.encode_value(v, type_tag)
         return encoded
 
-    def _encode_value(self, value, type_tag: str) -> bytes:
+    def encode_value(self, value, type_tag: str) -> bytes:
         if type_tag == 'u8':
             return struct.pack('B', int(value))
         elif type_tag == 'hash':
@@ -472,7 +472,7 @@ class AllwaysContractClient:
             return bytes(value)[:32].ljust(32, b'\x00')
         elif type_tag == 'bytes':
             data = value if isinstance(value, (bytes, bytearray)) else value.encode('utf-8')
-            return self._compact_encode_len(len(data)) + data
+            return self.compact_encode_len(len(data)) + data
         elif type_tag == 'u32':
             return struct.pack('<I', int(value))
         elif type_tag == 'u64':
@@ -488,40 +488,40 @@ class AllwaysContractClient:
             return bytes(value)
         elif type_tag == 'str':
             data = value.encode('utf-8') if isinstance(value, str) else value
-            return self._compact_encode_len(len(data)) + data
+            return self.compact_encode_len(len(data)) + data
         elif type_tag == 'vec_u64':
             items = list(value)
-            encoded = self._compact_encode_len(len(items))
+            encoded = self.compact_encode_len(len(items))
             for item in items:
                 encoded += struct.pack('<Q', int(item))
             return encoded
         raise ValueError(f'Unsupported type: {type_tag}')
 
-    _compact_encode_len = staticmethod(compact_encode_len)
+    compact_encode_len = staticmethod(compact_encode_len)
 
-    def _extract_u32(self, data: bytes) -> Optional[int]:
+    def extract_u32(self, data: bytes) -> Optional[int]:
         if not data or len(data) < 4:
             return None
         return struct.unpack_from('<I', data, 0)[0]
 
-    def _extract_u64(self, data: bytes) -> Optional[int]:
+    def extract_u64(self, data: bytes) -> Optional[int]:
         if not data or len(data) < 8:
             return None
         return struct.unpack_from('<Q', data, 0)[0]
 
-    def _extract_u128(self, data: bytes) -> Optional[int]:
+    def extract_u128(self, data: bytes) -> Optional[int]:
         if not data or len(data) < 16:
             return None
         low = struct.unpack_from('<Q', data, 0)[0]
         high = struct.unpack_from('<Q', data, 8)[0]
         return low + (high << 64)
 
-    def _extract_bool(self, data: bytes) -> Optional[bool]:
+    def extract_bool(self, data: bytes) -> Optional[bool]:
         if not data:
             return None
         return data[0] != 0
 
-    def _extract_account_id(self, data: bytes) -> Optional[str]:
+    def extract_account_id(self, data: bytes) -> Optional[str]:
         if not data or len(data) < 32:
             return None
         return self.subtensor.substrate.ss58_encode(data[:32].hex())
@@ -552,7 +552,7 @@ class AllwaysContractClient:
         s = data[offset : offset + str_len].decode('utf-8', errors='replace')
         return s, offset + str_len
 
-    def _decode_swap_data(self, data: bytes, offset: int = 0) -> Optional[Swap]:
+    def decode_swap_data(self, data: bytes, offset: int = 0) -> Optional[Swap]:
         """Decode a SwapData struct from raw SCALE bytes."""
         try:
             o = offset
@@ -635,63 +635,63 @@ class AllwaysContractClient:
     # Read helpers (typed wrappers over _raw_contract_read)
     # =========================================================================
 
-    def _read_u32(self, method: str, args: dict = None) -> int:
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args)
+    def read_u32(self, method: str, args: dict = None) -> int:
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
-        v = self._extract_u32(data)
+        v = self.extract_u32(data)
         return v if v is not None else 0
 
-    def _read_u64(self, method: str, args: dict = None) -> int:
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args)
+    def read_u64(self, method: str, args: dict = None) -> int:
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
-        v = self._extract_u64(data)
+        v = self.extract_u64(data)
         return v if v is not None else 0
 
-    def _read_u128(self, method: str, args: dict = None) -> int:
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args)
+    def read_u128(self, method: str, args: dict = None) -> int:
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
-        v = self._extract_u128(data)
+        v = self.extract_u128(data)
         return v if v is not None else 0
 
-    def _read_bool(self, method: str, args: dict = None) -> bool:
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args)
+    def read_bool(self, method: str, args: dict = None) -> bool:
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
-        v = self._extract_bool(data)
+        v = self.extract_bool(data)
         return v if v is not None else False
 
-    def _read_account_id(self, method: str, args: dict = None) -> str:
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args)
+    def read_account_id(self, method: str, args: dict = None) -> str:
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
-        v = self._extract_account_id(data)
+        v = self.extract_account_id(data)
         return v if v is not None else ''
 
-    def _read_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
+    def read_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
         """Read a method that returns Option<SwapData>."""
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args, caller=caller)
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args, caller=caller)
         if data is None or len(data) < 1:
             return None
         # Option discriminant: 0x00 = None, 0x01 = Some
         if data[0] == 0x00:
             return None
         if data[0] == 0x01:
-            return self._decode_swap_data(data, offset=1)
+            return self.decode_swap_data(data, offset=1)
         return None
 
-    def _read_result_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
+    def read_result_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
         """Read a method that returns Result<Option<SwapData>, ContractError>."""
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args, caller=caller)
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args, caller=caller)
         if data is None or len(data) < 1:
             return None
         # Result discriminant: 0x00 = Ok, 0x01 = Err
@@ -707,13 +707,13 @@ class AllwaysContractClient:
         if data[1] == 0x00:
             return None
         if data[1] == 0x01:
-            return self._decode_swap_data(data, offset=2)
+            return self.decode_swap_data(data, offset=2)
         return None
 
-    def _read_result_u128(self, method: str, args: dict = None, caller=None) -> int:
+    def read_result_u128(self, method: str, args: dict = None, caller=None) -> int:
         """Read a method that returns Result<u128, ContractError>."""
-        self._ensure_initialized()
-        data = self._raw_contract_read(method, args, caller=caller)
+        self.ensure_initialized()
+        data = self.raw_contract_read(method, args, caller=caller)
         if data is None or len(data) < 1:
             raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
         if data[0] != 0x00:
@@ -723,7 +723,7 @@ class AllwaysContractClient:
                     name, description = variant
                     raise ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: {name} — {description}')
             raise ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: contract rejected')
-        v = self._extract_u128(data[1:])
+        v = self.extract_u128(data[1:])
         return v if v is not None else 0
 
     # =========================================================================
@@ -732,14 +732,14 @@ class AllwaysContractClient:
 
     def get_swap(self, swap_id: int) -> Optional[Swap]:
         """Get an active/fulfilled swap by ID. Returns None if not found or already resolved."""
-        return self._read_option_swap('get_swap', {'swap_id': swap_id})
+        return self.read_option_swap('get_swap', {'swap_id': swap_id})
 
     def get_active_swaps(self, max_gap: int = 50) -> List[Swap]:
         """Scan backward from latest swap ID, returning all ACTIVE/FULFILLED swaps.
 
         Stops after max_gap consecutive None results (pruned/resolved gaps).
         """
-        self._ensure_initialized()
+        self.ensure_initialized()
         next_id = self.get_next_swap_id()
         if next_id <= 1:
             return []
@@ -765,61 +765,61 @@ class AllwaysContractClient:
         return [s for s in self.get_active_swaps(max_gap) if s.miner_hotkey == hotkey]
 
     def get_miner_collateral(self, hotkey: str) -> int:
-        return self._read_u128('get_collateral', {'hotkey': hotkey})
+        return self.read_u128('get_collateral', {'hotkey': hotkey})
 
     def get_fulfillment_timeout(self) -> int:
-        return self._read_u32('get_fulfillment_timeout')
+        return self.read_u32('get_fulfillment_timeout')
 
     def get_miner_active_flag(self, hotkey: str) -> bool:
-        return self._read_bool('get_miner_active', {'hotkey': hotkey})
+        return self.read_bool('get_miner_active', {'hotkey': hotkey})
 
     def get_miner_has_active_swap(self, hotkey: str) -> bool:
-        return self._read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
+        return self.read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
 
     def get_miner_last_resolved_block(self, hotkey: str) -> int:
-        return self._read_u32('get_miner_last_resolved_block', {'miner': hotkey})
+        return self.read_u32('get_miner_last_resolved_block', {'miner': hotkey})
 
     def get_next_swap_id(self) -> int:
-        return self._read_u64('get_next_swap_id')
+        return self.read_u64('get_next_swap_id')
 
     def get_pending_slash(self, swap_id: int) -> int:
-        return self._read_u128('get_pending_slash', {'swap_id': swap_id})
+        return self.read_u128('get_pending_slash', {'swap_id': swap_id})
 
     def get_min_collateral(self) -> int:
-        return self._read_u128('get_min_collateral')
+        return self.read_u128('get_min_collateral')
 
     def get_max_collateral(self) -> int:
-        return self._read_u128('get_max_collateral')
+        return self.read_u128('get_max_collateral')
 
     def get_required_votes_count(self) -> int:
-        return self._read_u32('get_required_votes_count')
+        return self.read_u32('get_required_votes_count')
 
     def get_miner_deactivation_block(self, hotkey: str) -> int:
-        return self._read_u32('get_miner_deactivation_block', {'miner': hotkey})
+        return self.read_u32('get_miner_deactivation_block', {'miner': hotkey})
 
     def get_consensus_threshold(self) -> int:
-        self._ensure_initialized()
-        data = self._raw_contract_read('get_consensus_threshold')
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_consensus_threshold')
         if data is None or len(data) < 1:
             return 0
         return data[0]
 
     def get_validator_count(self) -> int:
-        return self._read_u32('get_validator_count')
+        return self.read_u32('get_validator_count')
 
     def get_activation_vote_count(self, hotkey: str) -> int:
-        return self._read_u32('get_activation_vote_count', {'miner': hotkey})
+        return self.read_u32('get_activation_vote_count', {'miner': hotkey})
 
     def get_pending_reserve_vote_count(self, miner_hotkey: str) -> int:
-        return self._read_u32('get_pending_reserve_vote_count', {'miner': miner_hotkey})
+        return self.read_u32('get_pending_reserve_vote_count', {'miner': miner_hotkey})
 
     def get_extend_vote_count(self, miner_hotkey: str) -> int:
-        return self._read_u32('get_extend_vote_count', {'miner': miner_hotkey})
+        return self.read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
     def get_cooldown(self, from_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""
-        self._ensure_initialized()
-        data = self._raw_contract_read('get_cooldown', {'from_address': from_address})
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_cooldown', {'from_address': from_address})
         if data is None or len(data) < 5:
             return (0, 0)
         strike_count = data[0]
@@ -827,42 +827,42 @@ class AllwaysContractClient:
         return (strike_count, last_expired)
 
     def get_accumulated_fees(self) -> int:
-        return self._read_u128('get_accumulated_fees')
+        return self.read_u128('get_accumulated_fees')
 
     def get_total_recycled_fees(self) -> int:
-        return self._read_u128('get_total_recycled_fees')
+        return self.read_u128('get_total_recycled_fees')
 
     def get_min_swap_amount(self) -> int:
-        return self._read_u128('get_min_swap_amount')
+        return self.read_u128('get_min_swap_amount')
 
     def get_max_swap_amount(self) -> int:
-        return self._read_u128('get_max_swap_amount')
+        return self.read_u128('get_max_swap_amount')
 
     def get_owner(self) -> str:
-        return self._read_account_id('get_owner')
+        return self.read_account_id('get_owner')
 
     def get_halted(self) -> bool:
-        return self._read_bool('get_halted')
+        return self.read_bool('get_halted')
 
     def get_recycle_address(self) -> str:
-        return self._read_account_id('get_recycle_address')
+        return self.read_account_id('get_recycle_address')
 
     def is_validator(self, account: str) -> bool:
-        return self._read_bool('is_validator', {'account': account})
+        return self.read_bool('is_validator', {'account': account})
 
     def get_miner_reserved_until(self, miner_hotkey: str) -> int:
-        return self._read_u32('get_miner_reserved_until', {'miner': miner_hotkey})
+        return self.read_u32('get_miner_reserved_until', {'miner': miner_hotkey})
 
     def get_reservation_ttl(self) -> int:
-        return self._read_u32('get_reservation_ttl')
+        return self.read_u32('get_reservation_ttl')
 
     def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
         """Get reservation data for a miner.
 
         Returns (from_addr, tao_amount, from_amount, to_amount, reserved_until) or None.
         """
-        self._ensure_initialized()
-        data = self._raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
         if data is None or len(data) < 1:
             return None
         # Option discriminant: 0x00 = None, 0x01 = Some
@@ -906,14 +906,14 @@ class AllwaysContractClient:
 
     def post_collateral(self, wallet: bt.Wallet, amount_rao: int) -> str:
         """Post collateral to the contract. Amount is sent as value with the extrinsic."""
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('post_collateral', keypair=wallet.hotkey, value=amount_rao)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('post_collateral', keypair=wallet.hotkey, value=amount_rao)
         bt.logging.info(f'Collateral posted: {tx_hash}')
         return tx_hash
 
     def withdraw_collateral(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('withdraw_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('withdraw_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Collateral withdrawn: {tx_hash}')
         return tx_hash
 
@@ -929,8 +929,8 @@ class AllwaysContractClient:
         from_amount: int,
         to_amount: int,
     ) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw(
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
             'vote_reserve',
             args={
                 'request_hash': request_hash,
@@ -954,8 +954,8 @@ class AllwaysContractClient:
         miner_hotkey: str,
         from_tx_hash: str,
     ) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw(
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
             'vote_extend_reservation',
             args={
                 'request_hash': request_hash,
@@ -968,8 +968,8 @@ class AllwaysContractClient:
         return tx_hash
 
     def vote_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw(
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
             'vote_extend_timeout',
             args={'swap_id': swap_id},
             keypair=wallet.hotkey,
@@ -978,8 +978,8 @@ class AllwaysContractClient:
         return tx_hash
 
     def cancel_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('cancel_reservation', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('cancel_reservation', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
         bt.logging.info(f'Reservation cancelled for {miner_hotkey}: {tx_hash}')
         return tx_hash
 
@@ -1003,8 +1003,8 @@ class AllwaysContractClient:
         rate: str = '',
     ) -> str:
         """Vote to initiate a swap. On quorum, swap is created on contract."""
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw(
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
             'vote_initiate',
             args={
                 'request_hash': request_hash,
@@ -1030,8 +1030,8 @@ class AllwaysContractClient:
 
     def vote_activate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         """Vote to activate a miner. On quorum, miner becomes active."""
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('vote_activate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('vote_activate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
         bt.logging.info(f'Vote activate for miner {miner_hotkey}: {tx_hash}')
         return tx_hash
 
@@ -1043,8 +1043,8 @@ class AllwaysContractClient:
         to_amount: int,
         to_tx_block: int = 0,
     ) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw(
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
             'mark_fulfilled',
             args={
                 'swap_id': swap_id,
@@ -1058,27 +1058,27 @@ class AllwaysContractClient:
         return tx_hash
 
     def confirm_swap(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('confirm_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('confirm_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
         bt.logging.info(f'Swap {swap_id} confirmed: {tx_hash}')
         return tx_hash
 
     def timeout_swap(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('timeout_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('timeout_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
         bt.logging.info(f'Swap {swap_id} timed out: {tx_hash}')
         return tx_hash
 
     def deactivate_miner(self, wallet: bt.Wallet, miner: str) -> str:
         """Deactivate a miner directly on contract (permissionless)."""
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('deactivate', args={'miner': miner}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('deactivate', args={'miner': miner}, keypair=wallet.hotkey)
         bt.logging.info(f'Miner {miner} deactivated: {tx_hash}')
         return tx_hash
 
     def claim_slash(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('claim_slash', args={'swap_id': swap_id}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('claim_slash', args={'swap_id': swap_id}, keypair=wallet.hotkey)
         bt.logging.info(f'Slash claimed for swap {swap_id}: {tx_hash}')
         return tx_hash
 
@@ -1087,79 +1087,79 @@ class AllwaysContractClient:
     # =========================================================================
 
     def set_fulfillment_timeout(self, wallet: bt.Wallet, blocks: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_fulfillment_timeout', args={'blocks': blocks}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_fulfillment_timeout', args={'blocks': blocks}, keypair=wallet.hotkey)
         bt.logging.info(f'Fulfillment timeout set to {blocks}: {tx_hash}')
         return tx_hash
 
     def set_min_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_min_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_min_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Min collateral set to {amount_rao}: {tx_hash}')
         return tx_hash
 
     def set_max_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_max_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_max_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Max collateral set to {amount_rao}: {tx_hash}')
         return tx_hash
 
     def set_consensus_threshold(self, wallet: bt.Wallet, percent: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_consensus_threshold', args={'percent': percent}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_consensus_threshold', args={'percent': percent}, keypair=wallet.hotkey)
         bt.logging.info(f'Consensus threshold set to {percent}%: {tx_hash}')
         return tx_hash
 
     def set_min_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_min_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_min_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Min swap amount set to {amount_rao}: {tx_hash}')
         return tx_hash
 
     def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
         bt.logging.info(f'Recycle address set to {address}: {tx_hash}')
         return tx_hash
 
     def set_reservation_ttl(self, wallet: bt.Wallet, blocks: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
         bt.logging.info(f'Reservation TTL set to {blocks}: {tx_hash}')
         return tx_hash
 
     def set_halted(self, wallet: bt.Wallet, halted: bool) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_halted', args={'halted': halted}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_halted', args={'halted': halted}, keypair=wallet.hotkey)
         bt.logging.info(f'System halted set to {halted}: {tx_hash}')
         return tx_hash
 
     def set_max_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_max_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('set_max_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
         bt.logging.info(f'Max swap amount set to {amount_rao}: {tx_hash}')
         return tx_hash
 
     def add_validator(self, wallet: bt.Wallet, validator: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('add_validator', args={'validator': validator}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('add_validator', args={'validator': validator}, keypair=wallet.hotkey)
         bt.logging.info(f'Validator added {validator}: {tx_hash}')
         return tx_hash
 
     def remove_validator(self, wallet: bt.Wallet, validator: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('remove_validator', args={'validator': validator}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('remove_validator', args={'validator': validator}, keypair=wallet.hotkey)
         bt.logging.info(f'Validator removed {validator}: {tx_hash}')
         return tx_hash
 
     def recycle_fees(self, wallet: bt.Wallet) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('recycle_fees', keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('recycle_fees', keypair=wallet.hotkey)
         bt.logging.info(f'Fees recycled: {tx_hash}')
         return tx_hash
 
     def transfer_ownership(self, wallet: bt.Wallet, new_owner: str) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('transfer_ownership', args={'new_owner': new_owner}, keypair=wallet.hotkey)
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('transfer_ownership', args={'new_owner': new_owner}, keypair=wallet.hotkey)
         bt.logging.info(f'Ownership transferred to {new_owner}: {tx_hash}')
         return tx_hash

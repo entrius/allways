@@ -266,7 +266,7 @@ class ContractEventWatcher:
         self.contract_address = contract_address
         self.state_store = state_store
         self.registry = load_event_registry(metadata_path)
-        self._cursor: int = 0
+        self.cursor: int = 0
 
         self.collateral: Dict[str, int] = {}
         self.active_miners: Set[str] = set()
@@ -301,19 +301,19 @@ class ContractEventWatcher:
     def initialize(self, current_block: int) -> None:
         """Cold start: replay events from ``max(0, head - 2 * SCORING_WINDOW_BLOCKS)``."""
         start = max(0, current_block - 2 * SCORING_WINDOW_BLOCKS)
-        self._cursor = start
+        self.cursor = start
         self.sync_to(current_block)
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block``, applying each block's events."""
-        if current_block <= self._cursor:
+        if current_block <= self.cursor:
             return
-        for block_num in range(self._cursor + 1, current_block + 1):
-            self._process_block(block_num)
-        self._cursor = current_block
-        self._prune_old_collateral_events(current_block)
+        for block_num in range(self.cursor + 1, current_block + 1):
+            self.process_block(block_num)
+        self.cursor = current_block
+        self.prune_old_collateral_events(current_block)
 
-    def _process_block(self, block_num: int) -> None:
+    def process_block(self, block_num: int) -> None:
         try:
             block_hash = self.substrate.get_block_hash(block_num)
             if not block_hash:
@@ -324,13 +324,13 @@ class ContractEventWatcher:
             return
 
         for event_record in events:
-            decoded = self._decode_contract_event(event_record)
+            decoded = self.decode_contract_event(event_record)
             if decoded is None:
                 continue
             name, values = decoded
-            self._apply_event(block_num, name, values)
+            self.apply_event(block_num, name, values)
 
-    def _decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
         event = record.get('event', record) if isinstance(record, dict) else record
         module = event.get('module_id', '') if isinstance(event, dict) else ''
@@ -364,13 +364,13 @@ class ContractEventWatcher:
             return None
         return event_def.name, values
 
-    def _apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
+    def apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
         if name == 'CollateralPosted':
-            self._apply_collateral_delta(block_num, values.get('miner', ''), +int(values.get('amount', 0)))
+            self.apply_collateral_delta(block_num, values.get('miner', ''), +int(values.get('amount', 0)))
         elif name == 'CollateralWithdrawn':
-            self._apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
+            self.apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
         elif name == 'CollateralSlashed':
-            self._apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
+            self.apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
         elif name == 'MinerActivated':
             hotkey = values.get('miner', '')
             if not hotkey:
@@ -406,14 +406,14 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
 
-    def _apply_collateral_delta(self, block_num: int, hotkey: str, delta: int) -> None:
+    def apply_collateral_delta(self, block_num: int, hotkey: str, delta: int) -> None:
         if not hotkey:
             return
         new_total = max(0, self.collateral.get(hotkey, 0) + delta)
         self.collateral[hotkey] = new_total
         self.collateral_events.append(CollateralEvent(hotkey=hotkey, collateral_rao=new_total, block=block_num))
 
-    def _prune_old_collateral_events(self, current_block: int) -> None:
+    def prune_old_collateral_events(self, current_block: int) -> None:
         cutoff = current_block - 2 * SCORING_WINDOW_BLOCKS
         if cutoff <= 0 or not self.collateral_events:
             return

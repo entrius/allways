@@ -58,26 +58,26 @@ class ValidatorStateStore:
         db_path: Path | str | None = None,
         current_block_fn: Optional[Callable[[], int]] = None,
     ):
-        self._db_path = Path(db_path or Path.home() / '.allways' / 'validator' / 'state.db')
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._conn: Optional[sqlite3.Connection] = sqlite3.connect(self._db_path, check_same_thread=False)
+        self.db_path = Path(db_path or Path.home() / '.allways' / 'validator' / 'state.db')
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+        self.conn: Optional[sqlite3.Connection] = sqlite3.connect(self.db_path, check_same_thread=False)
         # busy_timeout must be set BEFORE journal_mode: setting WAL mode takes a
         # brief exclusive lock that a concurrent opener will otherwise hit as an
         # immediate "database is locked" error (dev env runs two validators
         # against the same SQLite file).
-        self._conn.execute('PRAGMA busy_timeout=5000')
-        self._conn.execute('PRAGMA journal_mode=WAL')
-        self._conn.row_factory = sqlite3.Row
-        self._current_block_fn = current_block_fn
-        self._init_db()
+        self.conn.execute('PRAGMA busy_timeout=5000')
+        self.conn.execute('PRAGMA journal_mode=WAL')
+        self.conn.row_factory = sqlite3.Row
+        self.current_block_fn = current_block_fn
+        self.init_db()
 
     # ─── pending_confirms ───────────────────────────────────────────────
 
     def enqueue(self, item: PendingConfirm) -> None:
         """Add or replace a pending confirm. Keyed by ``miner_hotkey``."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             conn.execute(
                 """
                 INSERT OR REPLACE INTO pending_confirms (
@@ -108,16 +108,16 @@ class ValidatorStateStore:
 
     def get_all(self) -> List[PendingConfirm]:
         """Return a snapshot of all pending items, oldest first."""
-        with self._lock:
-            conn = self._require_connection()
-            self._purge_expired(conn)
+        with self.lock:
+            conn = self.require_connection()
+            self.purge_expired(conn)
             rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
         return [self._row_to_pending(row) for row in rows]
 
     def remove(self, miner_hotkey: str) -> Optional[PendingConfirm]:
         """Remove and return a specific entry."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             row = conn.execute(
                 'SELECT * FROM pending_confirms WHERE miner_hotkey = ?',
                 (miner_hotkey,),
@@ -129,9 +129,9 @@ class ValidatorStateStore:
         return self._row_to_pending(row)
 
     def has(self, miner_hotkey: str) -> bool:
-        with self._lock:
-            conn = self._require_connection()
-            self._purge_expired(conn)
+        with self.lock:
+            conn = self.require_connection()
+            self.purge_expired(conn)
             row = conn.execute(
                 'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
                 (miner_hotkey,),
@@ -139,16 +139,16 @@ class ValidatorStateStore:
         return row is not None
 
     def pending_size(self) -> int:
-        with self._lock:
-            conn = self._require_connection()
-            self._purge_expired(conn)
+        with self.lock:
+            conn = self.require_connection()
+            self.purge_expired(conn)
             count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
             return int(count)
 
-    def _purge_expired(self, conn: sqlite3.Connection) -> None:
-        if self._current_block_fn is None:
+    def purge_expired(self, conn: sqlite3.Connection) -> None:
+        if self.current_block_fn is None:
             return
-        current_block = self._current_block_fn()
+        current_block = self.current_block_fn()
         conn.execute('DELETE FROM pending_confirms WHERE reserved_until < ?', (current_block,))
         conn.commit()
 
@@ -182,8 +182,8 @@ class ValidatorStateStore:
         block: int,
     ) -> bool:
         """Insert a rate event if throttle + change conditions pass."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             row = conn.execute(
                 """
                 SELECT rate, block FROM rate_events
@@ -213,8 +213,8 @@ class ValidatorStateStore:
         block: int,
     ) -> Optional[Tuple[float, int]]:
         """Most recent rate for ``hotkey``+direction at or before ``block``."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             row = conn.execute(
                 """
                 SELECT rate, block FROM rate_events
@@ -236,8 +236,8 @@ class ValidatorStateStore:
         end_block: int,
     ) -> List[dict]:
         """Rate events in ``(start_block, end_block]`` for a direction, oldest first."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             rows = conn.execute(
                 """
                 SELECT id, hotkey, rate, block FROM rate_events
@@ -258,8 +258,8 @@ class ValidatorStateStore:
         resolved_block: int,
     ) -> None:
         """Insert or replace a swap outcome row. Idempotent on ``swap_id``."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             conn.execute(
                 """
                 INSERT OR REPLACE INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block)
@@ -271,8 +271,8 @@ class ValidatorStateStore:
 
     def get_all_time_success_rates(self) -> Dict[str, Tuple[int, int]]:
         """Return ``{hotkey: (completed_count, timed_out_count)}`` over all outcomes."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             rows = conn.execute(
                 """
                 SELECT miner_hotkey,
@@ -288,8 +288,8 @@ class ValidatorStateStore:
 
     def delete_hotkey(self, hotkey: str) -> None:
         """Dereg purge: remove the hotkey from rate/outcomes tables."""
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
             conn.commit()
@@ -300,25 +300,25 @@ class ValidatorStateStore:
         Never touches ``swap_outcomes`` or ``pending_confirms`` — those have
         their own lifetimes.
         """
-        with self._lock:
-            conn = self._require_connection()
+        with self.lock:
+            conn = self.require_connection()
             conn.execute('DELETE FROM rate_events WHERE block < ?', (cutoff_block,))
             conn.commit()
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+        with self.lock:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
 
-    def _require_connection(self) -> sqlite3.Connection:
-        if self._conn is None:
+    def require_connection(self) -> sqlite3.Connection:
+        if self.conn is None:
             raise RuntimeError('ValidatorStateStore is closed')
-        return self._conn
+        return self.conn
 
-    def _init_db(self) -> None:
-        with self._lock:
-            conn = self._require_connection()
+    def init_db(self) -> None:
+        with self.lock:
+            conn = self.require_connection()
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS pending_confirms (

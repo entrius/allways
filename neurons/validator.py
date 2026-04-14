@@ -70,8 +70,8 @@ class Validator(BaseValidatorNeuron):
         # handler thread can enqueue pending confirms. Exposes current block
         # so pending_confirms can purge expired reservations lazily on read.
         self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
-        self._last_known_rates: dict[tuple[str, str, str], float] = {}
-        self._last_commitment_poll_block: int = 0
+        self.last_known_rates: dict[tuple[str, str, str], float] = {}
+        self.last_commitment_poll_block: int = 0
 
         # Event-sourced miner state. Replaces the old _poll_collaterals +
         # _refresh_min_collateral polling loops. ``sync_to(current_block)``
@@ -117,11 +117,11 @@ class Validator(BaseValidatorNeuron):
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
 
         # Attach synapse handlers to axon
-        self._attach_axon_handlers()
+        self.attach_axon_handlers()
 
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
 
-    def _attach_axon_handlers(self):
+    def attach_axon_handlers(self):
         """Attach all synapse handlers to the axon."""
         self.axon.attach(
             forward_fn=partial(handle_miner_activate, self),

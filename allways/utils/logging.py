@@ -17,7 +17,7 @@ def setup_events_logger(full_path, events_retention_size):
 
     def event(self, message, *args, **kws):
         if self.isEnabledFor(EVENTS_LEVEL_NUM):
-            self._log(EVENTS_LEVEL_NUM, message, args, **kws)
+            self.log(EVENTS_LEVEL_NUM, message, args, **kws)
 
     logging.Logger.event = event
 

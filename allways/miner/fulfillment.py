@@ -67,49 +67,49 @@ class SwapFulfiller:
         # neuron's reload mutates what we read here.
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         # swap_id → (to_tx_hash, to_tx_block, marked_fulfilled)
-        self._sent: Dict[int, Tuple[str, int, bool]] = {}
-        self._sent_cache_path = sent_cache_path
-        self._load_sent_cache()
+        self.sent: Dict[int, Tuple[str, int, bool]] = {}
+        self.sent_cache_path = sent_cache_path
+        self.load_sent_cache()
 
-    def _load_sent_cache(self):
+    def load_sent_cache(self):
         """Load persisted send results from disk to prevent double-sends after restart."""
-        if not self._sent_cache_path or not self._sent_cache_path.exists():
+        if not self.sent_cache_path or not self.sent_cache_path.exists():
             return
         try:
-            data = json.loads(self._sent_cache_path.read_text())
+            data = json.loads(self.sent_cache_path.read_text())
             for swap_id_str, entry in data.items():
                 # Back-compat: old cache entries were 2-tuples. Treat restored
                 # entries as not-yet-marked-fulfilled so the retry path runs.
                 marked = bool(entry[2]) if len(entry) >= 3 else False
-                self._sent[int(swap_id_str)] = (entry[0], entry[1], marked)
-            if self._sent:
-                bt.logging.info(f'Restored {len(self._sent)} cached send(s) from disk')
+                self.sent[int(swap_id_str)] = (entry[0], entry[1], marked)
+            if self.sent:
+                bt.logging.info(f'Restored {len(self.sent)} cached send(s) from disk')
         except Exception as e:
             bt.logging.warning(f'Failed to load sent cache: {e}')
 
-    def _save_sent_cache(self):
+    def save_sent_cache(self):
         """Persist send results to disk immediately after any change."""
-        if not self._sent_cache_path:
+        if not self.sent_cache_path:
             return
         try:
-            self._sent_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {str(k): [v[0], v[1], v[2]] for k, v in self._sent.items()}
-            tmp = self._sent_cache_path.with_suffix('.tmp')
+            self.sent_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            data = {str(k): [v[0], v[1], v[2]] for k, v in self.sent.items()}
+            tmp = self.sent_cache_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data))
-            tmp.rename(self._sent_cache_path)
+            tmp.rename(self.sent_cache_path)
         except Exception as e:
             bt.logging.error(f'CRITICAL: Failed to persist sent cache: {e}')
 
     def cleanup_stale_sends(self, active_swap_ids: Set[int]):
         """Remove cached send results for swaps no longer active."""
-        stale = [sid for sid in self._sent if sid not in active_swap_ids]
+        stale = [sid for sid in self.sent if sid not in active_swap_ids]
         for sid in stale:
-            self._sent.pop(sid)
+            self.sent.pop(sid)
             bt.logging.debug(f'Cleaned up stale send cache for swap {sid}')
         if stale:
-            self._save_sent_cache()
+            self.save_sent_cache()
 
-    def _verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
+    def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill. Returns (to_amount, miner_from_address) or None."""
         # Timeout check — bail out `timeout_cushion_blocks` before the hard
         # deadline so slow dest-chain inclusion can't turn a legitimate
@@ -222,7 +222,7 @@ class SwapFulfiller:
         Cache entries live until ``cleanup_stale_sends`` clears them when the
         swap leaves the active set.
         """
-        state = self._sent.get(swap.id)
+        state = self.sent.get(swap.id)
         if state is not None and state[2]:
             # mark_fulfilled already succeeded; contract state will catch up.
             return True
@@ -230,7 +230,7 @@ class SwapFulfiller:
         bt.logging.info(f'Processing swap {swap.id}: {swap.from_chain} -> {swap.to_chain}')
 
         # Step 1: Verify swap safety (timeout, rate, collateral)
-        safety_result = self._verify_swap_safety(swap)
+        safety_result = self.verify_swap_safety(swap)
         if safety_result is None:
             bt.logging.warning(f'Swap {swap.id}: failed safety checks, skipping')
             return False
@@ -252,8 +252,8 @@ class SwapFulfiller:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
             to_tx_hash, to_tx_block = send_result
-            self._sent[swap.id] = (to_tx_hash, to_tx_block, False)
-            self._save_sent_cache()
+            self.sent[swap.id] = (to_tx_hash, to_tx_block, False)
+            self.save_sent_cache()
 
         # Step 4: Mark fulfilled on contract
         try:
@@ -264,8 +264,8 @@ class SwapFulfiller:
                 to_amount=to_amount,
                 to_tx_block=to_tx_block,
             )
-            self._sent[swap.id] = (to_tx_hash, to_tx_block, True)
-            self._save_sent_cache()
+            self.sent[swap.id] = (to_tx_hash, to_tx_block, True)
+            self.save_sent_cache()
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True
         except ContractError as e:

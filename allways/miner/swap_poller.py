@@ -27,7 +27,7 @@ class SwapPoller:
     def poll(self) -> Tuple[List[Swap], List[Swap]]:
         """Incremental poll. Returns (active, fulfilled) for this miner."""
         try:
-            result = self._poll_inner()
+            result = self.poll_inner()
             self.last_poll_ok = True
             return result
         except Exception as e:
@@ -35,7 +35,7 @@ class SwapPoller:
             self.last_poll_ok = False
             return [], []
 
-    def _poll_inner(self) -> Tuple[List[Swap], List[Swap]]:
+    def poll_inner(self) -> Tuple[List[Swap], List[Swap]]:
         # 1. Discover new swaps since last scan
         fresh: Set[int] = set()
         next_id = self.client.get_next_swap_id()

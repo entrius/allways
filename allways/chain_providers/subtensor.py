@@ -26,7 +26,7 @@ class SubtensorProvider(ChainProvider):
     def __init__(self, subtensor: bt.Subtensor, wallet: Optional['bt.Wallet'] = None):
         self.subtensor = subtensor
         self.wallet = wallet
-        self._block_cache: Dict[int, dict] = {}
+        self.block_cache: Dict[int, dict] = {}
 
     def get_chain(self) -> ChainDefinition:
         return CHAIN_TAO
@@ -40,10 +40,10 @@ class SubtensorProvider(ChainProvider):
 
     def clear_cache(self):
         """Clear the block cache. Call at the start of each poll cycle."""
-        self._block_cache.clear()
+        self.block_cache.clear()
 
     @staticmethod
-    def _decode_compact(data: bytes) -> Tuple[int, int]:
+    def decode_compact(data: bytes) -> Tuple[int, int]:
         """Decode a SCALE compact integer. Returns (value, bytes_consumed)."""
         if not data:
             return 0, 0
@@ -65,14 +65,14 @@ class SubtensorProvider(ChainProvider):
             return int.from_bytes(data[1 : 1 + n], 'little'), 1 + n
 
     @classmethod
-    def _parse_raw_extrinsic(cls, ext_hex: str) -> Optional[dict]:
+    def parse_raw_extrinsic(cls, ext_hex: str) -> Optional[dict]:
         """Parse a raw SCALE-encoded extrinsic hex string to extract transfer info."""
         try:
             raw = bytes.fromhex(ext_hex[2:] if ext_hex.startswith('0x') else ext_hex)
             ext_hash = '0x' + blake2b(raw, digest_size=32).hexdigest()
 
             # Decode compact length prefix
-            _, length_bytes = cls._decode_compact(raw)
+            _, length_bytes = cls.decode_compact(raw)
             body = raw[length_bytes:]
             if not body:
                 return None
@@ -113,7 +113,7 @@ class SubtensorProvider(ChainProvider):
             dest = ss58_encode(dest_bytes, ss58_format=42)
 
             # Compact<Balance> follows
-            amount, _ = cls._decode_compact(after_call[33:])
+            amount, _ = cls.decode_compact(after_call[33:])
 
             return {
                 'extrinsic_hash': ext_hash,
@@ -125,10 +125,10 @@ class SubtensorProvider(ChainProvider):
         except Exception:
             return None
 
-    def _get_block(self, block_num: int) -> Optional[dict]:
+    def get_block(self, block_num: int) -> Optional[dict]:
         """Fetch a block, using cache to avoid redundant RPC calls within a poll cycle."""
-        if block_num in self._block_cache:
-            return self._block_cache[block_num]
+        if block_num in self.block_cache:
+            return self.block_cache[block_num]
 
         block_hash = self.subtensor.substrate.get_block_hash(block_num)
         if not block_hash:
@@ -137,15 +137,15 @@ class SubtensorProvider(ChainProvider):
         try:
             block = self.subtensor.substrate.get_block(block_hash)
             if block:
-                self._block_cache[block_num] = block
+                self.block_cache[block_num] = block
             return block
         except Exception as e:
             bt.logging.debug(f'Block fetch failed for block {block_num}, falling back to raw: {e}')
 
         # Fallback: raw RPC for blocks with pruned state
-        return self._get_block_raw(block_num, block_hash)
+        return self.get_block_raw(block_num, block_hash)
 
-    def _get_block_raw(self, block_num: int, block_hash: str) -> Optional[dict]:
+    def get_block_raw(self, block_num: int, block_hash: str) -> Optional[dict]:
         """Fetch a block via raw RPC and parse transfer extrinsics manually."""
         try:
             result = self.subtensor.substrate.rpc_request('chain_getBlock', [block_hash])
@@ -154,12 +154,12 @@ class SubtensorProvider(ChainProvider):
 
             parsed_exts = []
             for ext_hex in raw_exts:
-                parsed = self._parse_raw_extrinsic(ext_hex)
+                parsed = self.parse_raw_extrinsic(ext_hex)
                 if parsed:
                     parsed_exts.append(parsed)
 
             block = {'extrinsics': parsed_exts, '_raw': True}
-            self._block_cache[block_num] = block
+            self.block_cache[block_num] = block
             return block
         except Exception as e:
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
@@ -186,14 +186,14 @@ class SubtensorProvider(ChainProvider):
 
         try:
             for block_num in blocks_to_check:
-                block = self._get_block(block_num)
+                block = self.get_block(block_num)
                 if not block or 'extrinsics' not in block:
                     continue
 
                 is_raw = block.get('_raw', False)
 
                 for ext in block['extrinsics']:
-                    match = self._match_transfer(ext, tx_hash, is_raw)
+                    match = self.match_transfer(ext, tx_hash, is_raw)
                     if match is None:
                         continue
 
@@ -217,7 +217,7 @@ class SubtensorProvider(ChainProvider):
             raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
 
     @staticmethod
-    def _match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
+    def match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
         """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
         if is_raw:
             ext_hash = ext.get('extrinsic_hash', '')

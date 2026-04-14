@@ -19,17 +19,17 @@ DISCLAIMER = (
 )
 
 
-def _single_paragraph(text: str) -> str:
+def single_paragraph(text: str) -> str:
     """Collapse multiline help text into a single paragraph."""
     return ' '.join(text.split())
 
 
-def _has_rich_markup(text: str) -> bool:
+def has_rich_markup(text: str) -> bool:
     """Return whether the help text includes explicit Rich markup tags."""
     return '[' in text and ']' in text
 
 
-def _collect_help_rows(params: list[click.Parameter], ctx: click.Context) -> list[tuple[str, str]]:
+def collect_help_rows(params: list[click.Parameter], ctx: click.Context) -> list[tuple[str, str]]:
     """Collect Click help records for parameters."""
     rows: list[tuple[str, str]] = []
     for param in params:
@@ -40,7 +40,7 @@ def _collect_help_rows(params: list[click.Parameter], ctx: click.Context) -> lis
     return rows
 
 
-def _render_usage(console: Console, usage: str) -> None:
+def render_usage(console: Console, usage: str) -> None:
     """Render the usage line with styling."""
     usage = usage.strip()
     if usage.startswith('Usage:'):
@@ -58,7 +58,7 @@ def _render_usage(console: Console, usage: str) -> None:
     console.print()
 
 
-def _section_panel(
+def section_panel(
     title: str,
     rows: list[tuple[str, str]],
     left_style: str = 'bold cyan',
@@ -85,7 +85,7 @@ def _section_panel(
     )
 
 
-def _parse_option_decl(option_decl: str) -> tuple[str, str, str]:
+def parse_option_decl(option_decl: str) -> tuple[str, str, str]:
     """Split Click option declaration into long names, short alias, and type."""
     names_part = option_decl.strip()
     option_type = ''
@@ -105,7 +105,7 @@ def _parse_option_decl(option_decl: str) -> tuple[str, str, str]:
     return long_names, short_alias, option_type
 
 
-def _options_panel(rows: list[tuple[str, str]]) -> Panel:
+def options_panel(rows: list[tuple[str, str]]) -> Panel:
     """Render options with separate long, short, and type columns."""
     table = Table.grid(expand=True)
     table.add_column(style='bold cyan', no_wrap=True, ratio=4, justify='left')
@@ -115,7 +115,7 @@ def _options_panel(rows: list[tuple[str, str]]) -> Panel:
 
     if rows:
         for decl, description in rows:
-            long_names, short_alias, option_type = _parse_option_decl(decl)
+            long_names, short_alias, option_type = parse_option_decl(decl)
             table.add_row(long_names, short_alias, option_type, description or '')
     else:
         table.add_row('-', '-', '-', 'No entries')
@@ -130,7 +130,7 @@ def _options_panel(rows: list[tuple[str, str]]) -> Panel:
     )
 
 
-def _render_footer(console: Console, command: click.Command) -> None:
+def render_footer(console: Console, command: click.Command) -> None:
     """Render shared disclaimer and footer if present."""
     show_disclaimer = getattr(command, 'show_disclaimer', False)
     footer = getattr(command, 'help_footer', None)
@@ -151,22 +151,22 @@ class StyledCommand(click.Command):
         super().__init__(*args, **kwargs)
         self.show_disclaimer = show_disclaimer
 
-    def _help_options_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
-        return _collect_help_rows(self.get_params(ctx), ctx)
+    def help_options_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
+        return collect_help_rows(self.get_params(ctx), ctx)
 
     def get_help(self, ctx: click.Context) -> str:
         console = Console(width=ctx.terminal_width or 120)
 
         with console.capture() as capture:
-            _render_usage(console, self.get_usage(ctx))
+            render_usage(console, self.get_usage(ctx))
 
             help_text = cleandoc(self.help or '').replace('\x08', '')
             if help_text:
                 console.print(Padding(help_text, (0, 0, 0, 1)))
                 console.print()
 
-            console.print(_options_panel(self._help_options_rows(ctx)))
-            _render_footer(console, self)
+            console.print(options_panel(self.help_options_rows(ctx)))
+            render_footer(console, self)
 
         return capture.get()
 
@@ -181,16 +181,16 @@ class StyledGroup(click.Group):
         super().__init__(*args, **kwargs)
         self.show_disclaimer = show_disclaimer
 
-    def _alias_map(self) -> dict[str, list[str]]:
+    def alias_map(self) -> dict[str, list[str]]:
         """Return canonical-command -> aliases mapping."""
         return {}
 
-    def _help_options_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
-        return _collect_help_rows(self.get_params(ctx), ctx)
+    def help_options_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
+        return collect_help_rows(self.get_params(ctx), ctx)
 
-    def _help_commands_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
+    def help_commands_rows(self, ctx: click.Context) -> list[tuple[str, str]]:
         rows: list[tuple[str, str]] = []
-        alias_map = self._alias_map()
+        alias_map = self.alias_map()
 
         for name in self.list_commands(ctx):
             cmd = self.get_command(ctx, name)
@@ -215,25 +215,25 @@ class StyledGroup(click.Group):
         console = Console(width=ctx.terminal_width or 120)
 
         with console.capture() as capture:
-            _render_usage(console, self.get_usage(ctx))
+            render_usage(console, self.get_usage(ctx))
 
             help_text = cleandoc(self.help or '').replace('\x08', '')
             if help_text:
-                if _has_rich_markup(help_text):
+                if has_rich_markup(help_text):
                     console.print(Padding(help_text, (0, 0, 0, 1)))
                 else:
                     console.print(
                         Padding(
-                            f'[bright_white]{escape(_single_paragraph(help_text))}[/bright_white]',
+                            f'[bright_white]{escape(single_paragraph(help_text))}[/bright_white]',
                             (0, 0, 0, 1),
                         )
                     )
                 console.print()
 
-            console.print(_options_panel(self._help_options_rows(ctx)))
+            console.print(options_panel(self.help_options_rows(ctx)))
             console.print()
-            console.print(_section_panel('Commands', self._help_commands_rows(ctx)))
-            _render_footer(console, self)
+            console.print(section_panel('Commands', self.help_commands_rows(ctx)))
+            render_footer(console, self)
 
         return capture.get()
 
@@ -243,18 +243,18 @@ class StyledAliasGroup(StyledGroup):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._aliases: dict[str, str] = {}
+        self.aliases: dict[str, str] = {}
 
     def add_alias(self, name: str, alias: str) -> None:
         """Register an alias for an existing command."""
-        self._aliases[alias] = name
+        self.aliases[alias] = name
 
     def get_command(self, ctx: click.Context, cmd_name: str):
-        canonical = self._aliases.get(cmd_name, cmd_name)
+        canonical = self.aliases.get(cmd_name, cmd_name)
         return super().get_command(ctx, canonical)
 
-    def _alias_map(self) -> dict[str, list[str]]:
+    def alias_map(self) -> dict[str, list[str]]:
         reverse: dict[str, list[str]] = {}
-        for alias, canonical in self._aliases.items():
+        for alias, canonical in self.aliases.items():
             reverse.setdefault(canonical, []).append(alias)
         return reverse

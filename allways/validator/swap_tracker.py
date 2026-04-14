@@ -40,7 +40,7 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
-        self._null_retry_count: Dict[int, int] = {}
+        self.null_retry_count: Dict[int, int] = {}
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
     def initialize(self, current_block: int):
@@ -85,7 +85,7 @@ class SwapTracker:
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
-        self._null_retry_count.pop(swap_id, None)
+        self.null_retry_count.pop(swap_id, None)
 
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant vote extrinsics."""
@@ -98,14 +98,14 @@ class SwapTracker:
     async def poll(self, current_block: int = 0):
         """Incremental update — called every forward step (~12s)."""
         try:
-            await self._poll_inner()
+            await self.poll_inner()
         except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
             bt.logging.warning(f'SwapTracker poll transient error: {e}')
         except Exception as e:
             bt.logging.error(f'SwapTracker poll error: {e}')
             raise
 
-    async def _poll_inner(self):
+    async def poll_inner(self):
         next_id = await asyncio.to_thread(self.client.get_next_swap_id)
 
         # --- Discovery phase: scan new swap IDs ---
@@ -141,21 +141,21 @@ class SwapTracker:
                 # removed from contract storage, or an RPC flake. Retry a few
                 # times before dropping — event watcher will write the outcome
                 # when it replays the SwapCompleted/SwapTimedOut events.
-                retries = self._null_retry_count.get(sid, 0) + 1
+                retries = self.null_retry_count.get(sid, 0) + 1
                 if retries >= NULL_SWAP_RETRY_LIMIT:
                     resolved_ids.append(sid)
                 else:
-                    self._null_retry_count[sid] = retries
+                    self.null_retry_count[sid] = retries
             elif swap.status in ACTIVE_STATUSES:
                 self.active[sid] = swap
-                self._null_retry_count.pop(sid, None)
+                self.null_retry_count.pop(sid, None)
             else:
                 resolved_ids.append(sid)
 
         for sid in resolved_ids:
             self.active.pop(sid, None)
             self.voted_ids.discard(sid)
-            self._null_retry_count.pop(sid, None)
+            self.null_retry_count.pop(sid, None)
 
         if resolved_ids:
             bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')

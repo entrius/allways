@@ -7,14 +7,14 @@ from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
 from allways.validator.state_store import ValidatorStateStore
 
 
-def _make_store(tmp_path: Path) -> ValidatorStateStore:
+def make_store(tmp_path: Path) -> ValidatorStateStore:
     return ValidatorStateStore(db_path=tmp_path / 'state.db')
 
 
 class TestValidatorStateStoreSchema:
     def test_init_creates_all_tables_and_indexes(self, tmp_path: Path):
-        store = _make_store(tmp_path)
-        conn = store._require_connection()
+        store = make_store(tmp_path)
+        conn = store.require_connection()
 
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert {'rate_events', 'swap_outcomes', 'pending_confirms'}.issubset(tables)
@@ -35,12 +35,12 @@ class TestValidatorStateStoreSchema:
 
 class TestInsertRateEvent:
     def test_first_event_accepted(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         store.close()
 
     def test_rejected_when_within_throttle_window(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         # 74 < 75: blocked by throttle
         within = 100 + RATE_UPDATE_MIN_INTERVAL_BLOCKS - 1
@@ -48,20 +48,20 @@ class TestInsertRateEvent:
         store.close()
 
     def test_accepted_when_past_throttle_window(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         past = 100 + RATE_UPDATE_MIN_INTERVAL_BLOCKS
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00016, block=past) is True
         store.close()
 
     def test_rejected_when_rate_unchanged(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=200) is False
         store.close()
 
     def test_accepted_when_rate_changed_and_past_throttle(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00020, block=200) is True
         events = store.get_rate_events_in_range('tao', 'btc', start_block=99, end_block=300)
@@ -70,7 +70,7 @@ class TestInsertRateEvent:
 
     def test_direction_isolation(self, tmp_path: Path):
         """Throttle is per (hotkey, from, to) — different directions don't conflict."""
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         # Same hotkey, other direction — should not be throttled
         assert store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=105) is True
@@ -79,7 +79,7 @@ class TestInsertRateEvent:
 
 class TestInsertSwapOutcome:
     def test_idempotent_on_swap_id(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=False, resolved_block=101)
 
@@ -91,12 +91,12 @@ class TestInsertSwapOutcome:
 
 class TestGetLatestRateBefore:
     def test_returns_none_when_empty(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=100) is None
         store.close()
 
     def test_returns_most_recent_at_or_before(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00020, block=300)
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=250) == (0.00015, 100)
@@ -106,7 +106,7 @@ class TestGetLatestRateBefore:
 
 class TestGetRateEventsInRange:
     def test_boundary_exclusive_start_inclusive_end(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         # Insert 3 distinct events at different blocks (use distinct rates + past throttle).
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00010, block=100)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00020, block=200)
@@ -118,7 +118,7 @@ class TestGetRateEventsInRange:
         store.close()
 
     def test_filters_by_direction(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
         store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=100)
 
@@ -132,7 +132,7 @@ class TestGetRateEventsInRange:
 
 class TestSuccessRates:
     def test_aggregates_completed_and_timed_out(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
         store.insert_swap_outcome(swap_id=2, miner_hotkey='hk1', completed=True, resolved_block=101)
         store.insert_swap_outcome(swap_id=3, miner_hotkey='hk1', completed=False, resolved_block=102)
@@ -145,7 +145,7 @@ class TestSuccessRates:
 
 class TestDeleteHotkey:
     def test_removes_from_rate_and_outcome_tables(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
 
@@ -166,7 +166,7 @@ class TestDeleteHotkey:
 
 class TestPrune:
     def test_prune_leaves_swap_outcomes_intact(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
 
@@ -180,7 +180,7 @@ class TestPrune:
 
 class TestConcurrency:
     def test_concurrent_writes_threadsafe(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         errors: list[Exception] = []
 
         def writer(thread_idx: int):
@@ -204,7 +204,7 @@ class TestConcurrency:
 
         assert errors == []
 
-        conn = store._require_connection()
+        conn = store.require_connection()
         count = conn.execute('SELECT COUNT(*) FROM swap_outcomes').fetchone()[0]
         assert count == 400
         store.close()
@@ -212,7 +212,7 @@ class TestConcurrency:
 
 class TestClose:
     def test_close_is_idempotent_and_blocks_further_ops(self, tmp_path: Path):
-        store = _make_store(tmp_path)
+        store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
 
         store.close()
