@@ -11,14 +11,21 @@ from allways.chains import CHAIN_TAO, ChainDefinition
 
 
 class SubtensorProvider(ChainProvider):
-    """TAO chain provider using bt.Subtensor and substrate-interface."""
+    """TAO chain provider using bt.Subtensor and substrate-interface.
+
+    Owns its signing ``bt.Wallet`` when one is supplied at construction, so
+    callers of ``send_amount`` never need to pass key material. Validators
+    and read-only consumers can instantiate without a wallet and will get a
+    clear error if they attempt to send.
+    """
 
     # Balances pallet index and transfer call indices on Subtensor
     _BALANCES_PALLET = 5
     _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive', 7: 'transfer_all'}
 
-    def __init__(self, subtensor: bt.Subtensor):
+    def __init__(self, subtensor: bt.Subtensor, wallet: Optional['bt.Wallet'] = None):
         self.subtensor = subtensor
+        self.wallet = wallet
         self._block_cache: Dict[int, dict] = {}
 
     def get_chain(self) -> ChainDefinition:
@@ -288,15 +295,15 @@ class SubtensorProvider(ChainProvider):
             return False
 
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
-        """Send TAO via subtensor transfer. Amount is in rao. key should be a bt.Wallet."""
-        if key is None:
-            bt.logging.error('TAO send_amount requires a bt.Wallet as key')
+        """Send TAO via subtensor transfer. Amount is in rao."""
+        if self.wallet is None:
+            bt.logging.error('TAO send_amount called on a read-only SubtensorProvider (no wallet)')
             return None
         try:
             response = self.subtensor.transfer(
-                wallet=key,
+                wallet=self.wallet,
                 destination_ss58=to_address,
                 amount=bt.Balance.from_rao(amount),
                 wait_for_inclusion=True,

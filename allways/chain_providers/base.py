@@ -71,12 +71,16 @@ class ChainProvider(ABC):
 
     @abstractmethod
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
         """Send funds to an address. Returns (tx_hash, block_number) or None.
 
+        Providers own their own signing credentials — TAO uses the ``bt.Wallet``
+        passed at construction, BTC reads ``BTC_PRIVATE_KEY`` / RPC wallet from
+        env. Callers do not pass key material.
+
         amount: in smallest unit (satoshis / rao)
-        key: chain-specific signing key (e.g., bt.Wallet for TAO, None for BTC if using RPC wallet)
-        from_address: hint for sender's address type (used by BTC lightweight to derive correct type from WIF)
+        from_address: hint for sender's address type (used by BTC lightweight to
+                      derive correct type from WIF)
         """
         ...

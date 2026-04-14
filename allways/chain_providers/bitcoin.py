@@ -590,9 +590,13 @@ class BitcoinProvider(ChainProvider):
             return max(min_fee_rate, 5)
 
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
-        """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None."""
+        """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None.
+
+        Signing credentials come from ``BTC_PRIVATE_KEY`` / ``bitcoind`` wallet,
+        not from the caller.
+        """
         if self.mode == 'lightweight':
             return self.send_amount_lightweight(to_address, amount, from_address=from_address)
 
