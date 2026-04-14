@@ -777,9 +777,22 @@ mod allways_swap_manager {
                 let fee = swap.tao_amount.saturating_div(FEE_DIVISOR);
                 let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
                 let actual_fee = core::cmp::min(fee, miner_collateral);
+                let new_collateral = miner_collateral.saturating_sub(actual_fee);
                 if actual_fee > 0 {
-                    self.collateral.insert(swap.miner, &miner_collateral.saturating_sub(actual_fee));
+                    self.collateral.insert(swap.miner, &new_collateral);
                     self.accumulated_fees = self.accumulated_fees.saturating_add(actual_fee);
+                }
+
+                // If the fee deduction drops the miner below min_collateral,
+                // deactivate them here so validators don't keep crediting
+                // crown-time to a miner that can no longer honor swaps.
+                // Mirrors the same guard in timeout_swap.
+                if new_collateral < self.min_collateral
+                    && self.miner_active.get(swap.miner).unwrap_or(false)
+                {
+                    self.miner_active.insert(swap.miner, &false);
+                    self.miner_deactivation_block.insert(swap.miner, &self.env().block_number());
+                    self.env().emit_event(MinerActivated { miner: swap.miner, active: false });
                 }
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
