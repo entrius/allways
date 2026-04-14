@@ -17,7 +17,7 @@ class TestValidatorStateStoreSchema:
         conn = store._require_connection()
 
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {'rate_events', 'collateral_events', 'swap_outcomes'}.issubset(tables)
+        assert {'rate_events', 'swap_outcomes', 'pending_confirms'}.issubset(tables)
 
         indexes = {
             row[0]
@@ -28,8 +28,6 @@ class TestValidatorStateStoreSchema:
         assert 'idx_rate_events_block' in indexes
         assert 'idx_rate_events_dir_block' in indexes
         assert 'idx_rate_events_hotkey' in indexes
-        assert 'idx_collateral_events_block' in indexes
-        assert 'idx_collateral_events_hotkey_block' in indexes
         assert 'idx_swap_outcomes_hotkey' in indexes
 
         store.close()
@@ -76,25 +74,6 @@ class TestInsertRateEvent:
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         # Same hotkey, other direction — should not be throttled
         assert store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=105) is True
-        store.close()
-
-
-class TestInsertCollateralEvent:
-    def test_first_event_accepted(self, tmp_path: Path):
-        store = _make_store(tmp_path)
-        assert store.insert_collateral_event('hk1', collateral_rao=500_000_000, block=50) is True
-        store.close()
-
-    def test_skipped_when_unchanged(self, tmp_path: Path):
-        store = _make_store(tmp_path)
-        assert store.insert_collateral_event('hk1', collateral_rao=500_000_000, block=50) is True
-        assert store.insert_collateral_event('hk1', collateral_rao=500_000_000, block=60) is False
-        store.close()
-
-    def test_accepted_when_changed(self, tmp_path: Path):
-        store = _make_store(tmp_path)
-        assert store.insert_collateral_event('hk1', collateral_rao=500_000_000, block=50) is True
-        assert store.insert_collateral_event('hk1', collateral_rao=400_000_000, block=60) is True
         store.close()
 
 
@@ -165,26 +144,22 @@ class TestSuccessRates:
 
 
 class TestDeleteHotkey:
-    def test_removes_from_all_three_tables(self, tmp_path: Path):
+    def test_removes_from_rate_and_outcome_tables(self, tmp_path: Path):
         store = _make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
-        store.insert_collateral_event('hk1', 500_000_000, block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
 
         # Sanity
         store.insert_rate_event('hk2', 'tao', 'btc', 0.00016, block=100)
-        store.insert_collateral_event('hk2', 400_000_000, block=100)
         store.insert_swap_outcome(swap_id=2, miner_hotkey='hk2', completed=False, resolved_block=100)
 
         store.delete_hotkey('hk1')
 
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
-        assert store.get_latest_collateral_before('hk1', block=200) is None
         assert 'hk1' not in store.get_all_time_success_rates()
 
         # hk2 untouched
         assert store.get_latest_rate_before('hk2', 'tao', 'btc', block=200) is not None
-        assert store.get_latest_collateral_before('hk2', block=200) is not None
         assert 'hk2' in store.get_all_time_success_rates()
         store.close()
 
@@ -193,14 +168,12 @@ class TestPrune:
     def test_prune_leaves_swap_outcomes_intact(self, tmp_path: Path):
         store = _make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
-        store.insert_collateral_event('hk1', 500_000_000, block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
 
         store.prune_events_older_than(cutoff_block=200)
 
-        # Events gone, outcomes retained
+        # Rate events gone, outcomes retained
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
-        assert store.get_latest_collateral_before('hk1', block=200) is None
         assert store.get_all_time_success_rates() == {'hk1': (1, 0)}
         store.close()
 

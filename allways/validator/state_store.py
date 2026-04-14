@@ -248,69 +248,6 @@ class ValidatorStateStore:
             ).fetchall()
         return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
 
-    # ─── collateral_events ──────────────────────────────────────────────
-
-    def insert_collateral_event(self, hotkey: str, collateral_rao: int, block: int) -> bool:
-        """Insert a collateral event if the value changed since the last row."""
-        with self._lock:
-            conn = self._require_connection()
-            row = conn.execute(
-                """
-                SELECT collateral_rao FROM collateral_events
-                WHERE hotkey = ?
-                ORDER BY block DESC, id DESC
-                LIMIT 1
-                """,
-                (hotkey,),
-            ).fetchone()
-            if row is not None and row['collateral_rao'] == collateral_rao:
-                return False
-            conn.execute(
-                'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
-                (hotkey, collateral_rao, block),
-            )
-            conn.commit()
-            return True
-
-    def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
-        """Most recent collateral for ``hotkey`` at or before ``block``."""
-        with self._lock:
-            conn = self._require_connection()
-            row = conn.execute(
-                """
-                SELECT collateral_rao, block FROM collateral_events
-                WHERE hotkey = ? AND block <= ?
-                ORDER BY block DESC, id DESC
-                LIMIT 1
-                """,
-                (hotkey, block),
-            ).fetchone()
-        if row is None:
-            return None
-        return row['collateral_rao'], row['block']
-
-    def get_collateral_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
-        """Collateral events in ``(start_block, end_block]``, oldest first."""
-        with self._lock:
-            conn = self._require_connection()
-            rows = conn.execute(
-                """
-                SELECT id, hotkey, collateral_rao, block FROM collateral_events
-                WHERE block > ? AND block <= ?
-                ORDER BY block ASC, id ASC
-                """,
-                (start_block, end_block),
-            ).fetchall()
-        return [
-            {
-                'id': r['id'],
-                'hotkey': r['hotkey'],
-                'collateral_rao': r['collateral_rao'],
-                'block': r['block'],
-            }
-            for r in rows
-        ]
-
     # ─── swap_outcomes ──────────────────────────────────────────────────
 
     def insert_swap_outcome(
@@ -350,16 +287,15 @@ class ValidatorStateStore:
     # ─── cross-table maintenance ────────────────────────────────────────
 
     def delete_hotkey(self, hotkey: str) -> None:
-        """Dereg purge: remove the hotkey from rate/collateral/outcomes tables."""
+        """Dereg purge: remove the hotkey from rate/outcomes tables."""
         with self._lock:
             conn = self._require_connection()
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
-            conn.execute('DELETE FROM collateral_events WHERE hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
-        """Delete rate/collateral events older than ``cutoff_block``.
+        """Delete rate events older than ``cutoff_block``.
 
         Never touches ``swap_outcomes`` or ``pending_confirms`` — those have
         their own lifetimes.
@@ -367,7 +303,6 @@ class ValidatorStateStore:
         with self._lock:
             conn = self._require_connection()
             conn.execute('DELETE FROM rate_events WHERE block < ?', (cutoff_block,))
-            conn.execute('DELETE FROM collateral_events WHERE block < ?', (cutoff_block,))
             conn.commit()
 
     def close(self) -> None:
@@ -417,17 +352,6 @@ class ValidatorStateStore:
                     ON rate_events(from_chain, to_chain, block);
                 CREATE INDEX IF NOT EXISTS idx_rate_events_hotkey
                     ON rate_events(hotkey);
-
-                CREATE TABLE IF NOT EXISTS collateral_events (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    hotkey          TEXT NOT NULL,
-                    collateral_rao  INTEGER NOT NULL,
-                    block           INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_collateral_events_block
-                    ON collateral_events(block);
-                CREATE INDEX IF NOT EXISTS idx_collateral_events_hotkey_block
-                    ON collateral_events(hotkey, block);
 
                 CREATE TABLE IF NOT EXISTS swap_outcomes (
                     swap_id         INTEGER PRIMARY KEY,

@@ -12,12 +12,10 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
-    COLLATERAL_POLL_INTERVAL_BLOCKS,
     COMMITMENT_POLL_INTERVAL_BLOCKS,
     DIRECTION_POOLS,
     EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
-    MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     RECYCLE_UID,
     SCORING_INTERVAL_STEPS,
     SCORING_WINDOW_BLOCKS,
@@ -46,11 +44,13 @@ async def forward(self: Validator) -> None:
 
     Flow:
     1. Process pending confirmations (queued by axon handler, awaiting tx confirmations)
-    2. Poll tracker for new/updated swaps (incremental)
-    3. For FULFILLED swaps, verify both sides -> confirm_swap
-    4. For FULFILLED swaps near timeout with unconfirmed dest tx -> extend timeout
-    5. For ACTIVE/FULFILLED past timeout -> timeout_swap (single trigger)
-    6. Every SCORING_INTERVAL_STEPS, score from in-memory window
+    2. Commitment poll (rates)
+    3. Event watcher sync (collateral, active flag, min_collateral, swap outcomes)
+    4. Poll tracker for new/updated swaps (incremental)
+    5. For FULFILLED swaps, verify both sides -> confirm_swap
+    6. For FULFILLED swaps near timeout with unconfirmed dest tx -> extend timeout
+    7. For ACTIVE/FULFILLED past timeout -> timeout_swap (single trigger)
+    8. Every SCORING_INTERVAL_STEPS, score from in-memory window
     """
     bt.logging.info(f'Forward step {self.step}')
 
@@ -61,8 +61,10 @@ async def forward(self: Validator) -> None:
     _clear_provider_caches(self)
     _process_pending_confirms(self)
     _poll_commitments(self)
-    _refresh_min_collateral(self)
-    _poll_collaterals(self)
+    try:
+        self.event_watcher.sync_to(self.block)
+    except Exception as e:
+        bt.logging.warning(f'Event watcher sync failed: {e}')
     await tracker.poll(self.block)
     uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
     _extend_near_timeout_fulfilled(self)
@@ -162,66 +164,6 @@ def _purge_deregistered_hotkeys(self: Validator) -> None:
     for hk in stale:
         self.state_store.delete_hotkey(hk)
     self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
-
-
-def _poll_collaterals(self: Validator) -> None:
-    """Query each tracked miner's collateral and persist diffs.
-
-    Runs every ``COLLATERAL_POLL_INTERVAL_BLOCKS``. Only miners with a cached
-    rate (i.e. in ``_last_known_rates``) are polled — those are the ones that
-    can hold a crown. The contract stores collateral as a single per-miner
-    balance, so each row has no direction.
-    """
-    if self.block - self._last_collateral_poll_block < COLLATERAL_POLL_INTERVAL_BLOCKS:
-        return
-    self._last_collateral_poll_block = self.block
-
-    tracked_hotkeys = {key[0] for key in self._last_known_rates.keys()}
-    current_hotkeys = set(self.metagraph.hotkeys)
-
-    for hotkey in tracked_hotkeys:
-        if hotkey not in current_hotkeys:
-            continue
-        try:
-            collateral = self.contract_client.get_miner_collateral(hotkey)
-        except Exception as e:
-            bt.logging.debug(f'Collateral read failed for {hotkey[:8]}: {e}')
-            continue
-        if self._last_known_collaterals.get(hotkey) == collateral:
-            continue
-        inserted = self.state_store.insert_collateral_event(
-            hotkey=hotkey,
-            collateral_rao=collateral,
-            block=self.block,
-        )
-        if inserted:
-            self._last_known_collaterals[hotkey] = collateral
-
-    stale = set(self._last_known_collaterals.keys()) - current_hotkeys
-    for hk in stale:
-        self._last_known_collaterals.pop(hk, None)
-
-
-def _refresh_min_collateral(self: Validator) -> None:
-    """Refresh the cached ``min_collateral`` from the contract every ~4h.
-
-    Always advances the refresh block on any terminal outcome (success, no-op,
-    or exception) so a sustained contract outage can't turn every forward pass
-    into an RPC retry. The cached value is preserved on failure.
-    """
-    if self.block - self._last_min_collateral_refresh_block < MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS:
-        return
-    self._last_min_collateral_refresh_block = self.block
-    try:
-        value = self.contract_client.get_min_collateral()
-    except Exception as e:
-        bt.logging.warning(f'min_collateral refresh failed: {e}')
-        return
-    if value is None:
-        return
-    if value != self._min_collateral_rao:
-        bt.logging.info(f'min_collateral changed: {self._min_collateral_rao} -> {value}')
-        self._min_collateral_rao = value
 
 
 def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
@@ -505,10 +447,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Crown-time based reward computation.
 
     For each direction in ``DIRECTION_POOLS``:
-      1. Replay rate_events and collateral_events chronologically over the window
+      1. Replay rate events (from state_store) and collateral events (from
+         event_watcher) chronologically over the window
       2. At each block boundary, determine crown holders (tied best-rate miners
-         with collateral >= the cached ``_min_collateral_rao`` and still in the
-         metagraph)
+         that are in the metagraph AND active on-chain AND have
+         collateral >= the event-watcher's cached ``min_collateral``)
       3. Accumulate crown_blocks per hotkey, splitting evenly on ties
       4. ``rewards[uid] += pool * (crown_blocks[hk] / total) * success_rate ** SUCCESS_EXPONENT``
 
@@ -521,21 +464,26 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     window_end = self.block
     window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
 
-    active_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    # Miners must be both in the metagraph (registered) AND active on the
+    # contract (miner_active == true). Active is sourced from MinerActivated
+    # events replayed by the watcher.
+    in_metagraph: Set[str] = set(self.metagraph.hotkeys)
+    eligible_hotkeys: Set[str] = in_metagraph & self.event_watcher.active_miners
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     success_stats = self.state_store.get_all_time_success_rates()
-    min_collateral = int(getattr(self, '_min_collateral_rao', 0) or 0)
+    min_collateral = int(self.event_watcher.min_collateral or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         crown_blocks = _replay_crown_time(
             store=self.state_store,
+            event_watcher=self.event_watcher,
             from_chain=from_chain,
             to_chain=to_chain,
             window_start=window_start,
             window_end=window_end,
-            active_hotkeys=active_hotkeys,
+            eligible_hotkeys=eligible_hotkeys,
             min_collateral=min_collateral,
         )
         total = sum(crown_blocks.values())
@@ -575,36 +523,46 @@ def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
 
 def _replay_crown_time(
     store: ValidatorStateStore,
+    event_watcher,
     from_chain: str,
     to_chain: str,
     window_start: int,
     window_end: int,
-    active_hotkeys: Set[str],
+    eligible_hotkeys: Set[str],
     min_collateral: int,
 ) -> Dict[str, float]:
     """Walk the merged rate + collateral event stream, accumulate crown blocks.
 
+    Rates come from ``store`` (populated by commitment polling). Collateral
+    history comes from ``event_watcher`` (populated by contract event replay).
     Returns ``{hotkey: crown_blocks_float}``. Ties split credit evenly across
     the tied interval.
     """
-    # 1. Reconstruct state at window_start for every currently-active hotkey.
+    # 1. Reconstruct state at window_start for every eligible hotkey.
     current_rates: Dict[str, float] = {}
     current_collateral: Dict[str, int] = {}
 
-    for hotkey in active_hotkeys:
+    for hotkey in eligible_hotkeys:
         latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
         if latest_rate is not None:
             current_rates[hotkey] = latest_rate[0]
-        latest_col = store.get_latest_collateral_before(hotkey, window_start)
+        latest_col = event_watcher.get_latest_collateral_before(hotkey, window_start)
         if latest_col is not None:
             current_collateral[hotkey] = latest_col[0]
+        else:
+            # No event before window_start — fall back to the watcher's
+            # current value so a miner whose only collateral event predates
+            # the retention window still gets credited accurately.
+            snapshot = event_watcher.collateral.get(hotkey)
+            if snapshot is not None:
+                current_collateral[hotkey] = snapshot
 
     # 2. Merge rate and collateral events within the window, oldest first.
     #    Collateral events sort BEFORE rate events at the same block so a
     #    simultaneous "collateral drops + best rate" transition resolves to
     #    the post-drop state before rate attribution.
     rate_events = store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end)
-    col_events = store.get_collateral_events_in_range(window_start, window_end)
+    col_events = event_watcher.get_collateral_events_in_range(window_start, window_end)
 
     merged: List[Tuple[int, int, str, str, float]] = []
     for e in rate_events:
@@ -621,7 +579,7 @@ def _replay_crown_time(
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        holders = _crown_holders(current_rates, current_collateral, min_collateral, active_hotkeys)
+        holders = _crown_holders(current_rates, current_collateral, min_collateral, eligible_hotkeys)
         if not holders:
             return
         split = duration / len(holders)
@@ -644,11 +602,13 @@ def _crown_holders(
     rates: Dict[str, float],
     collaterals: Dict[str, int],
     min_collateral: int,
-    active: Set[str],
+    eligible: Set[str],
 ) -> List[str]:
-    """Hotkeys tied for best rate, with collateral >= min and in the metagraph."""
-    eligible = {hk: r for hk, r in rates.items() if hk in active and collaterals.get(hk, 0) >= min_collateral and r > 0}
-    if not eligible:
+    """Hotkeys tied for best rate, with collateral >= min and eligible."""
+    candidates = {
+        hk: r for hk, r in rates.items() if hk in eligible and collaterals.get(hk, 0) >= min_collateral and r > 0
+    }
+    if not candidates:
         return []
-    best = max(eligible.values())
-    return [hk for hk, r in eligible.items() if r == best]
+    best = max(candidates.values())
+    return [hk for hk, r in candidates.items() if r == best]

@@ -11,6 +11,7 @@ Usage:
 import threading
 import time
 from functools import partial
+from pathlib import Path
 
 import bittensor as bt
 from dotenv import load_dotenv
@@ -35,6 +36,7 @@ from allways.validator.axon_handlers import (
     priority_swap_reserve,
 )
 from allways.validator.chain_verification import SwapVerifier
+from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
@@ -69,25 +71,22 @@ class Validator(BaseValidatorNeuron):
         # so pending_confirms can purge expired reservations lazily on read.
         self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
         self._last_known_rates: dict[tuple[str, str, str], float] = {}
-        self._last_known_collaterals: dict[str, int] = {}
         self._last_commitment_poll_block: int = 0
-        self._last_collateral_poll_block: int = 0
-        # Falling back to 0 here would let zero-collateral miners hold crowns until
-        # the first successful refresh; fall back to MIN_COLLATERAL_TAO instead.
+
+        # Event-sourced miner state. Replaces the old _poll_collaterals +
+        # _refresh_min_collateral polling loops. ``sync_to(current_block)``
+        # runs each forward step; scoring reads collateral/active/min from
+        # the watcher's in-memory dicts.
         fallback_min_collateral = int(MIN_COLLATERAL_TAO * TAO_TO_RAO)
-        try:
-            raw_min_collateral = self.contract_client.get_min_collateral()
-            if raw_min_collateral and raw_min_collateral > 0:
-                self._min_collateral_rao: int = raw_min_collateral
-            else:
-                bt.logging.warning(
-                    f'min_collateral read returned {raw_min_collateral}, using fallback {fallback_min_collateral} rao'
-                )
-                self._min_collateral_rao = fallback_min_collateral
-        except Exception as e:
-            bt.logging.warning(f'Initial min_collateral read failed, using fallback {fallback_min_collateral} rao: {e}')
-            self._min_collateral_rao = fallback_min_collateral
-        self._last_min_collateral_refresh_block: int = self.block
+        metadata_path = Path(__file__).resolve().parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
+        self.event_watcher = ContractEventWatcher(
+            substrate=self.subtensor.substrate,
+            contract_address=self.contract_client.contract_address,
+            metadata_path=metadata_path,
+            state_store=self.state_store,
+            default_min_collateral=fallback_min_collateral,
+        )
+        self.event_watcher.initialize(self.block)
 
         self.swap_tracker = SwapTracker(
             client=self.contract_client,

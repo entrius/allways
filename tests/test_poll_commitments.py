@@ -6,10 +6,9 @@ from allways.classes import MinerPair
 from allways.constants import (
     COMMITMENT_POLL_INTERVAL_BLOCKS,
     EVENT_RETENTION_BLOCKS,
-    MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     RATE_UPDATE_MIN_INTERVAL_BLOCKS,
 )
-from allways.validator.forward import _poll_commitments, _refresh_min_collateral
+from allways.validator.forward import _poll_commitments
 from allways.validator.state_store import ValidatorStateStore
 
 
@@ -215,10 +214,6 @@ class TestPollCommitmentsPruning:
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_recent', 'tao', 'btc', 0.00020, recent_block),
         )
-        conn.execute(
-            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
-            ('hk_ancient', 100, ancient_block),
-        )
         conn.commit()
 
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
@@ -228,60 +223,4 @@ class TestPollCommitmentsPruning:
         surviving_blocks = {e['block'] for e in rate_events}
         assert ancient_block not in surviving_blocks
         assert recent_block in surviving_blocks
-
-        # Collateral event at ancient_block should also be gone.
-        assert v.state_store.get_latest_collateral_before('hk_ancient', block=v.block) is None
-        v.state_store.close()
-
-
-class TestRefreshMinCollateral:
-    def test_within_interval_is_noop(self, tmp_path: Path):
-        v = _make_validator(tmp_path)
-        v._min_collateral_rao = 500_000_000
-        v._last_min_collateral_refresh_block = v.block - (MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS - 1)
-        v.contract_client.get_min_collateral.return_value = 400_000_000
-
-        _refresh_min_collateral(v)
-
-        v.contract_client.get_min_collateral.assert_not_called()
-        assert v._min_collateral_rao == 500_000_000
-        v.state_store.close()
-
-    def test_after_interval_updates_cached_value(self, tmp_path: Path):
-        v = _make_validator(tmp_path)
-        v._min_collateral_rao = 500_000_000
-        v._last_min_collateral_refresh_block = v.block - MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS
-        v.contract_client.get_min_collateral.return_value = 400_000_000
-
-        _refresh_min_collateral(v)
-
-        assert v._min_collateral_rao == 400_000_000
-        assert v._last_min_collateral_refresh_block == v.block
-        v.state_store.close()
-
-    def test_exception_preserves_cache_but_advances_refresh_block(self, tmp_path: Path):
-        """On failure we keep the cached value but still advance the refresh
-        block so a sustained outage can't turn every forward step into an RPC
-        retry (~1200 calls over a 4h outage otherwise)."""
-        v = _make_validator(tmp_path)
-        v._min_collateral_rao = 500_000_000
-        v._last_min_collateral_refresh_block = v.block - MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS
-        v.contract_client.get_min_collateral.side_effect = RuntimeError('rpc down')
-
-        _refresh_min_collateral(v)
-
-        assert v._min_collateral_rao == 500_000_000  # cache preserved
-        assert v._last_min_collateral_refresh_block == v.block  # cadence advanced
-        v.state_store.close()
-
-    def test_unchanged_value_still_advances_refresh_block(self, tmp_path: Path):
-        v = _make_validator(tmp_path)
-        v._min_collateral_rao = 500_000_000
-        v._last_min_collateral_refresh_block = v.block - MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS
-        v.contract_client.get_min_collateral.return_value = 500_000_000
-
-        _refresh_min_collateral(v)
-
-        assert v._min_collateral_rao == 500_000_000
-        assert v._last_min_collateral_refresh_block == v.block
         v.state_store.close()
