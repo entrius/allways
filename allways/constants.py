@@ -37,6 +37,15 @@ SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s p
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
 SCORING_SUCCESS_EXPONENT = 8  # Harsh failure penalty: 92% → 0.51x, 96% → 0.72x
 
+# ─── V1 Crown-Time Scoring ───────────────────────────────
+# Validator throttle: rate_events for a hotkey are only accepted when this many
+# blocks have elapsed since the previous accepted event. Prevents rate-war games
+# and keeps crown-time attribution stable.
+RATE_UPDATE_MIN_INTERVAL_BLOCKS = 75
+# Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
+# window-start state can always be reconstructed from history.
+EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID — emissions recycled on-chain
 DAILY_EMISSION_ALPHA = 7200 * 0.41  # 2952 alpha/day (7200 blocks/day * 0.41 miner share)
