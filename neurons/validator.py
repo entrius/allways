@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
 from allways.constants import (
-    DEFAULT_FEE_DIVISOR,
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    FEE_DIVISOR,
     MIN_COLLATERAL_TAO,
     TAO_TO_RAO,
 )
@@ -61,11 +61,7 @@ class Validator(BaseValidatorNeuron):
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
         timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
-        try:
-            self.fee_divisor = self.contract_client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-        except Exception as e:
-            bt.logging.warning(f'Failed to read fee_divisor, using default {DEFAULT_FEE_DIVISOR}: {e}')
-            self.fee_divisor = DEFAULT_FEE_DIVISOR
+        self.fee_divisor = FEE_DIVISOR
 
         # V1 crown-time scoring state. Must be created before SwapTracker so the
         # tracker can persist swap outcomes into the credibility ledger.

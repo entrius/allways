@@ -29,7 +29,6 @@ mod allways_swap_manager {
         max_swap_amount: Balance,
         consensus_threshold_percent: u8,
         validator_count: u32,
-        fee_divisor: u128,
         halted: bool,
         validators: Mapping<AccountId, bool>,
 
@@ -84,8 +83,10 @@ mod allways_swap_manager {
     const REQ_EXTEND: u8 = 3;
     const REQ_EXTEND_TIMEOUT: u8 = 4;
 
-    // Fee cap: divisor >= 20 means fee can never exceed 5%
-    const MIN_FEE_DIVISOR: u128 = 20;
+    // Hardcoded 1% protocol fee. Immutable — not even the owner can change it.
+    // Callers on both the miner and validator side hardcode the same value so
+    // no one needs to poll the contract to compute fee_amount.
+    const FEE_DIVISOR: u128 = 100;
 
     // =========================================================================
     // Internal helpers
@@ -274,7 +275,6 @@ mod allways_swap_manager {
                 max_swap_amount,
                 consensus_threshold_percent,
                 validator_count: 0,
-                fee_divisor: 100,
                 halted: false,
                 validators: Mapping::default(),
 
@@ -772,9 +772,9 @@ mod allways_swap_manager {
                 swap.status = SwapStatus::Completed;
                 swap.completed_block = self.env().block_number();
 
-                // Fee from miner collateral -> accumulated_fees (divisor >= 20 enforced, max 5%)
+                // Fee from miner collateral -> accumulated_fees. 1% hardcoded.
                 #[allow(clippy::arithmetic_side_effects)]
-                let fee = swap.tao_amount.saturating_div(self.fee_divisor);
+                let fee = swap.tao_amount.saturating_div(FEE_DIVISOR);
                 let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
                 let actual_fee = core::cmp::min(fee, miner_collateral);
                 if actual_fee > 0 {
@@ -1151,20 +1151,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn set_fee_divisor(&mut self, divisor: u128) -> Result<(), Error> {
-            self.ensure_owner()?;
-            if divisor < MIN_FEE_DIVISOR {
-                return Err(Error::InvalidAmount);
-            }
-            self.fee_divisor = divisor;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("fee_divisor"),
-                value: divisor,
-            });
-            Ok(())
-        }
-
-        #[ink(message)]
         pub fn set_halted(&mut self, halted: bool) -> Result<(), Error> {
             self.ensure_owner()?;
             self.halted = halted;
@@ -1300,11 +1286,6 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_reservation_ttl(&self) -> u32 {
             self.reservation_ttl
-        }
-
-        #[ink(message)]
-        pub fn get_fee_divisor(&self) -> u128 {
-            self.fee_divisor
         }
 
         #[ink(message)]

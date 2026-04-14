@@ -80,8 +80,10 @@ EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend reservation when this 
 # ─── Display Only (real values enforced on-chain by contract) ─────
 # For CLI display and fallback logic only. Actual values are managed
 # via `alw admin` commands and read from the contract at runtime.
-DEFAULT_FEE_DIVISOR = 100  # tao_amount / fee_divisor — read from contract, fallback here
-SWAP_FEE_PERCENT = 0.01  # display only — derived from DEFAULT_FEE_DIVISOR
+# Hardcoded protocol fee divisor matching the smart contract's immutable
+# FEE_DIVISOR constant. No longer read from chain — both sides pin to 100 (1%).
+FEE_DIVISOR = 100
+SWAP_FEE_PERCENT = 0.01  # display only — derived from FEE_DIVISOR
 MAX_FEE_PERCENT = 0.05  # contract enforces divisor >= 20 (max 5% fee)
 MIN_COLLATERAL_TAO = 0.1  # Must be > max swap amount
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min — `alw admin set-timeout`

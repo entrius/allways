@@ -91,45 +91,6 @@ def set_reservation_ttl(blocks: int):
         console.print(f'[red]Failed to set reservation TTL: {e}[/red]\n')
 
 
-@admin_group.command('set-fee-divisor', show_disclaimer=True)
-@click.argument('divisor', type=int)
-def set_fee_divisor(divisor: int):
-    """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 20 = 5% fee max).
-
-    [dim]Examples:
-        $ alw admin set-fee-divisor 100[/dim]
-    """
-    if divisor < 20:
-        console.print('[red]Divisor must be at least 20 (max 5% fee)[/red]')
-        return
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current = client.get_fee_divisor()
-    except ContractError as e:
-        console.print(f'[red]Failed to read fee divisor: {e}[/red]')
-        return
-
-    current_pct = 100 / current if current > 0 else 0
-    new_pct = 100 / divisor
-
-    console.print('\n[bold]Set Fee Divisor[/bold]\n')
-    console.print(f'  Current: {current} ({current_pct:g}% fee)')
-    console.print(f'  New:     {divisor} ({new_pct:g}% fee)\n')
-
-    if not click.confirm('Confirm updating fee divisor?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_fee_divisor(wallet=wallet, divisor=divisor)
-        console.print(f'[green]Fee divisor set to {divisor} ({new_pct:g}% fee)[/green]\n')
-    except ContractError as e:
-        console.print(f'[red]Failed to set fee divisor: {e}[/red]\n')
-
-
 @admin_group.command('set-min-collateral', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_min_collateral(amount_tao: float):

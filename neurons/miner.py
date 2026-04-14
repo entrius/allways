@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitment
-from allways.constants import DEFAULT_FEE_DIVISOR, MINER_STATUS_LOG_INTERVAL_STEPS, TAO_TO_RAO
+from allways.constants import FEE_DIVISOR, MINER_STATUS_LOG_INTERVAL_STEPS, TAO_TO_RAO
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.miner.fulfillment import SwapFulfiller
 from allways.miner.swap_poller import SwapPoller
@@ -43,10 +43,7 @@ class Miner(BaseMinerNeuron):
             miner_hotkey=self.wallet.hotkey.ss58_address,
         )
 
-        try:
-            fee_divisor = self.contract_client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-        except Exception:
-            fee_divisor = DEFAULT_FEE_DIVISOR
+        fee_divisor = FEE_DIVISOR
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
@@ -164,16 +161,6 @@ class Miner(BaseMinerNeuron):
                 bt.logging.info(f'Collateral changed: {collateral_tao:.4f} TAO')
             self._last_collateral = collateral_rao
 
-    def _refresh_fee_divisor(self):
-        """Refresh fee_divisor from contract to stay in sync."""
-        try:
-            new_divisor = self.contract_client.get_fee_divisor()
-            if new_divisor and new_divisor != self.swap_fulfiller.fee_divisor:
-                bt.logging.info(f'Fee divisor updated: {self.swap_fulfiller.fee_divisor} -> {new_divisor}')
-                self.swap_fulfiller.fee_divisor = new_divisor
-        except Exception:
-            pass
-
     def _reconnect_and_propagate(self):
         """Reconnect subtensor and propagate the new connection to all dependents."""
         self._reconnect_subtensor()
@@ -188,7 +175,6 @@ class Miner(BaseMinerNeuron):
         self._maybe_reload_my_addresses()
         if self.step - self._last_status_step >= MINER_STATUS_LOG_INTERVAL_STEPS:
             self._log_status()
-            self._refresh_fee_divisor()
             self._last_status_step = self.step
         else:
             self._check_state_changes()

@@ -14,7 +14,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     read_miner_commitments,
 )
-from allways.constants import DEFAULT_FEE_DIVISOR
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
 
@@ -58,12 +58,7 @@ def quote_command(source_chain: str, dest_chain: str, amount: float):
     src_chain_def = get_chain(source_chain)
     source_amount = int(Decimal(str(amount)) * (10**src_chain_def.decimals))
 
-    # Read fee divisor
-    try:
-        fee_divisor = client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-    except ContractError:
-        fee_divisor = DEFAULT_FEE_DIVISOR
-
+    fee_divisor = FEE_DIVISOR
     fee_pct = 100 / fee_divisor
 
     # Find available miners

@@ -27,7 +27,7 @@ from allways.cli.swap_commands.helpers import (
     save_pending_swap,
 )
 from allways.commitments import read_miner_commitments
-from allways.constants import DEFAULT_FEE_DIVISOR, NETUID_FINNEY
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
@@ -598,16 +598,9 @@ def swap_now_command(
         get_chain(canon_src).decimals,
     )
 
-    # Show estimated receive inline
-    try:
-        preview_fee_divisor = client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-    except ContractError:
-        preview_fee_divisor = DEFAULT_FEE_DIVISOR
-        console.print(
-            f'[yellow]Warning: using default fee ({100 / DEFAULT_FEE_DIVISOR:g}%) — could not read from contract[/yellow]'
-        )
-    preview_receives = apply_fee_deduction(dest_amount, preview_fee_divisor)
-    preview_fee_pct = 100 / preview_fee_divisor
+    # Show estimated receive inline — fee is a hardcoded protocol constant.
+    preview_receives = apply_fee_deduction(dest_amount, FEE_DIVISOR)
+    preview_fee_pct = 100 / FEE_DIVISOR
     console.print(
         f'  You will receive: ~[green]{_from_smallest_unit(preview_receives, dest_chain):.8f} {dest_chain.upper()}[/green]'
         f' (after {preview_fee_pct:g}% fee)'
@@ -639,16 +632,7 @@ def swap_now_command(
     except ContractError:
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
 
-    try:
-        fee_divisor = client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-    except ContractError:
-        fee_divisor = DEFAULT_FEE_DIVISOR
-        if preview_fee_divisor != DEFAULT_FEE_DIVISOR:
-            console.print(
-                f'[yellow]Warning: using default fee ({100 / DEFAULT_FEE_DIVISOR:g}%)'
-                f' — could not read from contract[/yellow]'
-            )
-
+    fee_divisor = FEE_DIVISOR
     user_receives = apply_fee_deduction(dest_amount, fee_divisor)
     fee_percent = 100 / fee_divisor
 

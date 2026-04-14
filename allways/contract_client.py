@@ -49,7 +49,6 @@ CONTRACT_SELECTORS = {
     'set_max_swap_amount': bytes.fromhex('3e868f32'),
     'set_recycle_address': bytes.fromhex('50dfe685'),
     'set_reservation_ttl': bytes.fromhex('3143d9e3'),
-    'set_fee_divisor': bytes.fromhex('8832de41'),
     'recycle_fees': bytes.fromhex('97756ea1'),
     'get_swap': bytes.fromhex('a35f1bbf'),
     'get_collateral': bytes.fromhex('f48343ad'),
@@ -71,7 +70,6 @@ CONTRACT_SELECTORS = {
     'get_max_swap_amount': bytes.fromhex('97826e04'),
     'get_miner_reserved_until': bytes.fromhex('d5ed7150'),
     'get_reservation_ttl': bytes.fromhex('f7e24a31'),
-    'get_fee_divisor': bytes.fromhex('41afd8bc'),
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
@@ -135,7 +133,6 @@ CONTRACT_ARG_TYPES = {
     'set_max_swap_amount': [('amount', 'u128')],
     'set_recycle_address': [('address', 'AccountId')],
     'set_reservation_ttl': [('blocks', 'u32')],
-    'set_fee_divisor': [('divisor', 'u128')],
     'recycle_fees': [],
     'get_swap': [('swap_id', 'u64')],
     'get_collateral': [('hotkey', 'AccountId')],
@@ -172,7 +169,6 @@ CONTRACT_ARG_TYPES = {
     'get_max_swap_amount': [],
     'get_miner_reserved_until': [('miner', 'AccountId')],
     'get_reservation_ttl': [],
-    'get_fee_divisor': [],
 }
 
 DEFAULT_GAS_LIMIT = {'ref_time': 10_000_000_000, 'proof_size': 500_000}
@@ -860,9 +856,6 @@ class AllwaysContractClient:
     def get_reservation_ttl(self) -> int:
         return self._read_u32('get_reservation_ttl')
 
-    def get_fee_divisor(self) -> int:
-        return self._read_u128('get_fee_divisor')
-
     def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
         """Get reservation data for a miner.
 
@@ -1133,12 +1126,6 @@ class AllwaysContractClient:
         self._ensure_initialized()
         tx_hash = self._exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
         bt.logging.info(f'Reservation TTL set to {blocks}: {tx_hash}')
-        return tx_hash
-
-    def set_fee_divisor(self, wallet: bt.Wallet, divisor: int) -> str:
-        self._ensure_initialized()
-        tx_hash = self._exec_contract_raw('set_fee_divisor', args={'divisor': divisor}, keypair=wallet.hotkey)
-        bt.logging.info(f'Fee divisor set to {divisor}: {tx_hash}')
         return tx_hash
 
     def set_halted(self, wallet: bt.Wallet, halted: bool) -> str:

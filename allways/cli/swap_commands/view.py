@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     read_miner_commitments,
 )
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 
 
@@ -444,7 +445,6 @@ def view_contract():
             timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
             reservation_ttl_blocks = _read(client.get_reservation_ttl)
             reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
-            fee_divisor = _read(client.get_fee_divisor, default=0)
             consensus_threshold = _read(client.get_consensus_threshold)
             min_collateral_rao = _read(client.get_min_collateral)
             max_collateral_rao = _read(client.get_max_collateral)
@@ -467,9 +467,8 @@ def view_contract():
 
     table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks (~{timeout_minutes:.0f} min)')
     table.add_row('Reservation TTL', f'{reservation_ttl_blocks} blocks (~{reservation_ttl_minutes:.0f} min)')
-    if fee_divisor > 0:
-        fee_pct = 100 / fee_divisor
-        table.add_row('Fee', f'{fee_pct:g}% (divisor: {fee_divisor})')
+    fee_pct = 100 / FEE_DIVISOR
+    table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
     table.add_row('Consensus Threshold', f'{consensus_threshold}%')
     table.add_row('Min Collateral', f'{from_rao(min_collateral_rao):.4f} TAO')
     if max_collateral_rao > 0:
