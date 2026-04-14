@@ -8,7 +8,7 @@ Usage:
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import bittensor as bt
 from dotenv import load_dotenv
@@ -50,6 +50,9 @@ class Miner(BaseMinerNeuron):
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
+        self._rate_flag_path = Path.home() / '.allways' / 'miner' / f'rate_posted_{hotkey[:12]}.flag'
+
+        self.my_addresses: Dict[str, str] = self._load_my_addresses()
 
         self.swap_fulfiller = SwapFulfiller(
             contract_client=self.contract_client,
@@ -60,6 +63,7 @@ class Miner(BaseMinerNeuron):
             metagraph=self.metagraph,
             fee_divisor=fee_divisor,
             sent_cache_path=sent_cache_path,
+            my_addresses=self.my_addresses,
         )
 
         self._last_status_step = 0
@@ -70,6 +74,38 @@ class Miner(BaseMinerNeuron):
 
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address}')
         self._log_status()
+
+    def _load_my_addresses(self) -> Dict[str, str]:
+        """Read this miner's committed pair once and map chain → address.
+
+        Stored as ``self.my_addresses`` and shared with ``SwapFulfiller`` so
+        the fulfill path doesn't need to reach back into substrate storage on
+        every send. Refreshed whenever the CLI signals a rate post via the
+        flag file written by ``alw miner post``.
+        """
+        hotkey = self.wallet.hotkey.ss58_address
+        try:
+            pair = read_miner_commitment(self.subtensor, self.config.netuid, hotkey, metagraph=self.metagraph)
+        except Exception as e:
+            bt.logging.warning(f'Could not read own commitment at startup: {e}')
+            return {}
+        if pair is None:
+            return {}
+        return {pair.source_chain: pair.source_address, pair.dest_chain: pair.dest_address}
+
+    def _maybe_reload_my_addresses(self) -> None:
+        """If the CLI wrote a rate-posted flag, refresh the address cache."""
+        try:
+            if not self._rate_flag_path.exists():
+                return
+            fresh = self._load_my_addresses()
+            if fresh:
+                self.my_addresses.clear()
+                self.my_addresses.update(fresh)
+                bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
+            self._rate_flag_path.unlink(missing_ok=True)
+        except Exception as e:
+            bt.logging.debug(f'Rate-posted flag check failed: {e}')
 
     def _read_current_state(self) -> tuple:
         """Read current miner state from contract and chain. Returns (pair_key, pair, is_active, collateral_rao)."""
@@ -149,6 +185,7 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self):
         """Main miner forward pass — polls for swaps and processes each one."""
+        self._maybe_reload_my_addresses()
         if self.step - self._last_status_step >= MINER_STATUS_LOG_INTERVAL_STEPS:
             self._log_status()
             self._refresh_fee_divisor()

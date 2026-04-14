@@ -51,6 +51,7 @@ class SwapFulfiller:
         metagraph: Optional['bt.Metagraph'] = None,
         fee_divisor: int = 100,
         sent_cache_path: Optional[Path] = None,
+        my_addresses: Optional[Dict[str, str]] = None,
     ):
         self.client = contract_client
         self.providers = chain_providers
@@ -60,6 +61,11 @@ class SwapFulfiller:
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
         self.timeout_cushion_blocks = _load_timeout_cushion_blocks()
+        # Chain → miner's own deposit/fulfillment address, populated at
+        # startup from this miner's own commitment and refreshed by the
+        # miner loop when a new rate is posted. Shared dict so the miner
+        # neuron's reload mutates what we read here.
+        self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         # swap_id → (dest_tx_hash, dest_tx_block, marked_fulfilled)
         self._sent: Dict[int, Tuple[str, int, bool]] = {}
         self._sent_cache_path = sent_cache_path
@@ -187,29 +193,12 @@ class SwapFulfiller:
 
         key = self.wallet if swap.dest_chain == 'tao' else None
 
-        # For non-TAO sends, read the miner's commitment to get the sending address.
-        # Commitments are in canonical order, so pick whichever commitment address
-        # matches the swap's dest_chain — source_address for canonical-reverse swaps
-        # (e.g. TAO→BTC where BTC is canonical source), dest_address otherwise.
-        from_address = None
-        if swap.dest_chain != 'tao':
-            try:
-                from allways.commitments import read_miner_commitment
-
-                commitment = read_miner_commitment(
-                    subtensor=self.subtensor,
-                    netuid=self.netuid,
-                    hotkey=swap.miner_hotkey,
-                    metagraph=self.metagraph,
-                )
-                if commitment:
-                    if swap.dest_chain == commitment.source_chain:
-                        from_address = commitment.source_address
-                    elif swap.dest_chain == commitment.dest_chain:
-                        from_address = commitment.dest_address
-                    bt.logging.debug(f'Swap {swap.id}: sending from committed {swap.dest_chain} address {from_address}')
-            except Exception as e:
-                bt.logging.warning(f'Swap {swap.id}: could not read commitment for from_address, will probe: {e}')
+        # Miner's own dest-chain sending address — cached from this miner's
+        # committed pair at startup (refreshed when the CLI signals a new
+        # post). For TAO we don't need a from_address hint because the wallet
+        # keypair fully identifies the sender. For non-TAO chains we pass the
+        # cached address so the provider can skip UTXO probing.
+        from_address = None if swap.dest_chain == 'tao' else self.my_addresses.get(swap.dest_chain)
 
         result = provider.send_amount(swap.user_dest_address, dest_amount, key=key, from_address=from_address)
         if result:

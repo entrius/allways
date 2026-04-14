@@ -207,8 +207,27 @@ def post_pair(
 
         if receipt.is_success:
             console.print('[green]Pair posted successfully![/green]')
+            _write_rate_posted_flag(wallet.hotkey.ss58_address)
         else:
             console.print(f'[red]Failed to post pair: {receipt.error_message}[/red]')
 
     except Exception as e:
         console.print(f'[red]Error: {e}[/red]')
+
+
+def _write_rate_posted_flag(hotkey: str) -> None:
+    """Signal to a running miner that its committed pair changed.
+
+    A live miner polls this flag at each forward step and reloads its
+    cached ``my_addresses`` dict when it appears. Removing the flag is
+    the miner's responsibility; this writer is fire-and-forget.
+    """
+    from pathlib import Path
+
+    try:
+        flag_dir = Path.home() / '.allways' / 'miner'
+        flag_dir.mkdir(parents=True, exist_ok=True)
+        flag_path = flag_dir / f'rate_posted_{hotkey[:12]}.flag'
+        flag_path.touch()
+    except Exception:
+        pass
