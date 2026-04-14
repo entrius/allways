@@ -15,6 +15,7 @@ from allways.constants import (
     COLLATERAL_POLL_INTERVAL_BLOCKS,
     COMMITMENT_POLL_INTERVAL_BLOCKS,
     DIRECTION_POOLS,
+    EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
     MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     RECYCLE_UID,
@@ -84,11 +85,16 @@ def _poll_commitments(self: Validator) -> None:
     Runs every ``COMMITMENT_POLL_INTERVAL_BLOCKS``. For each miner pair in the
     metagraph, emits a ``rate_event`` per direction whose rate changed since the
     cache snapshot. The ``RateStateStore`` enforces the per-hotkey throttle.
-    Also purges deregistered hotkeys from the store and local cache.
+    Also purges deregistered hotkeys from the store and local cache, and prunes
+    aged rate/collateral history beyond ``EVENT_RETENTION_BLOCKS``.
     """
     if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
         return
     self._last_commitment_poll_block = self.block
+
+    cutoff = self.block - EVENT_RETENTION_BLOCKS
+    if cutoff > 0:
+        self.rate_state_store.prune_events_older_than(cutoff)
 
     try:
         pairs = read_miner_commitments(self.subtensor, self.config.netuid)
@@ -110,15 +116,17 @@ def _poll_commitments(self: Validator) -> None:
             key = (pair.hotkey, from_c, to_c)
             if self._last_known_rates.get(key) == r:
                 continue
-            inserted = self.rate_state_store.insert_rate_event(
+            self.rate_state_store.insert_rate_event(
                 hotkey=pair.hotkey,
                 from_chain=from_c,
                 to_chain=to_c,
                 rate=r,
                 block=self.block,
             )
-            if inserted:
-                self._last_known_rates[key] = r
+            # Cache the observed value whether or not the store accepted it —
+            # a throttled or deduped insert is still "known state" and we
+            # shouldn't re-attempt it on every subsequent poll.
+            self._last_known_rates[key] = r
 
     stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
     for hk in stale:
@@ -168,11 +176,13 @@ def _poll_collaterals(self: Validator) -> None:
 def _refresh_min_collateral(self: Validator) -> None:
     """Refresh the cached ``min_collateral`` from the contract every ~4h.
 
-    The value is read once at validator init and then refreshed on this
-    cadence. The cached value feeds crown eligibility during scoring replay.
+    Always advances the refresh block on any terminal outcome (success, no-op,
+    or exception) so a sustained contract outage can't turn every forward pass
+    into an RPC retry. The cached value is preserved on failure.
     """
     if self.block - self._last_min_collateral_refresh_block < MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS:
         return
+    self._last_min_collateral_refresh_block = self.block
     try:
         value = self.contract_client.get_min_collateral()
     except Exception as e:
@@ -183,7 +193,6 @@ def _refresh_min_collateral(self: Validator) -> None:
     if value != self._min_collateral_rao:
         bt.logging.info(f'min_collateral changed: {self._min_collateral_rao} -> {value}')
         self._min_collateral_rao = value
-    self._last_min_collateral_refresh_block = self.block
 
 
 def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:

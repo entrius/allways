@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from allways.classes import MinerPair
 from allways.constants import (
     COMMITMENT_POLL_INTERVAL_BLOCKS,
+    EVENT_RETENTION_BLOCKS,
     MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     RATE_UPDATE_MIN_INTERVAL_BLOCKS,
 )
@@ -119,7 +120,7 @@ class TestPollCommitmentsChanges:
         assert [e['rate'] for e in btc_tao] == [6500.0]
         v.rate_state_store.close()
 
-    def test_rate_change_blocked_by_throttle_updates_cache_on_next_success(self, tmp_path: Path):
+    def test_rate_change_blocked_by_throttle_still_advances_cache(self, tmp_path: Path):
         v = _make_validator(tmp_path)
         pairs_v1 = [_make_pair('hk_a', rate=0.00015, counter_rate=0.0)]
         pairs_v2 = [_make_pair('hk_a', rate=0.00020, counter_rate=0.0)]
@@ -127,16 +128,17 @@ class TestPollCommitmentsChanges:
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v1):
             _poll_commitments(v)
 
-        # Only past poll interval, NOT past rate throttle
+        # Only past poll interval, NOT past rate throttle.
         v.block += COMMITMENT_POLL_INTERVAL_BLOCKS
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v2):
             _poll_commitments(v)
 
+        # Throttle blocked the store insert — only the first event lands.
         tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
-        # Throttle blocked the insert
         assert [e['rate'] for e in tao_btc] == [0.00015]
-        # Cache keeps the last accepted rate so we don't re-try every poll
-        assert v._last_known_rates[('hk_a', 'tao', 'btc')] == 0.00015
+        # But the in-memory cache advances to the observed value so the next
+        # poll doesn't waste an insert attempt on the same throttled rate.
+        assert v._last_known_rates[('hk_a', 'tao', 'btc')] == 0.00020
         v.rate_state_store.close()
 
 
@@ -196,6 +198,42 @@ class TestPollCommitmentsErrors:
         v.rate_state_store.close()
 
 
+class TestPollCommitmentsPruning:
+    def test_prune_removes_events_older_than_retention_window(self, tmp_path: Path):
+        v = _make_validator(tmp_path)
+        # Move the clock forward so the retention cutoff is meaningful.
+        v.block = EVENT_RETENTION_BLOCKS + 1_000
+        ancient_block = 1  # well before cutoff (v.block - EVENT_RETENTION_BLOCKS = 1000)
+        recent_block = v.block - 100  # safely inside retention
+
+        conn = v.rate_state_store._require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_ancient', 'tao', 'btc', 0.00010, ancient_block),
+        )
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_recent', 'tao', 'btc', 0.00020, recent_block),
+        )
+        conn.execute(
+            'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+            ('hk_ancient', 100, ancient_block),
+        )
+        conn.commit()
+
+        with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
+            _poll_commitments(v)
+
+        rate_events = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
+        surviving_blocks = {e['block'] for e in rate_events}
+        assert ancient_block not in surviving_blocks
+        assert recent_block in surviving_blocks
+
+        # Collateral event at ancient_block should also be gone.
+        assert v.rate_state_store.get_latest_collateral_before('hk_ancient', block=v.block) is None
+        v.rate_state_store.close()
+
+
 class TestRefreshMinCollateral:
     def test_within_interval_is_noop(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -221,17 +259,19 @@ class TestRefreshMinCollateral:
         assert v._last_min_collateral_refresh_block == v.block
         v.rate_state_store.close()
 
-    def test_exception_preserves_state(self, tmp_path: Path):
+    def test_exception_preserves_cache_but_advances_refresh_block(self, tmp_path: Path):
+        """On failure we keep the cached value but still advance the refresh
+        block so a sustained outage can't turn every forward step into an RPC
+        retry (~1200 calls over a 4h outage otherwise)."""
         v = _make_validator(tmp_path)
         v._min_collateral_rao = 500_000_000
-        prior_refresh_block = v.block - MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS
-        v._last_min_collateral_refresh_block = prior_refresh_block
+        v._last_min_collateral_refresh_block = v.block - MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS
         v.contract_client.get_min_collateral.side_effect = RuntimeError('rpc down')
 
         _refresh_min_collateral(v)
 
-        assert v._min_collateral_rao == 500_000_000
-        assert v._last_min_collateral_refresh_block == prior_refresh_block
+        assert v._min_collateral_rao == 500_000_000  # cache preserved
+        assert v._last_min_collateral_refresh_block == v.block  # cadence advanced
         v.rate_state_store.close()
 
     def test_unchanged_value_still_advances_refresh_block(self, tmp_path: Path):
