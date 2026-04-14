@@ -7,7 +7,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -19,7 +19,7 @@ class SwapTracker:
     - Discovery: scan only NEW swap IDs since last poll
     - Monitoring: re-fetch all tracked ACTIVE/FULFILLED swaps each poll
 
-    Resolved swaps flow through ``_record_outcome`` into the ``rate_state_store``
+    Resolved swaps flow through ``_record_outcome`` into the ``state_store``
     credibility ledger; the tracker itself holds no scoring state.
     """
 
@@ -27,10 +27,10 @@ class SwapTracker:
         self,
         client: AllwaysContractClient,
         fulfillment_timeout_blocks: int,
-        rate_state_store: RateStateStore,
+        state_store: ValidatorStateStore,
     ):
         self.client = client
-        self.rate_state_store = rate_state_store
+        self.state_store = state_store
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
@@ -39,7 +39,7 @@ class SwapTracker:
 
     def _record_outcome(self, swap: Swap) -> None:
         """Persist the terminal state of ``swap`` to the credibility ledger."""
-        self.rate_state_store.insert_swap_outcome(
+        self.state_store.insert_swap_outcome(
             swap_id=swap.id,
             miner_hotkey=swap.miner_hotkey,
             completed=(swap.status == SwapStatus.COMPLETED),

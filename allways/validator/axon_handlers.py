@@ -19,7 +19,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
-from allways.validator.pending_confirms import PendingConfirm
+from allways.validator.state_store import PendingConfirm
 
 
 def _keccak256(data: bytes) -> bytes:
@@ -510,7 +510,7 @@ async def handle_swap_confirm(
                     rate_str=selected_rate_str,
                     reserved_until=reserved_until,
                 )
-                validator.pending_confirms.enqueue(pending)
+                validator.state_store.enqueue(pending)
                 synapse.accepted = True
                 synapse.rejection_reason = (
                     f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '

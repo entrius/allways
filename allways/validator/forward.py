@@ -31,7 +31,7 @@ from allways.validator.axon_handlers import (
     _scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 
@@ -112,7 +112,7 @@ def _prune_aged_rate_events(self: Validator) -> None:
     """
     cutoff = self.block - EVENT_RETENTION_BLOCKS
     if cutoff > 0:
-        self.rate_state_store.prune_events_older_than(cutoff)
+        self.state_store.prune_events_older_than(cutoff)
 
 
 def _refresh_miner_rates(self: Validator) -> None:
@@ -143,7 +143,7 @@ def _refresh_miner_rates(self: Validator) -> None:
             key = (pair.hotkey, from_c, to_c)
             if self._last_known_rates.get(key) == r:
                 continue
-            self.rate_state_store.insert_rate_event(
+            self.state_store.insert_rate_event(
                 hotkey=pair.hotkey,
                 from_chain=from_c,
                 to_chain=to_c,
@@ -160,7 +160,7 @@ def _purge_deregistered_hotkeys(self: Validator) -> None:
     if not stale:
         return
     for hk in stale:
-        self.rate_state_store.delete_hotkey(hk)
+        self.state_store.delete_hotkey(hk)
     self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
 
 
@@ -189,7 +189,7 @@ def _poll_collaterals(self: Validator) -> None:
             continue
         if self._last_known_collaterals.get(hotkey) == collateral:
             continue
-        inserted = self.rate_state_store.insert_collateral_event(
+        inserted = self.state_store.insert_collateral_event(
             hotkey=hotkey,
             collateral_rao=collateral,
             block=self.block,
@@ -255,7 +255,7 @@ def _process_pending_confirms(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
     from substrateinterface import Keypair
 
-    items = self.pending_confirms.get_all()
+    items = self.state_store.get_all()
     if not items:
         return
 
@@ -274,7 +274,7 @@ def _process_pending_confirms(self: Validator) -> None:
         # Skip if swap already initiated (another validator reached quorum)
         try:
             if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
-                self.pending_confirms.remove(item.miner_hotkey)
+                self.state_store.remove(item.miner_hotkey)
                 bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
                 continue
         except Exception as e:
@@ -283,7 +283,7 @@ def _process_pending_confirms(self: Validator) -> None:
         # Re-verify tx with main-loop chain provider
         provider = self.chain_providers.get(item.source_chain)
         if provider is None:
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
                 f'PendingConfirm [{swap_label} {miner_short}]: no provider for {item.source_chain}, dropping'
             )
@@ -304,14 +304,14 @@ def _process_pending_confirms(self: Validator) -> None:
             continue
 
         if tx_info is None:
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
                 f'PendingConfirm [{swap_label} {miner_short}]: tx {item.source_tx_hash[:16]}... not found, dropping'
             )
             continue
 
         if tx_info.sender and tx_info.sender != item.source_address:
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
                 f'PendingConfirm [{swap_label} {miner_short}]: sender mismatch '
                 f'(expected {item.source_address}, got {tx_info.sender}), dropping'
@@ -369,7 +369,7 @@ def _process_pending_confirms(self: Validator) -> None:
                 miner_dest_address=item.miner_dest_address,
                 rate=item.rate_str,
             )
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.success(
                 f'PendingConfirm [{swap_label} {miner_short}]: '
                 f'confirmed! voted initiate (tao={item.tao_amount / 1e9:.4f})'
@@ -379,7 +379,7 @@ def _process_pending_confirms(self: Validator) -> None:
                 # Contract rejected — in practice this means another validator
                 # already reached initiate quorum, so the entry is no longer
                 # actionable. Drop it.
-                self.pending_confirms.remove(item.miner_hotkey)
+                self.state_store.remove(item.miner_hotkey)
                 bt.logging.info(
                     f'PendingConfirm [{swap_label} {miner_short}]: contract rejected (likely already initiated)'
                 )
@@ -525,12 +525,12 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
-    success_stats = self.rate_state_store.get_all_time_success_rates()
+    success_stats = self.state_store.get_all_time_success_rates()
     min_collateral = int(getattr(self, '_min_collateral_rao', 0) or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         crown_blocks = _replay_crown_time(
-            store=self.rate_state_store,
+            store=self.state_store,
             from_chain=from_chain,
             to_chain=to_chain,
             window_start=window_start,
@@ -574,7 +574,7 @@ def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
 
 
 def _replay_crown_time(
-    store: RateStateStore,
+    store: ValidatorStateStore,
     from_chain: str,
     to_chain: str,
     window_start: int,

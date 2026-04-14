@@ -12,7 +12,7 @@ from allways.validator.forward import (
     _success_rate,
     calculate_miner_rewards,
 )
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 
 POOL_TAO_BTC = 0.04
 POOL_BTC_TAO = 0.04
@@ -25,11 +25,11 @@ def _make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
 
 
 def _make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
-    store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     return SimpleNamespace(
         block=block,
         metagraph=_make_metagraph(hotkeys),
-        rate_state_store=store,
+        state_store=store,
         _min_collateral_rao=MIN_COLLATERAL,
     )
 
@@ -78,7 +78,7 @@ class TestCrownHoldersHelper:
 
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
-        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         # Rate + collateral set before window_start = 0 via direct SQL to sidestep throttle.
         conn = store._require_connection()
         conn.execute(
@@ -104,7 +104,7 @@ class TestReplayCrownTime:
         store.close()
 
     def test_two_miners_alternate_rate_leadership(self, tmp_path: Path):
-        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         conn = store._require_connection()
         # Initial state — both miners have collateral and rates, A is worse to start.
         for row in (
@@ -138,7 +138,7 @@ class TestReplayCrownTime:
         store.close()
 
     def test_tie_splits_credit_evenly(self, tmp_path: Path):
-        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         conn = store._require_connection()
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
@@ -164,7 +164,7 @@ class TestReplayCrownTime:
         store.close()
 
     def test_collateral_drop_mid_window_forfeits_remaining_interval(self, tmp_path: Path):
-        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         conn = store._require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -195,7 +195,7 @@ class TestReplayCrownTime:
 
     def test_window_start_state_reconstruction_from_pre_window_events(self, tmp_path: Path):
         """A miner posted before window_start and never updated — replay reads initial state."""
-        store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         conn = store._require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -232,12 +232,12 @@ class TestCalculateMinerRewards:
         assert rewards[RECYCLE_UID] == 1.0
         assert rewards[0] == 0.0  # hk_a
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_single_miner_full_pool_with_perfect_success(self, tmp_path: Path):
         hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
         v = _make_validator(tmp_path, hotkeys=hotkeys)
-        conn = v.rate_state_store._require_connection()
+        conn = v.state_store._require_connection()
         # Post a rate in both directions with collateral, pre-window
         for direction in (('tao', 'btc'), ('btc', 'tao')):
             conn.execute(
@@ -249,19 +249,19 @@ class TestCalculateMinerRewards:
             ('hk_a', MIN_COLLATERAL, 0),
         )
         # Perfect record: 1 completed, 0 timed_out → success_rate = 1.0 → 1^3 = 1.0
-        v.rate_state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
+        v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
         conn.commit()
 
         rewards, _ = calculate_miner_rewards(v)
 
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC + POOL_BTC_TAO, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_partial_success_reduces_reward_by_cube(self, tmp_path: Path):
         hotkeys = _pad_hotkeys_to_cover_recycle(['hk_a'])
         v = _make_validator(tmp_path, hotkeys=hotkeys)
-        conn = v.rate_state_store._require_connection()
+        conn = v.state_store._require_connection()
         # Rate + collateral pre-window, one direction only
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -273,9 +273,9 @@ class TestCalculateMinerRewards:
         )
         # 8 completed, 2 timed_out → success 0.8 → 0.8^3 = 0.512
         for i in range(8):
-            v.rate_state_store.insert_swap_outcome(i + 1, 'hk_a', True, 100 + i)
+            v.state_store.insert_swap_outcome(i + 1, 'hk_a', True, 100 + i)
         for i in range(2):
-            v.rate_state_store.insert_swap_outcome(100 + i, 'hk_a', False, 200 + i)
+            v.state_store.insert_swap_outcome(100 + i, 'hk_a', False, 200 + i)
         conn.commit()
 
         rewards, _ = calculate_miner_rewards(v)
@@ -284,13 +284,13 @@ class TestCalculateMinerRewards:
         np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
         # Remainder recycles
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_dereg_mid_window_forfeits_credit(self, tmp_path: Path):
         # hk_a was the best rate miner but is no longer in the metagraph
         hotkeys = _pad_hotkeys_to_cover_recycle(['hk_b'])
         v = _make_validator(tmp_path, hotkeys=hotkeys)
-        conn = v.rate_state_store._require_connection()
+        conn = v.state_store._require_connection()
         for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -306,7 +306,7 @@ class TestCalculateMinerRewards:
 
         # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
         # Metagraph smaller than RECYCLE_UID — fallback to uid 0
@@ -317,11 +317,11 @@ class TestCalculateMinerRewards:
 
         assert rewards[0] == 1.0
         assert len(rewards) == 2
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_empty_metagraph_returns_empty(self, tmp_path: Path):
         v = _make_validator(tmp_path, hotkeys=[])
         rewards, uids = calculate_miner_rewards(v)
         assert rewards.size == 0
         assert uids == set()
-        v.rate_state_store.close()
+        v.state_store.close()

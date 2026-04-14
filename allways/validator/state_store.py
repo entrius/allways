@@ -1,0 +1,442 @@
+"""Single SQLite-backed store for all validator-local state.
+
+Consolidates what used to be two files (``rate_state.db`` + ``pending_confirms.db``)
+into one ``state.db`` with a single connection, a single lock, and one class
+holding every table the validator owns:
+
+- ``pending_confirms`` — user swap confirmations awaiting tx confirmations;
+  written by axon handler thread, drained by forward loop thread.
+- ``rate_events`` — per-miner per-direction rate history used by the V1
+  crown-time scoring replay. Bounded by ``RATE_UPDATE_MIN_INTERVAL_BLOCKS``
+  throttle on insert and ``EVENT_RETENTION_BLOCKS`` on prune.
+- ``collateral_events`` — per-miner collateral history. One row per observed
+  change. Pruned alongside rate_events.
+- ``swap_outcomes`` — all-time credibility ledger keyed by ``swap_id``. Never
+  time-pruned; only removed when a hotkey deregisters. Read during scoring
+  to compute ``success_rate ** SUCCESS_EXPONENT``.
+
+Threading: one ``sqlite3.Connection`` opened with ``check_same_thread=False``
+behind a ``threading.Lock``. ``busy_timeout`` set before ``journal_mode=WAL``
+so concurrent openers wait on the init lock instead of erroring out.
+"""
+
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
+
+
+@dataclass
+class PendingConfirm:
+    """All data needed to call ``vote_initiate`` once tx confirmations are met."""
+
+    miner_hotkey: str
+    source_tx_hash: str
+    source_chain: str
+    dest_chain: str
+    source_address: str
+    dest_address: str
+    tao_amount: int
+    source_amount: int
+    dest_amount: int
+    miner_deposit_address: str
+    miner_dest_address: str
+    rate_str: str
+    reserved_until: int
+    queued_at: float = field(default_factory=time.time)
+
+
+class ValidatorStateStore:
+    """Single-connection SQLite store owning every validator-local table."""
+
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        current_block_fn: Optional[Callable[[], int]] = None,
+    ):
+        self._db_path = Path(db_path or Path.home() / '.allways' / 'validator' / 'state.db')
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = sqlite3.connect(self._db_path, check_same_thread=False)
+        # busy_timeout must be set BEFORE journal_mode: setting WAL mode takes a
+        # brief exclusive lock that a concurrent opener will otherwise hit as an
+        # immediate "database is locked" error (dev env runs two validators
+        # against the same SQLite file).
+        self._conn.execute('PRAGMA busy_timeout=5000')
+        self._conn.execute('PRAGMA journal_mode=WAL')
+        self._conn.row_factory = sqlite3.Row
+        self._current_block_fn = current_block_fn
+        self._init_db()
+
+    # ─── pending_confirms ───────────────────────────────────────────────
+
+    def enqueue(self, item: PendingConfirm) -> None:
+        """Add or replace a pending confirm. Keyed by ``miner_hotkey``."""
+        with self._lock:
+            conn = self._require_connection()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pending_confirms (
+                    miner_hotkey, source_tx_hash, source_chain, dest_chain,
+                    source_address, dest_address, tao_amount, source_amount,
+                    dest_amount, miner_deposit_address, miner_dest_address,
+                    rate_str, reserved_until, queued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.miner_hotkey,
+                    item.source_tx_hash,
+                    item.source_chain,
+                    item.dest_chain,
+                    item.source_address,
+                    item.dest_address,
+                    item.tao_amount,
+                    item.source_amount,
+                    item.dest_amount,
+                    item.miner_deposit_address,
+                    item.miner_dest_address,
+                    item.rate_str,
+                    item.reserved_until,
+                    item.queued_at,
+                ),
+            )
+            conn.commit()
+
+    def get_all(self) -> List[PendingConfirm]:
+        """Return a snapshot of all pending items, oldest first."""
+        with self._lock:
+            conn = self._require_connection()
+            self._purge_expired(conn)
+            rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
+        return [self._row_to_pending(row) for row in rows]
+
+    def remove(self, miner_hotkey: str) -> Optional[PendingConfirm]:
+        """Remove and return a specific entry."""
+        with self._lock:
+            conn = self._require_connection()
+            row = conn.execute(
+                'SELECT * FROM pending_confirms WHERE miner_hotkey = ?',
+                (miner_hotkey,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute('DELETE FROM pending_confirms WHERE miner_hotkey = ?', (miner_hotkey,))
+            conn.commit()
+        return self._row_to_pending(row)
+
+    def has(self, miner_hotkey: str) -> bool:
+        with self._lock:
+            conn = self._require_connection()
+            self._purge_expired(conn)
+            row = conn.execute(
+                'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
+                (miner_hotkey,),
+            ).fetchone()
+        return row is not None
+
+    def pending_size(self) -> int:
+        with self._lock:
+            conn = self._require_connection()
+            self._purge_expired(conn)
+            count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
+            return int(count)
+
+    def _purge_expired(self, conn: sqlite3.Connection) -> None:
+        if self._current_block_fn is None:
+            return
+        current_block = self._current_block_fn()
+        conn.execute('DELETE FROM pending_confirms WHERE reserved_until < ?', (current_block,))
+        conn.commit()
+
+    @staticmethod
+    def _row_to_pending(row: sqlite3.Row) -> PendingConfirm:
+        return PendingConfirm(
+            miner_hotkey=row['miner_hotkey'],
+            source_tx_hash=row['source_tx_hash'],
+            source_chain=row['source_chain'],
+            dest_chain=row['dest_chain'],
+            source_address=row['source_address'],
+            dest_address=row['dest_address'],
+            tao_amount=row['tao_amount'],
+            source_amount=row['source_amount'],
+            dest_amount=row['dest_amount'],
+            miner_deposit_address=row['miner_deposit_address'],
+            miner_dest_address=row['miner_dest_address'],
+            rate_str=row['rate_str'],
+            reserved_until=row['reserved_until'],
+            queued_at=row['queued_at'],
+        )
+
+    # ─── rate_events ────────────────────────────────────────────────────
+
+    def insert_rate_event(
+        self,
+        hotkey: str,
+        from_chain: str,
+        to_chain: str,
+        rate: float,
+        block: int,
+    ) -> bool:
+        """Insert a rate event if throttle + change conditions pass."""
+        with self._lock:
+            conn = self._require_connection()
+            row = conn.execute(
+                """
+                SELECT rate, block FROM rate_events
+                WHERE hotkey = ? AND from_chain = ? AND to_chain = ?
+                ORDER BY block DESC, id DESC
+                LIMIT 1
+                """,
+                (hotkey, from_chain, to_chain),
+            ).fetchone()
+            if row is not None:
+                if block - row['block'] < RATE_UPDATE_MIN_INTERVAL_BLOCKS:
+                    return False
+                if row['rate'] == rate:
+                    return False
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hotkey, from_chain, to_chain, rate, block),
+            )
+            conn.commit()
+            return True
+
+    def get_latest_rate_before(
+        self,
+        hotkey: str,
+        from_chain: str,
+        to_chain: str,
+        block: int,
+    ) -> Optional[Tuple[float, int]]:
+        """Most recent rate for ``hotkey``+direction at or before ``block``."""
+        with self._lock:
+            conn = self._require_connection()
+            row = conn.execute(
+                """
+                SELECT rate, block FROM rate_events
+                WHERE hotkey = ? AND from_chain = ? AND to_chain = ? AND block <= ?
+                ORDER BY block DESC, id DESC
+                LIMIT 1
+                """,
+                (hotkey, from_chain, to_chain, block),
+            ).fetchone()
+        if row is None:
+            return None
+        return row['rate'], row['block']
+
+    def get_rate_events_in_range(
+        self,
+        from_chain: str,
+        to_chain: str,
+        start_block: int,
+        end_block: int,
+    ) -> List[dict]:
+        """Rate events in ``(start_block, end_block]`` for a direction, oldest first."""
+        with self._lock:
+            conn = self._require_connection()
+            rows = conn.execute(
+                """
+                SELECT id, hotkey, rate, block FROM rate_events
+                WHERE from_chain = ? AND to_chain = ? AND block > ? AND block <= ?
+                ORDER BY block ASC, id ASC
+                """,
+                (from_chain, to_chain, start_block, end_block),
+            ).fetchall()
+        return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
+
+    # ─── collateral_events ──────────────────────────────────────────────
+
+    def insert_collateral_event(self, hotkey: str, collateral_rao: int, block: int) -> bool:
+        """Insert a collateral event if the value changed since the last row."""
+        with self._lock:
+            conn = self._require_connection()
+            row = conn.execute(
+                """
+                SELECT collateral_rao FROM collateral_events
+                WHERE hotkey = ?
+                ORDER BY block DESC, id DESC
+                LIMIT 1
+                """,
+                (hotkey,),
+            ).fetchone()
+            if row is not None and row['collateral_rao'] == collateral_rao:
+                return False
+            conn.execute(
+                'INSERT INTO collateral_events (hotkey, collateral_rao, block) VALUES (?, ?, ?)',
+                (hotkey, collateral_rao, block),
+            )
+            conn.commit()
+            return True
+
+    def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
+        """Most recent collateral for ``hotkey`` at or before ``block``."""
+        with self._lock:
+            conn = self._require_connection()
+            row = conn.execute(
+                """
+                SELECT collateral_rao, block FROM collateral_events
+                WHERE hotkey = ? AND block <= ?
+                ORDER BY block DESC, id DESC
+                LIMIT 1
+                """,
+                (hotkey, block),
+            ).fetchone()
+        if row is None:
+            return None
+        return row['collateral_rao'], row['block']
+
+    def get_collateral_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
+        """Collateral events in ``(start_block, end_block]``, oldest first."""
+        with self._lock:
+            conn = self._require_connection()
+            rows = conn.execute(
+                """
+                SELECT id, hotkey, collateral_rao, block FROM collateral_events
+                WHERE block > ? AND block <= ?
+                ORDER BY block ASC, id ASC
+                """,
+                (start_block, end_block),
+            ).fetchall()
+        return [
+            {
+                'id': r['id'],
+                'hotkey': r['hotkey'],
+                'collateral_rao': r['collateral_rao'],
+                'block': r['block'],
+            }
+            for r in rows
+        ]
+
+    # ─── swap_outcomes ──────────────────────────────────────────────────
+
+    def insert_swap_outcome(
+        self,
+        swap_id: int,
+        miner_hotkey: str,
+        completed: bool,
+        resolved_block: int,
+    ) -> None:
+        """Insert or replace a swap outcome row. Idempotent on ``swap_id``."""
+        with self._lock:
+            conn = self._require_connection()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block)
+                VALUES (?, ?, ?, ?)
+                """,
+                (swap_id, miner_hotkey, 1 if completed else 0, resolved_block),
+            )
+            conn.commit()
+
+    def get_all_time_success_rates(self) -> Dict[str, Tuple[int, int]]:
+        """Return ``{hotkey: (completed_count, timed_out_count)}`` over all outcomes."""
+        with self._lock:
+            conn = self._require_connection()
+            rows = conn.execute(
+                """
+                SELECT miner_hotkey,
+                       SUM(completed) AS completed,
+                       SUM(1 - completed) AS timed_out
+                FROM swap_outcomes
+                GROUP BY miner_hotkey
+                """
+            ).fetchall()
+        return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
+
+    # ─── cross-table maintenance ────────────────────────────────────────
+
+    def delete_hotkey(self, hotkey: str) -> None:
+        """Dereg purge: remove the hotkey from rate/collateral/outcomes tables."""
+        with self._lock:
+            conn = self._require_connection()
+            conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
+            conn.execute('DELETE FROM collateral_events WHERE hotkey = ?', (hotkey,))
+            conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
+            conn.commit()
+
+    def prune_events_older_than(self, cutoff_block: int) -> None:
+        """Delete rate/collateral events older than ``cutoff_block``.
+
+        Never touches ``swap_outcomes`` or ``pending_confirms`` — those have
+        their own lifetimes.
+        """
+        with self._lock:
+            conn = self._require_connection()
+            conn.execute('DELETE FROM rate_events WHERE block < ?', (cutoff_block,))
+            conn.execute('DELETE FROM collateral_events WHERE block < ?', (cutoff_block,))
+            conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            raise RuntimeError('ValidatorStateStore is closed')
+        return self._conn
+
+    def _init_db(self) -> None:
+        with self._lock:
+            conn = self._require_connection()
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS pending_confirms (
+                    miner_hotkey          TEXT PRIMARY KEY,
+                    source_tx_hash        TEXT NOT NULL,
+                    source_chain          TEXT NOT NULL,
+                    dest_chain            TEXT NOT NULL,
+                    source_address        TEXT NOT NULL,
+                    dest_address          TEXT NOT NULL,
+                    tao_amount            INTEGER NOT NULL,
+                    source_amount         INTEGER NOT NULL,
+                    dest_amount           INTEGER NOT NULL,
+                    miner_deposit_address TEXT NOT NULL,
+                    miner_dest_address    TEXT NOT NULL,
+                    rate_str              TEXT NOT NULL,
+                    reserved_until        INTEGER NOT NULL,
+                    queued_at             REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS rate_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hotkey      TEXT NOT NULL,
+                    from_chain  TEXT NOT NULL,
+                    to_chain    TEXT NOT NULL,
+                    rate        REAL NOT NULL,
+                    block       INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_rate_events_block
+                    ON rate_events(block);
+                CREATE INDEX IF NOT EXISTS idx_rate_events_dir_block
+                    ON rate_events(from_chain, to_chain, block);
+                CREATE INDEX IF NOT EXISTS idx_rate_events_hotkey
+                    ON rate_events(hotkey);
+
+                CREATE TABLE IF NOT EXISTS collateral_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hotkey          TEXT NOT NULL,
+                    collateral_rao  INTEGER NOT NULL,
+                    block           INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_collateral_events_block
+                    ON collateral_events(block);
+                CREATE INDEX IF NOT EXISTS idx_collateral_events_hotkey_block
+                    ON collateral_events(hotkey, block);
+
+                CREATE TABLE IF NOT EXISTS swap_outcomes (
+                    swap_id         INTEGER PRIMARY KEY,
+                    miner_hotkey    TEXT NOT NULL,
+                    completed       INTEGER NOT NULL,
+                    resolved_block  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
+                    ON swap_outcomes(miner_hotkey);
+                """
+            )
+            conn.commit()

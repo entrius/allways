@@ -36,8 +36,7 @@ from allways.validator.axon_handlers import (
 )
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.forward import forward
-from allways.validator.pending_confirms import PendingConfirmQueue
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
@@ -63,9 +62,12 @@ class Validator(BaseValidatorNeuron):
         timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
-        # V1 crown-time scoring state. Must be created before SwapTracker so the
-        # tracker can persist swap outcomes into the credibility ledger.
-        self.rate_state_store = RateStateStore()
+        # Single store owning every validator-local table. Must be created
+        # before SwapTracker so the tracker can persist swap outcomes into
+        # the credibility ledger, and before the axon handler wiring so the
+        # handler thread can enqueue pending confirms. Exposes current block
+        # so pending_confirms can purge expired reservations lazily on read.
+        self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
         self._last_known_rates: dict[tuple[str, str, str], float] = {}
         self._last_known_collaterals: dict[str, int] = {}
         self._last_commitment_poll_block: int = 0
@@ -90,7 +92,7 @@ class Validator(BaseValidatorNeuron):
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
-            rate_state_store=self.rate_state_store,
+            state_store=self.state_store,
         )
         self.swap_tracker.initialize(self.block)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
@@ -107,10 +109,6 @@ class Validator(BaseValidatorNeuron):
             contract_client=self.contract_client,
             wallet=self.wallet,
         )
-
-        # Pending confirmation queue (axon handler thread → forward loop thread)
-        # Exposes current block so the queue can purge expired reservations on read.
-        self.pending_confirms = PendingConfirmQueue(current_block_fn=lambda: self.block)
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
@@ -150,8 +148,7 @@ class Validator(BaseValidatorNeuron):
         try:
             super().__exit__(exc_type, exc_value, traceback)
         finally:
-            self.pending_confirms.close()
-            self.rate_state_store.close()
+            self.state_store.close()
 
 
 # Main entry point

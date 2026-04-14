@@ -4,14 +4,14 @@ from pathlib import Path
 import pytest
 
 from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 
 
-def _make_store(tmp_path: Path) -> RateStateStore:
-    return RateStateStore(db_path=tmp_path / 'rate_state.db')
+def _make_store(tmp_path: Path) -> ValidatorStateStore:
+    return ValidatorStateStore(db_path=tmp_path / 'state.db')
 
 
-class TestRateStateStoreSchema:
+class TestValidatorStateStoreSchema:
     def test_init_creates_all_tables_and_indexes(self, tmp_path: Path):
         store = _make_store(tmp_path)
         conn = store._require_connection()

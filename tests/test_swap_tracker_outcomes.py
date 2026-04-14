@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
 
@@ -28,12 +28,12 @@ def _make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 50
 
 
 def _make_tracker(tmp_path: Path) -> SwapTracker:
-    store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     client = MagicMock()
     tracker = SwapTracker(
         client=client,
         fulfillment_timeout_blocks=30,
-        rate_state_store=store,
+        state_store=store,
     )
     return tracker
 
@@ -46,9 +46,9 @@ class TestResolveOutcome:
 
         tracker.resolve(swap_id=42, status=SwapStatus.COMPLETED, block=250)
 
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_miner': (1, 0)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
     def test_resolve_timed_out_writes_row_with_completed_zero(self, tmp_path: Path):
         tracker = _make_tracker(tmp_path)
@@ -57,9 +57,9 @@ class TestResolveOutcome:
 
         tracker.resolve(swap_id=43, status=SwapStatus.TIMED_OUT, block=260)
 
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_miner': (0, 1)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
     def test_resolve_idempotent_second_call_noop(self, tmp_path: Path):
         tracker = _make_tracker(tmp_path)
@@ -71,9 +71,9 @@ class TestResolveOutcome:
         tracker.resolve(swap_id=44, status=SwapStatus.TIMED_OUT, block=280)
 
         # First outcome wins; second call never wrote anything
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_miner': (1, 0)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
     def test_resolve_drops_swap_from_active(self, tmp_path: Path):
         """After resolve, the swap is gone from active tracking."""
@@ -84,7 +84,7 @@ class TestResolveOutcome:
         tracker.resolve(swap_id=45, status=SwapStatus.COMPLETED, block=290)
 
         assert 45 not in tracker.active
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
 
 class TestPollInnerRecordsOutcome:
@@ -104,9 +104,9 @@ class TestPollInnerRecordsOutcome:
 
         asyncio.run(tracker._poll_inner())
 
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_pollinner': (1, 0)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
     def test_contract_removed_past_timeout_infers_timed_out(self, tmp_path: Path):
         tracker = _make_tracker(tmp_path)
@@ -120,9 +120,9 @@ class TestPollInnerRecordsOutcome:
 
         asyncio.run(tracker._poll_inner())
 
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_late': (0, 1)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()
 
     def test_contract_returns_terminal_state_writes_outcome(self, tmp_path: Path):
         tracker = _make_tracker(tmp_path)
@@ -138,6 +138,6 @@ class TestPollInnerRecordsOutcome:
 
         asyncio.run(tracker._poll_inner())
 
-        rates = tracker.rate_state_store.get_all_time_success_rates()
+        rates = tracker.state_store.get_all_time_success_rates()
         assert rates == {'hk_terminal': (1, 0)}
-        tracker.rate_state_store.close()
+        tracker.state_store.close()

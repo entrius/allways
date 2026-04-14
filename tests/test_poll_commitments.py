@@ -10,7 +10,7 @@ from allways.constants import (
     RATE_UPDATE_MIN_INTERVAL_BLOCKS,
 )
 from allways.validator.forward import _poll_commitments, _refresh_min_collateral
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 
 
 def _make_pair(hotkey: str, rate: float, counter_rate: float, source='tao', dest='btc') -> MinerPair:
@@ -30,7 +30,7 @@ def _make_pair(hotkey: str, rate: float, counter_rate: float, source='tao', dest
 
 def _make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
     """Construct a validator stub with the fields used by _poll_commitments."""
-    store = RateStateStore(db_path=tmp_path / 'rate_state.db')
+    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     metagraph = SimpleNamespace(hotkeys=list(hotkeys or ['hk_a', 'hk_b']))
     config = SimpleNamespace(netuid=2)
     return SimpleNamespace(
@@ -38,7 +38,7 @@ def _make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
         subtensor=MagicMock(),
         config=config,
         metagraph=metagraph,
-        rate_state_store=store,
+        state_store=store,
         contract_client=MagicMock(),
         _last_known_rates={},
         _last_commitment_poll_block=0,
@@ -59,8 +59,8 @@ class TestPollCommitmentsBasic:
             _poll_commitments(v)
 
         # 4 rate_events: 2 miners * 2 directions
-        tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 2000)
-        btc_tao = v.rate_state_store.get_rate_events_in_range('btc', 'tao', 0, 2000)
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 2000)
+        btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 2000)
         assert len(tao_btc) == 2
         assert len(btc_tao) == 2
         assert v._last_commitment_poll_block == v.block
@@ -70,7 +70,7 @@ class TestPollCommitmentsBasic:
             ('hk_b', 'tao', 'btc'): 0.00016,
             ('hk_b', 'btc', 'tao'): 6400.0,
         }
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_poll_within_interval_is_noop(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -81,7 +81,7 @@ class TestPollCommitmentsBasic:
             _poll_commitments(v)
 
         mock_read.assert_not_called()
-        v.rate_state_store.close()
+        v.state_store.close()
 
 
 class TestPollCommitmentsChanges:
@@ -96,9 +96,9 @@ class TestPollCommitmentsChanges:
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
             _poll_commitments(v)
 
-        tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         assert len(tao_btc) == 1
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_rate_change_inserts_new_event_past_throttle(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -113,12 +113,12 @@ class TestPollCommitmentsChanges:
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs_v2):
             _poll_commitments(v)
 
-        tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
-        btc_tao = v.rate_state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
         assert [e['rate'] for e in tao_btc] == [0.00015, 0.00020]
         # counter rate unchanged → still only one event
         assert [e['rate'] for e in btc_tao] == [6500.0]
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_rate_change_blocked_by_throttle_still_advances_cache(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -134,12 +134,12 @@ class TestPollCommitmentsChanges:
             _poll_commitments(v)
 
         # Throttle blocked the store insert — only the first event lands.
-        tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         assert [e['rate'] for e in tao_btc] == [0.00015]
         # But the in-memory cache advances to the observed value so the next
         # poll doesn't waste an insert attempt on the same throttled rate.
         assert v._last_known_rates[('hk_a', 'tao', 'btc')] == 0.00020
-        v.rate_state_store.close()
+        v.state_store.close()
 
 
 class TestPollCommitmentsZeroRate:
@@ -150,13 +150,13 @@ class TestPollCommitmentsZeroRate:
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
             _poll_commitments(v)
 
-        tao_btc = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
-        btc_tao = v.rate_state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
         assert len(tao_btc) == 1
         assert len(btc_tao) == 0
         assert ('hk_a', 'tao', 'btc') in v._last_known_rates
         assert ('hk_a', 'btc', 'tao') not in v._last_known_rates
-        v.rate_state_store.close()
+        v.state_store.close()
 
 
 class TestPollCommitmentsDereg:
@@ -176,10 +176,10 @@ class TestPollCommitmentsDereg:
         with patch('allways.validator.forward.read_miner_commitments', return_value=pairs):
             _poll_commitments(v)
 
-        assert v.rate_state_store.get_latest_rate_before('hk_b', 'tao', 'btc', block=10_000) is None
-        assert v.rate_state_store.get_latest_rate_before('hk_a', 'tao', 'btc', block=10_000) is not None
+        assert v.state_store.get_latest_rate_before('hk_b', 'tao', 'btc', block=10_000) is None
+        assert v.state_store.get_latest_rate_before('hk_a', 'tao', 'btc', block=10_000) is not None
         assert all(k[0] != 'hk_b' for k in v._last_known_rates.keys())
-        v.rate_state_store.close()
+        v.state_store.close()
 
 
 class TestPollCommitmentsErrors:
@@ -193,9 +193,9 @@ class TestPollCommitmentsErrors:
             _poll_commitments(v)
 
         # No events, but the poll block WAS advanced so we don't hot-retry
-        assert v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) == []
+        assert v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) == []
         assert v._last_commitment_poll_block == v.block
-        v.rate_state_store.close()
+        v.state_store.close()
 
 
 class TestPollCommitmentsPruning:
@@ -206,7 +206,7 @@ class TestPollCommitmentsPruning:
         ancient_block = 1  # well before cutoff (v.block - EVENT_RETENTION_BLOCKS = 1000)
         recent_block = v.block - 100  # safely inside retention
 
-        conn = v.rate_state_store._require_connection()
+        conn = v.state_store._require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_ancient', 'tao', 'btc', 0.00010, ancient_block),
@@ -224,14 +224,14 @@ class TestPollCommitmentsPruning:
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
             _poll_commitments(v)
 
-        rate_events = v.rate_state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
+        rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
         surviving_blocks = {e['block'] for e in rate_events}
         assert ancient_block not in surviving_blocks
         assert recent_block in surviving_blocks
 
         # Collateral event at ancient_block should also be gone.
-        assert v.rate_state_store.get_latest_collateral_before('hk_ancient', block=v.block) is None
-        v.rate_state_store.close()
+        assert v.state_store.get_latest_collateral_before('hk_ancient', block=v.block) is None
+        v.state_store.close()
 
 
 class TestRefreshMinCollateral:
@@ -245,7 +245,7 @@ class TestRefreshMinCollateral:
 
         v.contract_client.get_min_collateral.assert_not_called()
         assert v._min_collateral_rao == 500_000_000
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_after_interval_updates_cached_value(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -257,7 +257,7 @@ class TestRefreshMinCollateral:
 
         assert v._min_collateral_rao == 400_000_000
         assert v._last_min_collateral_refresh_block == v.block
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_exception_preserves_cache_but_advances_refresh_block(self, tmp_path: Path):
         """On failure we keep the cached value but still advance the refresh
@@ -272,7 +272,7 @@ class TestRefreshMinCollateral:
 
         assert v._min_collateral_rao == 500_000_000  # cache preserved
         assert v._last_min_collateral_refresh_block == v.block  # cadence advanced
-        v.rate_state_store.close()
+        v.state_store.close()
 
     def test_unchanged_value_still_advances_refresh_block(self, tmp_path: Path):
         v = _make_validator(tmp_path)
@@ -284,4 +284,4 @@ class TestRefreshMinCollateral:
 
         assert v._min_collateral_rao == 500_000_000
         assert v._last_min_collateral_refresh_block == v.block
-        v.rate_state_store.close()
+        v.state_store.close()
