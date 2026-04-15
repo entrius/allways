@@ -4,7 +4,7 @@ import struct
 from unittest.mock import MagicMock
 
 from allways.chain_providers.subtensor import SubtensorProvider
-from allways.contract_client import AllwaysContractClient
+from allways.contract_client import AllwaysContractClient, compact_encode_len
 
 
 def make_client():
@@ -125,33 +125,33 @@ class TestEncodeVecU64:
 
 class TestCompactEncodeLen:
     def test_single_byte_mode_zero(self):
-        assert AllwaysContractClient.compact_encode_len(0) == bytes([0])
+        assert compact_encode_len(0) == bytes([0])
 
     def test_single_byte_mode_63(self):
         # 63 << 2 = 252 = 0xFC
-        assert AllwaysContractClient.compact_encode_len(63) == bytes([252])
+        assert compact_encode_len(63) == bytes([252])
 
     def test_two_byte_mode_64(self):
-        result = AllwaysContractClient.compact_encode_len(64)
+        result = compact_encode_len(64)
         assert len(result) == 2
         # Decode back: (byte0 | byte1<<8) >> 2 = 64
         val = (result[0] | (result[1] << 8)) >> 2
         assert val == 64
 
     def test_two_byte_mode_16383(self):
-        result = AllwaysContractClient.compact_encode_len(16383)
+        result = compact_encode_len(16383)
         assert len(result) == 2
         val = (result[0] | (result[1] << 8)) >> 2
         assert val == 16383
 
     def test_four_byte_mode_16384(self):
-        result = AllwaysContractClient.compact_encode_len(16384)
+        result = compact_encode_len(16384)
         assert len(result) == 4
         val = (result[0] | (result[1] << 8) | (result[2] << 16) | (result[3] << 24)) >> 2
         assert val == 16384
 
     def test_four_byte_mode_large(self):
-        result = AllwaysContractClient.compact_encode_len(100000)
+        result = compact_encode_len(100000)
         assert len(result) == 4
         val = (result[0] | (result[1] << 8) | (result[2] << 16) | (result[3] << 24)) >> 2
         assert val == 100000

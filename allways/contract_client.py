@@ -477,7 +477,7 @@ class AllwaysContractClient:
             return bytes(value)[:32].ljust(32, b'\x00')
         elif type_tag == 'bytes':
             data = value if isinstance(value, (bytes, bytearray)) else value.encode('utf-8')
-            return self.compact_encode_len(len(data)) + data
+            return compact_encode_len(len(data)) + data
         elif type_tag == 'u32':
             return struct.pack('<I', int(value))
         elif type_tag == 'u64':
@@ -493,16 +493,14 @@ class AllwaysContractClient:
             return bytes(value)
         elif type_tag == 'str':
             data = value.encode('utf-8') if isinstance(value, str) else value
-            return self.compact_encode_len(len(data)) + data
+            return compact_encode_len(len(data)) + data
         elif type_tag == 'vec_u64':
             items = list(value)
-            encoded = self.compact_encode_len(len(items))
+            encoded = compact_encode_len(len(items))
             for item in items:
                 encoded += struct.pack('<Q', int(item))
             return encoded
         raise ValueError(f'Unsupported type: {type_tag}')
-
-    compact_encode_len = staticmethod(compact_encode_len)
 
     def extract_u32(self, data: bytes) -> Optional[int]:
         if not data or len(data) < 4:

@@ -3,19 +3,17 @@ NETUID_FINNEY = 7
 NETUID_LOCAL = 2
 
 # ─── Contract ──────────────────────────────────────────────
-# testnet
-# CONTRACT_ADDRESS = '5GhkGErFdX5yYfwf6HJnAAXphsPJubPxrjUMne3sjM95oi1h'
-
-# mainnet
+# Default mainnet address; override via CONTRACT_ADDRESS env var for testnets
+# or alternate deployments.
 CONTRACT_ADDRESS = '5FTkUEhRmLPsALn4b7bJpVFhDQqohGbc6khnmA2aiYFLMZYP'
 
 # ─── Polling ──────────────────────────────────────────────
-MINER_POLL_INTERVAL_SECONDS = 12  # Match Bittensor block time for lowest latency
-VALIDATOR_POLL_INTERVAL_SECONDS = 12  # Match Bittensor block time for lowest latency
+# Bittensor base neuron loop heartbeat — not the scoring / forward cadence.
+MINER_POLL_INTERVAL_SECONDS = 12
+VALIDATOR_POLL_INTERVAL_SECONDS = 12
 
 # ─── Commitment Format ────────────────────────────────────
 COMMITMENT_VERSION = 1
-COMMITMENT_REVEAL_BLOCKS = 360  # ~72 min at 12s/block
 
 # ─── Unit Conversions ────────────────────────────────────
 TAO_TO_RAO = 1_000_000_000  # 1 TAO = 10^9 rao
@@ -70,15 +68,15 @@ RESERVATION_COOLDOWN_MULTIPLIER = 2  # Exponential backoff: 150 → 300 → 600 
 MAX_RESERVATIONS_PER_ADDRESS = 1  # 1 active reservation per source address (validator-enforced)
 EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend reservation when this many blocks remain
 
+# ─── Protocol Fee ──────────────────────────────────────────
+# Hardcoded 1% protocol fee matching the smart contract's immutable
+# FEE_DIVISOR constant. No longer read from chain — both sides pin to 100.
+FEE_DIVISOR = 100
+
 # ─── Display Only (real values enforced on-chain by contract) ─────
 # For CLI display and fallback logic only. Actual values are managed
 # via `alw admin` commands and read from the contract at runtime.
-# Hardcoded protocol fee divisor matching the smart contract's immutable
-# FEE_DIVISOR constant. No longer read from chain — both sides pin to 100 (1%).
-FEE_DIVISOR = 100
-SWAP_FEE_PERCENT = 0.01  # display only — derived from FEE_DIVISOR
-MAX_FEE_PERCENT = 0.05  # contract enforces divisor >= 20 (max 5% fee)
-MIN_COLLATERAL_TAO = 0.1  # Must be > max swap amount
+MIN_COLLATERAL_TAO = 0.1  # Fallback when the contract min_collateral read fails
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min — `alw admin set-timeout`
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO — `alw admin set-min-swap`
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO   — `alw admin set-max-swap`
