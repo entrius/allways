@@ -7,8 +7,11 @@ Users don't have TAO wallets. This module provides:
 """
 
 from pathlib import Path
+from typing import List, Optional
 
 import bittensor as bt
+
+from allways.contract_client import AllwaysContractClient
 
 EPHEMERAL_WALLET_DIR = Path.home() / '.allways' / 'ephemeral_wallet'
 EPHEMERAL_WALLET_NAME = 'allways_ephemeral'
@@ -34,7 +37,11 @@ def get_ephemeral_wallet() -> bt.Wallet:
     return wallet
 
 
-def discover_validators(subtensor: bt.Subtensor, netuid: int, contract_client=None) -> list:
+def discover_validators(
+    subtensor: bt.Subtensor,
+    netuid: int,
+    contract_client: Optional[AllwaysContractClient] = None,
+) -> List[bt.AxonInfo]:
     """Discover validator axon endpoints from metagraph.
 
     Filters for UIDs with validator_permit=True and is_serving=True.
@@ -61,7 +68,12 @@ def discover_validators(subtensor: bt.Subtensor, netuid: int, contract_client=No
     return axons
 
 
-def broadcast_synapse(wallet: bt.Wallet, axons: list, synapse, timeout: float = 30.0) -> list:
+def broadcast_synapse(
+    wallet: bt.Wallet,
+    axons: List[bt.AxonInfo],
+    synapse: bt.Synapse,
+    timeout: float = 30.0,
+) -> list:
     """Broadcast a synapse to all validator axons via dendrite.
 
     Returns list of response synapses.

@@ -9,17 +9,21 @@ These are attached to the validator's axon via functools.partial
 to inject the validator context.
 """
 
-from typing import Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
 from Crypto.Hash import keccak
 from substrateinterface import Keypair
 
+from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.validator.state_store import PendingConfirm
+
+if TYPE_CHECKING:
+    from neurons.validator import Validator
 
 
 def keccak256(data: bytes) -> bytes:
@@ -117,7 +121,11 @@ def scale_encode_initiate_hash_input(
     )
 
 
-def resolve_swap_direction(commitment, synapse_from_chain: str, synapse_to_chain: str):
+def resolve_swap_direction(
+    commitment: MinerPair,
+    synapse_from_chain: str,
+    synapse_to_chain: str,
+) -> Optional[Tuple[str, str, str, str, float, str]]:
     """Resolve deposit/fulfillment addresses and rate from commitment and requested direction.
 
     Returns (from_chain, to_chain, deposit_addr, fulfillment_addr, rate, rate_str) or None.
@@ -133,7 +141,7 @@ def resolve_swap_direction(commitment, synapse_from_chain: str, synapse_to_chain
     return from_chain, to_chain, deposit_addr, fulfillment_addr, rate, rate_str
 
 
-def load_swap_commitment(validator, miner_hotkey: str):
+def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
     """Read miner commitment and validate chains differ. Returns commitment or None."""
     commitment = read_miner_commitment(
         subtensor=validator.axon_subtensor,
@@ -145,7 +153,7 @@ def load_swap_commitment(validator, miner_hotkey: str):
     return commitment
 
 
-def reject_synapse(synapse, reason: str, context: str = '') -> None:
+def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
     """Mark a synapse as rejected with a reason and debug log."""
     synapse.accepted = False
     synapse.rejection_reason = reason
@@ -159,7 +167,7 @@ def reject_synapse(synapse, reason: str, context: str = '') -> None:
 
 
 async def blacklist_miner_activate(
-    validator,
+    validator: 'Validator',
     synapse: MinerActivateSynapse,
 ) -> Tuple[bool, str]:
     """Reject synapses from unregistered hotkeys."""
@@ -172,7 +180,7 @@ async def blacklist_miner_activate(
 
 
 async def priority_miner_activate(
-    validator,
+    validator: 'Validator',
     synapse: MinerActivateSynapse,
 ) -> float:
     """Priority by stake — higher stake processed first."""
@@ -184,7 +192,7 @@ async def priority_miner_activate(
 
 
 async def handle_miner_activate(
-    validator,
+    validator: 'Validator',
     synapse: MinerActivateSynapse,
 ) -> MinerActivateSynapse:
     """Process miner activation: verify commitment + vote on contract."""
@@ -240,7 +248,7 @@ async def handle_miner_activate(
 
 
 async def blacklist_swap_reserve(
-    validator,
+    validator: 'Validator',
     synapse: SwapReserveSynapse,
 ) -> Tuple[bool, str]:
     """Pass-through — custom field checks happen in forward handler.
@@ -253,7 +261,7 @@ async def blacklist_swap_reserve(
 
 
 async def priority_swap_reserve(
-    validator,
+    validator: 'Validator',
     synapse: SwapReserveSynapse,
 ) -> float:
     """Flat priority for user requests."""
@@ -261,7 +269,7 @@ async def priority_swap_reserve(
 
 
 async def handle_swap_reserve(
-    validator,
+    validator: 'Validator',
     synapse: SwapReserveSynapse,
 ) -> SwapReserveSynapse:
     """Validate swap reservation request and vote on contract."""
@@ -402,7 +410,7 @@ async def handle_swap_reserve(
 
 
 async def blacklist_swap_confirm(
-    validator,
+    validator: 'Validator',
     synapse: SwapConfirmSynapse,
 ) -> Tuple[bool, str]:
     """Pass-through — custom field checks happen in forward handler.
@@ -413,7 +421,7 @@ async def blacklist_swap_confirm(
 
 
 async def priority_swap_confirm(
-    validator,
+    validator: 'Validator',
     synapse: SwapConfirmSynapse,
 ) -> float:
     """Flat priority for user requests."""
@@ -421,7 +429,7 @@ async def priority_swap_confirm(
 
 
 async def handle_swap_confirm(
-    validator,
+    validator: 'Validator',
     synapse: SwapConfirmSynapse,
 ) -> SwapConfirmSynapse:
     """Verify source transaction and vote to initiate swap."""

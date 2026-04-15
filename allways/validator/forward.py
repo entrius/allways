@@ -30,7 +30,8 @@ from allways.validator.axon_handlers import (
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator.event_watcher import ContractEventWatcher
+from allways.validator.state_store import PendingConfirm, ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
 if TYPE_CHECKING:
@@ -163,7 +164,13 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
 
 
-def try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
+def try_extend_reservation(
+    self: Validator,
+    item: PendingConfirm,
+    current_block: int,
+    swap_label: str,
+    miner_short: str,
+) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
     from substrateinterface import Keypair
 
@@ -522,7 +529,7 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
 
 def replay_crown_time_window(
     store: ValidatorStateStore,
-    event_watcher,
+    event_watcher: ContractEventWatcher,
     from_chain: str,
     to_chain: str,
     window_start: int,
