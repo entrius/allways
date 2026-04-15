@@ -112,9 +112,17 @@ class SwapTracker:
         fresh: Set[int] = set()
         new_ids = list(range(self.last_scanned_id + 1, next_id))
         if new_ids:
-            swaps = await asyncio.gather(*[asyncio.to_thread(self.client.get_swap, sid) for sid in new_ids])
-
-            for sid, swap in zip(new_ids, swaps):
+            # return_exceptions=True so a single flaky get_swap doesn't abort
+            # the whole discovery pass and kill the forward step.
+            swaps = await asyncio.gather(
+                *[asyncio.to_thread(self.client.get_swap, sid) for sid in new_ids],
+                return_exceptions=True,
+            )
+            for sid, result in zip(new_ids, swaps):
+                if isinstance(result, Exception):
+                    bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during discovery: {result}')
+                    continue
+                swap = result
                 if swap is None:
                     continue
                 if swap.status in ACTIVE_STATUSES:
@@ -130,12 +138,27 @@ class SwapTracker:
         # --- Monitoring phase: refresh active set ---
         stale_ids = [sid for sid in self.active if sid not in fresh]
         if not stale_ids:
+            self.prune_stale_voted_ids()
             return
 
-        swaps = await asyncio.gather(*[asyncio.to_thread(self.client.get_swap, sid) for sid in stale_ids])
+        swaps = await asyncio.gather(
+            *[asyncio.to_thread(self.client.get_swap, sid) for sid in stale_ids],
+            return_exceptions=True,
+        )
 
         resolved_ids: List[int] = []
-        for sid, swap in zip(stale_ids, swaps):
+        for sid, result in zip(stale_ids, swaps):
+            if isinstance(result, Exception):
+                bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during refresh: {result}')
+                # Treat a transient error like a null return — bump the retry
+                # counter, drop after NULL_SWAP_RETRY_LIMIT failures.
+                retries = self.null_retry_count.get(sid, 0) + 1
+                if retries >= NULL_SWAP_RETRY_LIMIT:
+                    resolved_ids.append(sid)
+                else:
+                    self.null_retry_count[sid] = retries
+                continue
+            swap = result
             if swap is None:
                 # Contract returned None. Either the swap resolved and was
                 # removed from contract storage, or an RPC flake. Retry a few
@@ -159,6 +182,20 @@ class SwapTracker:
 
         if resolved_ids:
             bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
+
+        self.prune_stale_voted_ids()
+
+    def prune_stale_voted_ids(self) -> None:
+        """Drop any voted_ids entries whose swap is no longer being tracked.
+
+        voted_ids is normally cleaned up alongside active.pop() in resolve()
+        and the refresh loop, but an exceptional path (e.g. active.pop raced
+        with a manual test fixture) can leave orphans. Cap the set to prevent
+        unbounded growth.
+        """
+        orphans = self.voted_ids - set(self.active.keys())
+        if orphans:
+            self.voted_ids -= orphans
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""
