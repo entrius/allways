@@ -25,12 +25,17 @@ from allways.validator.state_store import ValidatorStateStore
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
 
+# Well-known test SS58 — Alice from the substrate dev keyring. Used as
+# contract_address in fixtures so the decoder's address comparison doesn't
+# receive a garbage string that could bypass validation on future codepaths.
+TEST_CONTRACT_ADDRESS = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+
 
 def make_watcher(tmp_path: Path) -> ContractEventWatcher:
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     return ContractEventWatcher(
         substrate=MagicMock(),
-        contract_address='5contract',
+        contract_address=TEST_CONTRACT_ADDRESS,
         metadata_path=METADATA_PATH,
         state_store=store,
     )

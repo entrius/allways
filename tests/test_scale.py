@@ -8,7 +8,14 @@ from allways.contract_client import AllwaysContractClient, compact_encode_len
 
 
 def make_client():
-    """Create a contract client with mocked subtensor for encoding tests."""
+    """Create a contract client for isolated encoder/decoder tests.
+
+    Uses ``__new__`` to skip ``__init__`` because the real constructor
+    connects to subtensor for the initial metadata read. These tests only
+    need the encoder/decoder methods, so we instantiate bare and attach
+    a mocked ``subtensor.substrate`` for the few methods that call
+    ``ss58_decode`` / ``ss58_encode``.
+    """
     client = AllwaysContractClient.__new__(AllwaysContractClient)
     client.subtensor = MagicMock()
     client.subtensor.substrate = MagicMock()

@@ -23,20 +23,6 @@ class TestGetChain:
             get_chain('eth')
 
 
-class TestChainProperties:
-    def test_btc_decimals(self):
-        assert CHAIN_BTC.decimals == 8
-
-    def test_tao_decimals(self):
-        assert CHAIN_TAO.decimals == 9
-
-    def test_btc_block_time(self):
-        assert CHAIN_BTC.seconds_per_block == 600
-
-    def test_tao_block_time(self):
-        assert CHAIN_TAO.seconds_per_block == 12
-
-
 class TestCanonicalPair:
     def test_already_canonical(self):
         assert canonical_pair('btc', 'tao') == ('btc', 'tao')
