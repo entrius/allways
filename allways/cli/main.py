@@ -10,6 +10,8 @@ Usage:
     alw view                - View swaps, miners, rates
 """
 
+import os  # noqa: E402
+
 # Prevent bittensor from hijacking --help via its argparse config.
 # Must happen before any bittensor import.
 import sys as _sys
@@ -17,9 +19,28 @@ import sys as _sys
 _saved_argv = _sys.argv[:]
 _sys.argv = [_sys.argv[0]]
 
+# Stub heavy imports during shell completion
+if os.environ.get('_ALW_COMPLETE'):
+    from unittest.mock import MagicMock as _MagicMock
+
+    _mock = _MagicMock()
+    for _pkg in ['bittensor', 'substrateinterface']:
+        for _suffix in [
+            '',
+            '.core',
+            '.core.subtensor',
+            '.core.synapse',
+            '.utils',
+            '.utils.balance',
+            '.utils.ss58',
+            '.exceptions',
+        ]:
+            _sys.modules[_pkg + _suffix] = _mock
+
 import json  # noqa: E402
 
 import click  # noqa: E402
+from click.shell_completion import get_completion_class  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from rich.table import Table  # noqa: E402
 
@@ -146,6 +167,38 @@ def config_set(key: str, value: str):
         console.print(f'[green]Updated {key}:[/green] {old_value} -> {display}')
     else:
         console.print(f'[green]Set {key}:[/green] {display}')
+
+
+def _detect_shell():
+    """Detect the current shell from the SHELL environment variable"""
+    shell_path = os.environ.get('SHELL', '')
+    shell_name = os.path.basename(shell_path)
+    if shell_name in ('bash', 'zsh', 'fish'):
+        return shell_name
+    return None
+
+
+@cli.command('completion')
+@click.argument('shell', type=click.Choice(['bash', 'zsh', 'fish']), default=None, required=False)
+def completion(shell):
+    """Generate shell completion script
+
+    Install completions:
+        bash:  eval "$(alw completion bash)"
+        zsh:   eval "$(alw completion zsh)"
+        fish:  alw completion fish | source
+
+    If shell is omitted, auto-detects from the SHELL environment variable.
+    """
+    if shell is None:
+        shell = _detect_shell()
+        if shell is None:
+            raise click.UsageError('Cannot detect shell. Please specify one of: bash, zsh, fish')
+    cls = get_completion_class(shell)
+    if cls is None:
+        raise click.UsageError(f'Unsupported shell: {shell}')
+    comp = cls(cli, ctx_args={}, prog_name='alw', complete_var='_ALW_COMPLETE')
+    click.echo(comp.source())
 
 
 # Register config group
