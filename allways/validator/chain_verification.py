@@ -5,7 +5,7 @@ from typing import Dict, Optional
 
 import bittensor as bt
 
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.classes import Swap
 from allways.utils.rate import expected_swap_amounts
 
@@ -42,7 +42,13 @@ class SwapVerifier:
         block_hint: int = 0,
         expected_sender: str = '',
     ) -> bool:
-        """Verify a confirmed transaction on a specific chain."""
+        """Verify a confirmed transaction on a specific chain.
+
+        Defers tx lookup, amount, and sender checks to the provider's
+        ``verify_transaction`` so the defense lives in one place shared with
+        the miner and axon flows. Keeps the rate-limited confirmations debug
+        log here because it's specific to the validator polling loop.
+        """
         provider = self.providers.get(chain)
         if not provider:
             bt.logging.warning(f'Swap {swap.id}: no provider for chain {chain}')
@@ -58,28 +64,16 @@ class SwapVerifier:
                 expected_recipient=expected_recipient,
                 expected_amount=expected_amount,
                 block_hint=block_hint,
+                expected_sender=expected_sender or None,
             )
             if tx_info is None:
                 bt.logging.debug(
                     f'Swap {swap.id}: verify_transaction returned None on {chain} '
                     f'(tx={tx_hash[:16]}... block_hint={block_hint})'
                 )
-            elif not tx_info.confirmed:
-                log_key = f'{swap.id}:{chain}'
-                prev_confs = self.last_logged_confs.get(log_key)
-                if prev_confs != tx_info.confirmations:
-                    self.last_logged_confs[log_key] = tx_info.confirmations
-                    bt.logging.debug(
-                        f'Swap {swap.id}: tx found but not confirmed on {chain} '
-                        f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
-                        f'addr={expected_recipient[:16]}... expected={expected_amount})'
-                    )
-            if tx_info is None or not tx_info.confirmed:
                 return False
-            if expected_sender and tx_info.sender != expected_sender:
-                bt.logging.warning(
-                    f'Swap {swap.id}: sender mismatch on {chain} — expected {expected_sender}, got {tx_info.sender}'
-                )
+            if not tx_info.confirmed:
+                self._log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
                 return False
             return True
         except ProviderUnreachableError:
@@ -87,6 +81,26 @@ class SwapVerifier:
         except Exception as e:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False
+
+    def _log_confs_progress(
+        self,
+        swap_id: int,
+        chain: str,
+        tx_hash: str,
+        tx_info: TransactionInfo,
+        expected_recipient: str,
+        expected_amount: int,
+    ) -> None:
+        """Rate-limited debug log for confirmations progress on unconfirmed txs."""
+        log_key = f'{swap_id}:{chain}'
+        if self.last_logged_confs.get(log_key) == tx_info.confirmations:
+            return
+        self.last_logged_confs[log_key] = tx_info.confirmations
+        bt.logging.debug(
+            f'Swap {swap_id}: tx found but not confirmed on {chain} '
+            f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
+            f'addr={expected_recipient[:16]}... expected={expected_amount})'
+        )
 
     async def verify_miner_fulfillment(self, swap: Swap) -> bool:
         """Verify rate, to_amount, user send, and miner fulfillment.

@@ -76,9 +76,11 @@ class ChainProvider(ABC):
         - ``require_confirmed`` — if True, reject txs that don't have enough
           confirmations for the chain. Default False, because axon/pending-confirm
           flows want the partial TransactionInfo so they can queue and retry.
-        - ``expected_sender`` — if provided, reject txs whose sender doesn't match.
-          Tolerates empty sender from the provider (unparseable vin/extrinsic); the
-          stricter ``SwapVerifier`` path keeps its own inline check.
+        - ``expected_sender`` — if provided, reject txs whose sender doesn't
+          match. Strict: an empty/unparseable sender from the provider also
+          fails the check, since we can't prove the tx came from the reserved
+          address. Closing this gap prevents a "malformed-input evades the
+          defense" class of attack.
 
         Rejections are logged once in the base so observability for the defense
         is in one place instead of duplicated at every call site.
@@ -99,10 +101,10 @@ class ChainProvider(ABC):
             )
             return None
 
-        if expected_sender and tx_info.sender and tx_info.sender != expected_sender:
+        if expected_sender and tx_info.sender != expected_sender:
             bt.logging.warning(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
-                f'(expected {expected_sender}, got {tx_info.sender})'
+                f'(expected {expected_sender}, got {tx_info.sender!r})'
             )
             return None
 
