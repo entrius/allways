@@ -84,24 +84,22 @@ def clear_provider_caches(self: Validator) -> None:
 def poll_commitments(self: Validator) -> None:
     """Rate-side validator tick.
 
-    Three independent steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
+    Two steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
 
-    1. ``prune_aged_rate_events`` — trim history older than the retention
-       window so the SQLite tables stay bounded.
-    2. ``refresh_miner_rates`` — read all miner commitments from the local
-       subtensor and persist direction-level diffs.
-    3. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
+    1. ``refresh_miner_rates`` — read all miner commitments from the local
+       subtensor and persist direction-level diffs. This is the sampling rate
+       for the crown-time series, so it must stay on the hot path.
+    2. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
        metagraph since the last poll, both from the store and the in-memory
        cache.
 
-    Kept as a thin orchestrator so each concern can be tested and reasoned
-    about independently.
+    Event retention pruning lives in ``run_scoring_pass`` — it's bounded-growth
+    hygiene, not correctness, so the once-per-scoring-round cadence is enough.
     """
     if self.block - self.last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
         return
     self.last_commitment_poll_block = self.block
 
-    prune_aged_rate_events(self)
     refresh_miner_rates(self)
     purge_deregistered_hotkeys(self)
 
@@ -427,6 +425,7 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
 def run_scoring_pass(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
+        prune_aged_rate_events(self)
         rewards, miner_uids = calculate_miner_rewards(self)
         if len(miner_uids) > 0 and len(rewards) > 0:
             self.update_scores(rewards, miner_uids)

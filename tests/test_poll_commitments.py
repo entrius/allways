@@ -202,12 +202,16 @@ class TestPollCommitmentsErrors:
 
 
 class TestPollCommitmentsPruning:
-    def test_prune_removes_events_older_than_retention_window(self, tmp_path: Path):
+    def test_prune_runs_via_scoring_pass_not_commitment_poll(self, tmp_path: Path):
+        """Pruning moved out of the per-tick path and into the scoring round —
+        verify both parts of that contract: commitment polling does NOT prune,
+        and run_scoring_pass DOES."""
+        from allways.validator.forward import prune_aged_rate_events
+
         v = make_validator(tmp_path)
-        # Move the clock forward so the retention cutoff is meaningful.
         v.block = EVENT_RETENTION_BLOCKS + 1_000
-        ancient_block = 1  # well before cutoff (v.block - EVENT_RETENTION_BLOCKS = 1000)
-        recent_block = v.block - 100  # safely inside retention
+        ancient_block = 1
+        recent_block = v.block - 100
 
         conn = v.state_store.require_connection()
         conn.execute(
@@ -220,11 +224,19 @@ class TestPollCommitmentsPruning:
         )
         conn.commit()
 
+        # 1. Commitment polling no longer prunes — ancient event survives.
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
             poll_commitments(v)
-
         rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
         surviving_blocks = {e['block'] for e in rate_events}
-        assert ancient_block not in surviving_blocks
+        assert ancient_block in surviving_blocks, 'poll_commitments should not prune'
         assert recent_block in surviving_blocks
+
+        # 2. Scoring pass does prune — ancient event gets cleared.
+        prune_aged_rate_events(v)
+        rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
+        surviving_blocks = {e['block'] for e in rate_events}
+        assert ancient_block not in surviving_blocks, 'prune_aged_rate_events should remove ancient'
+        assert recent_block in surviving_blocks
+
         v.state_store.close()
