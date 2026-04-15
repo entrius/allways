@@ -28,7 +28,12 @@ def make_pair(hotkey: str, rate: float, counter_rate: float, source='tao', dest=
 
 
 def make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
-    """Construct a validator stub with the fields used by poll_commitments."""
+    """Construct a validator stub with the fields used by poll_commitments.
+
+    Includes a MagicMock event_watcher defensively — poll_commitments
+    doesn't touch it today, but if a helper ever does the tests should
+    AttributeError loud, not silently pass or break confusingly.
+    """
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     metagraph = SimpleNamespace(hotkeys=list(hotkeys or ['hk_a', 'hk_b']))
     config = SimpleNamespace(netuid=2)
@@ -39,6 +44,7 @@ def make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
         metagraph=metagraph,
         state_store=store,
         contract_client=MagicMock(),
+        event_watcher=MagicMock(),
         last_known_rates={},
         last_commitment_poll_block=0,
     )
