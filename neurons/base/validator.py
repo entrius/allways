@@ -112,7 +112,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 except Exception as step_err:
                     consecutive_errors += 1
                     bt.logging.error(f'Step {self.step} error ({consecutive_errors} consecutive): {step_err}')
-                    self._reconnect_subtensor()
+                    self.reconnect_subtensor()
                     time.sleep(min(2**consecutive_errors, 30))
 
                 if self.should_exit:

@@ -38,13 +38,13 @@ class SwapReserveSynapse(bt.Synapse):
     # Request fields (user fills)
     miner_hotkey: str
     tao_amount: int
-    source_amount: int
-    dest_amount: int
-    source_address: str
-    source_address_proof: str
+    from_amount: int
+    to_amount: int
+    from_address: str
+    from_address_proof: str
     block_anchor: int
-    source_chain: str = ''  # User's source chain (for bilateral pair support)
-    dest_chain: str = ''  # User's dest chain
+    from_chain: str = ''  # User's source chain (for bilateral pair support)
+    to_chain: str = ''  # User's dest chain
 
     # Response fields (validator fills)
     accepted: Optional[bool] = None
@@ -61,12 +61,12 @@ class SwapConfirmSynapse(bt.Synapse):
 
     # Request fields (user fills)
     reservation_id: str
-    source_tx_hash: str
-    source_tx_proof: str
-    source_address: str
-    dest_address: str = ''
-    source_chain: str = ''  # User's source chain (for bilateral pair support)
-    dest_chain: str = ''  # User's dest chain
+    from_tx_hash: str
+    from_tx_proof: str
+    from_address: str
+    to_address: str = ''
+    from_chain: str = ''  # User's source chain (for bilateral pair support)
+    to_chain: str = ''  # User's dest chain
 
     # Response fields (validator fills)
     accepted: Optional[bool] = None

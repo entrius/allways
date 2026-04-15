@@ -11,7 +11,7 @@ __all__ = ['ChainProvider', 'TransactionInfo', 'BitcoinProvider', 'SubtensorProv
 # Registry: (chain_id, provider_class, kwarg names to forward)
 PROVIDER_REGISTRY: Tuple[Tuple[str, Type[ChainProvider], Tuple[str, ...]], ...] = (
     ('btc', BitcoinProvider, ()),
-    ('tao', SubtensorProvider, ('subtensor',)),
+    ('tao', SubtensorProvider, ('subtensor', 'wallet')),
 )
 
 

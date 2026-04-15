@@ -1,5 +1,8 @@
 """Tests for BIP-137 message signing and verification in BitcoinProvider."""
 
+import os
+from unittest.mock import patch
+
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
 from allways.chain_providers.bitcoin import (
@@ -7,6 +10,7 @@ from allways.chain_providers.bitcoin import (
     ADDR_TYPE_P2SH_P2WPKH,
     ADDR_TYPE_P2TR,
     ADDR_TYPE_P2WPKH,
+    BitcoinProvider,
     detect_address_type,
 )
 
@@ -95,3 +99,127 @@ class TestBIP137SignVerify:
         addr, _, sig = sign_message(TEST_WIF, 'p2wpkh', msg, deterministic=True)
         valid, _, _ = verify_message(addr, msg, sig)
         assert valid
+
+
+def make_lightweight_provider() -> BitcoinProvider:
+    """Construct a BitcoinProvider in lightweight mode for sign/verify tests.
+
+    Lightweight mode doesn't hit a node for sign/verify — it's pure
+    cryptographic work. BTC_MODE and BTC_PRIVATE_KEY are set via env patch.
+    """
+    with patch.dict(os.environ, {'BTC_MODE': 'lightweight', 'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
+        return BitcoinProvider()
+
+
+class TestBitcoinProviderSignFromProof:
+    """Direct coverage of BitcoinProvider.sign_from_proof — the wrapper our
+    validator/CLI actually invoke, not the underlying library."""
+
+    def test_p2wpkh_address_produces_valid_signature(self):
+        provider = make_lightweight_provider()
+        # Derive the P2WPKH address this WIF signs for
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
+
+        signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature != ''
+        assert provider.verify_from_proof(addr, TEST_MESSAGE, signature)
+
+    def test_p2pkh_address_produces_valid_signature(self):
+        provider = make_lightweight_provider()
+        addr, _, _ = sign_message(TEST_WIF, 'p2pkh', 'x', deterministic=True)
+
+        signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature != ''
+        assert provider.verify_from_proof(addr, TEST_MESSAGE, signature)
+
+    def test_p2sh_p2wpkh_address_produces_valid_signature(self):
+        provider = make_lightweight_provider()
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh-p2sh', 'x', deterministic=True)
+
+        signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature != ''
+        assert provider.verify_from_proof(addr, TEST_MESSAGE, signature)
+
+    def test_p2tr_address_rejected(self):
+        """P2TR isn't supported for BIP-137 signing — must return '' cleanly."""
+        provider = make_lightweight_provider()
+        p2tr_addr = 'bc1pxyz0000000000000000000000000000000000000000000000000000'
+
+        signature = provider.sign_from_proof(p2tr_addr, TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature == ''
+
+    def test_unknown_address_type_rejected(self):
+        provider = make_lightweight_provider()
+        signature = provider.sign_from_proof('xyz-not-a-bitcoin-address', TEST_MESSAGE, key=TEST_WIF)
+        assert signature == ''
+
+    def test_missing_wif_returns_empty_signature(self):
+        """Lightweight mode + no key arg + no BTC_PRIVATE_KEY env → empty sig."""
+        with patch.dict(os.environ, {'BTC_MODE': 'lightweight'}, clear=False):
+            os.environ.pop('BTC_PRIVATE_KEY', None)
+            provider = BitcoinProvider()
+            addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
+
+            signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=None)
+
+        assert signature == ''
+
+    def test_regtest_wif_is_converted_for_signing(self):
+        """Regtest/testnet WIF (0xef prefix) is converted to mainnet (0x80)
+        internally so the signing lib can handle it. Roundtrip succeeds."""
+        provider = make_lightweight_provider()
+        # Generate a mainnet-equivalent address that sign_message can work with
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
+
+        signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature != ''
+
+
+class TestBitcoinProviderVerifyFromProof:
+    """Direct coverage of BitcoinProvider.verify_from_proof."""
+
+    def test_valid_signature_verifies(self):
+        provider = make_lightweight_provider()
+        addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
+
+        assert provider.verify_from_proof(addr, TEST_MESSAGE, signature) is True
+
+    def test_wrong_message_fails_verification(self):
+        provider = make_lightweight_provider()
+        addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
+
+        assert provider.verify_from_proof(addr, 'tampered-message', signature) is False
+
+    def test_p2tr_address_rejected_in_verify(self):
+        provider = make_lightweight_provider()
+        p2tr_addr = 'bc1pxyz0000000000000000000000000000000000000000000000000000'
+        # Any signature at all — P2TR should short-circuit before verify
+        assert provider.verify_from_proof(p2tr_addr, TEST_MESSAGE, 'AAAA') is False
+
+    def test_unknown_address_type_rejected_in_verify(self):
+        provider = make_lightweight_provider()
+        assert provider.verify_from_proof('not-a-btc-address', TEST_MESSAGE, 'AAAA') is False
+
+    def test_malformed_signature_returns_false_not_exception(self):
+        """verify_from_proof catches library exceptions and returns False —
+        the validator must never crash on a bad signature."""
+        provider = make_lightweight_provider()
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
+
+        assert provider.verify_from_proof(addr, TEST_MESSAGE, 'not-base64-garbage') is False
+
+    def test_regtest_address_converted_for_verification(self):
+        """A bcrt1... (regtest) address is converted to bc1... (mainnet) so
+        the signing lib can verify against the signature. This path is only
+        meaningful when the message was signed against a mainnet-derived
+        address — for our tests we just confirm the call doesn't crash."""
+        provider = make_lightweight_provider()
+        # Fabricate a regtest address from scratch — verify should return False,
+        # not crash, because no valid signature binds to it.
+        result = provider.verify_from_proof('bcrt1qtestnettestaddresstestaddresstestaddr', TEST_MESSAGE, 'AAAA')
+        assert result is False

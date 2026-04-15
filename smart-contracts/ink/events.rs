@@ -27,7 +27,7 @@ pub struct SwapInitiated {
     pub user: AccountId,
     #[ink(topic)]
     pub miner: AccountId,
-    pub source_amount: u128,
+    pub from_amount: u128,
     pub initiated_block: u32,
 }
 
@@ -38,7 +38,7 @@ pub struct SwapFulfilled {
     pub swap_id: u64,
     #[ink(topic)]
     pub miner: AccountId,
-    pub dest_tx_hash: ink::prelude::string::String,
+    pub to_tx_hash: ink::prelude::string::String,
 }
 
 /// Event emitted when validators confirm swap completion

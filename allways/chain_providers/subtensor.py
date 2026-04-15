@@ -11,15 +11,22 @@ from allways.chains import CHAIN_TAO, ChainDefinition
 
 
 class SubtensorProvider(ChainProvider):
-    """TAO chain provider using bt.Subtensor and substrate-interface."""
+    """TAO chain provider using bt.Subtensor and substrate-interface.
+
+    Owns its signing ``bt.Wallet`` when one is supplied at construction, so
+    callers of ``send_amount`` never need to pass key material. Validators
+    and read-only consumers can instantiate without a wallet and will get a
+    clear error if they attempt to send.
+    """
 
     # Balances pallet index and transfer call indices on Subtensor
     _BALANCES_PALLET = 5
     _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive', 7: 'transfer_all'}
 
-    def __init__(self, subtensor: bt.Subtensor):
+    def __init__(self, subtensor: bt.Subtensor, wallet: Optional['bt.Wallet'] = None):
         self.subtensor = subtensor
-        self._block_cache: Dict[int, dict] = {}
+        self.wallet = wallet
+        self.block_cache: Dict[int, dict] = {}
 
     def get_chain(self) -> ChainDefinition:
         return CHAIN_TAO
@@ -33,10 +40,10 @@ class SubtensorProvider(ChainProvider):
 
     def clear_cache(self):
         """Clear the block cache. Call at the start of each poll cycle."""
-        self._block_cache.clear()
+        self.block_cache.clear()
 
     @staticmethod
-    def _decode_compact(data: bytes) -> Tuple[int, int]:
+    def decode_compact(data: bytes) -> Tuple[int, int]:
         """Decode a SCALE compact integer. Returns (value, bytes_consumed)."""
         if not data:
             return 0, 0
@@ -58,14 +65,14 @@ class SubtensorProvider(ChainProvider):
             return int.from_bytes(data[1 : 1 + n], 'little'), 1 + n
 
     @classmethod
-    def _parse_raw_extrinsic(cls, ext_hex: str) -> Optional[dict]:
+    def parse_raw_extrinsic(cls, ext_hex: str) -> Optional[dict]:
         """Parse a raw SCALE-encoded extrinsic hex string to extract transfer info."""
         try:
             raw = bytes.fromhex(ext_hex[2:] if ext_hex.startswith('0x') else ext_hex)
             ext_hash = '0x' + blake2b(raw, digest_size=32).hexdigest()
 
             # Decode compact length prefix
-            _, length_bytes = cls._decode_compact(raw)
+            _, length_bytes = cls.decode_compact(raw)
             body = raw[length_bytes:]
             if not body:
                 return None
@@ -106,7 +113,7 @@ class SubtensorProvider(ChainProvider):
             dest = ss58_encode(dest_bytes, ss58_format=42)
 
             # Compact<Balance> follows
-            amount, _ = cls._decode_compact(after_call[33:])
+            amount, _ = cls.decode_compact(after_call[33:])
 
             return {
                 'extrinsic_hash': ext_hash,
@@ -118,10 +125,10 @@ class SubtensorProvider(ChainProvider):
         except Exception:
             return None
 
-    def _get_block(self, block_num: int) -> Optional[dict]:
+    def get_block(self, block_num: int) -> Optional[dict]:
         """Fetch a block, using cache to avoid redundant RPC calls within a poll cycle."""
-        if block_num in self._block_cache:
-            return self._block_cache[block_num]
+        if block_num in self.block_cache:
+            return self.block_cache[block_num]
 
         block_hash = self.subtensor.substrate.get_block_hash(block_num)
         if not block_hash:
@@ -130,15 +137,15 @@ class SubtensorProvider(ChainProvider):
         try:
             block = self.subtensor.substrate.get_block(block_hash)
             if block:
-                self._block_cache[block_num] = block
+                self.block_cache[block_num] = block
             return block
         except Exception as e:
             bt.logging.debug(f'Block fetch failed for block {block_num}, falling back to raw: {e}')
 
         # Fallback: raw RPC for blocks with pruned state
-        return self._get_block_raw(block_num, block_hash)
+        return self.get_block_raw(block_num, block_hash)
 
-    def _get_block_raw(self, block_num: int, block_hash: str) -> Optional[dict]:
+    def get_block_raw(self, block_num: int, block_hash: str) -> Optional[dict]:
         """Fetch a block via raw RPC and parse transfer extrinsics manually."""
         try:
             result = self.subtensor.substrate.rpc_request('chain_getBlock', [block_hash])
@@ -147,12 +154,12 @@ class SubtensorProvider(ChainProvider):
 
             parsed_exts = []
             for ext_hex in raw_exts:
-                parsed = self._parse_raw_extrinsic(ext_hex)
+                parsed = self.parse_raw_extrinsic(ext_hex)
                 if parsed:
                     parsed_exts.append(parsed)
 
             block = {'extrinsics': parsed_exts, '_raw': True}
-            self._block_cache[block_num] = block
+            self.block_cache[block_num] = block
             return block
         except Exception as e:
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
@@ -163,7 +170,9 @@ class SubtensorProvider(ChainProvider):
     ) -> Optional[TransactionInfo]:
         """Verify a TAO transfer; raises ProviderUnreachableError if subtensor is unreachable.
 
-        If block_hint > 0, checks hinted block ±2. Otherwise scans last 150 blocks.
+        If block_hint > 0, checks the hinted block ±3. Otherwise scans the last
+        150 blocks. The ±3 window covers small clock/finality skews between the
+        caller's block_hint and the block the transfer actually landed in.
         """
         try:
             current_block = self.subtensor.get_current_block()
@@ -171,20 +180,20 @@ class SubtensorProvider(ChainProvider):
             raise ProviderUnreachableError(f'Subtensor unreachable: {e}') from e
 
         if block_hint > 0:
-            blocks_to_check = [block_hint + offset for offset in range(-2, 3) if block_hint + offset >= 0]
+            blocks_to_check = [block_hint + offset for offset in range(-3, 4) if block_hint + offset >= 0]
         else:
             blocks_to_check = [current_block - offset for offset in range(150) if current_block - offset >= 0]
 
         try:
             for block_num in blocks_to_check:
-                block = self._get_block(block_num)
+                block = self.get_block(block_num)
                 if not block or 'extrinsics' not in block:
                     continue
 
                 is_raw = block.get('_raw', False)
 
                 for ext in block['extrinsics']:
-                    match = self._match_transfer(ext, tx_hash, is_raw)
+                    match = self.match_transfer(ext, tx_hash, is_raw)
                     if match is None:
                         continue
 
@@ -208,7 +217,7 @@ class SubtensorProvider(ChainProvider):
             raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
 
     @staticmethod
-    def _match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
+    def match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
         """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
         if is_raw:
             ext_hash = ext.get('extrinsic_hash', '')
@@ -264,7 +273,7 @@ class SubtensorProvider(ChainProvider):
         except Exception:
             return False
 
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message using sr25519 keypair. key should be a Keypair."""
         if key is None or not hasattr(key, 'sign'):
             return ''
@@ -272,29 +281,29 @@ class SubtensorProvider(ChainProvider):
             signature = key.sign(message.encode())
             return signature.hex()
         except Exception as e:
-            bt.logging.error(f'TAO sign_source_proof failed: {e}')
+            bt.logging.error(f'TAO sign_from_proof failed: {e}')
             return ''
 
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify an sr25519 signature from the given SS58 address."""
         try:
             keypair = Keypair(ss58_address=address)
             sig_bytes = bytes.fromhex(signature)
             return keypair.verify(message.encode(), sig_bytes)
         except Exception as e:
-            bt.logging.error(f'TAO verify_source_proof failed: {e}')
+            bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
 
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
-        """Send TAO via subtensor transfer. Amount is in rao. key should be a bt.Wallet."""
-        if key is None:
-            bt.logging.error('TAO send_amount requires a bt.Wallet as key')
+        """Send TAO via subtensor transfer. Amount is in rao."""
+        if self.wallet is None:
+            bt.logging.error('TAO send_amount called on a read-only SubtensorProvider (no wallet)')
             return None
         try:
             response = self.subtensor.transfer(
-                wallet=key,
+                wallet=self.wallet,
                 destination_ss58=to_address,
                 amount=bt.Balance.from_rao(amount),
                 wait_for_inclusion=True,

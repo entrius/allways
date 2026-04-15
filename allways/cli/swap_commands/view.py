@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     read_miner_commitments,
 )
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 
 
@@ -49,8 +50,8 @@ def view_miners():
         console.print('[yellow]No miner commitments found[/yellow]\n')
         return
 
-    src_up = pairs[0].source_chain.upper()
-    dst_up = pairs[0].dest_chain.upper()
+    src_up = pairs[0].from_chain.upper()
+    dst_up = pairs[0].to_chain.upper()
 
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
@@ -88,8 +89,8 @@ def view_miners():
             ctr_display,
             collateral_str,
             active_str,
-            pair.source_address[:16] + '...',
-            pair.dest_address[:16] + '...',
+            pair.from_address[:16] + '...',
+            pair.to_address[:16] + '...',
         )
 
     console.print(table)
@@ -130,7 +131,7 @@ def view_rates(pair: str):
             console.print('[red]Invalid pair format. Use: chain-chain (e.g. btc-tao)[/red]')
             return
         src, dst = parts
-        pairs = [p for p in pairs if p.source_chain == src and p.dest_chain == dst]
+        pairs = [p for p in pairs if p.from_chain == src and p.to_chain == dst]
 
     if not pairs:
         console.print('[yellow]No rates found[/yellow]\n')
@@ -139,7 +140,7 @@ def view_rates(pair: str):
     # Group by pair direction
     grouped = {}
     for p in pairs:
-        key = f'{p.source_chain}-{p.dest_chain}'
+        key = f'{p.from_chain}-{p.to_chain}'
         grouped.setdefault(key, []).append(p)
 
     for pair_key, pair_list in grouped.items():
@@ -242,14 +243,14 @@ def view_swaps(status: str):
     table.add_column('Block', style='dim')
 
     for swap in swaps:
-        pair_str = f'{swap.source_chain.upper()}/{swap.dest_chain.upper()}'
+        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
         color = SWAP_STATUS_COLORS.get(swap.status, 'white')
         status_str = f'[{color}]{swap.status.name}[/{color}]'
 
         table.add_row(
             str(swap.id),
             pair_str,
-            str(swap.source_amount),
+            str(swap.from_amount),
             status_str,
             swap.miner_hotkey[:16] + '...',
             str(swap.initiated_block),
@@ -259,17 +260,17 @@ def view_swaps(status: str):
     console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def _build_swap_text(swap, chain_info=True):
+def build_swap_text(swap, chain_info=True):
     """Build swap display as a Rich markup string."""
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
     parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
 
-    src = swap.source_chain.upper()
-    dst = swap.dest_chain.upper()
-    src_chain_def = get_chain(swap.source_chain)
-    dst_chain_def = get_chain(swap.dest_chain)
-    src_human = swap.source_amount / (10**src_chain_def.decimals)
-    dst_human = swap.dest_amount / (10**dst_chain_def.decimals)
+    src = swap.from_chain.upper()
+    dst = swap.to_chain.upper()
+    src_chain_def = get_chain(swap.from_chain)
+    dst_chain_def = get_chain(swap.to_chain)
+    src_human = swap.from_amount / (10**src_chain_def.decimals)
+    dst_human = swap.to_amount / (10**dst_chain_def.decimals)
     parts.append(f'  {src} -> {dst} | {src_human:g} {src} -> {dst_human:.8f} {dst} | Rate: {swap.rate}')
 
     timed_out = swap.status == SwapStatus.TIMED_OUT
@@ -294,23 +295,23 @@ def _build_swap_text(swap, chain_info=True):
         parts.append(f'    [dim]⏱ Timeout       Block {swap.timeout_block}[/dim]')
 
     parts.append('')
-    parts.append(f'  Source TX:  {swap.source_tx_hash or "—"}')
-    parts.append(f'  Dest TX:   {swap.dest_tx_hash or "—"}')
+    parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
+    parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
 
     if chain_info:
         parts.append('')
         parts.append(f'  User:      {swap.user_hotkey}')
         parts.append(f'  Miner:     {swap.miner_hotkey}')
-        parts.append(f'  Send to:   {swap.user_source_address}')
-        parts.append(f'  Receive:   {swap.user_dest_address}')
+        parts.append(f'  Send to:   {swap.user_from_address}')
+        parts.append(f'  Receive:   {swap.user_to_address}')
 
     parts.append('')
     return '\n'.join(parts)
 
 
-def _display_swap(swap, chain_info=True):
+def display_swap(swap, chain_info=True):
     """Render a single swap with timeline view."""
-    console.print(_build_swap_text(swap, chain_info=chain_info))
+    console.print(build_swap_text(swap, chain_info=chain_info))
 
 
 @view_group.command('swap')
@@ -350,7 +351,7 @@ def view_swap(swap_id: int, watch: bool):
         return
 
     if not watch:
-        _display_swap(swap)
+        display_swap(swap)
         return
 
     watch_swap(client, swap_id, swap)
@@ -374,18 +375,18 @@ def watch_swap(client, swap_id: int, swap=None):
 
     terminal = (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
     if swap.status in terminal:
-        _display_swap(swap)
+        display_swap(swap)
         return swap
 
-    def _render(s, chain_info=True, watching=True):
-        markup = _build_swap_text(s, chain_info=chain_info)
+    def render(s, chain_info=True, watching=True):
+        markup = build_swap_text(s, chain_info=chain_info)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
         return Text.from_markup(markup)
 
     last_swap = swap
     try:
-        with Live(_render(swap), console=console, refresh_per_second=1) as live:
+        with Live(render(swap), console=console, refresh_per_second=1) as live:
             while True:
                 time.sleep(SECONDS_PER_BLOCK)
                 try:
@@ -407,12 +408,12 @@ def watch_swap(client, swap_id: int, swap=None):
                             status=SwapStatus.COMPLETED,
                             completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
                         )
-                    live.update(_render(final, chain_info=False, watching=False))
+                    live.update(render(final, chain_info=False, watching=False))
                     return final
                 last_swap = swap
-                live.update(_render(swap))
+                live.update(render(swap))
                 if swap.status in terminal:
-                    live.update(_render(swap, watching=False))
+                    live.update(render(swap, watching=False))
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
@@ -430,7 +431,7 @@ def view_contract():
 
     console.print('\n[bold]Contract Parameters[/bold]\n')
 
-    def _read(fn, default=None):
+    def read_safe(fn, default=None):
         try:
             return fn()
         except ContractError:
@@ -440,23 +441,22 @@ def view_contract():
 
     try:
         with loading('Reading contract parameters...'):
-            timeout_blocks = _read(client.get_fulfillment_timeout)
+            timeout_blocks = read_safe(client.get_fulfillment_timeout)
             timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
-            reservation_ttl_blocks = _read(client.get_reservation_ttl)
+            reservation_ttl_blocks = read_safe(client.get_reservation_ttl)
             reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
-            fee_divisor = _read(client.get_fee_divisor, default=0)
-            consensus_threshold = _read(client.get_consensus_threshold)
-            min_collateral_rao = _read(client.get_min_collateral)
-            max_collateral_rao = _read(client.get_max_collateral)
-            required_votes = _read(client.get_required_votes_count)
-            validator_count = _read(client.get_validator_count)
-            next_swap_id = _read(client.get_next_swap_id)
-            min_swap_rao = _read(client.get_min_swap_amount)
-            max_swap_rao = _read(client.get_max_swap_amount)
-            accumulated_fees_rao = _read(client.get_accumulated_fees)
-            total_recycled_rao = _read(client.get_total_recycled_fees)
-            owner = _read(client.get_owner)
-            recycle_address = _read(client.get_recycle_address, default=None)
+            consensus_threshold = read_safe(client.get_consensus_threshold)
+            min_collateral_rao = read_safe(client.get_min_collateral)
+            max_collateral_rao = read_safe(client.get_max_collateral)
+            required_votes = read_safe(client.get_required_votes_count)
+            validator_count = read_safe(client.get_validator_count)
+            next_swap_id = read_safe(client.get_next_swap_id)
+            min_swap_rao = read_safe(client.get_min_swap_amount)
+            max_swap_rao = read_safe(client.get_max_swap_amount)
+            accumulated_fees_rao = read_safe(client.get_accumulated_fees)
+            total_recycled_rao = read_safe(client.get_total_recycled_fees)
+            owner = read_safe(client.get_owner)
+            recycle_address = read_safe(client.get_recycle_address, default=None)
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
         return
@@ -467,9 +467,8 @@ def view_contract():
 
     table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks (~{timeout_minutes:.0f} min)')
     table.add_row('Reservation TTL', f'{reservation_ttl_blocks} blocks (~{reservation_ttl_minutes:.0f} min)')
-    if fee_divisor > 0:
-        fee_pct = 100 / fee_divisor
-        table.add_row('Fee', f'{fee_pct:g}% (divisor: {fee_divisor})')
+    fee_pct = 100 / FEE_DIVISOR
+    table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
     table.add_row('Consensus Threshold', f'{consensus_threshold}%')
     table.add_row('Min Collateral', f'{from_rao(min_collateral_rao):.4f} TAO')
     if max_collateral_rao > 0:
@@ -524,15 +523,15 @@ def view_reservation():
     table.add_column('Field', style='cyan')
     table.add_column('Value', style='green')
 
-    chain = get_chain(state.source_chain)
-    human_send = state.source_amount / (10**chain.decimals)
-    dest_chain_def = get_chain(state.dest_chain)
-    human_receive = state.user_receives / (10**dest_chain_def.decimals)
+    chain = get_chain(state.from_chain)
+    human_send = state.from_amount / (10**chain.decimals)
+    to_chain_def = get_chain(state.to_chain)
+    human_receive = state.user_receives / (10**to_chain_def.decimals)
 
-    table.add_row('Pair', f'{state.source_chain.upper()} -> {state.dest_chain.upper()}')
-    table.add_row('Send', f'{human_send} {state.source_chain.upper()}')
-    table.add_row('To Address', state.miner_source_address)
-    table.add_row('Receive', f'{human_receive:.8f} {state.dest_chain.upper()}')
+    table.add_row('Pair', f'{state.from_chain.upper()} -> {state.to_chain.upper()}')
+    table.add_row('Send', f'{human_send} {state.from_chain.upper()}')
+    table.add_row('To Address', state.miner_from_address)
+    table.add_row('Receive', f'{human_receive:.8f} {state.to_chain.upper()}')
     table.add_row('Receive Address', state.receive_address)
     table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
 
@@ -549,7 +548,7 @@ def view_reservation():
 
     if is_active:
         console.print(
-            f'\n[bold]Next step:[/bold] Send {human_send} {state.source_chain.upper()} to the address above, then run:'
+            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} to the address above, then run:'
         )
         console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
     else:

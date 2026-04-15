@@ -12,28 +12,26 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
-    COLLATERAL_POLL_INTERVAL_BLOCKS,
     COMMITMENT_POLL_INTERVAL_BLOCKS,
     DIRECTION_POOLS,
     EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
-    MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS,
     RECYCLE_UID,
     SCORING_INTERVAL_STEPS,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
 )
-from allways.contract_client import ContractError
+from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
+from allways.validator import voting
 from allways.validator.axon_handlers import (
-    _keccak256,
-    _scale_encode_extend_hash_input,
-    _scale_encode_initiate_hash_input,
+    keccak256,
+    scale_encode_extend_hash_input,
+    scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.rate_state import RateStateStore
+from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
-from allways.validator.voting import SwapVoter
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -46,56 +44,87 @@ async def forward(self: Validator) -> None:
 
     Flow:
     1. Process pending confirmations (queued by axon handler, awaiting tx confirmations)
-    2. Poll tracker for new/updated swaps (incremental)
-    3. For FULFILLED swaps, verify both sides -> confirm_swap
-    4. For FULFILLED swaps near timeout with unconfirmed dest tx -> extend timeout
-    5. For ACTIVE/FULFILLED past timeout -> timeout_swap (single trigger)
-    6. Every SCORING_INTERVAL_STEPS, score from in-memory window
+    2. Commitment poll (rates)
+    3. Event watcher sync (collateral, active flag, min_collateral, swap outcomes)
+    4. Poll tracker for new/updated swaps (incremental)
+    5. For FULFILLED swaps, verify both sides -> confirm_swap
+    6. For FULFILLED swaps near timeout with unconfirmed dest tx -> extend timeout
+    7. For ACTIVE/FULFILLED past timeout -> timeout_swap (single trigger)
+    8. Every SCORING_INTERVAL_STEPS, score from in-memory window
     """
     bt.logging.info(f'Forward step {self.step}')
 
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
-    voter: SwapVoter = self.swap_voter
 
-    _clear_provider_caches(self)
-    _process_pending_confirms(self)
-    _poll_commitments(self)
-    _refresh_min_collateral(self)
-    _poll_collaterals(self)
+    clear_provider_caches(self)
+    self.state_store.purge_expired_pending()
+    initialize_pending_user_reservations(self)
+    poll_commitments(self)
+    try:
+        self.event_watcher.sync_to(self.block)
+    except Exception as e:
+        bt.logging.warning(f'Event watcher sync failed: {e}')
     await tracker.poll(self.block)
-    uncertain = await _verify_fulfilled(tracker, verifier, voter, self.block)
-    _extend_near_timeout_fulfilled(self)
-    _timeout_expired(self, tracker, voter, uncertain)
+    uncertain = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
+    extend_fulfilled_near_timeout(self)
+    enforce_swap_timeouts(self, tracker, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
-        _score_miners(self)
+        run_scoring_pass(self)
 
 
-def _clear_provider_caches(self: Validator) -> None:
+def clear_provider_caches(self: Validator) -> None:
     """Clear per-poll caches on chain providers."""
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
 
 
-def _poll_commitments(self: Validator) -> None:
-    """Read all miner commitments from the local subtensor and persist diffs.
+def poll_commitments(self: Validator) -> None:
+    """Rate-side validator tick.
 
-    Runs every ``COMMITMENT_POLL_INTERVAL_BLOCKS``. For each miner pair in the
-    metagraph, emits a ``rate_event`` per direction whose rate changed since the
-    cache snapshot. The ``RateStateStore`` enforces the per-hotkey throttle.
-    Also purges deregistered hotkeys from the store and local cache, and prunes
-    aged rate/collateral history beyond ``EVENT_RETENTION_BLOCKS``.
+    Three independent steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
+
+    1. ``prune_aged_rate_events`` — trim history older than the retention
+       window so the SQLite tables stay bounded.
+    2. ``refresh_miner_rates`` — read all miner commitments from the local
+       subtensor and persist direction-level diffs.
+    3. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
+       metagraph since the last poll, both from the store and the in-memory
+       cache.
+
+    Kept as a thin orchestrator so each concern can be tested and reasoned
+    about independently.
     """
-    if self.block - self._last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
+    if self.block - self.last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
         return
-    self._last_commitment_poll_block = self.block
+    self.last_commitment_poll_block = self.block
 
+    prune_aged_rate_events(self)
+    refresh_miner_rates(self)
+    purge_deregistered_hotkeys(self)
+
+
+def prune_aged_rate_events(self: Validator) -> None:
+    """Delete rate/collateral events older than ``EVENT_RETENTION_BLOCKS``.
+
+    Retention is deliberately 2× the scoring window so ``get_latest_*_before``
+    calls at the window start can always find prior state to reconstruct from.
+    """
     cutoff = self.block - EVENT_RETENTION_BLOCKS
     if cutoff > 0:
-        self.rate_state_store.prune_events_older_than(cutoff)
+        self.state_store.prune_events_older_than(cutoff)
 
+
+def refresh_miner_rates(self: Validator) -> None:
+    """Pull all miner commitments and persist direction-level rate diffs.
+
+    Rate events that match the cached ``_last_known_rates`` value are skipped
+    entirely. Rate events accepted by the store update the cache; throttled or
+    deduped inserts still update the cache so we don't repeatedly retry the
+    same blocked write on every subsequent poll.
+    """
     try:
         pairs = read_miner_commitments(self.subtensor, self.config.netuid)
     except Exception as e:
@@ -108,94 +137,36 @@ def _poll_commitments(self: Validator) -> None:
         if pair.hotkey not in current_hotkeys:
             continue
         for from_c, to_c, r in (
-            (pair.source_chain, pair.dest_chain, pair.rate),
-            (pair.dest_chain, pair.source_chain, pair.counter_rate),
+            (pair.from_chain, pair.to_chain, pair.rate),
+            (pair.to_chain, pair.from_chain, pair.counter_rate),
         ):
             if r <= 0:
                 continue  # miner opted out of this direction
             key = (pair.hotkey, from_c, to_c)
-            if self._last_known_rates.get(key) == r:
+            if self.last_known_rates.get(key) == r:
                 continue
-            self.rate_state_store.insert_rate_event(
+            self.state_store.insert_rate_event(
                 hotkey=pair.hotkey,
                 from_chain=from_c,
                 to_chain=to_c,
                 rate=r,
                 block=self.block,
             )
-            # Cache the observed value whether or not the store accepted it —
-            # a throttled or deduped insert is still "known state" and we
-            # shouldn't re-attempt it on every subsequent poll.
-            self._last_known_rates[key] = r
-
-    stale = {hk for (hk, _, _) in self._last_known_rates.keys()} - current_hotkeys
-    for hk in stale:
-        self.rate_state_store.delete_hotkey(hk)
-    if stale:
-        self._last_known_rates = {k: v for k, v in self._last_known_rates.items() if k[0] not in stale}
+            self.last_known_rates[key] = r
 
 
-def _poll_collaterals(self: Validator) -> None:
-    """Query each tracked miner's collateral and persist diffs.
-
-    Runs every ``COLLATERAL_POLL_INTERVAL_BLOCKS``. Only miners with a cached
-    rate (i.e. in ``_last_known_rates``) are polled — those are the ones that
-    can hold a crown. The contract stores collateral as a single per-miner
-    balance, so each row has no direction.
-    """
-    if self.block - self._last_collateral_poll_block < COLLATERAL_POLL_INTERVAL_BLOCKS:
-        return
-    self._last_collateral_poll_block = self.block
-
-    tracked_hotkeys = {key[0] for key in self._last_known_rates.keys()}
+def purge_deregistered_hotkeys(self: Validator) -> None:
+    """Drop rates/collateral/outcomes for hotkeys that left the metagraph."""
     current_hotkeys = set(self.metagraph.hotkeys)
-
-    for hotkey in tracked_hotkeys:
-        if hotkey not in current_hotkeys:
-            continue
-        try:
-            collateral = self.contract_client.get_miner_collateral(hotkey)
-        except Exception as e:
-            bt.logging.debug(f'Collateral read failed for {hotkey[:8]}: {e}')
-            continue
-        if self._last_known_collaterals.get(hotkey) == collateral:
-            continue
-        inserted = self.rate_state_store.insert_collateral_event(
-            hotkey=hotkey,
-            collateral_rao=collateral,
-            block=self.block,
-        )
-        if inserted:
-            self._last_known_collaterals[hotkey] = collateral
-
-    stale = set(self._last_known_collaterals.keys()) - current_hotkeys
+    stale = {hk for (hk, _, _) in self.last_known_rates.keys()} - current_hotkeys
+    if not stale:
+        return
     for hk in stale:
-        self._last_known_collaterals.pop(hk, None)
+        self.state_store.delete_hotkey(hk)
+    self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
 
 
-def _refresh_min_collateral(self: Validator) -> None:
-    """Refresh the cached ``min_collateral`` from the contract every ~4h.
-
-    Always advances the refresh block on any terminal outcome (success, no-op,
-    or exception) so a sustained contract outage can't turn every forward pass
-    into an RPC retry. The cached value is preserved on failure.
-    """
-    if self.block - self._last_min_collateral_refresh_block < MIN_COLLATERAL_REFRESH_INTERVAL_BLOCKS:
-        return
-    self._last_min_collateral_refresh_block = self.block
-    try:
-        value = self.contract_client.get_min_collateral()
-    except Exception as e:
-        bt.logging.warning(f'min_collateral refresh failed: {e}')
-        return
-    if value is None:
-        return
-    if value != self._min_collateral_rao:
-        bt.logging.info(f'min_collateral changed: {self._min_collateral_rao} -> {value}')
-        self._min_collateral_rao = value
-
-
-def _try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
+def try_extend_reservation(self: Validator, item, current_block: int, swap_label: str, miner_short: str) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
     from substrateinterface import Keypair
 
@@ -204,12 +175,12 @@ def _try_extend_reservation(self: Validator, item, current_block: int, swap_labe
         blocks_left = reserved_until - current_block
         if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            extend_hash = _keccak256(_scale_encode_extend_hash_input(miner_bytes, item.source_tx_hash))
+            extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
             self.contract_client.vote_extend_reservation(
                 wallet=self.wallet,
                 request_hash=extend_hash,
                 miner_hotkey=item.miner_hotkey,
-                source_tx_hash=item.source_tx_hash,
+                from_tx_hash=item.from_tx_hash,
             )
             bt.logging.info(
                 f'PendingConfirm [{swap_label} {miner_short}]: '
@@ -222,62 +193,70 @@ def _try_extend_reservation(self: Validator, item, current_block: int, swap_labe
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
 
 
-def _process_pending_confirms(self: Validator) -> None:
+def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
     from substrateinterface import Keypair
 
-    items = self.pending_confirms.get_all()
+    items = self.state_store.get_all()
     if not items:
         return
 
     current_block = self.block
 
     for item in items:
-        swap_label = f'{item.source_chain.upper()}->{item.dest_chain.upper()}'
+        swap_label = f'{item.from_chain.upper()}->{item.to_chain.upper()}'
         try:
             uid = self.metagraph.hotkeys.index(item.miner_hotkey)
         except ValueError:
             uid = '?'
         miner_short = f'UID {uid} ({item.miner_hotkey[:8]})'
-        chain_def = self.chain_providers.get(item.source_chain)
+        chain_def = self.chain_providers.get(item.from_chain)
         min_confs = chain_def.get_chain().min_confirmations if chain_def else '?'
 
         # Skip if swap already initiated (another validator reached quorum)
         try:
             if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
-                self.pending_confirms.remove(item.miner_hotkey)
+                self.state_store.remove(item.miner_hotkey)
                 bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
                 continue
         except Exception as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
 
         # Re-verify tx with main-loop chain provider
-        provider = self.chain_providers.get(item.source_chain)
+        provider = self.chain_providers.get(item.from_chain)
         if provider is None:
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
-                f'PendingConfirm [{swap_label} {miner_short}]: no provider for {item.source_chain}, dropping'
+                f'PendingConfirm [{swap_label} {miner_short}]: no provider for {item.from_chain}, dropping'
             )
             continue
 
         try:
             tx_info = provider.verify_transaction(
-                tx_hash=item.source_tx_hash,
-                expected_recipient=item.miner_deposit_address,
-                expected_amount=item.source_amount,
+                tx_hash=item.from_tx_hash,
+                expected_recipient=item.miner_from_address,
+                expected_amount=item.from_amount,
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
-            _try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(self, item, current_block, swap_label, miner_short)
             continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
             continue
 
         if tx_info is None:
-            self.pending_confirms.remove(item.miner_hotkey)
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
-                f'PendingConfirm [{swap_label} {miner_short}]: tx {item.source_tx_hash[:16]}... not found, dropping'
+                f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... not found, dropping'
+            )
+            continue
+
+        if tx_info.sender and tx_info.sender != item.from_address:
+            self.state_store.remove(item.miner_hotkey)
+            bt.logging.warning(
+                f'PendingConfirm [{swap_label} {miner_short}]: sender mismatch '
+                f'(expected {item.from_address}, got {tx_info.sender}), dropping'
             )
             continue
 
@@ -285,57 +264,64 @@ def _process_pending_confirms(self: Validator) -> None:
             f'confs:{item.miner_hotkey}',
             tx_info.confirmations,
             f'PendingConfirm [{swap_label} {miner_short}]: '
-            f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.source_tx_hash[:16]}...',
+            f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.from_tx_hash[:16]}...',
         )
 
-        _try_extend_reservation(self, item, current_block, swap_label, miner_short)
+        try_extend_reservation(self, item, current_block, swap_label, miner_short)
 
         if not tx_info.confirmed:
             continue
 
-        # Confirmed — compute hash and vote
-        self.pending_confirms.remove(item.miner_hotkey)
+        # Confirmed — compute hash and vote. Only drop the queued entry once the
+        # vote is accepted (or the contract tells us someone else already
+        # initiated it). On transient RPC/network failure we leave the entry in
+        # place so the next forward step retries instead of silently losing it.
         try:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            hash_input = _scale_encode_initiate_hash_input(
+            hash_input = scale_encode_initiate_hash_input(
                 miner_bytes,
-                item.source_tx_hash,
-                item.source_chain,
-                item.dest_chain,
-                item.miner_deposit_address,
-                item.miner_dest_address,
+                item.from_tx_hash,
+                item.from_chain,
+                item.to_chain,
+                item.miner_from_address,
+                item.miner_to_address,
                 item.rate_str,
                 item.tao_amount,
-                item.source_amount,
-                item.dest_amount,
+                item.from_amount,
+                item.to_amount,
             )
-            request_hash = _keccak256(hash_input)
+            request_hash = keccak256(hash_input)
 
-            user_tao_address = item.dest_address if item.dest_chain == 'tao' else item.source_address
+            user_tao_address = item.to_address if item.to_chain == 'tao' else item.from_address
             self.contract_client.vote_initiate(
                 wallet=self.wallet,
                 request_hash=request_hash,
                 user_hotkey=user_tao_address,
                 miner_hotkey=item.miner_hotkey,
-                source_chain=item.source_chain,
-                dest_chain=item.dest_chain,
-                source_amount=item.source_amount,
+                from_chain=item.from_chain,
+                to_chain=item.to_chain,
+                from_amount=item.from_amount,
                 tao_amount=item.tao_amount,
-                user_source_address=item.source_address,
-                user_dest_address=item.dest_address,
-                source_tx_hash=item.source_tx_hash,
-                source_tx_block=tx_info.block_number or 0,
-                dest_amount=item.dest_amount,
-                miner_source_address=item.miner_deposit_address,
-                miner_dest_address=item.miner_dest_address,
+                user_from_address=item.from_address,
+                user_to_address=item.to_address,
+                from_tx_hash=item.from_tx_hash,
+                from_tx_block=tx_info.block_number or 0,
+                to_amount=item.to_amount,
+                miner_from_address=item.miner_from_address,
+                miner_to_address=item.miner_to_address,
                 rate=item.rate_str,
             )
+            self.state_store.remove(item.miner_hotkey)
             bt.logging.success(
                 f'PendingConfirm [{swap_label} {miner_short}]: '
                 f'confirmed! voted initiate (tao={item.tao_amount / 1e9:.4f})'
             )
         except ContractError as e:
-            if 'ContractReverted' in str(e):
+            if is_contract_rejection(e):
+                # Contract rejected — in practice this means another validator
+                # already reached initiate quorum, so the entry is no longer
+                # actionable. Drop it.
+                self.state_store.remove(item.miner_hotkey)
                 bt.logging.info(
                     f'PendingConfirm [{swap_label} {miner_short}]: contract rejected (likely already initiated)'
                 )
@@ -345,20 +331,20 @@ def _process_pending_confirms(self: Validator) -> None:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: unexpected error: {e}')
 
 
-async def _verify_fulfilled(
+async def confirm_miner_fulfillments(
+    self: Validator,
     tracker: SwapTracker,
     verifier: SwapVerifier,
-    voter: SwapVoter,
     current_block: int,
 ) -> Set[int]:
-    """Verify FULFILLED swaps; returns IDs where provider was unreachable so _timeout_expired skips them."""
+    """Verify FULFILLED swaps; returns IDs where provider was unreachable so enforce_swap_timeouts skips them."""
     uncertain: Set[int] = set()
     fulfilled = [s for s in tracker.get_fulfilled(current_block) if not tracker.is_voted(s.id)]
     if not fulfilled:
         return uncertain
 
     results = await asyncio.gather(
-        *[verifier.is_swap_complete(swap) for swap in fulfilled],
+        *[verifier.verify_miner_fulfillment(swap) for swap in fulfilled],
         return_exceptions=True,
     )
     for swap, result in zip(fulfilled, results):
@@ -370,13 +356,13 @@ async def _verify_fulfilled(
             bt.logging.error(f'Swap {swap.id}: verification error: {result}')
             continue
         if result:
-            if voter.confirm_swap(swap.id):
+            if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
     return uncertain
 
 
-def _extend_near_timeout_fulfilled(self: Validator) -> None:
+def extend_fulfilled_near_timeout(self: Validator) -> None:
     """Extend timeout for FULFILLED swaps where dest tx exists but isn't confirmed yet.
 
     Mirrors reservation extension logic: when a swap is nearing timeout but the
@@ -384,24 +370,23 @@ def _extend_near_timeout_fulfilled(self: Validator) -> None:
     so the transaction has time to confirm.
     """
     tracker: SwapTracker = self.swap_tracker
-    voter: SwapVoter = self.swap_voter
     current_block = self.block
 
     for swap in tracker.get_near_timeout_fulfilled(current_block, EXTEND_THRESHOLD_BLOCKS):
-        swap_label = f'{swap.source_chain.upper()}->{swap.dest_chain.upper()}'
+        swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
         # Check if dest tx exists on-chain (even if unconfirmed)
-        provider = self.chain_providers.get(swap.dest_chain)
-        if not provider or not swap.dest_tx_hash:
+        provider = self.chain_providers.get(swap.to_chain)
+        if not provider or not swap.to_tx_hash:
             continue
 
         try:
             tx_info = provider.verify_transaction(
-                tx_hash=swap.dest_tx_hash,
-                expected_recipient=swap.user_dest_address,
-                expected_amount=swap.dest_amount,
-                block_hint=swap.dest_tx_block,
+                tx_hash=swap.to_tx_hash,
+                expected_recipient=swap.user_to_address,
+                expected_amount=swap.to_amount,
+                block_hint=swap.to_tx_block,
             )
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend check verify_transaction error: {e}')
@@ -421,19 +406,19 @@ def _extend_near_timeout_fulfilled(self: Validator) -> None:
 
         # Dest tx exists (confirmed or not) — vote to extend timeout
         try:
-            if voter.extend_timeout(swap.id):
+            if voting.extend_swap_timeout(self.contract_client, self.wallet, swap.id):
                 bt.logging.info(
                     f'{ctx}: voted to extend timeout '
                     f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
                 )
         except ContractError as e:
-            if 'AlreadyVoted' not in str(e) and 'ContractReverted' not in str(e):
+            if 'AlreadyVoted' not in str(e) and not is_contract_rejection(e):
                 bt.logging.debug(f'{ctx}: extend timeout vote: {e}')
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')
 
 
-def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
+def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps: Set[int]) -> None:
     """Timeout expired swaps, skipping uncertain_swaps where the provider was unreachable this cycle."""
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
@@ -442,12 +427,12 @@ def _timeout_expired(self: Validator, tracker: SwapTracker, voter: SwapVoter, un
             bt.logging.warning(f'Swap {swap.id}: deferring timeout, provider was unreachable')
             continue
 
-        if voter.timeout_swap(swap.id):
+        if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
 
 
-def _score_miners(self: Validator) -> None:
+def run_scoring_pass(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
         rewards, miner_uids = calculate_miner_rewards(self)
@@ -461,10 +446,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Crown-time based reward computation.
 
     For each direction in ``DIRECTION_POOLS``:
-      1. Replay rate_events and collateral_events chronologically over the window
+      1. Replay rate events (from state_store) and collateral events (from
+         event_watcher) chronologically over the window
       2. At each block boundary, determine crown holders (tied best-rate miners
-         with collateral >= the cached ``_min_collateral_rao`` and still in the
-         metagraph)
+         that are in the metagraph AND active on-chain AND have
+         collateral >= the event-watcher's cached ``min_collateral``)
       3. Accumulate crown_blocks per hotkey, splitting evenly on ties
       4. ``rewards[uid] += pool * (crown_blocks[hk] / total) * success_rate ** SUCCESS_EXPONENT``
 
@@ -477,21 +463,26 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     window_end = self.block
     window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
 
-    active_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    # Miners must be both in the metagraph (registered) AND active on the
+    # contract (miner_active == true). Active is sourced from MinerActivated
+    # events replayed by the watcher.
+    in_metagraph: Set[str] = set(self.metagraph.hotkeys)
+    eligible_hotkeys: Set[str] = in_metagraph & self.event_watcher.active_miners
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
-    success_stats = self.rate_state_store.get_all_time_success_rates()
-    min_collateral = int(getattr(self, '_min_collateral_rao', 0) or 0)
+    success_stats = self.state_store.get_all_time_success_rates()
+    min_collateral = int(self.event_watcher.min_collateral or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
-        crown_blocks = _replay_crown_time(
-            store=self.rate_state_store,
+        crown_blocks = replay_crown_time_window(
+            store=self.state_store,
+            event_watcher=self.event_watcher,
             from_chain=from_chain,
             to_chain=to_chain,
             window_start=window_start,
             window_end=window_end,
-            active_hotkeys=active_hotkeys,
+            eligible_hotkeys=eligible_hotkeys,
             min_collateral=min_collateral,
         )
         total = sum(crown_blocks.values())
@@ -503,7 +494,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             share = blocks / total
-            sr = _success_rate(success_stats.get(hotkey))
+            sr = success_rate(success_stats.get(hotkey))
             rewards[uid] += pool * share * (sr**SUCCESS_EXPONENT)
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
@@ -518,7 +509,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     return rewards, set(range(n_uids))
 
 
-def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
+def success_rate(stats: Optional[Tuple[int, int]]) -> float:
     """All-time success rate. Zero-outcome miners default to 1.0 (optimistic)."""
     if stats is None:
         return 1.0
@@ -529,38 +520,48 @@ def _success_rate(stats: Optional[Tuple[int, int]]) -> float:
     return completed / total
 
 
-def _replay_crown_time(
-    store: RateStateStore,
+def replay_crown_time_window(
+    store: ValidatorStateStore,
+    event_watcher,
     from_chain: str,
     to_chain: str,
     window_start: int,
     window_end: int,
-    active_hotkeys: Set[str],
+    eligible_hotkeys: Set[str],
     min_collateral: int,
 ) -> Dict[str, float]:
     """Walk the merged rate + collateral event stream, accumulate crown blocks.
 
+    Rates come from ``store`` (populated by commitment polling). Collateral
+    history comes from ``event_watcher`` (populated by contract event replay).
     Returns ``{hotkey: crown_blocks_float}``. Ties split credit evenly across
     the tied interval.
     """
-    # 1. Reconstruct state at window_start for every currently-active hotkey.
+    # 1. Reconstruct state at window_start for every eligible hotkey.
     current_rates: Dict[str, float] = {}
     current_collateral: Dict[str, int] = {}
 
-    for hotkey in active_hotkeys:
+    for hotkey in eligible_hotkeys:
         latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
         if latest_rate is not None:
             current_rates[hotkey] = latest_rate[0]
-        latest_col = store.get_latest_collateral_before(hotkey, window_start)
+        latest_col = event_watcher.get_latest_collateral_before(hotkey, window_start)
         if latest_col is not None:
             current_collateral[hotkey] = latest_col[0]
+        else:
+            # No event before window_start — fall back to the watcher's
+            # current value so a miner whose only collateral event predates
+            # the retention window still gets credited accurately.
+            snapshot = event_watcher.collateral.get(hotkey)
+            if snapshot is not None:
+                current_collateral[hotkey] = snapshot
 
     # 2. Merge rate and collateral events within the window, oldest first.
     #    Collateral events sort BEFORE rate events at the same block so a
     #    simultaneous "collateral drops + best rate" transition resolves to
     #    the post-drop state before rate attribution.
     rate_events = store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end)
-    col_events = store.get_collateral_events_in_range(window_start, window_end)
+    col_events = event_watcher.get_collateral_events_in_range(window_start, window_end)
 
     merged: List[Tuple[int, int, str, str, float]] = []
     for e in rate_events:
@@ -577,7 +578,7 @@ def _replay_crown_time(
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        holders = _crown_holders(current_rates, current_collateral, min_collateral, active_hotkeys)
+        holders = crown_holders_at_instant(current_rates, current_collateral, min_collateral, eligible_hotkeys)
         if not holders:
             return
         split = duration / len(holders)
@@ -596,15 +597,17 @@ def _replay_crown_time(
     return crown_blocks
 
 
-def _crown_holders(
+def crown_holders_at_instant(
     rates: Dict[str, float],
     collaterals: Dict[str, int],
     min_collateral: int,
-    active: Set[str],
+    eligible: Set[str],
 ) -> List[str]:
-    """Hotkeys tied for best rate, with collateral >= min and in the metagraph."""
-    eligible = {hk: r for hk, r in rates.items() if hk in active and collaterals.get(hk, 0) >= min_collateral and r > 0}
-    if not eligible:
+    """Hotkeys tied for best rate, with collateral >= min and eligible."""
+    candidates = {
+        hk: r for hk, r in rates.items() if hk in eligible and collaterals.get(hk, 0) >= min_collateral and r > 0
+    }
+    if not candidates:
         return []
-    best = max(eligible.values())
-    return [hk for hk, r in eligible.items() if r == best]
+    best = max(candidates.values())
+    return [hk for hk, r in candidates.items() if r == best]

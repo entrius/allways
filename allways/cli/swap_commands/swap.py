@@ -27,13 +27,13 @@ from allways.cli.swap_commands.helpers import (
     save_pending_swap,
 )
 from allways.commitments import read_miner_commitments
-from allways.constants import DEFAULT_FEE_DIVISOR, NETUID_FINNEY
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
-from allways.utils.rate import apply_fee_deduction, calculate_dest_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount
 
 
-def _to_smallest_unit(amount: float, chain_id: str) -> int:
+def to_smallest_unit(amount: float, chain_id: str) -> int:
     """Convert a human-readable amount to the smallest unit for a chain.
 
     Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
@@ -44,7 +44,7 @@ def _to_smallest_unit(amount: float, chain_id: str) -> int:
     return int(Decimal(str(amount)) * (10**chain.decimals))
 
 
-def _from_smallest_unit(amount: int, chain_id: str) -> float:
+def from_smallest_unit(amount: int, chain_id: str) -> float:
     """Convert from smallest unit to human-readable amount."""
     chain = get_chain(chain_id)
     return amount / (10**chain.decimals)
@@ -57,15 +57,15 @@ def _from_smallest_unit(amount: int, chain_id: str) -> float:
 
 def sign_and_broadcast_confirm(
     provider,
-    user_source_address: str,
-    source_key,
-    source_tx_hash: str,
+    user_from_address: str,
+    from_key,
+    from_tx_hash: str,
     miner_hotkey: str,
     receive_address: str,
     validator_axons: list,
     ephemeral_wallet,
-    source_chain: str = '',
-    dest_chain: str = '',
+    from_chain: str = '',
+    to_chain: str = '',
 ) -> tuple:
     """Sign source tx proof and broadcast SwapConfirmSynapse to validators.
 
@@ -73,29 +73,29 @@ def sign_and_broadcast_confirm(
     but is waiting for source tx confirmations before voting to initiate.
     """
     console.print('[dim]Submitting swap to validators...[/dim]')
-    proof_message = f'allways-swap:{source_tx_hash}'
+    proof_message = f'allways-swap:{from_tx_hash}'
     try:
-        source_proof = provider.sign_source_proof(
-            user_source_address,
+        from_proof = provider.sign_from_proof(
+            user_from_address,
             proof_message,
-            source_key,
+            from_key,
         )
     except Exception as e:
         console.print(f'[red]Failed to sign source proof: {e}[/red]')
         return 0, 0
 
-    if not source_proof:
+    if not from_proof:
         console.print('[red]Source proof is empty — signing failed (check chain provider RPC connection)[/red]')
         return 0, 0
 
     confirm_synapse = SwapConfirmSynapse(
         reservation_id=miner_hotkey,
-        source_tx_hash=source_tx_hash,
-        source_tx_proof=source_proof,
-        source_address=user_source_address,
-        dest_address=receive_address,
-        source_chain=source_chain,
-        dest_chain=dest_chain,
+        from_tx_hash=from_tx_hash,
+        from_tx_proof=from_proof,
+        from_address=user_from_address,
+        to_address=receive_address,
+        from_chain=from_chain,
+        to_chain=to_chain,
     )
 
     console.print(f'  Broadcasting to {len(validator_axons)} validators...')
@@ -145,13 +145,13 @@ def broadcast_reserve_with_retry(
     client,
     provider,
     selected_pair,
-    source_chain: str,
-    dest_chain: str,
-    source_amount: int,
-    dest_amount: int,
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+    to_amount: int,
     tao_amount: int,
-    user_source_address: str,
-    source_key,
+    user_from_address: str,
+    from_key,
     netuid: int,
     skip_confirm: bool = False,
     max_retries: int = 2,
@@ -161,31 +161,31 @@ def broadcast_reserve_with_retry(
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
     current_block = subtensor.get_current_block()
-    reserve_proof_message = f'allways-reserve:{user_source_address}:{current_block}'
+    reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
     try:
-        source_address_proof = provider.sign_source_proof(
-            user_source_address,
+        from_address_proof = provider.sign_from_proof(
+            user_from_address,
             reserve_proof_message,
-            source_key,
+            from_key,
         )
     except Exception as e:
         console.print(f'[red]Failed to sign source address proof: {e}[/red]')
         return None
 
-    if not source_address_proof:
+    if not from_address_proof:
         console.print('[red]Source address proof is empty — signing failed (check chain provider RPC connection)[/red]')
         return None
 
     synapse = SwapReserveSynapse(
         miner_hotkey=selected_pair.hotkey,
         tao_amount=tao_amount,
-        source_amount=source_amount,
-        dest_amount=dest_amount,
-        source_address=user_source_address,
-        source_address_proof=source_address_proof,
+        from_amount=from_amount,
+        to_amount=to_amount,
+        from_address=user_from_address,
+        from_address_proof=from_address_proof,
         block_anchor=current_block,
-        source_chain=source_chain,
-        dest_chain=dest_chain,
+        from_chain=from_chain,
+        to_chain=to_chain,
     )
 
     ephemeral_wallet = get_ephemeral_wallet()
@@ -199,12 +199,12 @@ def broadcast_reserve_with_retry(
     for attempt in range(max_retries + 1):
         if attempt > 0:
             current_block = subtensor.get_current_block()
-            reserve_proof_message = f'allways-reserve:{user_source_address}:{current_block}'
+            reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
             try:
-                source_address_proof = provider.sign_source_proof(
-                    user_source_address,
+                from_address_proof = provider.sign_from_proof(
+                    user_from_address,
                     reserve_proof_message,
-                    source_key,
+                    from_key,
                 )
             except Exception as e:
                 console.print(f'[red]Failed to sign source address proof: {e}[/red]')
@@ -212,13 +212,13 @@ def broadcast_reserve_with_retry(
             synapse = SwapReserveSynapse(
                 miner_hotkey=selected_pair.hotkey,
                 tao_amount=tao_amount,
-                source_amount=source_amount,
-                dest_amount=dest_amount,
-                source_address=user_source_address,
-                source_address_proof=source_address_proof,
+                from_amount=from_amount,
+                to_amount=to_amount,
+                from_address=user_from_address,
+                from_address_proof=from_address_proof,
                 block_anchor=current_block,
-                source_chain=source_chain,
-                dest_chain=dest_chain,
+                from_chain=from_chain,
+                to_chain=to_chain,
             )
 
         console.print(f'  Broadcasting to {len(validator_axons)} validators...')
@@ -277,29 +277,29 @@ def broadcast_reserve_with_retry(
 # =========================================================================
 
 
-def _display_receipt(swap):
+def display_receipt(swap):
     """Show a rich completion receipt after a successful swap."""
-    src_chain_def = get_chain(swap.source_chain)
-    dst_chain_def = get_chain(swap.dest_chain)
-    src_human = swap.source_amount / (10**src_chain_def.decimals)
-    dst_human = swap.dest_amount / (10**dst_chain_def.decimals)
+    src_chain_def = get_chain(swap.from_chain)
+    dst_chain_def = get_chain(swap.to_chain)
+    src_human = swap.from_amount / (10**src_chain_def.decimals)
+    dst_human = swap.to_amount / (10**dst_chain_def.decimals)
     tao_human = swap.tao_amount / (10**9)
 
     # Calculate fee
     fee_divisor = 100  # 1% fee
-    if swap.dest_chain == 'tao':
+    if swap.to_chain == 'tao':
         fee_human = tao_human / fee_divisor
         fee_unit = 'TAO'
     else:
         fee_human = dst_human / fee_divisor
-        fee_unit = swap.dest_chain.upper()
+        fee_unit = swap.to_chain.upper()
 
-    src_tx = swap.source_tx_hash[:20] + '...' if len(swap.source_tx_hash) > 20 else swap.source_tx_hash
-    dst_tx = swap.dest_tx_hash[:20] + '...' if len(swap.dest_tx_hash) > 20 else swap.dest_tx_hash
+    src_tx = swap.from_tx_hash[:20] + '...' if len(swap.from_tx_hash) > 20 else swap.from_tx_hash
+    dst_tx = swap.to_tx_hash[:20] + '...' if len(swap.to_tx_hash) > 20 else swap.to_tx_hash
 
     receipt = (
-        f'  [green]Sent:      {src_human:g} {swap.source_chain.upper()}[/green]\n'
-        f'  [green]Received:  {dst_human:.8f} {swap.dest_chain.upper()}[/green]\n'
+        f'  [green]Sent:      {src_human:g} {swap.from_chain.upper()}[/green]\n'
+        f'  [green]Received:  {dst_human:.8f} {swap.to_chain.upper()}[/green]\n'
         f'  [dim]Fee:       {fee_human:.8f} {fee_unit} (1%)[/dim]\n'
         f'\n'
         f'  Source TX: [cyan]{src_tx}[/cyan]\n'
@@ -315,7 +315,7 @@ def _display_receipt(swap):
     console.print()
 
 
-def _poll_for_swap_with_progress(client, miner_hotkey: str, source_chain: str, max_polls: int = 60):
+def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
     """Poll for swap creation with a live progress display."""
     with console.status('') as status:
         errors = 0
@@ -344,7 +344,7 @@ def _poll_for_swap_with_progress(client, miner_hotkey: str, source_chain: str, m
     return None
 
 
-def _send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
+def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
     """Send BTC with fallback: embit lightweight -> RPC -> manual (with retry).
 
     Returns (tx_hash, block_number) or None (manual fallback failed/skipped).
@@ -400,22 +400,22 @@ def swap_group():
 
 @swap_group.command('now', show_disclaimer=True)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
-@click.option('--src', 'source_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
-@click.option('--dest', 'dest_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
+@click.option('--from', 'from_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
+@click.option('--to', 'to_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
 @click.option('--amount', 'amount_opt', default=None, type=float, help='Amount to send in source chain units')
 @click.option('--receive-address', 'receive_address_opt', default=None, help='Receive address on destination chain')
-@click.option('--source-address', 'source_address_opt', default=None, help='Source address on source chain')
-@click.option('--source-tx-hash', 'source_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
+@click.option('--from-address', 'from_address_opt', default=None, help='Source address on source chain')
+@click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 def swap_now_command(
     netuid: int,
-    source_chain_opt: Optional[str],
-    dest_chain_opt: Optional[str],
+    from_chain_opt: Optional[str],
+    to_chain_opt: Optional[str],
     amount_opt: Optional[float],
     receive_address_opt: Optional[str],
-    source_address_opt: Optional[str],
-    source_tx_hash_opt: Optional[str],
+    from_address_opt: Optional[str],
+    from_tx_hash_opt: Optional[str],
     auto_select: bool,
     skip_confirm: bool,
 ):
@@ -428,9 +428,9 @@ def swap_now_command(
     - Transaction hash is posted to validators automatically[/dim]
 
     [dim]Non-interactive mode (for scripting/testing):
-        $ alw swap now --src btc --dest tao --amount 0.001 \\
-            --receive-address 5C... --source-address bc1q... \\
-            --source-tx-hash abc123... --auto --yes[/dim]
+        $ alw swap now --from btc --to tao --amount 0.001 \\
+            --receive-address 5C... --from-address bc1q... \\
+            --from-tx-hash abc123... --auto --yes[/dim]
 
     [dim]Interactive mode:
         $ alw swap now[/dim]
@@ -447,13 +447,13 @@ def swap_now_command(
         pass
 
     # Validate provided chain options early
-    if source_chain_opt and source_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {source_chain_opt}[/red]')
+    if from_chain_opt and from_chain_opt not in SUPPORTED_CHAINS:
+        console.print(f'[red]Unknown source chain: {from_chain_opt}[/red]')
         return
-    if dest_chain_opt and dest_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {dest_chain_opt}[/red]')
+    if to_chain_opt and to_chain_opt not in SUPPORTED_CHAINS:
+        console.print(f'[red]Unknown destination chain: {to_chain_opt}[/red]')
         return
-    if source_chain_opt and dest_chain_opt and source_chain_opt == dest_chain_opt:
+    if from_chain_opt and to_chain_opt and from_chain_opt == to_chain_opt:
         console.print('[red]Source and destination chains must be different[/red]')
         return
 
@@ -487,9 +487,9 @@ def swap_now_command(
     chain_providers = create_chain_providers(subtensor=subtensor)
 
     # Step 1: Select swap direction
-    if source_chain_opt and dest_chain_opt:
-        source_chain = source_chain_opt
-        dest_chain = dest_chain_opt
+    if from_chain_opt and to_chain_opt:
+        from_chain = from_chain_opt
+        to_chain = to_chain_opt
     else:
         chain_ids = list(SUPPORTED_CHAINS.keys())
         directions = [(s, d) for s in chain_ids for d in chain_ids if s != d]
@@ -502,11 +502,11 @@ def swap_now_command(
         if choice < 1 or choice > len(directions):
             console.print('[red]Invalid selection[/red]')
             return
-        source_chain, dest_chain = directions[choice - 1]
+        from_chain, to_chain = directions[choice - 1]
 
     # Show send capability for the source chain (skip in non-interactive mode)
     if not skip_confirm:
-        if source_chain == 'tao':
+        if from_chain == 'tao':
             console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
         else:
             is_local = is_local_network(config.get('network', 'finney'))
@@ -528,7 +528,7 @@ def swap_now_command(
     console.print('\n[dim]Reading miner commitments...[/dim]')
     all_pairs = read_miner_commitments(subtensor, netuid)
 
-    matching_pairs = find_matching_miners(all_pairs, source_chain, dest_chain)
+    matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
 
     if not matching_pairs:
         console.print('[yellow]No miners found for this pair[/yellow]\n')
@@ -565,10 +565,10 @@ def swap_now_command(
     console.print(table)
 
     # Step 3: Select miner (default to best rate)
-    canon_src, canon_dest = canonical_pair(source_chain, dest_chain)
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
     best_pair = available_miners[0][0]
     console.print(
-        f'\n  Best rate: send 1 {source_chain.upper()}, get {best_pair.rate:g} {dest_chain.upper()} (Miner UID {best_pair.uid})'
+        f'\n  Best rate: send 1 {from_chain.upper()}, get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
     )
 
     if auto_select or len(available_miners) == 1:
@@ -582,41 +582,34 @@ def swap_now_command(
 
     # Step 4: Enter amount
     amount = (
-        amount_opt if amount_opt is not None else click.prompt(f'\nAmount to send ({source_chain.upper()})', type=float)
+        amount_opt if amount_opt is not None else click.prompt(f'\nAmount to send ({from_chain.upper()})', type=float)
     )
     if amount <= 0:
         console.print('[red]Amount must be positive[/red]')
         return
 
-    source_amount = _to_smallest_unit(amount, source_chain)
-    is_reverse = source_chain != canon_src
-    dest_amount = calculate_dest_amount(
-        source_amount,
+    from_amount = to_smallest_unit(amount, from_chain)
+    is_reverse = from_chain != canon_from
+    to_amount = calculate_to_amount(
+        from_amount,
         selected_pair.rate_str,
         is_reverse,
-        get_chain(canon_dest).decimals,
-        get_chain(canon_src).decimals,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
     )
 
-    # Show estimated receive inline
-    try:
-        preview_fee_divisor = client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-    except ContractError:
-        preview_fee_divisor = DEFAULT_FEE_DIVISOR
-        console.print(
-            f'[yellow]Warning: using default fee ({100 / DEFAULT_FEE_DIVISOR:g}%) — could not read from contract[/yellow]'
-        )
-    preview_receives = apply_fee_deduction(dest_amount, preview_fee_divisor)
-    preview_fee_pct = 100 / preview_fee_divisor
+    # Show estimated receive inline — fee is a hardcoded protocol constant.
+    preview_receives = apply_fee_deduction(to_amount, FEE_DIVISOR)
+    preview_fee_pct = 100 / FEE_DIVISOR
     console.print(
-        f'  You will receive: ~[green]{_from_smallest_unit(preview_receives, dest_chain):.8f} {dest_chain.upper()}[/green]'
+        f'  You will receive: ~[green]{from_smallest_unit(preview_receives, to_chain):.8f} {to_chain.upper()}[/green]'
         f' (after {preview_fee_pct:g}% fee)'
     )
 
-    if source_chain == 'tao':
-        tao_amount = source_amount
-    elif dest_chain == 'tao':
-        tao_amount = dest_amount
+    if from_chain == 'tao':
+        tao_amount = from_amount
+    elif to_chain == 'tao':
+        tao_amount = to_amount
     else:
         tao_amount = 0
 
@@ -639,60 +632,52 @@ def swap_now_command(
     except ContractError:
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
 
-    try:
-        fee_divisor = client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-    except ContractError:
-        fee_divisor = DEFAULT_FEE_DIVISOR
-        if preview_fee_divisor != DEFAULT_FEE_DIVISOR:
-            console.print(
-                f'[yellow]Warning: using default fee ({100 / DEFAULT_FEE_DIVISOR:g}%)'
-                f' — could not read from contract[/yellow]'
-            )
-
-    user_receives = apply_fee_deduction(dest_amount, fee_divisor)
+    fee_divisor = FEE_DIVISOR
+    user_receives = apply_fee_deduction(to_amount, fee_divisor)
     fee_percent = 100 / fee_divisor
 
     # Step 5: Enter receive address
-    receive_address = receive_address_opt or click.prompt(f'Your {dest_chain.upper()} receive address')
-    dest_provider = chain_providers.get(dest_chain)
-    if (
-        dest_provider
-        and hasattr(dest_provider, 'is_valid_address')
-        and not dest_provider.is_valid_address(receive_address)
-    ):
-        console.print(f'[yellow]Warning: address may not be valid for {dest_chain.upper()}[/yellow]')
+    receive_address = receive_address_opt or click.prompt(f'Your {to_chain.upper()} receive address')
+    to_provider = chain_providers.get(to_chain)
+    if to_provider and hasattr(to_provider, 'is_valid_address') and not to_provider.is_valid_address(receive_address):
+        console.print(f'[yellow]Warning: address may not be valid for {to_chain.upper()}[/yellow]')
 
     # Step 6: Source address (use public key — no password needed yet)
-    if source_address_opt:
-        user_source_address = source_address_opt
-    elif source_chain == 'tao':
-        user_source_address = wallet.coldkeypub.ss58_address
-        console.print(f'  Source: [dim]{user_source_address}[/dim] (from wallet)')
+    if from_address_opt:
+        user_from_address = from_address_opt
+    elif from_chain == 'tao':
+        user_from_address = wallet.coldkeypub.ss58_address
+        console.print(f'  Source: [dim]{user_from_address}[/dim] (from wallet)')
     else:
-        user_source_address = click.prompt(f'Your {source_chain.upper()} source address')
+        user_from_address = click.prompt(f'Your {from_chain.upper()} source address')
 
     # Step 6b: Verify sender has enough funds
-    if source_chain == 'tao':
+    if from_chain == 'tao':
         tao_balance = subtensor.get_balance(wallet.coldkeypub.ss58_address)
-        if tao_balance.rao < source_amount:
+        if tao_balance.rao < from_amount:
             console.print(
-                f'[red]Insufficient balance: you have {tao_balance} but need {bt.Balance.from_rao(source_amount)}[/red]'
+                f'[red]Insufficient balance: you have {tao_balance} but need {bt.Balance.from_rao(from_amount)}[/red]'
             )
             return
 
     # Step 7: Confirm summary
-    fee_in_dest = dest_amount - user_receives
+    fee_in_dest = to_amount - user_receives
 
     summary = (
-        f'  Send:    [red]{amount} {source_chain.upper()}[/red]\n'
-        f'  Receive: [green]{_from_smallest_unit(user_receives, dest_chain):.8f} {dest_chain.upper()}[/green]\n'
-        f'  Fee:     {fee_percent:g}% ({_from_smallest_unit(fee_in_dest, dest_chain):.8f} {dest_chain.upper()})\n'
-        f'  Rate:    send 1 {source_chain.upper()}, get {selected_pair.rate:g} {dest_chain.upper()}\n'
+        f'  Send:    [red]{amount} {from_chain.upper()}[/red]\n'
+        f'  From:    [yellow]{user_from_address}[/yellow]\n'
+        f'  Receive: [green]{from_smallest_unit(user_receives, to_chain):.8f} {to_chain.upper()}[/green]\n'
+        f'  Fee:     {fee_percent:g}% ({from_smallest_unit(fee_in_dest, to_chain):.8f} {to_chain.upper()})\n'
+        f'  Rate:    send 1 {from_chain.upper()}, get {selected_pair.rate:g} {to_chain.upper()}\n'
         f'  Miner:   UID {selected_pair.uid}\n'
         f'  To:      {receive_address}'
     )
     console.print()
     console.print(Panel(summary, title='[bold]Swap Summary[/bold]', expand=False))
+    console.print(
+        '  [yellow]⚠  You must send the source funds from the "From" address above.[/yellow]\n'
+        '  [dim]Validators reject swaps where the source tx sender does not match the reserved address.[/dim]'
+    )
     console.print()
 
     if not skip_confirm and not click.confirm('Proceed?'):
@@ -700,17 +685,17 @@ def swap_now_command(
         return
 
     # Unlock coldkey once (password prompt) — all subsequent signing uses the cached key
-    if source_chain == 'tao':
-        source_key = wallet.coldkey
+    if from_chain == 'tao':
+        from_key = wallet.coldkey
     else:
-        source_key = None
+        from_key = None
 
     # Step 8: Reserve miner
     console.print('\n[dim]Step 1/3: Reserving miner...[/dim]')
 
-    provider = chain_providers.get(source_chain)
+    provider = chain_providers.get(from_chain)
     if not provider:
-        console.print(f'[red]No chain provider for {source_chain}[/red]')
+        console.print(f'[red]No chain provider for {from_chain}[/red]')
         return
 
     result = broadcast_reserve_with_retry(
@@ -718,13 +703,13 @@ def swap_now_command(
         client,
         provider,
         selected_pair,
-        source_chain,
-        dest_chain,
-        source_amount,
-        dest_amount,
+        from_chain,
+        to_chain,
+        from_amount,
+        to_amount,
         tao_amount,
-        user_source_address,
-        source_key,
+        user_from_address,
+        from_key,
         netuid,
         skip_confirm=skip_confirm,
     )
@@ -737,15 +722,15 @@ def swap_now_command(
     state = PendingSwapState(
         miner_hotkey=selected_pair.hotkey,
         miner_uid=selected_pair.uid,
-        source_chain=source_chain,
-        dest_chain=dest_chain,
-        source_amount=source_amount,
-        dest_amount=dest_amount,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        from_amount=from_amount,
+        to_amount=to_amount,
         tao_amount=tao_amount,
         user_receives=user_receives,
         rate_str=selected_pair.rate_str,
-        miner_source_address=selected_pair.source_address,
-        user_source_address=user_source_address,
+        miner_from_address=selected_pair.from_address,
+        user_from_address=user_from_address,
         receive_address=receive_address,
         reserved_until_block=reserved_until,
         netuid=netuid,
@@ -756,28 +741,28 @@ def swap_now_command(
     save_pending_swap(state)
 
     # Step 9: Send funds (or use pre-provided tx hash)
-    if source_tx_hash_opt:
+    if from_tx_hash_opt:
         # Funds already sent externally — use provided tx hash
-        source_tx_hash = source_tx_hash_opt
-        console.print(f'[dim]Using provided source tx: {source_tx_hash[:16]}...[/dim]')
+        from_tx_hash = from_tx_hash_opt
+        console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
     else:
-        human_send = _from_smallest_unit(source_amount, source_chain)
+        human_send = from_smallest_unit(from_amount, from_chain)
         console.print(
-            f'\n  Ready to send [bold]{human_send} {source_chain.upper()}[/bold] to miner at [cyan]{selected_pair.source_address}[/cyan]'
+            f'\n  Ready to send [bold]{human_send} {from_chain.upper()}[/bold] to miner at [cyan]{selected_pair.from_address}[/cyan]'
         )
         if not skip_confirm and not click.confirm('  Send now?', default=True):
             console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
             return
 
-        console.print(f'\n[dim]Step 2/3: Sending {source_chain.upper()}...[/dim]')
+        console.print(f'\n[dim]Step 2/3: Sending {from_chain.upper()}...[/dim]')
 
-        source_tx_hash = None
-        if source_chain == 'tao':
+        from_tx_hash = None
+        if from_chain == 'tao':
             try:
                 response = subtensor.transfer(
                     wallet=wallet,
-                    destination_ss58=selected_pair.source_address,
-                    amount=bt.Balance.from_rao(source_amount),
+                    destination_ss58=selected_pair.from_address,
+                    amount=bt.Balance.from_rao(from_amount),
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
                 )
@@ -787,42 +772,42 @@ def swap_now_command(
                     return
                 try:
                     receipt = response.extrinsic_receipt
-                    source_tx_hash = receipt.extrinsic_hash
+                    from_tx_hash = receipt.extrinsic_hash
                 except Exception:
-                    source_tx_hash = (
+                    from_tx_hash = (
                         getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
                     )
-                console.print(f'[green]TAO sent (tx: {source_tx_hash[:16]}...)[/green]')
+                console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
             except Exception as e:
                 console.print(f'[red]Transfer error: {e}[/red]')
                 console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
                 return
         else:
-            send_result = _send_btc(
+            send_result = send_btc(
                 chain_providers,
                 config,
-                selected_pair.source_address,
-                source_amount,
-                from_address=user_source_address,
+                selected_pair.from_address,
+                from_amount,
+                from_address=user_from_address,
             )
             if send_result is None:
                 return
-            source_tx_hash = send_result[0]
+            from_tx_hash = send_result[0]
 
     # Step 10: Post tx hash to validators
     console.print('\n[dim]Step 3/3: Confirming with validators...[/dim]')
 
     accepted, queued = sign_and_broadcast_confirm(
         provider,
-        user_source_address,
-        source_key,
-        source_tx_hash,
+        user_from_address,
+        from_key,
+        from_tx_hash,
         selected_pair.hotkey,
         receive_address,
         validator_axons,
         ephemeral_wallet,
-        source_chain=source_chain,
-        dest_chain=dest_chain,
+        from_chain=from_chain,
+        to_chain=to_chain,
     )
 
     if accepted == 0:
@@ -833,12 +818,12 @@ def swap_now_command(
 
     if all_queued:
         # Validators queued — wait for confirmations with live progress
-        chain_def = get_chain(source_chain)
+        chain_def = get_chain(from_chain)
         est_secs = chain_def.min_confirmations * chain_def.seconds_per_block
         est_min = est_secs / 60
 
         console.print(
-            f'\n  Waiting for [bold]{chain_def.min_confirmations} {source_chain.upper()}[/bold]'
+            f'\n  Waiting for [bold]{chain_def.min_confirmations} {from_chain.upper()}[/bold]'
             f' confirmation(s) (~{est_min:.0f} min)...'
         )
 
@@ -850,7 +835,7 @@ def swap_now_command(
     # Poll for swap creation (longer timeout when queued)
     max_polls = 600 if all_queued else 60
     try:
-        swap_id = _poll_for_swap_with_progress(client, selected_pair.hotkey, source_chain, max_polls)
+        swap_id = poll_for_swap_with_progress(client, selected_pair.hotkey, from_chain, max_polls)
     except KeyboardInterrupt:
         clear_pending_swap()
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
@@ -877,4 +862,4 @@ def swap_now_command(
 
     # Show completion receipt
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
-        _display_receipt(final_swap)
+        display_receipt(final_swap)

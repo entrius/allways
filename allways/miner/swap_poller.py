@@ -12,7 +12,9 @@ class SwapPoller:
     """Incrementally polls the contract for swaps assigned to this miner.
 
     Uses a cursor to avoid O(N) full scans. Only fetches new swap IDs
-    since last poll, then refreshes the active set.
+    since last poll, then refreshes the active set. Whether a swap has
+    already been handled is tracked by ``SwapFulfiller``'s persistent
+    send cache — this poller reports raw contract state only.
     """
 
     def __init__(self, contract_client: AllwaysContractClient, miner_hotkey: str):
@@ -20,13 +22,12 @@ class SwapPoller:
         self.miner_hotkey = miner_hotkey
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
-        self._processed: Set[int] = set()
         self.last_poll_ok: bool = True
 
     def poll(self) -> Tuple[List[Swap], List[Swap]]:
-        """Incremental poll. Returns (new_pending, fulfilled) for this miner."""
+        """Incremental poll. Returns (active, fulfilled) for this miner."""
         try:
-            result = self._poll_inner()
+            result = self.poll_inner()
             self.last_poll_ok = True
             return result
         except Exception as e:
@@ -34,7 +35,7 @@ class SwapPoller:
             self.last_poll_ok = False
             return [], []
 
-    def _poll_inner(self) -> Tuple[List[Swap], List[Swap]]:
+    def poll_inner(self) -> Tuple[List[Swap], List[Swap]]:
         # 1. Discover new swaps since last scan
         fresh: Set[int] = set()
         next_id = self.client.get_next_swap_id()
@@ -59,13 +60,8 @@ class SwapPoller:
                 self.active[swap_id] = swap
         for sid in resolved:
             self.active.pop(sid, None)
-            self._processed.discard(sid)
 
-        # 3. Return categorized
-        pending = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE and s.id not in self._processed]
+        # 3. Return categorized by contract status
+        active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]
         fulfilled = [s for s in self.active.values() if s.status == SwapStatus.FULFILLED]
-        return pending, fulfilled
-
-    def mark_processed(self, swap_id: int):
-        """Mark a swap as processed so it won't appear in new_pending again."""
-        self._processed.add(swap_id)
+        return active_swaps, fulfilled

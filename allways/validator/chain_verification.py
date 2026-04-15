@@ -30,9 +30,9 @@ class SwapVerifier:
         self.netuid = netuid
         self.metagraph = metagraph
         self.fee_divisor = fee_divisor
-        self._last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
+        self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
 
-    def _verify_tx(
+    def verify_tx(
         self,
         swap: Swap,
         chain: str,
@@ -66,9 +66,9 @@ class SwapVerifier:
                 )
             elif not tx_info.confirmed:
                 log_key = f'{swap.id}:{chain}'
-                prev_confs = self._last_logged_confs.get(log_key)
+                prev_confs = self.last_logged_confs.get(log_key)
                 if prev_confs != tx_info.confirmations:
-                    self._last_logged_confs[log_key] = tx_info.confirmations
+                    self.last_logged_confs[log_key] = tx_info.confirmations
                     bt.logging.debug(
                         f'Swap {swap.id}: tx found but not confirmed on {chain} '
                         f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
@@ -88,48 +88,47 @@ class SwapVerifier:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False
 
-    async def is_swap_complete(self, swap: Swap) -> bool:
-        """Verify rate, dest_amount, user send, and miner fulfillment.
+    async def verify_miner_fulfillment(self, swap: Swap) -> bool:
+        """Verify rate, to_amount, user send, and miner fulfillment.
 
         Rate and miner source address are read directly from the swap struct
         (snapshotted at initiation), so this works regardless of miner registration.
         """
-        if not swap.rate or not swap.miner_source_address:
-            bt.logging.warning(f'Swap {swap.id}: missing rate or miner_source_address on swap struct')
+        if not swap.rate or not swap.miner_from_address:
+            bt.logging.warning(f'Swap {swap.id}: missing rate or miner_from_address on swap struct')
             return False
 
         _, expected_user_receives = expected_swap_amounts(swap, self.fee_divisor)
         if expected_user_receives == 0:
-            bt.logging.warning(f'Swap {swap.id}: rate produces 0 dest_amount after fees')
+            bt.logging.warning(f'Swap {swap.id}: rate produces 0 to_amount after fees')
             return False
 
-        if int(swap.dest_amount) != expected_user_receives:
+        if int(swap.to_amount) != expected_user_receives:
             bt.logging.warning(
-                f'Swap {swap.id}: dest_amount mismatch — expected {expected_user_receives}, '
-                f'contract has {swap.dest_amount}'
+                f'Swap {swap.id}: to_amount mismatch — expected {expected_user_receives}, contract has {swap.to_amount}'
             )
             return False
 
         # Verify sequentially — parallel threads cause WebSocket contention
         # with the API server thread sharing the same substrate connection
         source_ok = await asyncio.to_thread(
-            self._verify_tx,
+            self.verify_tx,
             swap,
-            swap.source_chain,
-            swap.source_tx_hash,
-            swap.miner_source_address,
-            swap.source_amount,
-            swap.source_tx_block,
+            swap.from_chain,
+            swap.from_tx_hash,
+            swap.miner_from_address,
+            swap.from_amount,
+            swap.from_tx_block,
         )
         dest_ok = await asyncio.to_thread(
-            self._verify_tx,
+            self.verify_tx,
             swap,
-            swap.dest_chain,
-            swap.dest_tx_hash,
-            swap.user_dest_address,
+            swap.to_chain,
+            swap.to_tx_hash,
+            swap.user_to_address,
             expected_user_receives,
-            swap.dest_tx_block,
-            swap.miner_dest_address,
+            swap.to_tx_block,
+            swap.miner_to_address,
         )
 
         return source_ok and dest_ok

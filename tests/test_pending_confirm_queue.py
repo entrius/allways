@@ -3,23 +3,23 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from allways.validator.pending_confirms import (
+from allways.validator.state_store import (
     PendingConfirm,
-    PendingConfirmQueue,
+    ValidatorStateStore,
 )
 
 PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
     miner_hotkey='miner-1',
-    source_tx_hash='tx-1',
-    source_chain='btc',
-    dest_chain='tao',
-    source_address='bc1-user',
-    dest_address='5user',
+    from_tx_hash='tx-1',
+    from_chain='btc',
+    to_chain='tao',
+    from_address='bc1-user',
+    to_address='5user',
     tao_amount=123,
-    source_amount=456,
-    dest_amount=789,
-    miner_deposit_address='bc1-miner',
-    miner_dest_address='5miner',
+    from_amount=456,
+    to_amount=789,
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
     rate_str='350',
     reserved_until=100,
     queued_at=1.0,
@@ -28,16 +28,16 @@ PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
 
 PENDING_CONFIRM_SAMPLE2 = PendingConfirm(
     miner_hotkey='miner-2',
-    source_tx_hash='tx-2',
-    source_chain='btc',
-    dest_chain='tao',
-    source_address='bc1-user',
-    dest_address='5user',
+    from_tx_hash='tx-2',
+    from_chain='btc',
+    to_chain='tao',
+    from_address='bc1-user',
+    to_address='5user',
     tao_amount=123,
-    source_amount=456,
-    dest_amount=789,
-    miner_deposit_address='bc1-miner',
-    miner_dest_address='5miner',
+    from_amount=456,
+    to_amount=789,
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
     rate_str='350',
     reserved_until=100,
     queued_at=2.0,
@@ -46,37 +46,37 @@ PENDING_CONFIRM_SAMPLE2 = PendingConfirm(
 
 class TestPendingConfirmQueue:
     def test_persists_across_queue_instances(self, tmp_path: Path):
-        db_path = tmp_path / 'pending_confirms.db'
-        queue1 = PendingConfirmQueue(db_path=db_path)
+        db_path = tmp_path / 'state.db'
+        queue1 = ValidatorStateStore(db_path=db_path)
         queue1.enqueue(PENDING_CONFIRM_SAMPLE1)
         queue1.enqueue(PENDING_CONFIRM_SAMPLE2)
         queue1.close()
 
-        queue2 = PendingConfirmQueue(db_path=db_path)
+        queue2 = ValidatorStateStore(db_path=db_path)
         items = queue2.get_all()
 
-        assert queue2.size() == 2
+        assert queue2.pending_size() == 2
         assert len(items) == 2
         assert items[0].miner_hotkey == 'miner-1'
-        assert items[0].source_tx_hash == 'tx-1'
+        assert items[0].from_tx_hash == 'tx-1'
         assert items[1].miner_hotkey == 'miner-2'
-        assert items[1].source_tx_hash == 'tx-2'
+        assert items[1].from_tx_hash == 'tx-2'
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
-        db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(db_path=db_path)
+        db_path = tmp_path / 'state.db'
+        queue = ValidatorStateStore(db_path=db_path)
 
         queue.enqueue(PENDING_CONFIRM_SAMPLE1)
-        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, source_tx_hash='tx-new'))
+        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, from_tx_hash='tx-new'))
 
         items = queue.get_all()
-        assert queue.size() == 1
+        assert queue.pending_size() == 1
         assert len(items) == 1
-        assert items[0].source_tx_hash == 'tx-new'
+        assert items[0].from_tx_hash == 'tx-new'
 
     def test_has_reflects_enqueue_and_remove(self, tmp_path: Path):
-        db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(db_path=db_path)
+        db_path = tmp_path / 'state.db'
+        queue = ValidatorStateStore(db_path=db_path)
 
         assert not queue.has('miner-1')
 
@@ -88,26 +88,28 @@ class TestPendingConfirmQueue:
         assert removed.miner_hotkey == 'miner-1'
         assert not queue.has('miner-1')
 
-    def test_reads_purge_expired_entries(self, tmp_path: Path):
-        db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(
+    def test_purge_expired_pending_removes_stale_entries(self, tmp_path: Path):
+        db_path = tmp_path / 'state.db'
+        queue = ValidatorStateStore(
             db_path=db_path,
             current_block_fn=lambda: 101,
         )
 
-        queue.enqueue(PENDING_CONFIRM_SAMPLE1)
+        queue.enqueue(PENDING_CONFIRM_SAMPLE1)  # reserved_until=100 → expired at block 101
         queue.enqueue(replace(PENDING_CONFIRM_SAMPLE2, reserved_until=105))
 
-        items = queue.get_all()
+        removed = queue.purge_expired_pending()
+        assert removed == 1
 
+        items = queue.get_all()
         assert [item.miner_hotkey for item in items] == ['miner-2']
         assert not queue.has('miner-1')
         assert queue.has('miner-2')
-        assert queue.size() == 1
+        assert queue.pending_size() == 1
 
     def test_enqueue_and_remove_are_safe_across_threads(self, tmp_path: Path):
-        db_path = tmp_path / 'pending_confirms.db'
-        queue = PendingConfirmQueue(db_path=db_path)
+        db_path = tmp_path / 'state.db'
+        queue = ValidatorStateStore(db_path=db_path)
         removed_hotkeys: list[str] = []
 
         def writer():
@@ -133,5 +135,5 @@ class TestPendingConfirmQueue:
         remover_thread.join()
 
         assert set(removed_hotkeys) == {'miner-1', 'miner-2'}
-        assert queue.size() == 0
+        assert queue.pending_size() == 0
         assert queue.get_all() == []

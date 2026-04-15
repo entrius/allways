@@ -26,14 +26,14 @@ from rich.table import Table  # noqa: E402
 load_dotenv()
 
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
-from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, console, parse_global_flags  # noqa: E402
+from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
 
 # Strip global flags (--wallet, --hotkey, --network, --netuid) from argv
 # before Click processes commands. Must happen after argv is restored above.
-parse_global_flags()
+apply_global_flags()
 
 
 @click.group(cls=StyledAliasGroup, show_disclaimer=True)
