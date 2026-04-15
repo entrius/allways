@@ -239,6 +239,20 @@ class CollateralEvent:
     block: int
 
 
+@dataclass
+class BusyEvent:
+    """A transition in a miner's open-swap count.
+
+    ``delta`` is +1 on SwapInitiated and -1 on SwapCompleted/SwapTimedOut. The
+    running sum of deltas per hotkey is the number of in-flight swaps; a miner
+    is "busy" (excluded from crown) whenever that sum is > 0.
+    """
+
+    hotkey: str
+    delta: int
+    block: int
+
+
 MAX_BLOCKS_PER_SYNC = 50
 
 
@@ -290,6 +304,12 @@ class ContractEventWatcher:
         # lookups during scoring replay. Kept in sync with the flat list.
         self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
 
+        # Per-miner open-swap count and transition history. Count > 0 means
+        # the miner is currently handling a swap and should be excluded from
+        # crown-time credit — idle runners-up earn that interval instead.
+        self.open_swap_count: Dict[str, int] = {}
+        self.busy_events: List[BusyEvent] = []
+
     # ─── Public API consumed by scoring ─────────────────────────────────
 
     def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
@@ -323,6 +343,31 @@ class ContractEventWatcher:
                 break
             out.append({'hotkey': ev.hotkey, 'collateral_rao': ev.collateral_rao, 'block': ev.block})
         return out
+
+    def get_busy_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
+        """Ordered busy transitions in ``(start_block, end_block]``."""
+        out: List[dict] = []
+        for ev in self.busy_events:
+            if ev.block <= start_block:
+                continue
+            if ev.block > end_block:
+                break
+            out.append({'hotkey': ev.hotkey, 'delta': ev.delta, 'block': ev.block})
+        return out
+
+    def get_busy_miners_at(self, block: int) -> Dict[str, int]:
+        """Reconstruct the per-hotkey open-swap count at ``block``.
+
+        Walks every busy event at or before ``block`` and applies its delta.
+        Used by the crown-time replay to seed ``currently_busy`` state at the
+        window start.
+        """
+        counts: Dict[str, int] = {}
+        for ev in self.busy_events:
+            if ev.block > block:
+                break
+            counts[ev.hotkey] = counts.get(ev.hotkey, 0) + ev.delta
+        return {hk: c for hk, c in counts.items() if c > 0}
 
     # ─── Sync loop ──────────────────────────────────────────────────────
 
@@ -360,6 +405,25 @@ class ContractEventWatcher:
                     self.min_collateral = raw_min
             except Exception as e:
                 bt.logging.debug(f'EventWatcher bootstrap: min_collateral read failed: {e}')
+            # Seed busy state from any in-flight swaps. Without this a miner
+            # serving a swap at watcher-startup would be treated as idle until
+            # the next terminal event flipped them free.
+            try:
+                in_flight = contract_client.get_active_swaps() or []
+                seen_hotkeys = set()
+                for swap in in_flight:
+                    hk = getattr(swap, 'miner_hotkey', '')
+                    init_block = getattr(swap, 'initiated_block', current_block)
+                    if not hk:
+                        continue
+                    seen_hotkeys.add(hk)
+                    self.open_swap_count[hk] = self.open_swap_count.get(hk, 0) + 1
+                    self.busy_events.append(BusyEvent(hotkey=hk, delta=+1, block=init_block))
+                if seen_hotkeys:
+                    self.busy_events.sort(key=lambda ev: ev.block)
+                    bt.logging.info(f'EventWatcher bootstrap: seeded {len(seen_hotkeys)} miners as busy from contract')
+            except Exception as e:
+                bt.logging.debug(f'EventWatcher bootstrap: active swaps read failed: {e}')
             bt.logging.info(
                 f'EventWatcher initialized: {len(self.collateral)} collateral entries, '
                 f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
@@ -476,6 +540,12 @@ class ContractEventWatcher:
                     self.min_collateral = int(values.get('value', 0))
                 except (TypeError, ValueError):
                     pass
+        elif name == 'SwapInitiated':
+            # Miner becomes busy — excluded from crown-time credit until a
+            # terminal event (Completed/TimedOut) frees them.
+            miner = values.get('miner', '')
+            if miner:
+                self.apply_busy_delta(block_num, miner, +1)
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -486,6 +556,7 @@ class ContractEventWatcher:
                     completed=True,
                     resolved_block=block_num,
                 )
+                self.apply_busy_delta(block_num, miner, -1)
         elif name == 'SwapTimedOut':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -496,6 +567,23 @@ class ContractEventWatcher:
                     completed=False,
                     resolved_block=block_num,
                 )
+                self.apply_busy_delta(block_num, miner, -1)
+
+    def apply_busy_delta(self, block_num: int, hotkey: str, delta: int) -> None:
+        """Apply a ±1 transition to ``hotkey``'s open-swap count.
+
+        Floors the count at zero: a terminal event we observe with no matching
+        SwapInitiated in history (e.g. a swap that started before the watcher
+        bootstrapped) is dropped rather than letting the count go negative.
+        """
+        if delta == 0:
+            return
+        current = self.open_swap_count.get(hotkey, 0)
+        new_count = current + delta
+        if new_count < 0:
+            return
+        self.open_swap_count[hotkey] = new_count
+        self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
 
     def set_collateral(self, block_num: int, hotkey: str, new_total: int) -> None:
         """Record an authoritative post-event collateral balance for ``hotkey``."""
@@ -516,12 +604,21 @@ class ContractEventWatcher:
 
     def prune_old_collateral_events(self, current_block: int) -> None:
         cutoff = current_block - 2 * SCORING_WINDOW_BLOCKS
-        if cutoff <= 0 or not self.collateral_events:
+        if cutoff <= 0:
             return
-        self.collateral_events = [ev for ev in self.collateral_events if ev.block >= cutoff]
-        for hotkey, events in list(self.collateral_events_by_hotkey.items()):
-            pruned = [ev for ev in events if ev.block >= cutoff]
-            if pruned:
-                self.collateral_events_by_hotkey[hotkey] = pruned
-            else:
-                del self.collateral_events_by_hotkey[hotkey]
+        if self.collateral_events:
+            self.collateral_events = [ev for ev in self.collateral_events if ev.block >= cutoff]
+            for hotkey, events in list(self.collateral_events_by_hotkey.items()):
+                pruned = [ev for ev in events if ev.block >= cutoff]
+                if pruned:
+                    self.collateral_events_by_hotkey[hotkey] = pruned
+                else:
+                    del self.collateral_events_by_hotkey[hotkey]
+        # Prune busy events — but never drop transitions that would leave a
+        # still-open interval dangling. Keep anything newer than cutoff; older
+        # events are only safe to drop if the running count for that hotkey
+        # was zero after them. Conservative: prune only when the hotkey's
+        # count is currently zero (no open swap) and the event is before cutoff.
+        if self.busy_events:
+            open_now = {hk for hk, c in self.open_swap_count.items() if c > 0}
+            self.busy_events = [ev for ev in self.busy_events if ev.block >= cutoff or ev.hotkey in open_now]

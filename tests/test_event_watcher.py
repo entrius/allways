@@ -145,6 +145,69 @@ class TestSwapOutcomePersistence:
         w.state_store.close()
 
 
+class TestBusyIntervals:
+    def test_initiate_marks_busy_then_complete_frees(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        assert 'hk_a' in w.get_busy_miners_at(100)
+        assert w.open_swap_count['hk_a'] == 1
+
+        w.apply_event(150, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 'hk_a' not in w.get_busy_miners_at(150)
+        w.state_store.close()
+
+    def test_timeout_frees_busy_miner(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(500, 'SwapTimedOut', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 'hk_a' not in w.get_busy_miners_at(500)
+        w.state_store.close()
+
+    def test_get_busy_events_in_range_is_block_filtered(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(200, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(300, 'SwapInitiated', {'swap_id': 2, 'miner': 'hk_b'})
+        # Range is (start, end]: block 100 is excluded, 200/300 included
+        events = w.get_busy_events_in_range(100, 300)
+        assert [(e['block'], e['hotkey'], e['delta']) for e in events] == [
+            (200, 'hk_a', -1),
+            (300, 'hk_b', +1),
+        ]
+        w.state_store.close()
+
+    def test_count_never_goes_negative(self, tmp_path: Path):
+        """A terminal event with no matching initiate (e.g. bootstrap gap)
+        is dropped rather than letting count go negative."""
+        w = make_watcher(tmp_path)
+        w.apply_event(500, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        # And no event was recorded
+        assert w.busy_events == []
+        w.state_store.close()
+
+    def test_bootstrap_seeds_busy_from_active_swaps(self, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_collateral.return_value = 0
+        client.get_miner_active_flag.return_value = False
+        client.get_min_collateral.return_value = 0
+        client.get_active_swaps.return_value = [
+            type('S', (), {'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+            type('S', (), {'miner_hotkey': 'hk_b', 'initiated_block': 80})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+
+        assert w.open_swap_count == {'hk_a': 1, 'hk_b': 1}
+        busy_now = w.get_busy_miners_at(100)
+        assert busy_now == {'hk_a': 1, 'hk_b': 1}
+        w.state_store.close()
+
+
 class TestSCALEDecoder:
     """Decoder fixtures: hand-build event bytes and feed them through.
 
