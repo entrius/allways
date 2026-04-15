@@ -128,17 +128,33 @@ def read_miner_commitment(
 
 
 def read_miner_commitments(subtensor: bt.Subtensor, netuid: int) -> List[MinerPair]:
-    """Read all miner commitments from chain, parse into MinerPair list."""
-    pairs = []
+    """Read all miner commitments for the netuid in a single RPC call.
+
+    Uses substrate-interface's ``query_map`` over the ``CommitmentOf`` double map
+    keyed by ``(netuid, hotkey)``. One RPC round-trip returns every committed
+    hotkey on the subnet — cheaper than the old N-RPC for-loop, matters most
+    on full validator polling cadence.
+    """
+    pairs: List[MinerPair] = []
     try:
         metagraph = subtensor.metagraph(netuid)
-        for uid in range(metagraph.n.item()):
-            hotkey = metagraph.hotkeys[uid]
-            commitment = get_commitment(subtensor, netuid, hotkey)
-            if commitment:
-                pair = parse_commitment_data(commitment, uid=uid, hotkey=hotkey)
-                if pair:
-                    pairs.append(pair)
+        hotkey_to_uid = {metagraph.hotkeys[uid]: uid for uid in range(metagraph.n.item())}
+        result = subtensor.substrate.query_map(
+            module='Commitments',
+            storage_function='CommitmentOf',
+            params=[netuid],
+        )
+        for key, metadata in result:
+            hotkey = str(key.value) if hasattr(key, 'value') else str(key)
+            uid = hotkey_to_uid.get(hotkey)
+            if uid is None:
+                continue  # miner dereg'd but commitment still in storage
+            commitment = decode_commitment_field(metadata)
+            if not commitment:
+                continue
+            pair = parse_commitment_data(commitment, uid=uid, hotkey=hotkey)
+            if pair:
+                pairs.append(pair)
     except (ConnectionError, TimeoutError) as e:
         bt.logging.warning(f'Transient error reading commitments: {e}')
     except Exception as e:

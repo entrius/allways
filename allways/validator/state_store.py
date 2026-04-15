@@ -7,8 +7,8 @@ holding every table the validator owns:
 - ``pending_confirms`` — user swap confirmations awaiting tx confirmations;
   written by axon handler thread, drained by forward loop thread.
 - ``rate_events`` — per-miner per-direction rate history used by the V1
-  crown-time scoring replay. Bounded by ``RATE_UPDATE_MIN_INTERVAL_BLOCKS``
-  throttle on insert and ``EVENT_RETENTION_BLOCKS`` on prune.
+  crown-time scoring replay. Deduped on insert (same-rate observations are
+  dropped) and bounded by ``EVENT_RETENTION_BLOCKS`` on prune.
 - ``collateral_events`` — per-miner collateral history. One row per observed
   change. Pruned alongside rate_events.
 - ``swap_outcomes`` — all-time credibility ledger keyed by ``swap_id``. Never
@@ -26,8 +26,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
-
-from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
 
 
 @dataclass
@@ -191,23 +189,27 @@ class ValidatorStateStore:
         rate: float,
         block: int,
     ) -> bool:
-        """Insert a rate event if throttle + change conditions pass."""
+        """Insert a rate event, skipping same-rate duplicates.
+
+        The validator no longer throttles how often rate events land — per-block
+        commitment polling picks up every chain-accepted change, and shorter
+        inter-rate gaps become real crown intervals instead of getting collapsed
+        into the previous one. The only gate is same-rate dedupe to keep the
+        table from bloating on identical observations.
+        """
         with self.lock:
             conn = self.require_connection()
             row = conn.execute(
                 """
-                SELECT rate, block FROM rate_events
+                SELECT rate FROM rate_events
                 WHERE hotkey = ? AND from_chain = ? AND to_chain = ?
                 ORDER BY block DESC, id DESC
                 LIMIT 1
                 """,
                 (hotkey, from_chain, to_chain),
             ).fetchone()
-            if row is not None:
-                if block - row['block'] < RATE_UPDATE_MIN_INTERVAL_BLOCKS:
-                    return False
-                if row['rate'] == rate:
-                    return False
+            if row is not None and row['rate'] == rate:
+                return False
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hotkey, from_chain, to_chain, rate, block),

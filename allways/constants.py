@@ -38,17 +38,9 @@ SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s p
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
 
 # ─── V1 Crown-Time Scoring ───────────────────────────────
-# Validator throttle: rate_events for a hotkey are only accepted when this many
-# blocks have elapsed since the previous accepted event. Prevents rate-war games
-# and keeps crown-time attribution stable.
-RATE_UPDATE_MIN_INTERVAL_BLOCKS = 75
 # Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
 # window-start state can always be reconstructed from history.
 EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
-# How often the validator polls miner commitments from its local subtensor.
-# 15 blocks ≈ 3 min — 1/5 of RATE_UPDATE_MIN_INTERVAL_BLOCKS for good responsiveness
-# without hammering the RPC.
-COMMITMENT_POLL_INTERVAL_BLOCKS = 15
 # Emission allocation per swap direction. Sum of values is the portion of each
 # scoring pass allocated to crown-time winners; 1 - sum() recycles to RECYCLE_UID.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {

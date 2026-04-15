@@ -12,7 +12,6 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
-    COMMITMENT_POLL_INTERVAL_BLOCKS,
     DIRECTION_POOLS,
     EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
@@ -84,22 +83,21 @@ def clear_provider_caches(self: Validator) -> None:
 def poll_commitments(self: Validator) -> None:
     """Rate-side validator tick.
 
-    Two steps run at ``COMMITMENT_POLL_INTERVAL_BLOCKS`` cadence:
+    Fires every forward step because ``read_miner_commitments`` is now a
+    single ``query_map`` RPC — the cost is one round-trip regardless of
+    miner count, so per-block sampling is cheap and gives the crown-time
+    series its tightest possible accuracy (~1 block granularity).
 
-    1. ``refresh_miner_rates`` — read all miner commitments from the local
-       subtensor and persist direction-level diffs. This is the sampling rate
-       for the crown-time series, so it must stay on the hot path.
+    Two steps:
+
+    1. ``refresh_miner_rates`` — pull the current commitment snapshot and
+       persist any direction-level diffs vs the in-memory cache.
     2. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
-       metagraph since the last poll, both from the store and the in-memory
-       cache.
+       metagraph since the last poll.
 
     Event retention pruning lives in ``run_scoring_pass`` — it's bounded-growth
     hygiene, not correctness, so the once-per-scoring-round cadence is enough.
     """
-    if self.block - self.last_commitment_poll_block < COMMITMENT_POLL_INTERVAL_BLOCKS:
-        return
-    self.last_commitment_poll_block = self.block
-
     refresh_miner_rates(self)
     purge_deregistered_hotkeys(self)
 

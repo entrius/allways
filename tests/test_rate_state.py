@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
 from allways.validator.state_store import ValidatorStateStore
 
 
@@ -39,19 +38,13 @@ class TestInsertRateEvent:
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         store.close()
 
-    def test_rejected_when_within_throttle_window(self, tmp_path: Path):
+    def test_rate_change_next_block_is_accepted(self, tmp_path: Path):
+        """No throttle — a rate change one block later lands immediately."""
         store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
-        # 74 < 75: blocked by throttle
-        within = 100 + RATE_UPDATE_MIN_INTERVAL_BLOCKS - 1
-        assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00016, block=within) is False
-        store.close()
-
-    def test_accepted_when_past_throttle_window(self, tmp_path: Path):
-        store = make_store(tmp_path)
-        assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
-        past = 100 + RATE_UPDATE_MIN_INTERVAL_BLOCKS
-        assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00016, block=past) is True
+        assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00016, block=101) is True
+        events = store.get_rate_events_in_range('tao', 'btc', start_block=99, end_block=200)
+        assert [e['rate'] for e in events] == [0.00015, 0.00016]
         store.close()
 
     def test_rejected_when_rate_unchanged(self, tmp_path: Path):
@@ -60,7 +53,7 @@ class TestInsertRateEvent:
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=200) is False
         store.close()
 
-    def test_accepted_when_rate_changed_and_past_throttle(self, tmp_path: Path):
+    def test_accepted_when_rate_changes(self, tmp_path: Path):
         store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00020, block=200) is True
@@ -69,10 +62,10 @@ class TestInsertRateEvent:
         store.close()
 
     def test_direction_isolation(self, tmp_path: Path):
-        """Throttle is per (hotkey, from, to) — different directions don't conflict."""
+        """Dedupe is per (hotkey, from, to) — different directions don't conflict."""
         store = make_store(tmp_path)
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
-        # Same hotkey, other direction — should not be throttled
+        # Same hotkey, other direction — same-rate dedupe only checks its own direction
         assert store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=105) is True
         store.close()
 

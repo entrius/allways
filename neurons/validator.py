@@ -70,7 +70,6 @@ class Validator(BaseValidatorNeuron):
         # so pending_confirms can purge expired reservations lazily on read.
         self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
-        self.last_commitment_poll_block: int = 0
 
         # Event-sourced miner state. Replaces the old _poll_collaterals +
         # _refresh_min_collateral polling loops. ``sync_to(current_block)``
