@@ -537,16 +537,19 @@ def replay_crown_time_window(
     eligible_hotkeys: Set[str],
     min_collateral: int,
 ) -> Dict[str, float]:
-    """Walk the merged rate + collateral event stream, accumulate crown blocks.
+    """Walk the merged rate + collateral + busy event stream, accumulate crown blocks.
 
     Rates come from ``store`` (populated by commitment polling). Collateral
-    history comes from ``event_watcher`` (populated by contract event replay).
-    Returns ``{hotkey: crown_blocks_float}``. Ties split credit evenly across
-    the tied interval.
+    history and busy-interval transitions come from ``event_watcher``
+    (populated by contract event replay). Returns ``{hotkey: crown_blocks_float}``.
+    Ties split credit evenly across the tied interval; miners with an open
+    swap at the time are excluded so the credit flows to the next-best idle
+    miner instead.
     """
     # 1. Reconstruct state at window_start for every eligible hotkey.
     current_rates: Dict[str, float] = {}
     current_collateral: Dict[str, int] = {}
+    current_busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
 
     for hotkey in eligible_hotkeys:
         latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
@@ -563,29 +566,42 @@ def replay_crown_time_window(
             if snapshot is not None:
                 current_collateral[hotkey] = snapshot
 
-    # 2. Merge rate and collateral events within the window, oldest first.
-    #    Collateral events sort BEFORE rate events at the same block so a
-    #    simultaneous "collateral drops + best rate" transition resolves to
-    #    the post-drop state before rate attribution.
+    # 2. Merge rate, collateral, and busy events within the window, oldest first.
+    #    At identical blocks, busy transitions land first (0), then collateral
+    #    (1), then rate (2) so that "user reserves miner + miner's best rate"
+    #    resolves to the post-busy state before rate attribution — matching
+    #    the economic intent that a reservation immediately ends crown credit.
     rate_events = store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end)
     col_events = event_watcher.get_collateral_events_in_range(window_start, window_end)
+    busy_events = event_watcher.get_busy_events_in_range(window_start, window_end)
 
     merged: List[Tuple[int, int, str, str, float]] = []
-    for e in rate_events:
-        merged.append((e['block'], 1, 'rate', e['hotkey'], float(e['rate'])))
+    for e in busy_events:
+        merged.append((e['block'], 0, 'busy', e['hotkey'], float(e['delta'])))
     for e in col_events:
-        merged.append((e['block'], 0, 'collateral', e['hotkey'], float(e['collateral_rao'])))
+        merged.append((e['block'], 1, 'collateral', e['hotkey'], float(e['collateral_rao'])))
+    for e in rate_events:
+        merged.append((e['block'], 2, 'rate', e['hotkey'], float(e['rate'])))
     merged.sort(key=lambda x: (x[0], x[1]))
 
     # 3. Walk intervals, crediting current holders.
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
 
+    def current_busy_set() -> Set[str]:
+        return {hk for hk, c in current_busy_count.items() if c > 0}
+
     def attribute(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        holders = crown_holders_at_instant(current_rates, current_collateral, min_collateral, eligible_hotkeys)
+        holders = crown_holders_at_instant(
+            current_rates,
+            current_collateral,
+            min_collateral,
+            eligible_hotkeys,
+            busy=current_busy_set(),
+        )
         if not holders:
             return
         split = duration / len(holders)
@@ -596,8 +612,15 @@ def replay_crown_time_window(
         attribute(prev_block, block)
         if kind == 'rate':
             current_rates[hotkey] = value
-        else:
+        elif kind == 'collateral':
             current_collateral[hotkey] = int(value)
+        else:  # busy
+            delta = int(value)
+            new_count = current_busy_count.get(hotkey, 0) + delta
+            if new_count > 0:
+                current_busy_count[hotkey] = new_count
+            else:
+                current_busy_count.pop(hotkey, None)
         prev_block = block
 
     attribute(prev_block, window_end)
@@ -609,10 +632,24 @@ def crown_holders_at_instant(
     collaterals: Dict[str, int],
     min_collateral: int,
     eligible: Set[str],
+    busy: Optional[Set[str]] = None,
 ) -> List[str]:
-    """Hotkeys tied for best rate, with collateral >= min and eligible."""
+    """Hotkeys tied for best rate, eligible, collateralized, and not currently busy.
+
+    A miner is a candidate when they are:
+    - in ``eligible`` (registered + contract-active)
+    - not in ``busy`` (no open swap at this instant)
+    - collateralized at or above ``min_collateral``
+    - posting a rate > 0
+
+    Among candidates, the tied best rate takes the crown. Ties split credit
+    evenly in the caller.
+    """
+    busy = busy or set()
     candidates = {
-        hk: r for hk, r in rates.items() if hk in eligible and collaterals.get(hk, 0) >= min_collateral and r > 0
+        hk: r
+        for hk, r in rates.items()
+        if hk in eligible and hk not in busy and collaterals.get(hk, 0) >= min_collateral and r > 0
     }
     if not candidates:
         return []

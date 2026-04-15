@@ -98,6 +98,20 @@ class TestCrownHoldersHelper:
         holders = set(crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}))
         assert holders == {'a', 'b'}
 
+    def test_busy_best_rate_loses_to_idle_runner_up(self):
+        """Miner A has the best rate but is mid-swap — crown goes to B."""
+        rates = {'a': 0.00030, 'b': 0.00020}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        holders = crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}, busy={'a'})
+        assert holders == ['b']
+
+    def test_all_busy_returns_empty(self):
+        """Every eligible miner is busy → no crown → pool recycles."""
+        rates = {'a': 0.00030, 'b': 0.00020}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        holders = crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, {'a', 'b'}, busy={'a', 'b'})
+        assert holders == []
+
 
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
@@ -233,6 +247,112 @@ class TestReplayCrownTime:
             min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 1000.0}
+        store.close()
+
+    def test_best_rate_miner_goes_busy_credit_flows_to_runner_up(self, tmp_path: Path):
+        """A holds the best rate but takes a swap at block 400 that resolves
+        at block 800. During [400, 800] the crown flips to idle runner-up B."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_a', 'tao', 'btc', 0.00030, 0),  # A is best
+            ('hk_b', 'tao', 'btc', 0.00020, 0),  # B is runner-up
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_b', MIN_COLLATERAL, 0)
+
+        # A goes busy with a swap at 400, completes at 800.
+        watcher.apply_event(400, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(800, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            eligible_hotkeys={'hk_a', 'hk_b'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        # A earns (100,400] = 300 + (800,1100] = 300 → 600 total
+        # B earns (400,800] = 400 total
+        assert crown == {'hk_a': 600.0, 'hk_b': 400.0}
+        store.close()
+
+    def test_solo_miner_busy_pool_recycles(self, tmp_path: Path):
+        """Only one miner has a rate, they're busy for part of the window —
+        nobody else is eligible, so the busy period earns nothing (recycles)."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+
+        watcher.apply_event(400, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(900, 'SwapTimedOut', {'swap_id': 1, 'miner': 'hk_a'})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            eligible_hotkeys={'hk_a'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        # A earns (100,400] = 300 + (900,1100] = 200 → 500. The 500 blocks
+        # of busy interval have no idle candidate → not credited to anyone
+        # (the caller recycles via the remainder).
+        assert crown == {'hk_a': 500.0}
+        store.close()
+
+    def test_busy_state_at_window_start_is_reconstructed(self, tmp_path: Path):
+        """Miner A's SwapInitiated fires before window_start and doesn't
+        resolve until mid-window — replay must see A as busy from the start."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_a', 'tao', 'btc', 0.00030, 0),
+            ('hk_b', 'tao', 'btc', 0.00020, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        seed_collateral(watcher, 'hk_b', MIN_COLLATERAL, 0)
+
+        # A's swap started BEFORE the window opens and completes inside it.
+        watcher.apply_event(50, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(500, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            eligible_hotkeys={'hk_a', 'hk_b'},
+            min_collateral=MIN_COLLATERAL,
+        )
+        # From window_start=100 A is already busy (reconstructed from pre-window
+        # SwapInitiated). B earns (100,500] = 400; A earns (500,1100] = 600.
+        assert crown == {'hk_b': 400.0, 'hk_a': 600.0}
         store.close()
 
 
