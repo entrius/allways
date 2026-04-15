@@ -33,7 +33,7 @@ BTC_MIN_FEE_RATE = 2  # sat/vB — minimum BTC fee rate floor to avoid stuck txs
 DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS = 5
 
 # ─── Scoring ─────────────────────────────────────────────
-SCORING_WINDOW_BLOCKS = 3600  # ~12 hours at 12s/block
+SCORING_WINDOW_BLOCKS = 1200  # ~4 hours at 12s/block
 SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s poll)
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
 
