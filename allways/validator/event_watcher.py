@@ -295,21 +295,22 @@ class ContractEventWatcher:
     def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
         """Most recent collateral event for ``hotkey`` at or before ``block``.
 
-        O(log n) via binary search on the per-hotkey event list.
+        O(log n) via binary search on the per-hotkey event list. If no events
+        exist for the hotkey at all (bootstrap-only miners), returns the
+        static snapshot at block 0 — that's the authoritative pre-event
+        state. If events exist but none fall at/before ``block``, returns
+        None: the snapshot reflects state AFTER the existing events and is
+        not valid for queries in the pre-event gap.
         """
         from bisect import bisect_right
 
         events = self.collateral_events_by_hotkey.get(hotkey)
         if not events:
-            # Fall back to the snapshot value taken at initialize(). Before any
-            # events land for this hotkey, the snapshot is the authoritative
-            # state and it's been stable since ``block`` by definition.
             snapshot = self.collateral.get(hotkey)
             return (snapshot, 0) if snapshot is not None else None
         idx = bisect_right([e.block for e in events], block) - 1
         if idx < 0:
-            snapshot = self.collateral.get(hotkey)
-            return (snapshot, 0) if snapshot is not None else None
+            return None
         ev = events[idx]
         return ev.collateral_rao, ev.block
 

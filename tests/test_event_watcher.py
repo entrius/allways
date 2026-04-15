@@ -1,14 +1,26 @@
-"""Unit tests for ContractEventWatcher state application.
+"""Unit tests for ContractEventWatcher.
 
-These tests exercise the event→state pipeline without hitting a live chain —
-events are injected via ``_apply_event`` directly. The substrate-side decode
-path is covered by the live dev-env suite.
+Covers three layers:
+  1. ``load_event_registry`` — metadata JSON → registry dict
+  2. ``decode_data_fields`` / ``decode_topic_fields`` — raw bytes → values
+     (driven by hand-encoded SCALE fixtures so we don't need a live node)
+  3. ``apply_event`` — state transitions once events are decoded
 """
 
+import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from allways.validator.event_watcher import ContractEventWatcher, load_event_registry
+from substrateinterface.utils.ss58 import ss58_decode
+
+from allways.validator.event_watcher import (
+    ContractEventWatcher,
+    EventDef,
+    FieldDef,
+    decode_data_fields,
+    decode_topic_fields,
+    load_event_registry,
+)
 from allways.validator.state_store import ValidatorStateStore
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -22,6 +34,22 @@ def make_watcher(tmp_path: Path) -> ContractEventWatcher:
         metadata_path=METADATA_PATH,
         state_store=store,
     )
+
+
+def encode_u64_le(v: int) -> bytes:
+    return struct.pack('<Q', v)
+
+
+def encode_u128_le(v: int) -> bytes:
+    return struct.pack('<QQ', v & 0xFFFFFFFFFFFFFFFF, v >> 64)
+
+
+def encode_bool(v: bool) -> bytes:
+    return b'\x01' if v else b'\x00'
+
+
+def ss58_to_bytes(addr: str) -> bytes:
+    return bytes.fromhex(ss58_decode(addr))
 
 
 class TestRegistryLoad:
@@ -109,6 +137,166 @@ class TestSwapOutcomePersistence:
         w.apply_event(102, 'SwapTimedOut', {'swap_id': 3, 'miner': 'hk_a'})
         stats = w.state_store.get_all_time_success_rates()
         assert stats['hk_a'] == (2, 1)
+        w.state_store.close()
+
+
+class TestSCALEDecoder:
+    """Decoder fixtures: hand-build event bytes and feed them through.
+
+    ink! v5 emits all event fields in the data blob in declaration order,
+    with topic_fields getting a second copy in the topics array. These
+    fixtures mirror what substrate.get_events would produce.
+    """
+
+    ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+
+    def test_decode_miner_activated(self):
+        event = EventDef(
+            name='MinerActivated',
+            signature_topic='0x' + '00' * 32,
+            topic_fields=[FieldDef('miner', 'AccountId')],
+            data_fields=[FieldDef('active', 'bool')],
+        )
+        miner_bytes = ss58_to_bytes(self.ALICE)
+        # data = AccountId (32b, the indexed-field copy) + active bool
+        data = miner_bytes + encode_bool(True)
+        topics = [b'\x00' * 32, miner_bytes]
+
+        values = decode_topic_fields(event, topics)
+        values.update(decode_data_fields(event, data))
+
+        assert values['miner'] == self.ALICE
+        assert values['active'] is True
+
+    def test_decode_collateral_posted(self):
+        event = EventDef(
+            name='CollateralPosted',
+            signature_topic='0x' + '00' * 32,
+            topic_fields=[FieldDef('miner', 'AccountId')],
+            data_fields=[FieldDef('amount', 'u128'), FieldDef('total', 'u128')],
+        )
+        miner_bytes = ss58_to_bytes(self.ALICE)
+        amount = 250_000_000
+        total = 750_000_000
+        data = miner_bytes + encode_u128_le(amount) + encode_u128_le(total)
+        topics = [b'\x00' * 32, miner_bytes]
+
+        values = decode_topic_fields(event, topics)
+        values.update(decode_data_fields(event, data))
+
+        assert values['miner'] == self.ALICE
+        assert values['amount'] == amount
+        assert values['total'] == total
+
+    def test_decode_swap_completed(self):
+        event = EventDef(
+            name='SwapCompleted',
+            signature_topic='0x' + '00' * 32,
+            topic_fields=[FieldDef('swap_id', 'u64'), FieldDef('miner', 'AccountId')],
+            data_fields=[FieldDef('tao_amount', 'u128'), FieldDef('fee_amount', 'u128')],
+        )
+        miner_bytes = ss58_to_bytes(self.ALICE)
+        data = encode_u64_le(42) + miner_bytes + encode_u128_le(500_000_000) + encode_u128_le(5_000_000)
+        topics = [b'\x00' * 32, encode_u64_le(42), miner_bytes]
+
+        values = decode_topic_fields(event, topics)
+        values.update(decode_data_fields(event, data))
+
+        assert values['swap_id'] == 42
+        assert values['miner'] == self.ALICE
+        assert values['tao_amount'] == 500_000_000
+        assert values['fee_amount'] == 5_000_000
+
+    def test_decoder_stops_on_unknown_type(self):
+        """A FieldDef with a type the decoder doesn't know halts decoding
+        cleanly — partial values are kept, the rest are skipped."""
+        event = EventDef(
+            name='Weird',
+            signature_topic='0x' + '00' * 32,
+            topic_fields=[],
+            data_fields=[
+                FieldDef('first', 'u128'),
+                FieldDef('second', 'FloatNobodySupports'),
+                FieldDef('third', 'u128'),
+            ],
+        )
+        data = encode_u128_le(1) + encode_u128_le(2) + encode_u128_le(3)
+        values = decode_data_fields(event, data)
+        # First decodes fine; decoder bails at 'second' and never reaches third
+        assert 'first' in values
+        assert 'second' not in values
+        assert 'third' not in values
+
+
+class TestBootstrap:
+    """initialize() snapshotting behavior — the M1 fix."""
+
+    def test_bootstrap_seeds_collateral_and_active_from_contract(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_collateral.side_effect = lambda hk: {'hk_a': 10, 'hk_b': 20}.get(hk, 0)
+        client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
+        client.get_min_collateral.return_value = 5
+
+        w.initialize(current_block=1000, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+
+        assert w.collateral == {'hk_a': 10, 'hk_b': 20}
+        assert w.active_miners == {'hk_a'}
+        assert w.min_collateral == 5
+        assert w.cursor == 1000
+        w.state_store.close()
+
+    def test_bootstrap_tolerates_contract_read_failures(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_collateral.side_effect = RuntimeError('rpc down')
+        client.get_miner_active_flag.side_effect = RuntimeError('rpc down')
+        client.get_min_collateral.side_effect = RuntimeError('rpc down')
+
+        w.initialize(current_block=500, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        # Everything defaults to empty/starting state, no exception propagated
+        assert w.collateral == {}
+        assert w.active_miners == set()
+        assert w.cursor == 500
+        w.state_store.close()
+
+
+class TestSetCollateral:
+    def test_set_collateral_uses_total_from_collateral_posted(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 1_000, 'total': 10_000})
+        # total (not amount) is authoritative
+        assert w.collateral['hk_a'] == 10_000
+        w.state_store.close()
+
+    def test_set_collateral_uses_remaining_from_withdrawn(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 10_000, 'total': 10_000})
+        w.apply_event(200, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 3_000, 'remaining': 7_000})
+        assert w.collateral['hk_a'] == 7_000
+        w.state_store.close()
+
+    def test_latest_before_uses_bisect_index(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        for block, amount in [(100, 1), (200, 2), (300, 3), (400, 4)]:
+            w.set_collateral(block, 'hk_a', amount)
+        # Before first event → None
+        assert w.get_latest_collateral_before('hk_a', block=50) is None
+        # On-boundary → hit that event
+        assert w.get_latest_collateral_before('hk_a', block=200) == (2, 200)
+        # Between events → previous event
+        assert w.get_latest_collateral_before('hk_a', block=250) == (2, 200)
+        # After last event → last event
+        assert w.get_latest_collateral_before('hk_a', block=9999) == (4, 400)
+        w.state_store.close()
+
+    def test_latest_before_falls_back_to_snapshot_when_no_events(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        # No events yet; only bootstrap-seeded collateral
+        w.collateral['hk_seed'] = 500
+        result = w.get_latest_collateral_before('hk_seed', block=1000)
+        assert result == (500, 0)
         w.state_store.close()
 
 
