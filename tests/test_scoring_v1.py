@@ -43,8 +43,7 @@ def make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEventW
 
 def seed_collateral(watcher: ContractEventWatcher, hotkey: str, collateral_rao: int, block: int) -> None:
     """Insert a collateral event directly into the watcher's in-memory state."""
-    watcher.collateral[hotkey] = collateral_rao
-    watcher.collateral_events.append(CollateralEvent(hotkey=hotkey, collateral_rao=collateral_rao, block=block))
+    watcher.set_collateral(block, hotkey, collateral_rao)
 
 
 def make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:

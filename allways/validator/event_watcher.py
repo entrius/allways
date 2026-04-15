@@ -239,12 +239,15 @@ class CollateralEvent:
     block: int
 
 
+MAX_BLOCKS_PER_SYNC = 50
+
+
 class ContractEventWatcher:
     """Replays contract events into in-memory miner state.
 
     Usage:
         watcher = ContractEventWatcher(substrate, contract_address, metadata_path, state_store)
-        watcher.initialize(current_block)   # backfill from head - 2*window
+        watcher.initialize(current_block, metagraph_hotkeys, contract_client)
         ... every forward step ...
         watcher.sync_to(current_block)
 
@@ -252,6 +255,15 @@ class ContractEventWatcher:
     ``active_miners``, ``min_collateral`` directly off the watcher. Swap outcomes
     are forwarded into ``state_store.insert_swap_outcome`` so the credibility
     ledger persists across restarts.
+
+    ``initialize`` snapshots current on-chain state for every metagraph miner,
+    then advances the cursor to ``current_block``. From that point forward only
+    events drive state changes. This avoids the trap where a miner who posted
+    collateral before the replay window would look like they had zero.
+
+    ``sync_to`` is bounded to ``MAX_BLOCKS_PER_SYNC`` per call so a long outage
+    doesn't block the forward loop — the cursor catches up over multiple
+    forward steps at ~50 blocks per tick.
     """
 
     def __init__(
@@ -274,17 +286,32 @@ class ContractEventWatcher:
         # Sorted-by-block history used by crown-time replay. Bounded to
         # 2x the scoring window; older entries are dropped on sync.
         self.collateral_events: List[CollateralEvent] = []
+        # Per-hotkey view of collateral_events for O(log n) latest-before
+        # lookups during scoring replay. Kept in sync with the flat list.
+        self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
     def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
-        latest: Optional[Tuple[int, int]] = None
-        for ev in self.collateral_events:
-            if ev.block > block:
-                break
-            if ev.hotkey == hotkey:
-                latest = (ev.collateral_rao, ev.block)
-        return latest
+        """Most recent collateral event for ``hotkey`` at or before ``block``.
+
+        O(log n) via binary search on the per-hotkey event list.
+        """
+        from bisect import bisect_right
+
+        events = self.collateral_events_by_hotkey.get(hotkey)
+        if not events:
+            # Fall back to the snapshot value taken at initialize(). Before any
+            # events land for this hotkey, the snapshot is the authoritative
+            # state and it's been stable since ``block`` by definition.
+            snapshot = self.collateral.get(hotkey)
+            return (snapshot, 0) if snapshot is not None else None
+        idx = bisect_right([e.block for e in events], block) - 1
+        if idx < 0:
+            snapshot = self.collateral.get(hotkey)
+            return (snapshot, 0) if snapshot is not None else None
+        ev = events[idx]
+        return ev.collateral_rao, ev.block
 
     def get_collateral_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
         out: List[dict] = []
@@ -298,19 +325,60 @@ class ContractEventWatcher:
 
     # ─── Sync loop ──────────────────────────────────────────────────────
 
-    def initialize(self, current_block: int) -> None:
-        """Cold start: replay events from ``max(0, head - 2 * SCORING_WINDOW_BLOCKS)``."""
-        start = max(0, current_block - 2 * SCORING_WINDOW_BLOCKS)
-        self.cursor = start
-        self.sync_to(current_block)
+    def initialize(
+        self,
+        current_block: int,
+        metagraph_hotkeys: Optional[List[str]] = None,
+        contract_client: Any = None,
+    ) -> None:
+        """Cold start: snapshot contract state for every metagraph miner, then
+        advance the cursor so only forward events drive state changes.
+
+        Callers should pass ``metagraph_hotkeys`` and a read-capable
+        ``contract_client``. If either is missing (e.g. in unit tests) the
+        watcher falls back to an empty snapshot and starts at ``current_block``
+        — scoring will simply not credit any miner until events arrive.
+        """
+        if metagraph_hotkeys and contract_client is not None:
+            for hotkey in metagraph_hotkeys:
+                try:
+                    collateral = contract_client.get_miner_collateral(hotkey) or 0
+                except Exception as e:
+                    bt.logging.debug(f'EventWatcher bootstrap: collateral read failed for {hotkey[:8]}: {e}')
+                    collateral = 0
+                if collateral > 0:
+                    self.collateral[hotkey] = collateral
+                try:
+                    if contract_client.get_miner_active_flag(hotkey):
+                        self.active_miners.add(hotkey)
+                except Exception as e:
+                    bt.logging.debug(f'EventWatcher bootstrap: active flag read failed for {hotkey[:8]}: {e}')
+            try:
+                raw_min = contract_client.get_min_collateral() or 0
+                if raw_min > 0:
+                    self.min_collateral = raw_min
+            except Exception as e:
+                bt.logging.debug(f'EventWatcher bootstrap: min_collateral read failed: {e}')
+            bt.logging.info(
+                f'EventWatcher initialized: {len(self.collateral)} collateral entries, '
+                f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
+            )
+        self.cursor = current_block
 
     def sync_to(self, current_block: int) -> None:
-        """Catch up from cursor to ``current_block``, applying each block's events."""
+        """Catch up from cursor to ``current_block`` in bounded chunks.
+
+        At most ``MAX_BLOCKS_PER_SYNC`` blocks are processed per call so a
+        multi-minute outage doesn't freeze the forward loop on one sync. The
+        cursor advances incrementally across forward steps until it catches
+        up to head.
+        """
         if current_block <= self.cursor:
             return
-        for block_num in range(self.cursor + 1, current_block + 1):
+        end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
+        for block_num in range(self.cursor + 1, end + 1):
             self.process_block(block_num)
-        self.cursor = current_block
+        self.cursor = end
         self.prune_old_collateral_events(current_block)
 
     def process_block(self, block_num: int) -> None:
@@ -347,30 +415,52 @@ class ContractEventWatcher:
         try:
             raw_data = to_bytes(attrs.get('data', ''))
             topics = [to_bytes(t) for t in record_topics]
-        except Exception:
+        except Exception as e:
+            bt.logging.warning(f'EventWatcher: failed to parse event bytes: {e}')
             return None
 
         if not topics:
+            bt.logging.warning('EventWatcher: contract event with no topics — decoder cannot identify it')
             return None
         sig_topic = '0x' + topics[0].hex()
         event_def = self.registry.get(sig_topic)
         if event_def is None:
+            # Unknown event topic — likely metadata drift. Warn once per topic
+            # so a stale metadata.json doesn't silently drop every event.
+            bt.logging.warning(f'EventWatcher: unknown event topic {sig_topic[:18]}... — metadata may be stale')
             return None
 
         try:
             values = decode_topic_fields(event_def, topics)
             values.update(decode_data_fields(event_def, raw_data))
-        except Exception:
+        except Exception as e:
+            bt.logging.warning(f'EventWatcher: failed to decode {event_def.name}: {e}')
             return None
         return event_def.name, values
 
     def apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
         if name == 'CollateralPosted':
-            self.apply_collateral_delta(block_num, values.get('miner', ''), +int(values.get('amount', 0)))
+            # `total` is the authoritative post-event balance — use it as a
+            # SET so we don't drift when the replay window is missing prior
+            # events. Fall back to an add if `total` isn't present.
+            hotkey = values.get('miner', '')
+            total = values.get('total')
+            if total is not None:
+                self.set_collateral(block_num, hotkey, int(total))
+            else:
+                self.adjust_collateral(block_num, hotkey, +int(values.get('amount', 0)))
         elif name == 'CollateralWithdrawn':
-            self.apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
+            hotkey = values.get('miner', '')
+            remaining = values.get('remaining')
+            if remaining is not None:
+                self.set_collateral(block_num, hotkey, int(remaining))
+            else:
+                self.adjust_collateral(block_num, hotkey, -int(values.get('amount', 0)))
         elif name == 'CollateralSlashed':
-            self.apply_collateral_delta(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
+            # Slashed has no `total` / `remaining` field — it only carries the
+            # slash amount. Subtract from the current snapshot (which was
+            # seeded at initialize() or updated by a prior Posted/Withdrawn).
+            self.adjust_collateral(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
         elif name == 'MinerActivated':
             hotkey = values.get('miner', '')
             if not hotkey:
@@ -406,23 +496,31 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
 
-    def apply_collateral_delta(self, block_num: int, hotkey: str, delta: int) -> None:
+    def set_collateral(self, block_num: int, hotkey: str, new_total: int) -> None:
+        """Record an authoritative post-event collateral balance for ``hotkey``."""
+        if not hotkey:
+            return
+        new_total = max(0, new_total)
+        self.collateral[hotkey] = new_total
+        event = CollateralEvent(hotkey=hotkey, collateral_rao=new_total, block=block_num)
+        self.collateral_events.append(event)
+        self.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
+
+    def adjust_collateral(self, block_num: int, hotkey: str, delta: int) -> None:
+        """Add a delta to the current collateral snapshot and emit an event row."""
         if not hotkey:
             return
         new_total = max(0, self.collateral.get(hotkey, 0) + delta)
-        self.collateral[hotkey] = new_total
-        self.collateral_events.append(CollateralEvent(hotkey=hotkey, collateral_rao=new_total, block=block_num))
+        self.set_collateral(block_num, hotkey, new_total)
 
     def prune_old_collateral_events(self, current_block: int) -> None:
         cutoff = current_block - 2 * SCORING_WINDOW_BLOCKS
         if cutoff <= 0 or not self.collateral_events:
             return
-        keep_from = 0
-        for i, ev in enumerate(self.collateral_events):
-            if ev.block >= cutoff:
-                keep_from = i
-                break
-        else:
-            keep_from = len(self.collateral_events)
-        if keep_from > 0:
-            self.collateral_events = self.collateral_events[keep_from:]
+        self.collateral_events = [ev for ev in self.collateral_events if ev.block >= cutoff]
+        for hotkey, events in list(self.collateral_events_by_hotkey.items()):
+            pruned = [ev for ev in events if ev.block >= cutoff]
+            if pruned:
+                self.collateral_events_by_hotkey[hotkey] = pruned
+            else:
+                del self.collateral_events_by_hotkey[hotkey]

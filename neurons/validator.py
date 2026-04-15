@@ -86,7 +86,11 @@ class Validator(BaseValidatorNeuron):
             state_store=self.state_store,
             default_min_collateral=fallback_min_collateral,
         )
-        self.event_watcher.initialize(self.block)
+        self.event_watcher.initialize(
+            current_block=self.block,
+            metagraph_hotkeys=list(self.metagraph.hotkeys),
+            contract_client=self.contract_client,
+        )
 
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
