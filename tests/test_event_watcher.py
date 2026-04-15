@@ -124,14 +124,14 @@ class TestSwapOutcomePersistence:
     def test_completed_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (1, 0)
         w.state_store.close()
 
     def test_timed_out_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapTimedOut', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (0, 1)
         w.state_store.close()
 
@@ -140,7 +140,7 @@ class TestSwapOutcomePersistence:
         w.apply_event(100, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
         w.apply_event(101, 'SwapCompleted', {'swap_id': 2, 'miner': 'hk_a'})
         w.apply_event(102, 'SwapTimedOut', {'swap_id': 3, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (2, 1)
         w.state_store.close()
 

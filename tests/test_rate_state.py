@@ -76,7 +76,7 @@ class TestInsertSwapOutcome:
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=False, resolved_block=101)
 
-        rates = store.get_all_time_success_rates()
+        rates = store.get_success_rates_since(0)
         # Second insert replaced the first: 0 completed, 1 timed_out
         assert rates == {'hk1': (0, 1)}
         store.close()
@@ -131,8 +131,40 @@ class TestSuccessRates:
         store.insert_swap_outcome(swap_id=3, miner_hotkey='hk1', completed=False, resolved_block=102)
         store.insert_swap_outcome(swap_id=4, miner_hotkey='hk2', completed=True, resolved_block=103)
 
-        rates = store.get_all_time_success_rates()
+        rates = store.get_success_rates_since(0)
         assert rates == {'hk1': (2, 1), 'hk2': (1, 0)}
+        store.close()
+
+    def test_excludes_outcomes_before_since_block(self, tmp_path: Path):
+        """Rolling window — outcomes before the cutoff don't count."""
+        store = make_store(tmp_path)
+        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=False, resolved_block=100)
+        store.insert_swap_outcome(swap_id=2, miner_hotkey='hk1', completed=True, resolved_block=500)
+
+        rates = store.get_success_rates_since(200)
+        assert rates == {'hk1': (1, 0)}  # ancient timeout aged out
+        store.close()
+
+
+class TestPruneSwapOutcomes:
+    def test_prune_removes_old_outcomes_only(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
+        store.insert_swap_outcome(swap_id=2, miner_hotkey='hk1', completed=True, resolved_block=500)
+
+        store.prune_swap_outcomes_older_than(cutoff_block=200)
+
+        rates = store.get_success_rates_since(0)
+        assert rates == {'hk1': (1, 0)}  # only the resolved_block=500 outcome survives
+        store.close()
+
+    def test_prune_noop_when_cutoff_nonpositive(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
+        store.prune_swap_outcomes_older_than(cutoff_block=0)
+        store.prune_swap_outcomes_older_than(cutoff_block=-100)
+        rates = store.get_success_rates_since(0)
+        assert rates == {'hk1': (1, 0)}
         store.close()
 
 
@@ -149,11 +181,11 @@ class TestDeleteHotkey:
         store.delete_hotkey('hk1')
 
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
-        assert 'hk1' not in store.get_all_time_success_rates()
+        assert 'hk1' not in store.get_success_rates_since(0)
 
         # hk2 untouched
         assert store.get_latest_rate_before('hk2', 'tao', 'btc', block=200) is not None
-        assert 'hk2' in store.get_all_time_success_rates()
+        assert 'hk2' in store.get_success_rates_since(0)
         store.close()
 
 
@@ -167,7 +199,7 @@ class TestPrune:
 
         # Rate events gone, outcomes retained
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
-        assert store.get_all_time_success_rates() == {'hk1': (1, 0)}
+        assert store.get_success_rates_since(0) == {'hk1': (1, 0)}
         store.close()
 
 

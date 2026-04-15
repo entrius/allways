@@ -12,6 +12,7 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
+    CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
     EVENT_RETENTION_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
@@ -424,11 +425,20 @@ def run_scoring_pass(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
         prune_aged_rate_events(self)
+        prune_stale_swap_outcomes(self)
         rewards, miner_uids = calculate_miner_rewards(self)
         if len(miner_uids) > 0 and len(rewards) > 0:
             self.update_scores(rewards, miner_uids)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
+
+
+def prune_stale_swap_outcomes(self: Validator) -> None:
+    """Drop swap_outcomes rows older than the credibility window so the
+    ledger stays bounded and miners can rehabilitate."""
+    cutoff = self.block - CREDIBILITY_WINDOW_BLOCKS
+    if cutoff > 0:
+        self.state_store.prune_swap_outcomes_older_than(cutoff)
 
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
@@ -460,7 +470,8 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
-    success_stats = self.state_store.get_all_time_success_rates()
+    credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
+    success_stats = self.state_store.get_success_rates_since(credibility_since)
     min_collateral = int(self.event_watcher.min_collateral or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():

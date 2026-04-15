@@ -41,6 +41,10 @@ SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only,
 # Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
 # window-start state can always be reconstructed from history.
 EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
+# Rolling credibility window for success_rate. 30 days at 12s/block. Miners
+# with no outcomes in this window default to optimistic (1.0); miners with
+# bad history can rehabilitate by completing swaps over the next ~month.
+CREDIBILITY_WINDOW_BLOCKS = 216_000  # 30 days
 # Emission allocation per swap direction. Sum of values is the portion of each
 # scoring pass allocated to crown-time winners; 1 - sum() recycles to RECYCLE_UID.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {

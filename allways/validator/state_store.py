@@ -11,9 +11,10 @@ holding every table the validator owns:
   dropped) and bounded by ``EVENT_RETENTION_BLOCKS`` on prune.
 - ``collateral_events`` — per-miner collateral history. One row per observed
   change. Pruned alongside rate_events.
-- ``swap_outcomes`` — all-time credibility ledger keyed by ``swap_id``. Never
-  time-pruned; only removed when a hotkey deregisters. Read during scoring
-  to compute ``success_rate ** SUCCESS_EXPONENT``.
+- ``swap_outcomes`` — rolling credibility ledger keyed by ``swap_id``. Pruned
+  on each scoring pass to a ~30 day window, and fully removed when a hotkey
+  deregisters. Read during scoring via ``get_success_rates_since(block)`` to
+  compute ``success_rate ** SUCCESS_EXPONENT`` over recent behavior only.
 
 Threading: one ``sqlite3.Connection`` opened with ``check_same_thread=False``
 behind a ``threading.Lock``. ``busy_timeout`` set before ``journal_mode=WAL``
@@ -281,8 +282,10 @@ class ValidatorStateStore:
             )
             conn.commit()
 
-    def get_all_time_success_rates(self) -> Dict[str, Tuple[int, int]]:
-        """Return ``{hotkey: (completed_count, timed_out_count)}`` over all outcomes."""
+    def get_success_rates_since(self, since_block: int) -> Dict[str, Tuple[int, int]]:
+        """Return ``{hotkey: (completed_count, timed_out_count)}`` for outcomes
+        resolved at or after ``since_block``. Callers pass the rolling
+        credibility window start so miners can rehabilitate over time."""
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute(
@@ -291,10 +294,23 @@ class ValidatorStateStore:
                        SUM(completed) AS completed,
                        SUM(1 - completed) AS timed_out
                 FROM swap_outcomes
+                WHERE resolved_block >= ?
                 GROUP BY miner_hotkey
-                """
+                """,
+                (since_block,),
             ).fetchall()
         return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
+
+    def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
+        """Bound swap_outcomes growth by dropping rows resolved before the
+        credibility window start. Called from the scoring pass alongside the
+        rate-events prune."""
+        if cutoff_block <= 0:
+            return
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
+            conn.commit()
 
     # ─── cross-table maintenance ────────────────────────────────────────
 
@@ -373,6 +389,8 @@ class ValidatorStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
                     ON swap_outcomes(miner_hotkey);
+                CREATE INDEX IF NOT EXISTS idx_swap_outcomes_resolved_block
+                    ON swap_outcomes(resolved_block);
                 """
             )
             conn.commit()
