@@ -1,8 +1,44 @@
 """Client for interacting with the Allways Swap Manager smart contract.
 
-Uses raw RPC calls to bypass substrate-interface's ContractInstance, which
-has SCALE decoding issues with the devnet subtensor runtime. This approach
-is proven reliable in gittensor's production contract clients.
+This module bypasses substrate-interface's ``ContractInstance`` layer and
+talks to the contract via raw ``state_call`` / signed extrinsic RPCs. The
+ContractInstance path hits SCALE-decode bugs against the subtensor runtime
+we target; the raw path works and is proven in gittensor's production
+clients.
+
+Layout
+------
+
+1. **Selector registry** (``CONTRACT_SELECTORS``): maps each contract
+   message name to its 4-byte ink! selector. Selectors are generated at
+   contract build time and pinned here — keep in sync with
+   ``allways/metadata/allways_swap_manager.json``. Adding a new contract
+   message means:
+     a. Adding the selector bytes to ``CONTRACT_SELECTORS``
+     b. Adding the parameter signature to ``METHOD_SIGNATURES``
+     c. Adding a wrapper method on ``AllwaysContractClient``
+
+2. **Parameter encoder** (``encode_value``): minimal SCALE encoder for the
+   primitive types we use (u32, u64, u128, AccountId, String, bytes,
+   bool, vec_u64). Not a general SCALE implementation — only supports
+   what the ink! methods here need.
+
+3. **Reader helpers** (``read_u32``, ``read_u64``, ``read_u128``,
+   ``read_bool``, ``read_account_id``, ``raw_contract_read``): call the
+   contract via ``state_call`` then decode the ContractExecResult envelope
+   and ink! Result discriminant. All raise ``ContractError`` on failure
+   (including the explicit contract-reject path via ``decode_contract_error``).
+
+4. **Writer** (``exec_contract_raw``): signs and submits an extrinsic,
+   waits for inclusion, and raises ``ContractError`` on any failure. All
+   message wrappers (e.g. ``vote_initiate``, ``mark_fulfilled``) route
+   through here.
+
+5. **Error flow**: every contract failure ends up as ``ContractError``.
+   Callers that specifically need to distinguish "contract explicitly
+   rejected this call" from "something else went wrong" should use
+   ``is_contract_rejection(e)`` — that's the only discrimination we
+   maintain a single source of truth for.
 """
 
 import os
