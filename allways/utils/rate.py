@@ -11,8 +11,8 @@ def calculate_to_amount(
     from_amount: int,
     rate: str,
     is_reverse: bool,
-    dest_decimals: int,
-    source_decimals: int,
+    to_decimals: int,
+    from_decimals: int,
 ) -> int:
     """Calculate to_amount from from_amount and committed rate using fixed-point arithmetic.
 
@@ -27,14 +27,14 @@ def calculate_to_amount(
         from_amount: Amount in smallest units (sat, rao, wei, etc.)
         rate: Canonical dest per 1 canonical source as a string (e.g. '345')
         is_reverse: True when swap direction is opposite of canonical order
-        dest_decimals: Decimal places for canonical dest chain (e.g. 9 for TAO)
-        source_decimals: Decimal places for canonical source chain (e.g. 8 for BTC)
+        to_decimals: Decimal places for canonical dest chain (e.g. 9 for TAO)
+        from_decimals: Decimal places for canonical source chain (e.g. 8 for BTC)
     """
     rate_fixed = int(Decimal(rate) * RATE_PRECISION)
     if rate_fixed == 0:
         return 0
 
-    decimal_diff = dest_decimals - source_decimals
+    decimal_diff = to_decimals - from_decimals
 
     if is_reverse:
         # Reverse direction: divide by rate, adjust for decimals
@@ -56,15 +56,15 @@ def expected_swap_amounts(swap, fee_divisor: int) -> Tuple[int, int]:
     Single source of truth used by both miner (fulfillment) and validator (verification).
     Returns (raw_dest_amount, user_receives) or (0, 0) if the rate is invalid.
     """
-    canon_src, canon_dest = canonical_pair(swap.from_chain, swap.to_chain)
-    is_reverse = swap.from_chain != canon_src
+    canon_from, canon_to = canonical_pair(swap.from_chain, swap.to_chain)
+    is_reverse = swap.from_chain != canon_from
 
     to_amount = calculate_to_amount(
         swap.from_amount,
         swap.rate,
         is_reverse,
-        get_chain(canon_dest).decimals,
-        get_chain(canon_src).decimals,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
     )
     if to_amount == 0:
         return 0, 0

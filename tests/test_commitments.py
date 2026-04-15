@@ -119,7 +119,7 @@ class TestParseCommitmentData:
         assert rate == 0.0
         assert rate <= 0  # validator guard: if selected_rate <= 0: reject
         # Even if the guard were bypassed, calculate_to_amount returns 0
-        to_amount = calculate_to_amount(1_000_000_000, rate_str, is_reverse=True, dest_decimals=9, source_decimals=8)
+        to_amount = calculate_to_amount(1_000_000_000, rate_str, is_reverse=True, to_decimals=9, from_decimals=8)
         assert to_amount == 0  # contract would reject with InvalidAmount
 
     def test_single_direction_forward_only(self):

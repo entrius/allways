@@ -84,10 +84,10 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     available.sort(key=lambda x: x[0].rate, reverse=True)
 
     # Calculate amounts per miner
-    canon_src, canon_dest = canonical_pair(from_chain, to_chain)
-    is_reverse = from_chain != canon_src
-    canon_to_decimals = get_chain(canon_dest).decimals
-    canon_from_decimals = get_chain(canon_src).decimals
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    is_reverse = from_chain != canon_from
+    canon_to_decimals = get_chain(canon_to).decimals
+    canon_from_decimals = get_chain(canon_from).decimals
     dst_chain_def = get_chain(to_chain)
 
     console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')

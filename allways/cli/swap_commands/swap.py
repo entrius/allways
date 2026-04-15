@@ -565,7 +565,7 @@ def swap_now_command(
     console.print(table)
 
     # Step 3: Select miner (default to best rate)
-    canon_src, canon_dest = canonical_pair(from_chain, to_chain)
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
     best_pair = available_miners[0][0]
     console.print(
         f'\n  Best rate: send 1 {from_chain.upper()}, get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
@@ -589,13 +589,13 @@ def swap_now_command(
         return
 
     from_amount = to_smallest_unit(amount, from_chain)
-    is_reverse = from_chain != canon_src
+    is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(
         from_amount,
         selected_pair.rate_str,
         is_reverse,
-        get_chain(canon_dest).decimals,
-        get_chain(canon_src).decimals,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
     )
 
     # Show estimated receive inline — fee is a hardcoded protocol constant.

@@ -46,8 +46,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
 
         # Normalize to canonical direction (alphabetical ordering).
         # When swapping direction, swap rates too: the posted "forward" rate becomes "reverse".
-        canon_src, _ = canonical_pair(src_chain, dst_chain)
-        if src_chain != canon_src:
+        canon_from, _ = canonical_pair(src_chain, dst_chain)
+        if src_chain != canon_from:
             src_chain, dst_chain = dst_chain, src_chain
             src_addr, dst_addr = dst_addr, src_addr
             rate, counter_rate = counter_rate, rate
