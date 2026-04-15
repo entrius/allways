@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
-from allways.validator.event_watcher import CollateralEvent, ContractEventWatcher
+from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import (
     calculate_miner_rewards,
     crown_holders_at_instant,

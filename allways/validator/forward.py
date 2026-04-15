@@ -21,7 +21,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
 )
-from allways.contract_client import ContractError
+from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
 from allways.validator.axon_handlers import (
     keccak256,
@@ -317,7 +317,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                 f'confirmed! voted initiate (tao={item.tao_amount / 1e9:.4f})'
             )
         except ContractError as e:
-            if 'ContractReverted' in str(e):
+            if is_contract_rejection(e):
                 # Contract rejected — in practice this means another validator
                 # already reached initiate quorum, so the entry is no longer
                 # actionable. Drop it.
@@ -413,7 +413,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
                     f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
                 )
         except ContractError as e:
-            if 'AlreadyVoted' not in str(e) and 'ContractReverted' not in str(e):
+            if 'AlreadyVoted' not in str(e) and not is_contract_rejection(e):
                 bt.logging.debug(f'{ctx}: extend timeout vote: {e}')
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')

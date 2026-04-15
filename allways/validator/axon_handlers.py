@@ -17,7 +17,7 @@ from substrateinterface import Keypair
 
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len
+from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.validator.state_store import PendingConfirm
 
@@ -387,7 +387,7 @@ async def handle_swap_reserve(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the reservation' if 'ContractReverted' in str(e) else str(e)
+        reason = 'Contract rejected the reservation' if is_contract_rejection(e) else str(e)
         reject_synapse(synapse, reason)
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
@@ -560,7 +560,7 @@ async def handle_swap_confirm(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the swap initiation' if 'ContractReverted' in str(e) else str(e)
+        reason = 'Contract rejected the swap initiation' if is_contract_rejection(e) else str(e)
         reject_synapse(synapse, reason)
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')

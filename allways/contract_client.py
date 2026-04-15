@@ -7,7 +7,6 @@ is proven reliable in gittensor's production contract clients.
 
 import os
 import struct
-from enum import Enum
 from typing import List, Optional, Tuple
 
 import bittensor as bt
@@ -205,14 +204,6 @@ _DATA_COMPACT_OFFSET = 15  # Start of compact-encoded data length
 # =========================================================================
 
 
-class ContractErrorKind(Enum):
-    NOT_INITIALIZED = 'not_initialized'
-    RPC_FAILURE = 'rpc_failure'
-    CALL_FAILED = 'call_failed'
-    INSUFFICIENT_BALANCE = 'insufficient_balance'
-    CONTRACT_REJECTED = 'contract_rejected'
-
-
 # Ink! contract error variants — order must match smart-contracts/ink/errors.rs enum
 CONTRACT_ERROR_VARIANTS = {
     0: ('NotOwner', 'Caller is not the contract owner'),
@@ -246,9 +237,27 @@ CONTRACT_ERROR_VARIANTS = {
 
 
 class ContractError(Exception):
-    def __init__(self, kind: ContractErrorKind, message: str):
-        self.kind = kind
-        super().__init__(f'{kind.value}: {message}')
+    """Raised when a contract call fails.
+
+    A failure can be one of: contract not initialized, RPC failure, unknown
+    method selector, insufficient balance, or the contract explicitly
+    rejecting the call (a.k.a. "ContractReverted"). Callers that need to
+    distinguish "contract deliberately rejected" from "something else went
+    wrong" should use ``is_contract_rejection`` — it's the only branch we
+    reliably want to differentiate.
+    """
+
+
+def is_contract_rejection(e: BaseException) -> bool:
+    """Return True if ``e`` represents a contract-side rejection.
+
+    Matches both our own ContractError messages that include ``contract
+    rejected`` (explicit revert), and substrate's ``ContractReverted`` string
+    which bubbles up from signed extrinsics. One place to keep this check in
+    sync so callers don't re-implement the string match.
+    """
+    msg = str(e)
+    return 'contract rejected' in msg or 'ContractReverted' in msg
 
 
 # =========================================================================
@@ -278,9 +287,9 @@ class AllwaysContractClient:
 
     def ensure_initialized(self):
         if not self.contract_address:
-            raise ContractError(ContractErrorKind.NOT_INITIALIZED, 'contract address not set')
+            raise ContractError('contract address not set')
         if not self.subtensor:
-            raise ContractError(ContractErrorKind.NOT_INITIALIZED, 'subtensor not available')
+            raise ContractError('subtensor not available')
         if not self.initialized:
             bt.logging.info(f'Contract client ready for {self.contract_address}')
             self.initialized = True
@@ -353,9 +362,7 @@ class AllwaysContractClient:
 
             if len(r) < data_start + data_len or data_len < 1:
                 if is_revert:
-                    raise ContractError(
-                        ContractErrorKind.CONTRACT_REJECTED, f'{method}: contract rejected (no details)'
-                    )
+                    raise ContractError(f'{method}: contract rejected (no details)')
                 return None
 
             # REVERT flag means the contract returned Err — decode the error variant.
@@ -388,11 +395,9 @@ class AllwaysContractClient:
             variant = CONTRACT_ERROR_VARIANTS.get(variant_idx)
             if variant:
                 name, description = variant
-                return ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: {name} — {description}')
-            return ContractError(
-                ContractErrorKind.CONTRACT_REJECTED, f'{method}: unknown error variant ({variant_idx})'
-            )
-        return ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: contract rejected')
+                return ContractError(f'{method}: {name} — {description}')
+            return ContractError(f'{method}: unknown error variant ({variant_idx})')
+        return ContractError(f'{method}: contract rejected')
 
     def exec_contract_raw(
         self,
@@ -406,7 +411,7 @@ class AllwaysContractClient:
         gas_limit = gas_limit or DEFAULT_GAS_LIMIT
         selector = CONTRACT_SELECTORS.get(method)
         if not selector:
-            raise ContractError(ContractErrorKind.CALL_FAILED, f'{method}: unknown method')
+            raise ContractError(f'{method}: unknown method')
 
         encoded_args = self.encode_args(method, args or {})
         call_data = selector + encoded_args
@@ -417,12 +422,12 @@ class AllwaysContractClient:
         try:
             account_info = substrate.query('System', 'Account', [signer_address])
         except Exception as e:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: balance query failed: {e}') from e
+            raise ContractError(f'{method}: balance query failed: {e}') from e
 
         account_data = account_info.value if hasattr(account_info, 'value') else account_info
         free_balance = account_data.get('data', {}).get('free', 0)
         if free_balance < MIN_BALANCE_FOR_TX_RAO:
-            raise ContractError(ContractErrorKind.INSUFFICIENT_BALANCE, f'{method}: free={free_balance}')
+            raise ContractError(f'{method}: free={free_balance}')
 
         try:
             call = substrate.compose_call(
@@ -439,13 +444,13 @@ class AllwaysContractClient:
             extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
             receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=False)
         except Exception as e:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: exec failed: {e}') from e
+            raise ContractError(f'{method}: exec failed: {e}') from e
 
         try:
             if receipt.is_success:
                 return receipt.extrinsic_hash
             else:
-                raise ContractError(ContractErrorKind.CALL_FAILED, f'{method}: {receipt.error_message}')
+                raise ContractError(f'{method}: {receipt.error_message}')
         except _EXTRINSIC_NOT_FOUND:
             return receipt.extrinsic_hash
 
@@ -639,7 +644,7 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         v = self.extract_u32(data)
         return v if v is not None else 0
 
@@ -647,7 +652,7 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         v = self.extract_u64(data)
         return v if v is not None else 0
 
@@ -655,7 +660,7 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         v = self.extract_u128(data)
         return v if v is not None else 0
 
@@ -663,7 +668,7 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         v = self.extract_bool(data)
         return v if v is not None else False
 
@@ -671,7 +676,7 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         v = self.extract_account_id(data)
         return v if v is not None else ''
 
@@ -715,14 +720,14 @@ class AllwaysContractClient:
         self.ensure_initialized()
         data = self.raw_contract_read(method, args, caller=caller)
         if data is None or len(data) < 1:
-            raise ContractError(ContractErrorKind.RPC_FAILURE, f'{method}: no response')
+            raise ContractError(f'{method}: no response')
         if data[0] != 0x00:
             if len(data) >= 2:
                 variant = CONTRACT_ERROR_VARIANTS.get(data[1])
                 if variant:
                     name, description = variant
-                    raise ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: {name} — {description}')
-            raise ContractError(ContractErrorKind.CONTRACT_REJECTED, f'{method}: contract rejected')
+                    raise ContractError(f'{method}: {name} — {description}')
+            raise ContractError(f'{method}: contract rejected')
         v = self.extract_u128(data[1:])
         return v if v is not None else 0
 
