@@ -696,24 +696,43 @@ def crown_holders_at_instant(
     eligible: Set[str],
     busy: Optional[Set[str]] = None,
 ) -> List[str]:
-    """Hotkeys tied for best rate, eligible, collateralized, and not currently busy.
+    """Find the crown holder(s) at a single instant in time.
 
-    A miner is a candidate when they are:
-    - in ``eligible`` (registered + contract-active)
-    - not in ``busy`` (no open swap at this instant)
-    - collateralized at or above ``min_collateral``
-    - posting a rate > 0
+    The rule, in plain English: **take the miner posting the best rate — but
+    only if they satisfy every other condition. If they don't, fall through
+    to the next-best rate and try again.** Keep falling until a rate bucket
+    has at least one miner who qualifies, or return empty.
 
-    Among candidates, the tied best rate takes the crown. Ties split credit
-    evenly in the caller.
+    A miner qualifies at this instant when they are:
+      - in ``eligible``  — registered in the metagraph AND contract-active
+      - not in ``busy``  — not currently handling an open swap
+      - collateralized  — ``collaterals[hk] >= min_collateral``
+      - posting a rate  — ``rates[hk] > 0``
+
+    Ties at the winning rate share credit evenly (the caller splits the
+    interval duration across whatever this returns).
     """
     busy = busy or set()
-    candidates = {
-        hk: r
-        for hk, r in rates.items()
-        if hk in eligible and hk not in busy and collaterals.get(hk, 0) >= min_collateral and r > 0
-    }
-    if not candidates:
-        return []
-    best = max(candidates.values())
-    return [hk for hk, r in candidates.items() if r == best]
+
+    def qualifies(hotkey: str) -> bool:
+        return (
+            hotkey in eligible
+            and hotkey not in busy
+            and collaterals.get(hotkey, 0) >= min_collateral
+            and rates.get(hotkey, 0) > 0
+        )
+
+    # Bucket hotkeys by rate, then walk from best rate downward. The first
+    # bucket with any qualified miner wins the crown — everyone at worse
+    # rates is ignored whether they qualify or not.
+    by_rate: Dict[float, List[str]] = {}
+    for hotkey, rate in rates.items():
+        if rate > 0:
+            by_rate.setdefault(rate, []).append(hotkey)
+
+    for rate in sorted(by_rate, reverse=True):
+        winners = [hk for hk in by_rate[rate] if qualifies(hk)]
+        if winners:
+            return winners
+
+    return []
