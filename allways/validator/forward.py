@@ -23,6 +23,7 @@ from allways.constants import (
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
+from allways.validator import voting
 from allways.validator.axon_handlers import (
     keccak256,
     scale_encode_extend_hash_input,
@@ -31,7 +32,6 @@ from allways.validator.axon_handlers import (
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
-from allways.validator.voting import SwapVoter
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -56,9 +56,9 @@ async def forward(self: Validator) -> None:
 
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
-    voter: SwapVoter = self.swap_voter
 
     clear_provider_caches(self)
+    self.state_store.purge_expired_pending()
     initialize_pending_user_reservations(self)
     poll_commitments(self)
     try:
@@ -66,9 +66,9 @@ async def forward(self: Validator) -> None:
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
     await tracker.poll(self.block)
-    uncertain = await confirm_miner_fulfillments(tracker, verifier, voter, self.block)
+    uncertain = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
     extend_fulfilled_near_timeout(self)
-    enforce_swap_timeouts(self, tracker, voter, uncertain)
+    enforce_swap_timeouts(self, tracker, uncertain)
 
     if self.step % SCORING_INTERVAL_STEPS == 0:
         run_scoring_pass(self)
@@ -332,9 +332,9 @@ def initialize_pending_user_reservations(self: Validator) -> None:
 
 
 async def confirm_miner_fulfillments(
+    self: Validator,
     tracker: SwapTracker,
     verifier: SwapVerifier,
-    voter: SwapVoter,
     current_block: int,
 ) -> Set[int]:
     """Verify FULFILLED swaps; returns IDs where provider was unreachable so enforce_swap_timeouts skips them."""
@@ -356,7 +356,7 @@ async def confirm_miner_fulfillments(
             bt.logging.error(f'Swap {swap.id}: verification error: {result}')
             continue
         if result:
-            if voter.confirm_swap(swap.id):
+            if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
     return uncertain
@@ -370,7 +370,6 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     so the transaction has time to confirm.
     """
     tracker: SwapTracker = self.swap_tracker
-    voter: SwapVoter = self.swap_voter
     current_block = self.block
 
     for swap in tracker.get_near_timeout_fulfilled(current_block, EXTEND_THRESHOLD_BLOCKS):
@@ -407,7 +406,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
 
         # Dest tx exists (confirmed or not) — vote to extend timeout
         try:
-            if voter.extend_timeout(swap.id):
+            if voting.extend_swap_timeout(self.contract_client, self.wallet, swap.id):
                 bt.logging.info(
                     f'{ctx}: voted to extend timeout '
                     f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
@@ -419,7 +418,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')
 
 
-def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, voter: SwapVoter, uncertain_swaps: Set[int]) -> None:
+def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps: Set[int]) -> None:
     """Timeout expired swaps, skipping uncertain_swaps where the provider was unreachable this cycle."""
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
@@ -428,7 +427,7 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, voter: SwapVote
             bt.logging.warning(f'Swap {swap.id}: deferring timeout, provider was unreachable')
             continue
 
-        if voter.timeout_swap(swap.id):
+        if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
 

@@ -107,10 +107,14 @@ class ValidatorStateStore:
             conn.commit()
 
     def get_all(self) -> List[PendingConfirm]:
-        """Return a snapshot of all pending items, oldest first."""
+        """Return a snapshot of all pending items, oldest first.
+
+        Read-only — does not purge expired entries. Call ``purge_expired``
+        explicitly from the forward loop once per tick instead of side-
+        effecting every read.
+        """
         with self.lock:
             conn = self.require_connection()
-            self.purge_expired(conn)
             rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
         return [self.row_to_pending(row) for row in rows]
 
@@ -131,7 +135,6 @@ class ValidatorStateStore:
     def has(self, miner_hotkey: str) -> bool:
         with self.lock:
             conn = self.require_connection()
-            self.purge_expired(conn)
             row = conn.execute(
                 'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
                 (miner_hotkey,),
@@ -141,16 +144,23 @@ class ValidatorStateStore:
     def pending_size(self) -> int:
         with self.lock:
             conn = self.require_connection()
-            self.purge_expired(conn)
             count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
             return int(count)
 
-    def purge_expired(self, conn: sqlite3.Connection) -> None:
+    def purge_expired_pending(self) -> int:
+        """Drop pending confirms whose reservation has already expired.
+
+        Returns the number of rows removed. Meant to be called once per
+        forward-loop tick — the forward loop knows when it's safe to mutate.
+        """
         if self.current_block_fn is None:
-            return
+            return 0
         current_block = self.current_block_fn()
-        conn.execute('DELETE FROM pending_confirms WHERE reserved_until < ?', (current_block,))
-        conn.commit()
+        with self.lock:
+            conn = self.require_connection()
+            cursor = conn.execute('DELETE FROM pending_confirms WHERE reserved_until < ?', (current_block,))
+            conn.commit()
+            return cursor.rowcount
 
     @staticmethod
     def row_to_pending(row: sqlite3.Row) -> PendingConfirm:

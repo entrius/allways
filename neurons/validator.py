@@ -40,7 +40,6 @@ from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
-from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
@@ -105,11 +104,6 @@ class Validator(BaseValidatorNeuron):
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             fee_divisor=self.fee_divisor,
-        )
-
-        self.swap_voter = SwapVoter(
-            contract_client=self.contract_client,
-            wallet=self.wallet,
         )
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
