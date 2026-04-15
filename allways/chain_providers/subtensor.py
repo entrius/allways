@@ -165,14 +165,16 @@ class SubtensorProvider(ChainProvider):
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
             return None
 
-    def verify_transaction(
+    def _fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a TAO transfer; raises ProviderUnreachableError if subtensor is unreachable.
+        """Scan for a TAO transfer matching recipient + amount.
 
         If block_hint > 0, checks the hinted block ±3. Otherwise scans the last
         150 blocks. The ±3 window covers small clock/finality skews between the
         caller's block_hint and the block the transfer actually landed in.
+
+        Raises ProviderUnreachableError if subtensor is unreachable.
         """
         try:
             current_block = self.subtensor.get_current_block()

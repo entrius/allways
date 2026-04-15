@@ -160,21 +160,11 @@ class SwapFulfiller:
                 expected_recipient=miner_from_address,
                 expected_amount=swap.from_amount,
                 block_hint=swap.from_tx_block,
+                expected_sender=swap.user_from_address,
+                require_confirmed=True,
             )
-
             if tx_info is None:
-                bt.logging.debug(f'Swap {swap.id}: source tx not found or unconfirmed')
-                return False
-
-            if not tx_info.confirmed:
-                bt.logging.debug(f'Swap {swap.id}: source tx not yet confirmed')
-                return False
-
-            if tx_info.sender and tx_info.sender != swap.user_from_address:
-                bt.logging.warning(
-                    f'Swap {swap.id}: source tx sender mismatch '
-                    f'(expected {swap.user_from_address}, got {tx_info.sender}) — refusing to fulfill'
-                )
+                bt.logging.debug(f'Swap {swap.id}: source tx not ready (not found, unconfirmed, or sender mismatch)')
                 return False
 
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} from {tx_info.sender})')
