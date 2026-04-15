@@ -300,18 +300,22 @@ class TestBootstrap:
     """initialize() snapshotting behavior — the M1 fix."""
 
     def test_bootstrap_seeds_collateral_and_active_from_contract(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
         w = make_watcher(tmp_path)
         client = MagicMock()
         client.get_miner_collateral.side_effect = lambda hk: {'hk_a': 10, 'hk_b': 20}.get(hk, 0)
         client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
         client.get_min_collateral.return_value = 5
 
-        w.initialize(current_block=1000, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+        current_block = SCORING_WINDOW_BLOCKS + 500  # well past the backfill floor
+        w.initialize(current_block=current_block, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
 
         assert w.collateral == {'hk_a': 10, 'hk_b': 20}
         assert w.active_miners == {'hk_a'}
         assert w.min_collateral == 5
-        assert w.cursor == 1000
+        # Cursor rewinds one scoring window so sync_to backfills the crown-time history.
+        assert w.cursor == current_block - SCORING_WINDOW_BLOCKS
         w.state_store.close()
 
     def test_bootstrap_tolerates_contract_read_failures(self, tmp_path: Path):
@@ -321,12 +325,13 @@ class TestBootstrap:
         client.get_miner_active_flag.side_effect = RuntimeError('rpc down')
         client.get_min_collateral.side_effect = RuntimeError('rpc down')
 
+        # Pre-window start (current_block < SCORING_WINDOW_BLOCKS) — cursor clamps at 0.
         w.initialize(current_block=500, metagraph_hotkeys=['hk_a'], contract_client=client)
 
         # Everything defaults to empty/starting state, no exception propagated
         assert w.collateral == {}
         assert w.active_miners == set()
-        assert w.cursor == 500
+        assert w.cursor == 0
         w.state_store.close()
 
 

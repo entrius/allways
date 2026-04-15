@@ -323,14 +323,31 @@ class ValidatorStateStore:
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
-        """Delete rate events older than ``cutoff_block``.
+        """Delete rate events older than ``cutoff_block``ㅡwith one exception.
+
+        The single most recent row per ``(hotkey, from_chain, to_chain)`` is
+        always preserved, even if it's older than the cutoff. Without this,
+        a miner who posts a rate once and never updates it would eventually
+        have their only row pruned, and ``get_latest_rate_before(window_start)``
+        at the next scoring pass would find nothing, dropping them from crown
+        attribution entirely.
 
         Never touches ``swap_outcomes`` or ``pending_confirms`` — those have
         their own lifetimes.
         """
         with self.lock:
             conn = self.require_connection()
-            conn.execute('DELETE FROM rate_events WHERE block < ?', (cutoff_block,))
+            conn.execute(
+                """
+                DELETE FROM rate_events
+                WHERE block < ?
+                  AND id NOT IN (
+                      SELECT MAX(id) FROM rate_events
+                      GROUP BY hotkey, from_chain, to_chain
+                  )
+                """,
+                (cutoff_block,),
+            )
             conn.commit()
 
     def close(self) -> None:

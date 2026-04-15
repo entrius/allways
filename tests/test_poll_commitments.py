@@ -168,7 +168,10 @@ class TestPollCommitmentsPruning:
     def test_prune_runs_via_scoring_pass_not_commitment_poll(self, tmp_path: Path):
         """Pruning moved out of the per-tick path and into the scoring round —
         verify both parts of that contract: commitment polling does NOT prune,
-        and run_scoring_pass DOES."""
+        and run_scoring_pass DOES. The latest row per (hotkey, direction) is
+        preserved as a state-reconstruction anchor even when it's older than
+        the cutoff, so this test uses a hotkey with two rows to exercise the
+        "older one drops, newer one survives" path."""
         from allways.validator.scoring import prune_aged_rate_events
 
         v = make_validator(tmp_path)
@@ -177,29 +180,29 @@ class TestPollCommitmentsPruning:
         recent_block = v.block - 100
 
         conn = v.state_store.require_connection()
+        # Two rows for the same direction — the ancient one must drop on prune
+        # while the recent one survives.
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_ancient', 'tao', 'btc', 0.00010, ancient_block),
+            ('hk_a', 'tao', 'btc', 0.00010, ancient_block),
         )
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_recent', 'tao', 'btc', 0.00020, recent_block),
+            ('hk_a', 'tao', 'btc', 0.00020, recent_block),
         )
         conn.commit()
 
-        # 1. Commitment polling no longer prunes — ancient event survives.
+        # 1. Commitment polling no longer prunes — both rows survive.
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
             poll_commitments(v)
-        rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
-        surviving_blocks = {e['block'] for e in rate_events}
+        surviving_blocks = {e['block'] for e in v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)}
         assert ancient_block in surviving_blocks, 'poll_commitments should not prune'
         assert recent_block in surviving_blocks
 
-        # 2. Scoring pass does prune — ancient event gets cleared.
+        # 2. Scoring pass prunes the ancient row; the latest row stays as anchor.
         prune_aged_rate_events(v)
-        rate_events = v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)
-        surviving_blocks = {e['block'] for e in rate_events}
-        assert ancient_block not in surviving_blocks, 'prune_aged_rate_events should remove ancient'
+        surviving_blocks = {e['block'] for e in v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)}
+        assert ancient_block not in surviving_blocks
         assert recent_block in surviving_blocks
 
         v.state_store.close()

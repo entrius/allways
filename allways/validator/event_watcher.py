@@ -18,14 +18,18 @@ in-memory dicts:
 - ``min_collateral`` — current minimum collateral threshold (from
   ConfigUpdated{key="min_collateral"} events)
 - ``collateral_events`` — ordered history used by the crown-time scoring
-  replay, bounded to ``2 * SCORING_WINDOW_BLOCKS``
+  replay, bounded to one ``SCORING_WINDOW_BLOCKS`` (plus one anchor row per
+  hotkey so state reconstruction at window_start always has something)
+- ``busy_events`` — per-hotkey open-swap count transitions, same retention
 - swap outcomes are forwarded into ``ValidatorStateStore.insert_swap_outcome``
   so the credibility ledger survives restarts
 
-Cold start: every run backfills from ``max(0, head - 2 * SCORING_WINDOW_BLOCKS)``.
-No cursor file. The scoring window only needs one window of history; the
-swap_outcomes ledger is the single piece of state that must persist across
-restarts and it already lives in ``state.db``.
+Cold start: ``initialize`` snapshots current contract state for all metagraph
+miners, seeds busy state from in-flight swaps, then rewinds the cursor to
+``head - SCORING_WINDOW_BLOCKS``. The existing bounded ``sync_to`` catches up
+over ~24 forward steps and fills the scoring window long before the first
+scoring pass runs. Swap_outcomes is the one ledger that must persist across
+restarts and already lives in ``state.db``.
 
 Decoder: ported from ``alw-utils/.../watch_contract_events.py`` which has been
 in production on the dashboard side. Falls back to a hardcoded topic→event
@@ -428,7 +432,11 @@ class ContractEventWatcher:
                 f'EventWatcher initialized: {len(self.collateral)} collateral entries, '
                 f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
             )
-        self.cursor = current_block
+        # Rewind the cursor so ``sync_to`` backfills the full scoring window
+        # on cold start. The existing bounded-chunk sync loop catches up over
+        # ~24 forward steps (50 blocks/step × 1200 blocks), finishing long
+        # before the first scoring pass at step SCORING_INTERVAL_STEPS.
+        self.cursor = max(0, current_block - SCORING_WINDOW_BLOCKS)
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in bounded chunks.
@@ -603,22 +611,32 @@ class ContractEventWatcher:
         self.set_collateral(block_num, hotkey, new_total)
 
     def prune_old_collateral_events(self, current_block: int) -> None:
-        cutoff = current_block - 2 * SCORING_WINDOW_BLOCKS
+        """Drop collateral and busy events older than one scoring window.
+
+        The single latest collateral event per hotkey is always preserved
+        (even if it's older than the cutoff), so crown-time replay can still
+        reconstruct window-start state for miners who haven't posted or
+        withdrawn inside the window. Busy events are only pruned when the
+        hotkey's current open-swap count is zero — never drop a +1 whose
+        matching -1 hasn't been observed yet.
+        """
+        cutoff = current_block - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return
         if self.collateral_events:
-            self.collateral_events = [ev for ev in self.collateral_events if ev.block >= cutoff]
+            latest_per_hotkey = {}
+            for ev in self.collateral_events:
+                latest_per_hotkey[ev.hotkey] = ev  # last write wins (events are append-order)
+            self.collateral_events = [
+                ev for ev in self.collateral_events if ev.block >= cutoff or latest_per_hotkey.get(ev.hotkey) is ev
+            ]
             for hotkey, events in list(self.collateral_events_by_hotkey.items()):
-                pruned = [ev for ev in events if ev.block >= cutoff]
+                latest = events[-1] if events else None
+                pruned = [ev for ev in events if ev.block >= cutoff or ev is latest]
                 if pruned:
                     self.collateral_events_by_hotkey[hotkey] = pruned
                 else:
                     del self.collateral_events_by_hotkey[hotkey]
-        # Prune busy events — but never drop transitions that would leave a
-        # still-open interval dangling. Keep anything newer than cutoff; older
-        # events are only safe to drop if the running count for that hotkey
-        # was zero after them. Conservative: prune only when the hotkey's
-        # count is currently zero (no open swap) and the event is before cutoff.
         if self.busy_events:
             open_now = {hk for hk, c in self.open_swap_count.items() if c > 0}
             self.busy_events = [ev for ev in self.busy_events if ev.block >= cutoff or ev.hotkey in open_now]

@@ -191,15 +191,56 @@ class TestDeleteHotkey:
 
 class TestPrune:
     def test_prune_leaves_swap_outcomes_intact(self, tmp_path: Path):
+        """Pruning only touches rate_events — swap_outcomes has its own lifetime."""
         store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
         store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
 
         store.prune_events_older_than(cutoff_block=200)
 
-        # Rate events gone, outcomes retained
-        assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
+        # Swap outcomes untouched by rate-event prune.
         assert store.get_success_rates_since(0) == {'hk1': (1, 0)}
+        store.close()
+
+    def test_prune_preserves_latest_row_per_direction(self, tmp_path: Path):
+        """A miner's single rate row must survive even when it's older than
+        the cutoff — otherwise get_latest_rate_before at window_start would
+        find nothing and the miner falls out of scoring entirely."""
+        store = make_store(tmp_path)
+        store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
+
+        # Cutoff is way past block 100, but the row is the only anchor.
+        store.prune_events_older_than(cutoff_block=5_000)
+
+        assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=10_000) == (0.00015, 100)
+        store.close()
+
+    def test_prune_drops_older_rows_when_newer_exists(self, tmp_path: Path):
+        """When a direction has multiple rows, rows older than the cutoff
+        get pruned as long as a newer row survives as the anchor."""
+        store = make_store(tmp_path)
+        store.insert_rate_event('hk1', 'tao', 'btc', 0.00010, block=100)
+        store.insert_rate_event('hk1', 'tao', 'btc', 0.00020, block=200)
+        store.insert_rate_event('hk1', 'tao', 'btc', 0.00030, block=6_000)
+
+        store.prune_events_older_than(cutoff_block=5_000)
+
+        # blocks 100 and 200 drop; block 6000 survives.
+        events = store.get_rate_events_in_range('tao', 'btc', start_block=0, end_block=10_000)
+        assert [e['block'] for e in events] == [6_000]
+        store.close()
+
+    def test_prune_preserves_latest_per_direction_independently(self, tmp_path: Path):
+        """Preservation is keyed on (hotkey, from_chain, to_chain) — each
+        direction keeps its own anchor row."""
+        store = make_store(tmp_path)
+        store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
+        store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=100)
+
+        store.prune_events_older_than(cutoff_block=5_000)
+
+        assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=10_000) == (0.00015, 100)
+        assert store.get_latest_rate_before('hk1', 'btc', 'tao', block=10_000) == (6500.0, 100)
         store.close()
 
 

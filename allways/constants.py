@@ -38,9 +38,10 @@ SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s p
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
 
 # ─── V1 Crown-Time Scoring ───────────────────────────────
-# Rate/collateral event retention. Must be >= SCORING_WINDOW_BLOCKS so the
-# window-start state can always be reconstructed from history.
-EVENT_RETENTION_BLOCKS = 2 * SCORING_WINDOW_BLOCKS
+# Rate/collateral event retention. Matches the scoring window exactly — the
+# prune helpers preserve the single latest row per miner/direction even when
+# it's older, so state-at-window-start reconstruction still has an anchor.
+EVENT_RETENTION_BLOCKS = SCORING_WINDOW_BLOCKS
 # Rolling credibility window for success_rate. 30 days at 12s/block. Miners
 # with no outcomes in this window default to optimistic (1.0); miners with
 # bad history can rehabilitate by completing swaps over the next ~month.
