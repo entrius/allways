@@ -252,14 +252,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
             continue
 
-        if tx_info.sender and tx_info.sender != item.from_address:
-            self.state_store.remove(item.miner_hotkey)
-            bt.logging.warning(
-                f'PendingConfirm [{swap_label} {miner_short}]: sender mismatch '
-                f'(expected {item.from_address}, got {tx_info.sender}), dropping'
-            )
-            continue
-
         log_on_change(
             f'confs:{item.miner_hotkey}',
             tx_info.confirmations,

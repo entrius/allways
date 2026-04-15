@@ -78,10 +78,7 @@ class SwapFulfiller:
         try:
             data = json.loads(self.sent_cache_path.read_text())
             for swap_id_str, entry in data.items():
-                # Back-compat: old cache entries were 2-tuples. Treat restored
-                # entries as not-yet-marked-fulfilled so the retry path runs.
-                marked = bool(entry[2]) if len(entry) >= 3 else False
-                self.sent[int(swap_id_str)] = (entry[0], entry[1], marked)
+                self.sent[int(swap_id_str)] = (entry[0], entry[1], bool(entry[2]))
             if self.sent:
                 bt.logging.info(f'Restored {len(self.sent)} cached send(s) from disk')
         except Exception as e:
@@ -173,11 +170,6 @@ class SwapFulfiller:
                 bt.logging.debug(f'Swap {swap.id}: source tx not yet confirmed')
                 return False
 
-            # Miner self-protection: don't send dest funds unless the source tx
-            # actually came from the user address tied to this swap. Validators
-            # check this too at initiation, but the miner shouldn't trust that
-            # alone — an exploited or buggy validator quorum shouldn't cost the
-            # miner their send.
             if tx_info.sender and tx_info.sender != swap.user_from_address:
                 bt.logging.warning(
                     f'Swap {swap.id}: source tx sender mismatch '
