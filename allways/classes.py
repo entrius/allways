@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
 
 
 class SwapStatus(IntEnum):
@@ -8,21 +7,6 @@ class SwapStatus(IntEnum):
     FULFILLED = 1
     COMPLETED = 2
     TIMED_OUT = 3
-
-
-class SwapRequestStatus(IntEnum):
-    QUEUED = 0
-    VERIFYING = 1
-    CONFIRMED = 2
-    REJECTED = 3
-    ON_CHAIN = 4
-    RETRYING = 5
-
-
-class ReservationStatus(IntEnum):
-    ACTIVE = 0
-    CONFIRMED = 1
-    EXPIRED = 2
 
 
 @dataclass
@@ -86,43 +70,3 @@ class Swap:
     timeout_block: int = 0
     fulfilled_block: int = 0
     completed_block: int = 0
-
-
-@dataclass
-class SwapRequest:
-    """API request tracking for validator-routed swap initiation."""
-
-    request_id: str
-    status: SwapRequestStatus = SwapRequestStatus.QUEUED
-    miner_hotkey: str = ''
-    from_chain: str = ''
-    to_chain: str = ''
-    from_amount: int = 0
-    tao_amount: int = 0
-    user_from_address: str = ''
-    user_to_address: str = ''
-    from_tx_hash: str = ''
-    from_tx_block: int = 0
-    from_proof: str = ''
-    swap_id: Optional[int] = None
-    reservation_id: str = ''
-    reserved_at_block: int = 0
-    error: str = ''
-    created_at: float = 0.0
-    retry_count: int = 0
-
-
-@dataclass
-class Reservation:
-    reservation_id: str
-    miner_hotkey: str
-    from_chain: str
-    to_chain: str
-    from_amount: int
-    tao_amount: int
-    user_from_address: str
-    user_to_address: str
-    status: ReservationStatus = ReservationStatus.ACTIVE
-    reserved_at_block: int = 0
-    expires_at_block: int = 0
-    created_at: float = 0.0

@@ -112,7 +112,7 @@ class ValidatorStateStore:
             conn = self.require_connection()
             self.purge_expired(conn)
             rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
-        return [self._row_to_pending(row) for row in rows]
+        return [self.row_to_pending(row) for row in rows]
 
     def remove(self, miner_hotkey: str) -> Optional[PendingConfirm]:
         """Remove and return a specific entry."""
@@ -126,7 +126,7 @@ class ValidatorStateStore:
                 return None
             conn.execute('DELETE FROM pending_confirms WHERE miner_hotkey = ?', (miner_hotkey,))
             conn.commit()
-        return self._row_to_pending(row)
+        return self.row_to_pending(row)
 
     def has(self, miner_hotkey: str) -> bool:
         with self.lock:
@@ -153,7 +153,7 @@ class ValidatorStateStore:
         conn.commit()
 
     @staticmethod
-    def _row_to_pending(row: sqlite3.Row) -> PendingConfirm:
+    def row_to_pending(row: sqlite3.Row) -> PendingConfirm:
         return PendingConfirm(
             miner_hotkey=row['miner_hotkey'],
             from_tx_hash=row['from_tx_hash'],
