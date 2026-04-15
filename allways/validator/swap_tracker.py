@@ -146,31 +146,21 @@ class SwapTracker:
             return_exceptions=True,
         )
 
+        # Null and transient errors share the same retry policy — a missing
+        # swap is usually either RPC flake or a freshly-resolved entry that
+        # the event watcher will write a terminal outcome for. Give it a
+        # few tries, then drop.
         resolved_ids: List[int] = []
         for sid, result in zip(stale_ids, swaps):
             if isinstance(result, Exception):
                 bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during refresh: {result}')
-                # Treat a transient error like a null return — bump the retry
-                # counter, drop after NULL_SWAP_RETRY_LIMIT failures.
-                retries = self.null_retry_count.get(sid, 0) + 1
-                if retries >= NULL_SWAP_RETRY_LIMIT:
+                result = None
+
+            if result is None:
+                if self._bump_null_retry(sid):
                     resolved_ids.append(sid)
-                else:
-                    self.null_retry_count[sid] = retries
-                continue
-            swap = result
-            if swap is None:
-                # Contract returned None. Either the swap resolved and was
-                # removed from contract storage, or an RPC flake. Retry a few
-                # times before dropping — event watcher will write the outcome
-                # when it replays the SwapCompleted/SwapTimedOut events.
-                retries = self.null_retry_count.get(sid, 0) + 1
-                if retries >= NULL_SWAP_RETRY_LIMIT:
-                    resolved_ids.append(sid)
-                else:
-                    self.null_retry_count[sid] = retries
-            elif swap.status in ACTIVE_STATUSES:
-                self.active[sid] = swap
+            elif result.status in ACTIVE_STATUSES:
+                self.active[sid] = result
                 self.null_retry_count.pop(sid, None)
             else:
                 resolved_ids.append(sid)
@@ -184,6 +174,16 @@ class SwapTracker:
             bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
 
         self.prune_stale_voted_ids()
+
+    def _bump_null_retry(self, swap_id: int) -> bool:
+        """Increment the retry counter for a swap whose refresh returned None
+        (or raised). Returns True when the retry limit is hit and the caller
+        should treat the swap as resolved."""
+        retries = self.null_retry_count.get(swap_id, 0) + 1
+        if retries >= NULL_SWAP_RETRY_LIMIT:
+            return True
+        self.null_retry_count[swap_id] = retries
+        return False
 
     def prune_stale_voted_ids(self) -> None:
         """Drop any voted_ids entries whose swap is no longer being tracked.
