@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
@@ -527,6 +529,102 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
     return completed / total
 
 
+class EventKind(IntEnum):
+    """Ordering of coincident-block transitions in the crown-time replay.
+
+    At the same block number, busy transitions apply before collateral
+    changes, which apply before rate changes. So if a user reserves a miner
+    in the same block that miner's best rate was posted, the reservation
+    ends crown credit *before* the rate attribution — matching the intent
+    that a busy miner doesn't earn a new interval.
+    """
+
+    BUSY = 0
+    COLLATERAL = 1
+    RATE = 2
+
+
+@dataclass
+class ReplayEvent:
+    """One transition in the chronological replay stream.
+
+    The ``value`` field is polymorphic by ``kind``:
+      - ``RATE``       → the new rate as float
+      - ``COLLATERAL`` → the new collateral in rao (cast to int at apply time)
+      - ``BUSY``       → the open-swap count delta: +1 or -1
+    """
+
+    block: int
+    hotkey: str
+    kind: EventKind
+    value: float
+
+    @property
+    def sort_key(self) -> Tuple[int, int]:
+        return (self.block, int(self.kind))
+
+
+def _reconstruct_window_start_state(
+    store: ValidatorStateStore,
+    event_watcher: ContractEventWatcher,
+    from_chain: str,
+    to_chain: str,
+    window_start: int,
+    eligible_hotkeys: Set[str],
+) -> Tuple[Dict[str, float], Dict[str, int], Dict[str, int]]:
+    """Snapshot rates, collateral, and busy counts as they stood at window_start."""
+    rates: Dict[str, float] = {}
+    collateral: Dict[str, int] = {}
+    busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
+
+    for hotkey in eligible_hotkeys:
+        latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
+        if latest_rate is not None:
+            rates[hotkey] = latest_rate[0]
+
+        latest_col = event_watcher.get_latest_collateral_before(hotkey, window_start)
+        if latest_col is not None:
+            collateral[hotkey] = latest_col[0]
+        else:
+            # No event before window_start — fall back to the watcher's current
+            # snapshot so a miner whose only collateral event predates retention
+            # still gets credited accurately.
+            snapshot = event_watcher.collateral.get(hotkey)
+            if snapshot is not None:
+                collateral[hotkey] = snapshot
+
+    return rates, collateral, busy_count
+
+
+def _merge_replay_events(
+    store: ValidatorStateStore,
+    event_watcher: ContractEventWatcher,
+    from_chain: str,
+    to_chain: str,
+    window_start: int,
+    window_end: int,
+) -> List[ReplayEvent]:
+    """Pull rate, collateral, and busy transitions within the window and merge
+    them into one chronologically-sorted event stream."""
+    events: List[ReplayEvent] = []
+
+    for e in event_watcher.get_busy_events_in_range(window_start, window_end):
+        events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.BUSY, value=float(e['delta'])))
+
+    for e in event_watcher.get_collateral_events_in_range(window_start, window_end):
+        events.append(
+            ReplayEvent(
+                block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
+            )
+        )
+
+    for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
+        events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.RATE, value=float(e['rate'])))
+
+    events.sort(key=lambda ev: ev.sort_key)
+    return events
+
+
 def replay_crown_time_window(
     store: ValidatorStateStore,
     event_watcher: ContractEventWatcher,
@@ -540,90 +638,54 @@ def replay_crown_time_window(
     """Walk the merged rate + collateral + busy event stream, accumulate crown blocks.
 
     Rates come from ``store`` (populated by commitment polling). Collateral
-    history and busy-interval transitions come from ``event_watcher``
-    (populated by contract event replay). Returns ``{hotkey: crown_blocks_float}``.
-    Ties split credit evenly across the tied interval; miners with an open
-    swap at the time are excluded so the credit flows to the next-best idle
-    miner instead.
+    history and busy-interval transitions come from ``event_watcher`` (populated
+    by contract event replay). Returns ``{hotkey: crown_blocks_float}``. Ties
+    split credit evenly across the tied interval; miners with an open swap at
+    the time are excluded so the credit flows to the next-best idle miner
+    instead.
     """
-    # 1. Reconstruct state at window_start for every eligible hotkey.
-    current_rates: Dict[str, float] = {}
-    current_collateral: Dict[str, int] = {}
-    current_busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
+    # 1. Reconstruct the "as of window_start" state for every eligible hotkey.
+    rates, collateral, busy_count = _reconstruct_window_start_state(
+        store, event_watcher, from_chain, to_chain, window_start, eligible_hotkeys
+    )
 
-    for hotkey in eligible_hotkeys:
-        latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
-        if latest_rate is not None:
-            current_rates[hotkey] = latest_rate[0]
-        latest_col = event_watcher.get_latest_collateral_before(hotkey, window_start)
-        if latest_col is not None:
-            current_collateral[hotkey] = latest_col[0]
-        else:
-            # No event before window_start — fall back to the watcher's
-            # current value so a miner whose only collateral event predates
-            # the retention window still gets credited accurately.
-            snapshot = event_watcher.collateral.get(hotkey)
-            if snapshot is not None:
-                current_collateral[hotkey] = snapshot
+    # 2. Pull every transition inside the window, merged chronologically.
+    replay_events = _merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
 
-    # 2. Merge rate, collateral, and busy events within the window, oldest first.
-    #    At identical blocks, busy transitions land first (0), then collateral
-    #    (1), then rate (2) so that "user reserves miner + miner's best rate"
-    #    resolves to the post-busy state before rate attribution — matching
-    #    the economic intent that a reservation immediately ends crown credit.
-    rate_events = store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end)
-    col_events = event_watcher.get_collateral_events_in_range(window_start, window_end)
-    busy_events = event_watcher.get_busy_events_in_range(window_start, window_end)
-
-    merged: List[Tuple[int, int, str, str, float]] = []
-    for e in busy_events:
-        merged.append((e['block'], 0, 'busy', e['hotkey'], float(e['delta'])))
-    for e in col_events:
-        merged.append((e['block'], 1, 'collateral', e['hotkey'], float(e['collateral_rao'])))
-    for e in rate_events:
-        merged.append((e['block'], 2, 'rate', e['hotkey'], float(e['rate'])))
-    merged.sort(key=lambda x: (x[0], x[1]))
-
-    # 3. Walk intervals, crediting current holders.
+    # 3. Walk intervals, crediting the current crown holders for each span.
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
 
-    def current_busy_set() -> Set[str]:
-        return {hk for hk, c in current_busy_count.items() if c > 0}
-
-    def attribute(interval_start: int, interval_end: int) -> None:
+    def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        holders = crown_holders_at_instant(
-            current_rates,
-            current_collateral,
-            min_collateral,
-            eligible_hotkeys,
-            busy=current_busy_set(),
-        )
+        busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        holders = crown_holders_at_instant(rates, collateral, min_collateral, eligible_hotkeys, busy=busy_set)
         if not holders:
             return
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
 
-    for block, _order, kind, hotkey, value in merged:
-        attribute(prev_block, block)
-        if kind == 'rate':
-            current_rates[hotkey] = value
-        elif kind == 'collateral':
-            current_collateral[hotkey] = int(value)
-        else:  # busy
-            delta = int(value)
-            new_count = current_busy_count.get(hotkey, 0) + delta
+    def apply_event(event: ReplayEvent) -> None:
+        if event.kind is EventKind.RATE:
+            rates[event.hotkey] = event.value
+        elif event.kind is EventKind.COLLATERAL:
+            collateral[event.hotkey] = int(event.value)
+        else:  # BUSY
+            new_count = busy_count.get(event.hotkey, 0) + int(event.value)
             if new_count > 0:
-                current_busy_count[hotkey] = new_count
+                busy_count[event.hotkey] = new_count
             else:
-                current_busy_count.pop(hotkey, None)
-        prev_block = block
+                busy_count.pop(event.hotkey, None)
 
-    attribute(prev_block, window_end)
+    for event in replay_events:
+        credit_interval(prev_block, event.block)
+        apply_event(event)
+        prev_block = event.block
+
+    credit_interval(prev_block, window_end)
     return crown_blocks
 
 
