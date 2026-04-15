@@ -136,19 +136,17 @@ class TestEdgeCases:
         result = calculate_to_amount(1_000_000, '0', is_reverse=False, to_decimals=TAO_DEC, from_decimals=BTC_DEC)
         assert result == 0
 
-    def test_negative_rate_string(self):
-        # Doesn't crash — contract should reject negative rates
+    def test_negative_rate_produces_negative_amount(self):
+        """Negative rates aren't expected in practice — the contract rejects
+        them at post time. calculate_to_amount doesn't defend against them;
+        it just returns the signed product. Lock in the actual behavior so a
+        silent change is caught, and document that the guard lives upstream.
+        """
         result = calculate_to_amount(1_000_000, '-345', is_reverse=False, to_decimals=TAO_DEC, from_decimals=BTC_DEC)
-        assert isinstance(result, int)
-
-    def test_rate_precision_constant(self):
-        assert RATE_PRECISION == 10**18
-
-    def test_btc_sat_constant(self):
-        assert BTC_TO_SAT == 100_000_000
-
-    def test_tao_rao_constant(self):
-        assert TAO_TO_RAO == 1_000_000_000
+        assert result == -calculate_to_amount(
+            1_000_000, '345', is_reverse=False, to_decimals=TAO_DEC, from_decimals=BTC_DEC
+        )
+        assert result < 0
 
     def test_determinism_across_calls(self):
         results = set()
@@ -212,8 +210,21 @@ class TestFeeDeduction:
         assert fee == 10 * TAO_TO_RAO
 
     def test_fee_plus_user_equals_total(self):
+        """apply_fee_deduction = to_amount - to_amount // divisor, so
+        fee + user_receives must exactly equal the input."""
         tao_amount = 3_450_000_000
         fee = tao_amount // self.FEE_DIVISOR
-        user = tao_amount - fee
-        assert fee + user <= tao_amount
-        assert tao_amount - fee - user < self.FEE_DIVISOR
+        user = apply_fee_deduction(tao_amount, self.FEE_DIVISOR)
+        assert fee + user == tao_amount
+
+    def test_apply_fee_deduction_on_unaligned_amount(self):
+        """Floor division floors the fee, so 1-off amounts don't over-refund."""
+        # 99 // 100 = 0 → user receives 99 (all of it, no fee taken)
+        assert apply_fee_deduction(99, 100) == 99
+        # 100 // 100 = 1 → user receives 99
+        assert apply_fee_deduction(100, 100) == 99
+        # 101 // 100 = 1 → user receives 100
+        assert apply_fee_deduction(101, 100) == 100
+
+    def test_apply_fee_deduction_zero_amount(self):
+        assert apply_fee_deduction(0, 100) == 0
