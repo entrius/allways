@@ -169,7 +169,7 @@ class TestPollCommitmentsPruning:
         """Pruning moved out of the per-tick path and into the scoring round —
         verify both parts of that contract: commitment polling does NOT prune,
         and run_scoring_pass DOES."""
-        from allways.validator.forward import prune_aged_rate_events
+        from allways.validator.scoring import prune_aged_rate_events
 
         v = make_validator(tmp_path)
         v.block = EVENT_RETENTION_BLOCKS + 1_000

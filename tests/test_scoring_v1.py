@@ -8,7 +8,7 @@ import numpy as np
 
 from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
 from allways.validator.event_watcher import ContractEventWatcher
-from allways.validator.forward import (
+from allways.validator.scoring import (
     calculate_miner_rewards,
     crown_holders_at_instant,
     replay_crown_time_window,
