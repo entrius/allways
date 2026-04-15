@@ -110,7 +110,18 @@ class SwapFulfiller:
             self.save_sent_cache()
 
     def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
-        """Verify the swap is safe to fulfill. Returns (to_amount, miner_from_address) or None."""
+        """Verify the swap is safe to fulfill.
+
+        Returns ``(user_receives_amount, miner_from_address)`` or ``None`` if
+        the swap isn't safe to fulfill. ``user_receives_amount`` is the
+        POST-FEE amount the miner must actually send to the user; it is
+        distinct from ``swap.to_amount`` (which at fulfill time gets set to
+        this same value, but at initiate time is the full pre-fee amount).
+        """
+        # Hot-reload the cushion on every call so an operator can tune
+        # MINER_TIMEOUT_CUSHION_BLOCKS without restarting the miner.
+        self.timeout_cushion_blocks = load_timeout_cushion_blocks()
+
         # Timeout check — bail out `timeout_cushion_blocks` before the hard
         # deadline so slow dest-chain inclusion can't turn a legitimate
         # fulfillment into a timeout and a slash.
@@ -128,12 +139,12 @@ class SwapFulfiller:
             bt.logging.error(f'Swap {swap.id}: missing rate or miner_from_address on swap struct')
             return None
 
-        _, user_receives = expected_swap_amounts(swap, self.fee_divisor)
-        if user_receives == 0:
-            bt.logging.error(f'Swap {swap.id}: calculated to_amount is 0')
+        _, user_receives_amount = expected_swap_amounts(swap, self.fee_divisor)
+        if user_receives_amount == 0:
+            bt.logging.error(f'Swap {swap.id}: rate produces 0 user-receives amount after fees')
             return None
 
-        return user_receives, swap.miner_from_address
+        return user_receives_amount, swap.miner_from_address
 
     def verify_user_sent_funds(self, swap: Swap, miner_from_address: str) -> bool:
         """Verify that the user sent funds on the source chain."""
@@ -184,8 +195,8 @@ class SwapFulfiller:
             bt.logging.error(f'Swap {swap.id}: verification error: {e}')
             return False
 
-    def send_dest_funds(self, swap: Swap, to_amount: int) -> Optional[Tuple[str, int]]:
-        """Send destination funds to the user. Returns (tx_hash, block_number) or None."""
+    def send_dest_funds(self, swap: Swap, user_receives_amount: int) -> Optional[Tuple[str, int]]:
+        """Send the post-fee amount to the user. Returns (tx_hash, block_number) or None."""
         provider = self.providers.get(swap.to_chain)
         if not provider:
             bt.logging.error(f'Swap {swap.id}: no provider for dest chain: {swap.to_chain}')
@@ -199,16 +210,16 @@ class SwapFulfiller:
         # credentials live on the provider itself.
         from_address = None if swap.to_chain == 'tao' else self.my_addresses.get(swap.to_chain)
 
-        result = provider.send_amount(swap.user_to_address, to_amount, from_address=from_address)
+        result = provider.send_amount(swap.user_to_address, user_receives_amount, from_address=from_address)
         if result:
             tx_hash, block_num = result
             bt.logging.info(
-                f'Swap {swap.id}: sent {to_amount} to {swap.user_to_address} '
+                f'Swap {swap.id}: sent {user_receives_amount} to {swap.user_to_address} '
                 f'on {swap.to_chain} (tx: {tx_hash}, block: {block_num})'
             )
         else:
             bt.logging.error(
-                f'Swap {swap.id}: failed to send {to_amount} to {swap.user_to_address} '
+                f'Swap {swap.id}: failed to send {user_receives_amount} to {swap.user_to_address} '
                 f'on {swap.to_chain} — check wallet balance and node connectivity'
             )
         return result
@@ -235,19 +246,21 @@ class SwapFulfiller:
             bt.logging.warning(f'Swap {swap.id}: failed safety checks, skipping')
             return False
 
-        to_amount, my_source_address = safety_result
+        user_receives_amount, my_source_address = safety_result
 
         # Step 2: Verify user sent source funds
         if not self.verify_user_sent_funds(swap, my_source_address):
             bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
             return False
 
-        # Step 3: Send destination funds (with double-send prevention)
+        # Step 3: Send destination funds. The ``sent`` cache serves two
+        # purposes: skip the send on a retry (dest tx already broadcast) and
+        # skip the mark_fulfilled call on a retry (contract already accepted).
         if state is not None:
             to_tx_hash, to_tx_block, _ = state
             bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {to_tx_hash[:16]}...')
         else:
-            send_result = self.send_dest_funds(swap, to_amount)
+            send_result = self.send_dest_funds(swap, user_receives_amount)
             if not send_result:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
@@ -255,13 +268,16 @@ class SwapFulfiller:
             self.sent[swap.id] = (to_tx_hash, to_tx_block, False)
             self.save_sent_cache()
 
-        # Step 4: Mark fulfilled on contract
+        # Step 4: Mark fulfilled on contract. We pass user_receives_amount as
+        # to_amount because at mark_fulfilled time the contract expects the
+        # actual sent amount (post-fee), which is what `swap.to_amount` will
+        # be set to after the call.
         try:
             self.client.mark_fulfilled(
                 wallet=self.wallet,
                 swap_id=swap.id,
                 to_tx_hash=to_tx_hash,
-                to_amount=to_amount,
+                to_amount=user_receives_amount,
                 to_tx_block=to_tx_block,
             )
             self.sent[swap.id] = (to_tx_hash, to_tx_block, True)
