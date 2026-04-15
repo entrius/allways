@@ -118,10 +118,21 @@ pub struct ConfigUpdated {
     pub value: u128,
 }
 
-/// Event emitted when accumulated fees are recycled (transferred to recycle address)
+/// Event emitted when accumulated fees are recycled — either via the subtensor
+/// chain extension (`via_chain_ext = true`) or via the immutable custodial
+/// fallback address (`via_chain_ext = false`).
 #[ink::event]
 pub struct FeesRecycled {
     pub tao_amount: u128,
+    pub via_chain_ext: bool,
+}
+
+/// Emitted exactly once, when `recycle_fees` successfully calls the chain
+/// extension for the first time. After this fires, the fallback custodial
+/// path is permanently disabled.
+#[ink::event]
+pub struct ChainExtensionLatched {
+    pub at_block: u32,
 }
 
 /// Event emitted when ownership is transferred
