@@ -62,6 +62,14 @@ mod allways_swap_manager {
         // Configuration
         owner: AccountId,
         treasury_hotkey: AccountId,
+        // Immutable custodial fallback: where fees land until the subtensor
+        // chain extension is live. No setter — constructor-only. Once
+        // `chain_ext_enabled` latches to true, this address is never used again.
+        recycle_address: AccountId,
+        // One-way latch: flips to true the first time `add_stake_recycle`
+        // succeeds. Never flips back. After latching, recycle_fees has no
+        // fallback and must use the chain extension.
+        chain_ext_enabled: bool,
         netuid: u16,
         fulfillment_timeout_blocks: u32,
         reservation_ttl: u32,
@@ -264,6 +272,7 @@ mod allways_swap_manager {
         #[ink(constructor)]
         pub fn new(
             treasury_hotkey: AccountId,
+            recycle_address: AccountId,
             netuid: u16,
             fulfillment_timeout_blocks: u32,
             reservation_ttl: u32,
@@ -276,6 +285,8 @@ mod allways_swap_manager {
             Self {
                 owner: Self::env().caller(),
                 treasury_hotkey,
+                recycle_address,
+                chain_ext_enabled: false,
                 netuid,
                 fulfillment_timeout_blocks,
                 reservation_ttl,
@@ -1156,25 +1167,61 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        /// Recycle accumulated fees. Permissionless — anyone can call.
+        ///
+        /// Once the chain extension has latched (success observed at least once),
+        /// this function can only succeed via the chain extension. Before that,
+        /// it probes the chain extension on every call; on failure, it falls
+        /// back to transferring fees to the immutable `recycle_address`.
         #[ink(message)]
         pub fn recycle_fees(&mut self) -> Result<(), Error> {
-            self.ensure_owner()?;
-
             let fees = self.accumulated_fees;
             if fees == 0 {
                 return Err(Error::ZeroAmount);
             }
 
-            let amount: u64 = fees.try_into().map_err(|_| Error::TransferFailed)?;
-            self.env()
-                .extension()
-                .add_stake_recycle(self.treasury_hotkey, self.netuid, amount)
-                .map_err(|_| Error::TransferFailed)?;
+            if self.chain_ext_enabled {
+                let amount: u64 = fees.try_into().map_err(|_| Error::TransferFailed)?;
+                self.env()
+                    .extension()
+                    .add_stake_recycle(self.treasury_hotkey, self.netuid, amount)
+                    .map_err(|_| Error::TransferFailed)?;
+                self.finalize_recycle(fees, true);
+                return Ok(());
+            }
 
+            let chain_ext_ok = match u64::try_from(fees) {
+                Ok(amount) => self
+                    .env()
+                    .extension()
+                    .add_stake_recycle(self.treasury_hotkey, self.netuid, amount)
+                    .is_ok(),
+                Err(_) => false,
+            };
+
+            if chain_ext_ok {
+                self.chain_ext_enabled = true;
+                self.env().emit_event(ChainExtensionLatched {
+                    at_block: self.env().block_number(),
+                });
+                self.finalize_recycle(fees, true);
+                return Ok(());
+            }
+
+            self.env()
+                .transfer(self.recycle_address, fees)
+                .map_err(|_| Error::TransferFailed)?;
+            self.finalize_recycle(fees, false);
+            Ok(())
+        }
+
+        fn finalize_recycle(&mut self, fees: Balance, via_chain_ext: bool) {
             self.accumulated_fees = 0;
             self.total_recycled_fees = self.total_recycled_fees.saturating_add(fees);
-            self.env().emit_event(FeesRecycled { tao_amount: fees });
-            Ok(())
+            self.env().emit_event(FeesRecycled {
+                tao_amount: fees,
+                via_chain_ext,
+            });
         }
 
         // =====================================================================
@@ -1244,6 +1291,16 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_total_recycled_fees(&self) -> Balance {
             self.total_recycled_fees
+        }
+
+        #[ink(message)]
+        pub fn get_recycle_address(&self) -> AccountId {
+            self.recycle_address
+        }
+
+        #[ink(message)]
+        pub fn get_chain_ext_enabled(&self) -> bool {
+            self.chain_ext_enabled
         }
 
         #[ink(message)]
