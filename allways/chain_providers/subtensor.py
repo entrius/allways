@@ -165,7 +165,7 @@ class SubtensorProvider(ChainProvider):
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
             return None
 
-    def _fetch_matching_tx(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
         """Scan for a TAO transfer matching recipient + amount.

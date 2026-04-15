@@ -44,7 +44,7 @@ class ChainProvider(ABC):
         ...
 
     @abstractmethod
-    def _fetch_matching_tx(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
         """Chain-specific fetch — return TransactionInfo if the tx exists and matches
@@ -70,7 +70,7 @@ class ChainProvider(ABC):
     ) -> Optional[TransactionInfo]:
         """Verify a transaction against the shared post-fetch checklist.
 
-        Dispatches to the provider's ``_fetch_matching_tx`` for the chain-specific
+        Dispatches to the provider's ``fetch_matching_tx`` for the chain-specific
         scan, then applies the common checks every caller cares about:
 
         - ``require_confirmed`` — if True, reject txs that don't have enough
@@ -85,7 +85,7 @@ class ChainProvider(ABC):
         Rejections are logged once in the base so observability for the defense
         is in one place instead of duplicated at every call site.
         """
-        tx_info = self._fetch_matching_tx(
+        tx_info = self.fetch_matching_tx(
             tx_hash=tx_hash,
             expected_recipient=expected_recipient,
             expected_amount=expected_amount,

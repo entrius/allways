@@ -157,7 +157,7 @@ class SwapTracker:
                 result = None
 
             if result is None:
-                if self._bump_null_retry(sid):
+                if self.bump_null_retry(sid):
                     resolved_ids.append(sid)
             elif result.status in ACTIVE_STATUSES:
                 self.active[sid] = result
@@ -175,7 +175,7 @@ class SwapTracker:
 
         self.prune_stale_voted_ids()
 
-    def _bump_null_retry(self, swap_id: int) -> bool:
+    def bump_null_retry(self, swap_id: int) -> bool:
         """Increment the retry counter for a swap whose refresh returned None
         (or raised). Returns True when the retry limit is hit and the caller
         should treat the swap as resolved."""

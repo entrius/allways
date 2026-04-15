@@ -564,7 +564,7 @@ class ReplayEvent:
         return (self.block, int(self.kind))
 
 
-def _reconstruct_window_start_state(
+def reconstruct_window_start_state(
     store: ValidatorStateStore,
     event_watcher: ContractEventWatcher,
     from_chain: str,
@@ -596,7 +596,7 @@ def _reconstruct_window_start_state(
     return rates, collateral, busy_count
 
 
-def _merge_replay_events(
+def merge_replay_events(
     store: ValidatorStateStore,
     event_watcher: ContractEventWatcher,
     from_chain: str,
@@ -645,12 +645,12 @@ def replay_crown_time_window(
     instead.
     """
     # 1. Reconstruct the "as of window_start" state for every eligible hotkey.
-    rates, collateral, busy_count = _reconstruct_window_start_state(
+    rates, collateral, busy_count = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, eligible_hotkeys
     )
 
     # 2. Pull every transition inside the window, merged chronologically.
-    replay_events = _merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
+    replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
 
     # 3. Walk intervals, crediting the current crown holders for each span.
     crown_blocks: Dict[str, float] = {}

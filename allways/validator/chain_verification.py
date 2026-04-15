@@ -73,7 +73,7 @@ class SwapVerifier:
                 )
                 return False
             if not tx_info.confirmed:
-                self._log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
+                self.log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
                 return False
             return True
         except ProviderUnreachableError:
@@ -82,7 +82,7 @@ class SwapVerifier:
             bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
             return False
 
-    def _log_confs_progress(
+    def log_confs_progress(
         self,
         swap_id: int,
         chain: str,
