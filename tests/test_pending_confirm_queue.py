@@ -88,7 +88,7 @@ class TestPendingConfirmQueue:
         assert removed.miner_hotkey == 'miner-1'
         assert not queue.has('miner-1')
 
-    def test_purge_expired_pending_removes_stale_entries(self, tmp_path: Path):
+    def test_purge_expired_pending_confirms_removes_stale_entries(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'
         queue = ValidatorStateStore(
             db_path=db_path,
@@ -98,7 +98,7 @@ class TestPendingConfirmQueue:
         queue.enqueue(PENDING_CONFIRM_SAMPLE1)  # reserved_until=100 → expired at block 101
         queue.enqueue(replace(PENDING_CONFIRM_SAMPLE2, reserved_until=105))
 
-        removed = queue.purge_expired_pending()
+        removed = queue.purge_expired_pending_confirms()
         assert removed == 1
 
         items = queue.get_all()

@@ -2,6 +2,7 @@
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
@@ -12,6 +13,21 @@ from allways.classes import Swap
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.utils.rate import expected_swap_amounts
+
+
+@dataclass
+class SentSwap:
+    """Persistent record of a destination-chain send for a single swap.
+
+    Created when ``send_dest_funds`` succeeds; ``marked_fulfilled`` flips to
+    True after the contract accepts ``mark_fulfilled``. A retry after crash
+    finds this record, skips re-sending (prevents double-sends), and only
+    re-calls mark_fulfilled if it didn't already succeed.
+    """
+
+    to_tx_hash: str
+    to_tx_block: int
+    marked_fulfilled: bool
 
 
 def load_timeout_cushion_blocks() -> int:
@@ -66,8 +82,7 @@ class SwapFulfiller:
         # miner loop when a new rate is posted. Shared dict so the miner
         # neuron's reload mutates what we read here.
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
-        # swap_id → (to_tx_hash, to_tx_block, marked_fulfilled)
-        self.sent: Dict[int, Tuple[str, int, bool]] = {}
+        self.sent: Dict[int, SentSwap] = {}
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
 
@@ -78,10 +93,11 @@ class SwapFulfiller:
         try:
             data = json.loads(self.sent_cache_path.read_text())
             for swap_id_str, entry in data.items():
-                # Back-compat: old cache entries were 2-tuples. Treat restored
-                # entries as not-yet-marked-fulfilled so the retry path runs.
-                marked = bool(entry[2]) if len(entry) >= 3 else False
-                self.sent[int(swap_id_str)] = (entry[0], entry[1], marked)
+                self.sent[int(swap_id_str)] = SentSwap(
+                    to_tx_hash=entry[0],
+                    to_tx_block=entry[1],
+                    marked_fulfilled=bool(entry[2]),
+                )
             if self.sent:
                 bt.logging.info(f'Restored {len(self.sent)} cached send(s) from disk')
         except Exception as e:
@@ -93,7 +109,7 @@ class SwapFulfiller:
             return
         try:
             self.sent_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {str(k): [v[0], v[1], v[2]] for k, v in self.sent.items()}
+            data = {str(swap_id): [s.to_tx_hash, s.to_tx_block, s.marked_fulfilled] for swap_id, s in self.sent.items()}
             tmp = self.sent_cache_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data))
             tmp.rename(self.sent_cache_path)
@@ -163,26 +179,11 @@ class SwapFulfiller:
                 expected_recipient=miner_from_address,
                 expected_amount=swap.from_amount,
                 block_hint=swap.from_tx_block,
+                expected_sender=swap.user_from_address,
+                require_confirmed=True,
             )
-
             if tx_info is None:
-                bt.logging.debug(f'Swap {swap.id}: source tx not found or unconfirmed')
-                return False
-
-            if not tx_info.confirmed:
-                bt.logging.debug(f'Swap {swap.id}: source tx not yet confirmed')
-                return False
-
-            # Miner self-protection: don't send dest funds unless the source tx
-            # actually came from the user address tied to this swap. Validators
-            # check this too at initiation, but the miner shouldn't trust that
-            # alone — an exploited or buggy validator quorum shouldn't cost the
-            # miner their send.
-            if tx_info.sender and tx_info.sender != swap.user_from_address:
-                bt.logging.warning(
-                    f'Swap {swap.id}: source tx sender mismatch '
-                    f'(expected {swap.user_from_address}, got {tx_info.sender}) — refusing to fulfill'
-                )
+                bt.logging.debug(f'Swap {swap.id}: source tx not ready (not found, unconfirmed, or sender mismatch)')
                 return False
 
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} from {tx_info.sender})')
@@ -225,17 +226,23 @@ class SwapFulfiller:
         return result
 
     def process_swap(self, swap: Swap) -> bool:
-        """Full swap processing flow: verify safety -> verify funds -> send -> mark fulfilled.
+        """Run the full swap lifecycle for one assigned swap.
 
-        Idempotent across forward steps. The ``_sent`` cache records both the
-        dest-tx outcome and whether ``mark_fulfilled`` has already succeeded, so
-        retry polls don't re-send dest funds and don't re-call the contract.
-        Cache entries live until ``cleanup_stale_sends`` clears them when the
-        swap leaves the active set.
+        Idempotent across forward steps — the ``sent`` cache tracks both the
+        dest-tx outcome and whether ``mark_fulfilled`` has landed, so retry
+        polls never double-send and never double-call the contract. Cache
+        entries live until ``cleanup_stale_sends`` drops them once the swap
+        leaves the active set.
+
+        Three possible starting states when this runs:
+          - no prior record → send dest funds, then mark fulfilled
+          - prior send, not yet marked → skip send, retry mark fulfilled
+          - prior send, already marked → nothing to do
         """
-        state = self.sent.get(swap.id)
-        if state is not None and state[2]:
-            # mark_fulfilled already succeeded; contract state will catch up.
+        sent = self.sent.get(swap.id)
+        if sent and sent.marked_fulfilled:
+            # Already finished on a previous pass. Contract state catches up
+            # when validators confirm — nothing to retry here.
             return True
 
         bt.logging.info(f'Processing swap {swap.id}: {swap.from_chain} -> {swap.to_chain}')
@@ -253,34 +260,33 @@ class SwapFulfiller:
             bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
             return False
 
-        # Step 3: Send destination funds. The ``sent`` cache serves two
-        # purposes: skip the send on a retry (dest tx already broadcast) and
-        # skip the mark_fulfilled call on a retry (contract already accepted).
-        if state is not None:
-            to_tx_hash, to_tx_block, _ = state
-            bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {to_tx_hash[:16]}...')
-        else:
+        # Step 3: Send destination funds — unless we already did on a previous
+        # pass, in which case we skip straight to the mark_fulfilled retry.
+        if sent is None:
             send_result = self.send_dest_funds(swap, user_receives_amount)
             if not send_result:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
             to_tx_hash, to_tx_block = send_result
-            self.sent[swap.id] = (to_tx_hash, to_tx_block, False)
+            sent = SentSwap(to_tx_hash=to_tx_hash, to_tx_block=to_tx_block, marked_fulfilled=False)
+            self.sent[swap.id] = sent
             self.save_sent_cache()
+        else:
+            bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {sent.to_tx_hash[:16]}...')
 
-        # Step 4: Mark fulfilled on contract. We pass user_receives_amount as
-        # to_amount because at mark_fulfilled time the contract expects the
-        # actual sent amount (post-fee), which is what `swap.to_amount` will
-        # be set to after the call.
+        # Step 4: Mark fulfilled on contract. We pass ``user_receives_amount``
+        # as ``to_amount`` because at mark_fulfilled time the contract stores
+        # the actual sent amount (post-fee), which is what ``swap.to_amount``
+        # becomes after the call.
         try:
             self.client.mark_fulfilled(
                 wallet=self.wallet,
                 swap_id=swap.id,
-                to_tx_hash=to_tx_hash,
+                to_tx_hash=sent.to_tx_hash,
                 to_amount=user_receives_amount,
-                to_tx_block=to_tx_block,
+                to_tx_block=sent.to_tx_block,
             )
-            self.sent[swap.id] = (to_tx_hash, to_tx_block, True)
+            sent.marked_fulfilled = True
             self.save_sent_cache()
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True

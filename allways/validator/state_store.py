@@ -1,23 +1,11 @@
-"""Single SQLite-backed store for all validator-local state.
+"""SQLite-backed store for all validator-local state.
 
-Consolidates what used to be two files (``rate_state.db`` + ``pending_confirms.db``)
-into one ``state.db`` with a single connection, a single lock, and one class
-holding every table the validator owns:
-
-- ``pending_confirms`` — user swap confirmations awaiting tx confirmations;
-  written by axon handler thread, drained by forward loop thread.
-- ``rate_events`` — per-miner per-direction rate history used by the V1
-  crown-time scoring replay. Bounded by ``RATE_UPDATE_MIN_INTERVAL_BLOCKS``
-  throttle on insert and ``EVENT_RETENTION_BLOCKS`` on prune.
-- ``collateral_events`` — per-miner collateral history. One row per observed
-  change. Pruned alongside rate_events.
-- ``swap_outcomes`` — all-time credibility ledger keyed by ``swap_id``. Never
-  time-pruned; only removed when a hotkey deregisters. Read during scoring
-  to compute ``success_rate ** SUCCESS_EXPONENT``.
-
-Threading: one ``sqlite3.Connection`` opened with ``check_same_thread=False``
-behind a ``threading.Lock``. ``busy_timeout`` set before ``journal_mode=WAL``
-so concurrent openers wait on the init lock instead of erroring out.
+Tables: ``pending_confirms`` (axon→forward queue), ``rate_events`` (crown-time
+input), ``swap_outcomes`` (credibility ledger). Single connection guarded by
+one lock; opened with ``check_same_thread=False``. ``busy_timeout`` is set
+before ``journal_mode=WAL`` because the WAL flip takes a brief exclusive lock
+that concurrent openers would otherwise hit as "database is locked" — the
+local dev env runs two validators against the same file.
 """
 
 import sqlite3
@@ -27,12 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from allways.constants import RATE_UPDATE_MIN_INTERVAL_BLOCKS
-
 
 @dataclass
 class PendingConfirm:
-    """All data needed to call ``vote_initiate`` once tx confirmations are met."""
+    """All data needed to call ``vote_initiate`` once tx confirmations land."""
 
     miner_hotkey: str
     from_tx_hash: str
@@ -51,8 +37,6 @@ class PendingConfirm:
 
 
 class ValidatorStateStore:
-    """Single-connection SQLite store owning every validator-local table."""
-
     def __init__(
         self,
         db_path: Path | str | None = None,
@@ -62,10 +46,9 @@ class ValidatorStateStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.conn: Optional[sqlite3.Connection] = sqlite3.connect(self.db_path, check_same_thread=False)
-        # busy_timeout must be set BEFORE journal_mode: setting WAL mode takes a
-        # brief exclusive lock that a concurrent opener will otherwise hit as an
-        # immediate "database is locked" error (dev env runs two validators
-        # against the same SQLite file).
+        # busy_timeout must be set before journal_mode: the WAL switch takes a
+        # brief exclusive lock that a concurrent opener would otherwise hit as
+        # an immediate "database is locked" error.
         self.conn.execute('PRAGMA busy_timeout=5000')
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.row_factory = sqlite3.Row
@@ -75,7 +58,6 @@ class ValidatorStateStore:
     # ─── pending_confirms ───────────────────────────────────────────────
 
     def enqueue(self, item: PendingConfirm) -> None:
-        """Add or replace a pending confirm. Keyed by ``miner_hotkey``."""
         with self.lock:
             conn = self.require_connection()
             conn.execute(
@@ -107,19 +89,14 @@ class ValidatorStateStore:
             conn.commit()
 
     def get_all(self) -> List[PendingConfirm]:
-        """Return a snapshot of all pending items, oldest first.
-
-        Read-only — does not purge expired entries. Call ``purge_expired``
-        explicitly from the forward loop once per tick instead of side-
-        effecting every read.
-        """
+        """Snapshot of pending items, oldest first. Does not purge expired
+        entries — call ``purge_expired_pending_confirms`` explicitly."""
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
         return [self.row_to_pending(row) for row in rows]
 
     def remove(self, miner_hotkey: str) -> Optional[PendingConfirm]:
-        """Remove and return a specific entry."""
         with self.lock:
             conn = self.require_connection()
             row = conn.execute(
@@ -147,12 +124,8 @@ class ValidatorStateStore:
             count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
             return int(count)
 
-    def purge_expired_pending(self) -> int:
-        """Drop pending confirms whose reservation has already expired.
-
-        Returns the number of rows removed. Meant to be called once per
-        forward-loop tick — the forward loop knows when it's safe to mutate.
-        """
+    def purge_expired_pending_confirms(self) -> int:
+        """Drop pending confirms whose reservation has already expired."""
         if self.current_block_fn is None:
             return 0
         current_block = self.current_block_fn()
@@ -191,23 +164,20 @@ class ValidatorStateStore:
         rate: float,
         block: int,
     ) -> bool:
-        """Insert a rate event if throttle + change conditions pass."""
+        """Insert a rate event, skipping same-rate duplicates."""
         with self.lock:
             conn = self.require_connection()
             row = conn.execute(
                 """
-                SELECT rate, block FROM rate_events
+                SELECT rate FROM rate_events
                 WHERE hotkey = ? AND from_chain = ? AND to_chain = ?
                 ORDER BY block DESC, id DESC
                 LIMIT 1
                 """,
                 (hotkey, from_chain, to_chain),
             ).fetchone()
-            if row is not None:
-                if block - row['block'] < RATE_UPDATE_MIN_INTERVAL_BLOCKS:
-                    return False
-                if row['rate'] == rate:
-                    return False
+            if row is not None and row['rate'] == rate:
+                return False
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hotkey, from_chain, to_chain, rate, block),
@@ -222,7 +192,6 @@ class ValidatorStateStore:
         to_chain: str,
         block: int,
     ) -> Optional[Tuple[float, int]]:
-        """Most recent rate for ``hotkey``+direction at or before ``block``."""
         with self.lock:
             conn = self.require_connection()
             row = conn.execute(
@@ -267,7 +236,6 @@ class ValidatorStateStore:
         completed: bool,
         resolved_block: int,
     ) -> None:
-        """Insert or replace a swap outcome row. Idempotent on ``swap_id``."""
         with self.lock:
             conn = self.require_connection()
             conn.execute(
@@ -279,8 +247,9 @@ class ValidatorStateStore:
             )
             conn.commit()
 
-    def get_all_time_success_rates(self) -> Dict[str, Tuple[int, int]]:
-        """Return ``{hotkey: (completed_count, timed_out_count)}`` over all outcomes."""
+    def get_success_rates_since(self, since_block: int) -> Dict[str, Tuple[int, int]]:
+        """Return ``{hotkey: (completed_count, timed_out_count)}`` for outcomes
+        resolved at or after ``since_block``."""
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute(
@@ -289,15 +258,24 @@ class ValidatorStateStore:
                        SUM(completed) AS completed,
                        SUM(1 - completed) AS timed_out
                 FROM swap_outcomes
+                WHERE resolved_block >= ?
                 GROUP BY miner_hotkey
-                """
+                """,
+                (since_block,),
             ).fetchall()
         return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
+
+    def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
+        if cutoff_block <= 0:
+            return
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
+            conn.commit()
 
     # ─── cross-table maintenance ────────────────────────────────────────
 
     def delete_hotkey(self, hotkey: str) -> None:
-        """Dereg purge: remove the hotkey from rate/outcomes tables."""
         with self.lock:
             conn = self.require_connection()
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
@@ -305,14 +283,22 @@ class ValidatorStateStore:
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
-        """Delete rate events older than ``cutoff_block``.
-
-        Never touches ``swap_outcomes`` or ``pending_confirms`` — those have
-        their own lifetimes.
-        """
+        """Delete rate events older than ``cutoff_block``, preserving the
+        latest row per ``(hotkey, from_chain, to_chain)`` as a state-
+        reconstruction anchor for ``get_latest_rate_before(window_start)``."""
         with self.lock:
             conn = self.require_connection()
-            conn.execute('DELETE FROM rate_events WHERE block < ?', (cutoff_block,))
+            conn.execute(
+                """
+                DELETE FROM rate_events
+                WHERE block < ?
+                  AND id NOT IN (
+                      SELECT MAX(id) FROM rate_events
+                      GROUP BY hotkey, from_chain, to_chain
+                  )
+                """,
+                (cutoff_block,),
+            )
             conn.commit()
 
     def close(self) -> None:
@@ -371,6 +357,8 @@ class ValidatorStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
                     ON swap_outcomes(miner_hotkey);
+                CREATE INDEX IF NOT EXISTS idx_swap_outcomes_resolved_block
+                    ON swap_outcomes(resolved_block);
                 """
             )
             conn.commit()

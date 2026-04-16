@@ -142,10 +142,10 @@ class BitcoinProvider(ChainProvider):
             bt.logging.error(f'BTC RPC call failed ({method}): {e}')
             return None
 
-    def verify_transaction(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction via RPC with Blockstream fallback."""
+        """Look up a Bitcoin tx via RPC with Blockstream fallback."""
         result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
         if result is not None:
             return result

@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+import bittensor as bt
+
 from allways.chains import ChainDefinition
 
 
@@ -42,16 +44,71 @@ class ChainProvider(ABC):
         ...
 
     @abstractmethod
-    def verify_transaction(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a transaction; returns TransactionInfo if found, None if not found,
-        raises ProviderUnreachableError on transient failures.
+        """Chain-specific fetch — return TransactionInfo if the tx exists and matches
+        recipient + amount, otherwise None. Raises ProviderUnreachableError on
+        transient backend failures.
 
         Uses >= for amount (overpayment is acceptable on-chain).
         block_hint: If > 0, providers can use this for O(1) lookup instead of scanning.
+
+        Not called directly by application code — use ``verify_transaction``,
+        which wraps this with the common confirmed/sender post-checks.
         """
         ...
+
+    def verify_transaction(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        expected_sender: Optional[str] = None,
+        require_confirmed: bool = False,
+    ) -> Optional[TransactionInfo]:
+        """Verify a transaction against the shared post-fetch checklist.
+
+        Dispatches to the provider's ``fetch_matching_tx`` for the chain-specific
+        scan, then applies the common checks every caller cares about:
+
+        - ``require_confirmed`` — if True, reject txs that don't have enough
+          confirmations for the chain. Default False, because axon/pending-confirm
+          flows want the partial TransactionInfo so they can queue and retry.
+        - ``expected_sender`` — if provided, reject txs whose sender doesn't
+          match. Strict: an empty/unparseable sender from the provider also
+          fails the check, since we can't prove the tx came from the reserved
+          address. Closing this gap prevents a "malformed-input evades the
+          defense" class of attack.
+
+        Rejections are logged once in the base so observability for the defense
+        is in one place instead of duplicated at every call site.
+        """
+        tx_info = self.fetch_matching_tx(
+            tx_hash=tx_hash,
+            expected_recipient=expected_recipient,
+            expected_amount=expected_amount,
+            block_hint=block_hint,
+        )
+        if tx_info is None:
+            return None
+
+        if require_confirmed and not tx_info.confirmed:
+            bt.logging.debug(
+                f'verify_transaction: tx {tx_hash[:16]}... not yet confirmed '
+                f'({tx_info.confirmations}/{self.get_chain().min_confirmations})'
+            )
+            return None
+
+        if expected_sender and tx_info.sender != expected_sender:
+            bt.logging.warning(
+                f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
+                f'(expected {expected_sender}, got {tx_info.sender!r})'
+            )
+            return None
+
+        return tx_info
 
     @abstractmethod
     def get_balance(self, address: str) -> int: ...

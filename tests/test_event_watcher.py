@@ -124,14 +124,14 @@ class TestSwapOutcomePersistence:
     def test_completed_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (1, 0)
         w.state_store.close()
 
     def test_timed_out_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapTimedOut', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (0, 1)
         w.state_store.close()
 
@@ -140,8 +140,71 @@ class TestSwapOutcomePersistence:
         w.apply_event(100, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
         w.apply_event(101, 'SwapCompleted', {'swap_id': 2, 'miner': 'hk_a'})
         w.apply_event(102, 'SwapTimedOut', {'swap_id': 3, 'miner': 'hk_a'})
-        stats = w.state_store.get_all_time_success_rates()
+        stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (2, 1)
+        w.state_store.close()
+
+
+class TestBusyIntervals:
+    def test_initiate_marks_busy_then_complete_frees(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        assert 'hk_a' in w.get_busy_miners_at(100)
+        assert w.open_swap_count['hk_a'] == 1
+
+        w.apply_event(150, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 'hk_a' not in w.get_busy_miners_at(150)
+        w.state_store.close()
+
+    def test_timeout_frees_busy_miner(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(500, 'SwapTimedOut', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 'hk_a' not in w.get_busy_miners_at(500)
+        w.state_store.close()
+
+    def test_get_busy_events_in_range_is_block_filtered(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(200, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        w.apply_event(300, 'SwapInitiated', {'swap_id': 2, 'miner': 'hk_b'})
+        # Range is (start, end]: block 100 is excluded, 200/300 included
+        events = w.get_busy_events_in_range(100, 300)
+        assert [(e['block'], e['hotkey'], e['delta']) for e in events] == [
+            (200, 'hk_a', -1),
+            (300, 'hk_b', +1),
+        ]
+        w.state_store.close()
+
+    def test_count_never_goes_negative(self, tmp_path: Path):
+        """A terminal event with no matching initiate (e.g. bootstrap gap)
+        is dropped rather than letting count go negative."""
+        w = make_watcher(tmp_path)
+        w.apply_event(500, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        # And no event was recorded
+        assert w.busy_events == []
+        w.state_store.close()
+
+    def test_bootstrap_seeds_busy_from_active_swaps(self, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_collateral.return_value = 0
+        client.get_miner_active_flag.return_value = False
+        client.get_min_collateral.return_value = 0
+        client.get_active_swaps.return_value = [
+            type('S', (), {'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+            type('S', (), {'miner_hotkey': 'hk_b', 'initiated_block': 80})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+
+        assert w.open_swap_count == {'hk_a': 1, 'hk_b': 1}
+        busy_now = w.get_busy_miners_at(100)
+        assert busy_now == {'hk_a': 1, 'hk_b': 1}
         w.state_store.close()
 
 
@@ -237,18 +300,22 @@ class TestBootstrap:
     """initialize() snapshotting behavior — the M1 fix."""
 
     def test_bootstrap_seeds_collateral_and_active_from_contract(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
         w = make_watcher(tmp_path)
         client = MagicMock()
         client.get_miner_collateral.side_effect = lambda hk: {'hk_a': 10, 'hk_b': 20}.get(hk, 0)
         client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
         client.get_min_collateral.return_value = 5
 
-        w.initialize(current_block=1000, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+        current_block = SCORING_WINDOW_BLOCKS + 500  # well past the backfill floor
+        w.initialize(current_block=current_block, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
 
         assert w.collateral == {'hk_a': 10, 'hk_b': 20}
         assert w.active_miners == {'hk_a'}
         assert w.min_collateral == 5
-        assert w.cursor == 1000
+        # Cursor rewinds one scoring window so sync_to backfills the crown-time history.
+        assert w.cursor == current_block - SCORING_WINDOW_BLOCKS
         w.state_store.close()
 
     def test_bootstrap_tolerates_contract_read_failures(self, tmp_path: Path):
@@ -258,12 +325,13 @@ class TestBootstrap:
         client.get_miner_active_flag.side_effect = RuntimeError('rpc down')
         client.get_min_collateral.side_effect = RuntimeError('rpc down')
 
+        # Pre-window start (current_block < SCORING_WINDOW_BLOCKS) — cursor clamps at 0.
         w.initialize(current_block=500, metagraph_hotkeys=['hk_a'], contract_client=client)
 
         # Everything defaults to empty/starting state, no exception propagated
         assert w.collateral == {}
         assert w.active_miners == set()
-        assert w.cursor == 500
+        assert w.cursor == 0
         w.state_store.close()
 
 

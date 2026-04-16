@@ -1,6 +1,9 @@
-"""Tests for allways.commitments — commitment string parsing."""
+"""Tests for allways.commitments — commitment string parsing + query_map read."""
 
-from allways.commitments import parse_commitment_data
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from allways.commitments import parse_commitment_data, read_miner_commitments
 
 
 class TestParseCommitmentData:
@@ -159,3 +162,89 @@ class TestParseCommitmentData:
 
     def test_same_chain(self):
         assert parse_commitment_data('v1:btc:addr:btc:addr:340:350') is None
+
+
+class TestReadMinerCommitmentsQueryMap:
+    """Coverage for the query_map-batched read.
+
+    ``read_miner_commitments`` used to do N separate ``substrate.query`` calls
+    in a for-loop. It now uses ``substrate.query_map`` to pull every
+    ``(hotkey, commitment)`` pair under ``Commitments.CommitmentOf(netuid)``
+    in a single RPC. These tests mock the substrate interface to exercise
+    the new path — the hotkey→uid filter, the decode fallthrough, and the
+    "commitment exists but miner dereg'd" dropout.
+    """
+
+    def make_subtensor(self, hotkeys: list[str], rows: list[tuple[str, str]]) -> MagicMock:
+        """Build a mock subtensor whose metagraph and query_map match the args.
+
+        ``rows`` is a list of (hotkey, raw_commitment_text) pairs as they'd
+        come back from Commitments.CommitmentOf. Each raw text is wrapped in
+        a fake metadata object that the real ``decode_commitment_field``
+        can parse.
+        """
+        subtensor = MagicMock()
+        metagraph = SimpleNamespace(
+            hotkeys=list(hotkeys),
+            n=SimpleNamespace(item=lambda: len(hotkeys)),
+        )
+        subtensor.metagraph.return_value = metagraph
+
+        def fake_query_map(module, storage_function, params):
+            for hotkey, raw in rows:
+                key = SimpleNamespace(value=hotkey)
+                # Fake the ink!-shaped metadata that decode_commitment_field walks.
+                metadata = SimpleNamespace(value={'info': {'fields': [{'Raw0': '0x' + raw.encode().hex()}]}})
+                yield key, metadata
+
+        subtensor.substrate.query_map.side_effect = fake_query_map
+        return subtensor
+
+    def test_returns_parsed_pairs_for_every_registered_miner(self):
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_a', 'hk_b'],
+            rows=[
+                ('hk_a', 'v1:btc:bc1qaddr_a:tao:5C_a:340:350'),
+                ('hk_b', 'v1:btc:bc1qaddr_b:tao:5C_b:345:355'),
+            ],
+        )
+        pairs = read_miner_commitments(subtensor, netuid=7)
+        assert len(pairs) == 2
+        by_hotkey = {p.hotkey: p for p in pairs}
+        assert by_hotkey['hk_a'].uid == 0
+        assert by_hotkey['hk_b'].uid == 1
+        assert by_hotkey['hk_a'].rate == 340.0
+        assert by_hotkey['hk_b'].rate == 345.0
+
+    def test_drops_dereg_hotkey_still_in_storage(self):
+        """A miner can deregister before their commitment is cleared from
+        Commitments.CommitmentOf. Those rows must be skipped."""
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_live'],  # only hk_live is in the metagraph
+            rows=[
+                ('hk_live', 'v1:btc:bc1qlive:tao:5Clive:340:350'),
+                ('hk_ghost', 'v1:btc:bc1qghost:tao:5Cghost:999:999'),
+            ],
+        )
+        pairs = read_miner_commitments(subtensor, netuid=7)
+        assert [p.hotkey for p in pairs] == ['hk_live']
+
+    def test_single_query_map_call(self):
+        """Regression guard: we must not fall back into an N-RPC loop."""
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_a', 'hk_b', 'hk_c'],
+            rows=[('hk_a', 'v1:btc:a:tao:a:1:1')],
+        )
+        read_miner_commitments(subtensor, netuid=7)
+        assert subtensor.substrate.query_map.call_count == 1
+        # And no per-hotkey query() calls leaked back in.
+        assert subtensor.substrate.query.call_count == 0
+
+    def test_transient_error_returns_empty_list(self):
+        """ConnectionError / TimeoutError during query_map shouldn't raise."""
+        subtensor = MagicMock()
+        subtensor.metagraph.return_value = SimpleNamespace(hotkeys=['hk_a'], n=SimpleNamespace(item=lambda: 1))
+        subtensor.substrate.query_map.side_effect = ConnectionError('websocket dead')
+        with patch('allways.commitments.bt.logging.warning'):
+            pairs = read_miner_commitments(subtensor, netuid=7)
+        assert pairs == []
