@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
-from allways.validator.event_watcher import ActiveEvent, ContractEventWatcher
+from allways.validator.event_watcher import ActiveEvent, ConfigEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
     crown_holders_at_instant,
@@ -36,7 +36,6 @@ def make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEventW
         state_store=store,
         default_min_collateral=MIN_COLLATERAL,
     )
-    w.min_collateral = MIN_COLLATERAL
     w.active_miners = set(active)
     # Seed an anchor active=True event at block 0 for each bootstrapped
     # active miner — mirrors the bootstrap seed that ContractEventWatcher
@@ -65,6 +64,20 @@ def seed_active(watcher: ContractEventWatcher, hotkey: str, active: bool, block:
         watcher.active_miners.add(hotkey)
     else:
         watcher.active_miners.discard(hotkey)
+
+
+def seed_config(watcher: ContractEventWatcher, key: str, value: int, block: int) -> None:
+    """Insert a contract config event directly into the watcher's in-memory
+    state and advance the current-state mirror. Bypasses
+    ``record_config_transition``'s no-op-on-same-value guard."""
+    event = ConfigEvent(key=key, value=int(value), block=block)
+    watcher.config_events.append(event)
+    watcher.config_events_by_key.setdefault(key, []).append(event)
+    watcher.config_events.sort(key=lambda ev: ev.block)
+    watcher.config_events_by_key[key].sort(key=lambda ev: ev.block)
+    watcher.config_current[key] = int(value)
+    if key == 'min_collateral':
+        watcher.min_collateral = int(value)
 
 
 def make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
@@ -154,7 +167,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 1000.0}
         store.close()
@@ -188,7 +200,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # B leads blocks (100, 600] → 500 blocks, A leads (600, 1100] → 500 blocks
         assert crown == {'hk_b': 500.0, 'hk_a': 500.0}
@@ -214,7 +225,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
         store.close()
@@ -240,7 +250,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 500.0}
         store.close()
@@ -265,7 +274,6 @@ class TestReplayCrownTime:
             window_start=10_000,
             window_end=11_000,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 1000.0}
         store.close()
@@ -300,7 +308,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # A earns (100,400] = 300 + (800,1100] = 300 → 600 total
         # B earns (400,800] = 400 total
@@ -331,7 +338,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         # A earns (100,400] = 300 + (900,1100] = 200 → 500. The 500 blocks
         # of busy interval have no idle candidate → not credited to anyone
@@ -369,7 +375,6 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # From window_start=100 A is already busy (reconstructed from pre-window
         # SwapInitiated). B earns (100,500] = 400; A earns (500,1100] = 600.
@@ -540,7 +545,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 500.0}
         store.close()
@@ -567,7 +571,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         # (100, 400] → inactive, no credit. (400, 1100] → active, 700 blocks.
         assert crown == {'hk_a': 700.0}
@@ -616,7 +619,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 400.0}
         store.close()
@@ -645,7 +647,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # A earns (100, 500] = 400. B earns (500, 1100] = 600.
         assert crown == {'hk_a': 400.0, 'hk_b': 600.0}
@@ -697,7 +698,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {'hk_a': 1000.0}
         store.close()
@@ -724,7 +724,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
-            min_collateral=MIN_COLLATERAL,
         )
         assert crown == {}
         store.close()
@@ -760,7 +759,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # (100, 500] → B alone: 400. (500, 1100] → A (higher rate, now active): 600.
         assert crown == {'hk_b': 400.0, 'hk_a': 600.0}
@@ -821,7 +819,6 @@ class TestHistoricalActiveState:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_collateral=MIN_COLLATERAL,
         )
         # (100, 500] → A holds: 400. (500, 1100] → B holds (A inactive AND
         # busy, then inactive only): 600.
@@ -953,12 +950,341 @@ class TestEventWatcherActiveState:
         assert watcher.get_active_miners_at(20_000) == {'hk_a', 'hk_b'}
         store.close()
 
-    def test_busy_state_ordered_after_active_at_same_block(self, tmp_path: Path):
-        """EventKind.ACTIVE (0) < EventKind.BUSY (1). At a shared block,
+    def test_event_kind_ordering_at_same_block(self, tmp_path: Path):
+        """CONFIG < ACTIVE < BUSY < COLLATERAL < RATE. At a shared block
         the credit_interval *ending* at that block is evaluated before any
-        of those transitions applies. Verifying the ordering via sort_key
-        (behavioral coverage already exists in the replay tests; this
-        guards the constant values)."""
+        of those transitions applies. Ordering matters: a halt at block N
+        must disqualify block N+1 regardless of any other same-block
+        transition."""
         from allways.validator.scoring import EventKind
 
-        assert int(EventKind.ACTIVE) < int(EventKind.BUSY) < int(EventKind.COLLATERAL) < int(EventKind.RATE)
+        assert (
+            int(EventKind.CONFIG)
+            < int(EventKind.ACTIVE)
+            < int(EventKind.BUSY)
+            < int(EventKind.COLLATERAL)
+            < int(EventKind.RATE)
+        )
+
+
+class TestHistoricalConfigState:
+    """Replay must evaluate min_collateral, max_collateral, and halt state
+    as-of each block, not as-of scoring time. Admin-side config changes
+    don't retroactively disqualify blocks the miner legitimately earned."""
+
+    def test_min_collateral_raised_mid_window_excludes_post_raise_blocks(self, tmp_path: Path):
+        """Miner has 100M collateral. Admin raises min_collateral from 80M
+        to 120M at block 600. Miner qualifies (100 <= min 80) before the
+        raise, disqualifies (100 < min 120) after."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        seed_config(watcher, 'min_collateral', 80_000_000, 0)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', 100_000_000, 0)
+        watcher.apply_event(600, 'ConfigUpdated', {'key': 'min_collateral', 'value': 120_000_000})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # (100, 600] → min 80M, qualifies: 500 blocks. (600, 1100] → min 120M, disqualified: 0.
+        assert crown == {'hk_a': 500.0}
+        store.close()
+
+    def test_min_collateral_lowered_mid_window_admits_miner(self, tmp_path: Path):
+        """Under-min at window_start; admin lowers min mid-window; miner
+        now qualifies for post-lower blocks."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        seed_config(watcher, 'min_collateral', 200_000_000, 0)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', 100_000_000, 0)
+        watcher.apply_event(400, 'ConfigUpdated', {'key': 'min_collateral', 'value': 50_000_000})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # (100, 400] → disqualified. (400, 1100] → qualified: 700 blocks.
+        assert crown == {'hk_a': 700.0}
+        store.close()
+
+    def test_max_collateral_excludes_over_cap_miner(self, tmp_path: Path):
+        """Miner A has 500M collateral; max_collateral is 200M; A is over
+        cap and disqualifies despite best rate. B (100M, under cap) wins."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        seed_config(watcher, 'max_collateral', 200_000_000, 0)
+        conn = store.require_connection()
+        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', rate, 0),
+            )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', 500_000_000, 0)
+        seed_collateral(watcher, 'hk_b', 100_000_000, 0)
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # A is over-cap every block → excluded. B wins the whole window.
+        assert crown == {'hk_b': 1000.0}
+        store.close()
+
+    def test_max_collateral_lowered_mid_window_disqualifies_miner(self, tmp_path: Path):
+        """A has 300M collateral. max starts at 500M (A qualifies). Admin
+        lowers max to 100M at block 500. A is now over-cap."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        seed_config(watcher, 'max_collateral', 500_000_000, 0)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', 300_000_000, 0)
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'max_collateral', 'value': 100_000_000})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # (100, 500] → max 500M, 300M qualifies: 400 blocks. (500, 1100] → max 100M, over-cap: 0.
+        assert crown == {'hk_a': 400.0}
+        store.close()
+
+    def test_max_collateral_zero_means_no_cap(self, tmp_path: Path):
+        """Contract semantics: max_collateral=0 disables the upper bound.
+        A miner with arbitrarily large collateral still qualifies."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        # config_current default for max_collateral is 0.
+        assert watcher.config_current['max_collateral'] == 0
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        # A posts 1 trillion rao — absurd but should still qualify with no cap.
+        seed_collateral(watcher, 'hk_a', 1_000_000_000_000, 0)
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        assert crown == {'hk_a': 1000.0}
+        store.close()
+
+    def test_halt_mid_window_recycles_halt_interval(self, tmp_path: Path):
+        """Contract halted at block 400, unhalted at block 800. During the
+        halt, no miner holds crown — that interval's pool recycles. Miner
+        earns only the active intervals."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        watcher.apply_event(400, 'ConfigUpdated', {'key': 'halted', 'value': 1})
+        watcher.apply_event(800, 'ConfigUpdated', {'key': 'halted', 'value': 0})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # (100, 400] = 300 + (800, 1100] = 300 → 600 total. (400, 800] recycles.
+        assert crown == {'hk_a': 600.0}
+        store.close()
+
+    def test_halt_entire_window_recycles_full_pool(self, tmp_path: Path):
+        """Contract halted at scoring time and for the full window — the
+        pool fully recycles through RECYCLE_UID."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys, block=10_000)
+        # Halt the contract starting pre-window.
+        seed_config(v.event_watcher, 'halted', 1, 0)
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(v.event_watcher, 'hk_a', MIN_COLLATERAL, 0)
+
+        rewards, _ = calculate_miner_rewards(v)
+
+        assert rewards[0] == 0.0
+        np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_halt_event_applied_after_block_halt_takes_effect_next_block(self, tmp_path: Path):
+        """Halt event at block 500. The credit_interval *ending* at 500
+        uses pre-halt state — block 500 is credited. The interval after
+        (500, window_end] sees halted=True → no credit."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'halted', 'value': 1})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # (100, 500] = 400. After block 500 the halt applies, rest recycles.
+        assert crown == {'hk_a': 400.0}
+        store.close()
+
+    def test_unknown_config_key_is_ignored(self, tmp_path: Path):
+        """ConfigUpdated for a key not in CONFIG_KEYS_TRACKED is silently
+        dropped — we don't bloat the log with every knob."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'consensus_threshold_percent', 'value': 66})
+        assert watcher.config_events_by_key.get('consensus_threshold_percent') is None
+        store.close()
+
+    def test_duplicate_config_event_no_op(self, tmp_path: Path):
+        """Duplicate ConfigUpdated for the same value is a no-op."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        watcher.apply_event(100, 'ConfigUpdated', {'key': 'min_collateral', 'value': 500})
+        watcher.apply_event(200, 'ConfigUpdated', {'key': 'min_collateral', 'value': 500})
+        watcher.apply_event(300, 'ConfigUpdated', {'key': 'min_collateral', 'value': 500})
+        events = watcher.config_events_by_key['min_collateral']
+        assert [e.block for e in events] == [100]
+        store.close()
+
+    def test_get_config_at_returns_current_when_no_events(self, tmp_path: Path):
+        """Fallback path: no history → return config_current value (set by
+        constructor default / bootstrap)."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        assert watcher.get_config_at('min_collateral', 9_999) == MIN_COLLATERAL
+        assert watcher.get_config_at('max_collateral', 9_999) == 0
+        assert watcher.get_config_at('halted', 9_999) == 0
+        store.close()
+
+    def test_config_history_is_replayed_when_events_exist(self, tmp_path: Path):
+        """With in-window events, get_config_at returns the latest value
+        at or before the requested block."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        watcher.apply_event(100, 'ConfigUpdated', {'key': 'max_collateral', 'value': 1_000_000})
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'max_collateral', 'value': 2_000_000})
+        watcher.apply_event(900, 'ConfigUpdated', {'key': 'max_collateral', 'value': 500_000})
+        assert watcher.get_config_at('max_collateral', 50) == 0  # pre-first-event falls back
+        assert watcher.get_config_at('max_collateral', 100) == 1_000_000
+        assert watcher.get_config_at('max_collateral', 499) == 1_000_000
+        assert watcher.get_config_at('max_collateral', 500) == 2_000_000
+        assert watcher.get_config_at('max_collateral', 899) == 2_000_000
+        assert watcher.get_config_at('max_collateral', 999) == 500_000
+        store.close()
+
+    def test_halt_and_min_collateral_change_same_block(self, tmp_path: Path):
+        """Both a halt and a min_collateral change at the same block apply
+        in the same credit_interval boundary. Both are CONFIG kind →
+        ordering among themselves is insertion order. Halt is the stronger
+        filter so result is dominated by it."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        seed_collateral(watcher, 'hk_a', MIN_COLLATERAL, 0)
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'halted', 'value': 1})
+        watcher.apply_event(500, 'ConfigUpdated', {'key': 'min_collateral', 'value': 999_999_999})
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        # Pre-500: 400 blocks to A. Post-500: halted → nobody. Also over-min.
+        assert crown == {'hk_a': 400.0}
+        store.close()
+
+    def test_crown_helper_halted_short_circuits(self):
+        """crown_holders_at_instant: halted=True returns [] unconditionally."""
+        rates = {'a': 0.00020, 'b': 0.00015}
+        collaterals = {'a': MIN_COLLATERAL, 'b': MIN_COLLATERAL}
+        holders = crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, rewardable={'a', 'b'}, halted=True)
+        assert holders == []
+
+    def test_crown_helper_max_collateral_excludes_over_cap(self):
+        rates = {'a': 0.00030, 'b': 0.00020}
+        collaterals = {'a': 300_000_000, 'b': 100_000_000}
+        holders = crown_holders_at_instant(
+            rates, collaterals, MIN_COLLATERAL, rewardable={'a', 'b'}, max_collateral=200_000_000
+        )
+        assert holders == ['b']
+
+    def test_crown_helper_max_collateral_zero_disabled(self):
+        rates = {'a': 0.00020}
+        collaterals = {'a': 1_000_000_000_000}
+        holders = crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, rewardable={'a'}, max_collateral=0)
+        assert holders == ['a']
