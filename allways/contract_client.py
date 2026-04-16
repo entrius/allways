@@ -56,6 +56,22 @@ except ImportError:
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
+from allways.utils.scale import (
+    ACCOUNT_ID_BYTES,
+    U32_BYTES,
+    U64_BYTES,
+    U128_BYTES,
+    compact_encode_len,
+    decode_account_id,
+    decode_string,
+    decode_u32,
+    decode_u64,
+    decode_u128,
+    encode_bytes,
+    encode_str,
+    encode_u128,
+    strip_hex_prefix,
+)
 
 # =========================================================================
 # Contract selectors (from metadata — deterministic per contract build)
@@ -212,23 +228,6 @@ DEFAULT_GAS_LIMIT = {'ref_time': 10_000_000_000, 'proof_size': 500_000}
 _EXTRINSIC_NOT_FOUND = tuple(t for t in [ExtrinsicNotFound, AsyncExtrinsicNotFound] if t is not None)
 
 
-def compact_encode_len(length: int) -> bytes:
-    """SCALE compact-encode a length prefix. Shared by contract client and axon handlers."""
-    if length < 64:
-        return bytes([length << 2])
-    elif length < 16384:
-        return bytes([((length << 2) | 1) & 0xFF, length >> 6])
-    else:
-        return bytes(
-            [
-                ((length << 2) | 2) & 0xFF,
-                (length >> 6) & 0xFF,
-                (length >> 14) & 0xFF,
-                (length >> 22) & 0xFF,
-            ]
-        )
-
-
 # ContractExecResult byte layout offsets (after gas prefix)
 _GAS_PREFIX_BYTES = 16  # Skip gas consumed/required
 _RESULT_OK_OFFSET = 10  # Byte indicating Ok(0x00) vs Err in Result
@@ -370,7 +369,7 @@ class AllwaysContractClient:
             if not result.get('result'):
                 return None
 
-            raw = bytes.fromhex(result['result'].replace('0x', ''))
+            raw = bytes.fromhex(strip_hex_prefix(result['result']))
             if len(raw) < 32:
                 return None
 
@@ -380,7 +379,7 @@ class AllwaysContractClient:
             if len(r) < _DATA_COMPACT_OFFSET or r[_RESULT_OK_OFFSET] != 0x00:
                 return None
 
-            flags = struct.unpack_from('<I', r, _FLAGS_OFFSET)[0]
+            flags, _ = decode_u32(r, _FLAGS_OFFSET)
             is_revert = bool(flags & 1)
 
             data_compact = r[_DATA_COMPACT_OFFSET]
@@ -509,18 +508,17 @@ class AllwaysContractClient:
             return struct.pack('B', int(value))
         elif type_tag == 'hash':
             if isinstance(value, str):
-                return bytes.fromhex(value.replace('0x', ''))
-            return bytes(value)[:32].ljust(32, b'\x00')
+                return bytes.fromhex(strip_hex_prefix(value))
+            return bytes(value)[:ACCOUNT_ID_BYTES].ljust(ACCOUNT_ID_BYTES, b'\x00')
         elif type_tag == 'bytes':
             data = value if isinstance(value, (bytes, bytearray)) else value.encode('utf-8')
-            return compact_encode_len(len(data)) + data
+            return encode_bytes(data)
         elif type_tag == 'u32':
             return struct.pack('<I', int(value))
         elif type_tag == 'u64':
             return struct.pack('<Q', int(value))
         elif type_tag == 'u128':
-            v = int(value)
-            return struct.pack('<QQ', v & 0xFFFFFFFFFFFFFFFF, v >> 64)
+            return encode_u128(int(value))
         elif type_tag == 'bool':
             return b'\x01' if value else b'\x00'
         elif type_tag == 'AccountId':
@@ -528,8 +526,7 @@ class AllwaysContractClient:
                 return bytes.fromhex(self.subtensor.substrate.ss58_decode(value))
             return bytes(value)
         elif type_tag == 'str':
-            data = value.encode('utf-8') if isinstance(value, str) else value
-            return compact_encode_len(len(data)) + data
+            return encode_str(value) if isinstance(value, str) else encode_bytes(value)
         elif type_tag == 'vec_u64':
             items = list(value)
             encoded = compact_encode_len(len(items))
@@ -539,21 +536,19 @@ class AllwaysContractClient:
         raise ValueError(f'Unsupported type: {type_tag}')
 
     def extract_u32(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 4:
+        if not data or len(data) < U32_BYTES:
             return None
-        return struct.unpack_from('<I', data, 0)[0]
+        return decode_u32(data, 0)[0]
 
     def extract_u64(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 8:
+        if not data or len(data) < U64_BYTES:
             return None
-        return struct.unpack_from('<Q', data, 0)[0]
+        return decode_u64(data, 0)[0]
 
     def extract_u128(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 16:
+        if not data or len(data) < U128_BYTES:
             return None
-        low = struct.unpack_from('<Q', data, 0)[0]
-        high = struct.unpack_from('<Q', data, 8)[0]
-        return low + (high << 64)
+        return decode_u128(data, 0)[0]
 
     def extract_bool(self, data: bytes) -> Optional[bool]:
         if not data:
@@ -561,86 +556,38 @@ class AllwaysContractClient:
         return data[0] != 0
 
     def extract_account_id(self, data: bytes) -> Optional[str]:
-        if not data or len(data) < 32:
+        if not data or len(data) < ACCOUNT_ID_BYTES:
             return None
-        return self.subtensor.substrate.ss58_encode(data[:32].hex())
-
-    def decode_string(self, data: bytes, offset: int) -> Tuple[str, int]:
-        """Decode a SCALE compact-prefixed string. Returns (string, new_offset)."""
-        if offset >= len(data):
-            return '', offset
-        first = data[offset]
-        mode = first & 0x03
-        if mode == 0:
-            str_len = first >> 2
-            offset += 1
-        elif mode == 1:
-            if offset + 1 >= len(data):
-                return '', offset
-            str_len = (data[offset] | (data[offset + 1] << 8)) >> 2
-            offset += 2
-        else:
-            if offset + 3 >= len(data):
-                return '', offset
-            str_len = (
-                data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)
-            ) >> 2
-            offset += 4
-        if offset + str_len > len(data):
-            return '', offset
-        s = data[offset : offset + str_len].decode('utf-8', errors='replace')
-        return s, offset + str_len
+        return decode_account_id(data, 0)[0]
 
     def decode_swap_data(self, data: bytes, offset: int = 0) -> Optional[Swap]:
         """Decode a SwapData struct from raw SCALE bytes."""
         try:
             o = offset
-
-            swap_id = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            user = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
-            o += 32
-            miner = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
-            o += 32
-            from_chain, o = self.decode_string(data, o)
-            to_chain, o = self.decode_string(data, o)
-            from_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            from_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            from_amount = from_amount_lo + (from_amount_hi << 64)
-            to_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            to_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            to_amount = to_amount_lo + (to_amount_hi << 64)
-            tao_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            tao_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            tao_amount = tao_amount_lo + (tao_amount_hi << 64)
-            user_from_address, o = self.decode_string(data, o)
-            user_to_address, o = self.decode_string(data, o)
-            miner_from_address, o = self.decode_string(data, o)
-            miner_to_address, o = self.decode_string(data, o)
-            rate, o = self.decode_string(data, o)
-            from_tx_hash, o = self.decode_string(data, o)
-            from_tx_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            to_tx_hash, o = self.decode_string(data, o)
-            to_tx_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
+            swap_id, o = decode_u64(data, o)
+            user, o = decode_account_id(data, o)
+            miner, o = decode_account_id(data, o)
+            from_chain, o = decode_string(data, o)
+            to_chain, o = decode_string(data, o)
+            from_amount, o = decode_u128(data, o)
+            to_amount, o = decode_u128(data, o)
+            tao_amount, o = decode_u128(data, o)
+            user_from_address, o = decode_string(data, o)
+            user_to_address, o = decode_string(data, o)
+            miner_from_address, o = decode_string(data, o)
+            miner_to_address, o = decode_string(data, o)
+            rate, o = decode_string(data, o)
+            from_tx_hash, o = decode_string(data, o)
+            from_tx_block, o = decode_u32(data, o)
+            to_tx_hash, o = decode_string(data, o)
+            to_tx_block, o = decode_u32(data, o)
             status_byte = data[o]
             o += 1
             status = SwapStatus(status_byte) if status_byte <= 3 else SwapStatus.ACTIVE
-            initiated_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            timeout_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            fulfilled_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            completed_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
+            initiated_block, o = decode_u32(data, o)
+            timeout_block, o = decode_u32(data, o)
+            fulfilled_block, o = decode_u32(data, o)
+            completed_block, o = decode_u32(data, o)
 
             return Swap(
                 id=swap_id,
@@ -862,7 +809,7 @@ class AllwaysContractClient:
         if data is None or len(data) < 5:
             return (0, 0)
         strike_count = data[0]
-        last_expired = struct.unpack_from('<I', data, 1)[0]
+        last_expired, _ = decode_u32(data, 1)
         return (strike_count, last_expired)
 
     def get_accumulated_fees(self) -> int:
@@ -910,33 +857,11 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # String from_addr: compact length + UTF-8 bytes
-        first = data[o]
-        mode = first & 0x03
-        if mode == 0:
-            addr_len = first >> 2
-            o += 1
-        elif mode == 1:
-            addr_len = (data[o] | (data[o + 1] << 8)) >> 2
-            o += 2
-        else:
-            return None
-        from_addr = data[o : o + addr_len].decode('utf-8')
-        o += addr_len
-        # 3 x u128 + 1 x u32
-        tao_lo = struct.unpack_from('<Q', data, o)[0]
-        tao_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        tao_amount = tao_lo + (tao_hi << 64)
-        o += 16
-        src_lo = struct.unpack_from('<Q', data, o)[0]
-        src_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        from_amount = src_lo + (src_hi << 64)
-        o += 16
-        dst_lo = struct.unpack_from('<Q', data, o)[0]
-        dst_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        to_amount = dst_lo + (dst_hi << 64)
-        o += 16
-        reserved_until = struct.unpack_from('<I', data, o)[0]
+        from_addr, o = decode_string(data, o)
+        tao_amount, o = decode_u128(data, o)
+        from_amount, o = decode_u128(data, o)
+        to_amount, o = decode_u128(data, o)
+        reserved_until, _ = decode_u32(data, o)
         return (from_addr, tao_amount, from_amount, to_amount, reserved_until)
 
     # =========================================================================

@@ -18,8 +18,9 @@ from substrateinterface import Keypair
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len, is_contract_rejection
+from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
 if TYPE_CHECKING:
@@ -46,36 +47,23 @@ def scale_encode_reserve_hash_input(
         &(miner, user_from_address, from_chain, to_chain, tao_amount, from_amount, to_amount)
     ).
     """
-    src_bytes = from_chain.encode('utf-8')
-    dst_bytes = to_chain.encode('utf-8')
     return (
-        miner_bytes  # AccountId: 32 bytes raw
-        + compact_encode_len(len(from_addr_bytes))
-        + from_addr_bytes  # String: compact length + UTF-8 bytes
-        + compact_encode_len(len(src_bytes))
-        + src_bytes  # String: compact length + UTF-8 bytes
-        + compact_encode_len(len(dst_bytes))
-        + dst_bytes  # String: compact length + UTF-8 bytes
-        + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + from_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + to_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
+        miner_bytes
+        + encode_bytes(from_addr_bytes)
+        + encode_str(from_chain)
+        + encode_str(to_chain)
+        + encode_u128(tao_amount)
+        + encode_u128(from_amount)
+        + encode_u128(to_amount)
     )
 
 
-def scale_encode_extend_hash_input(
-    miner_bytes: bytes,
-    from_tx_hash: str,
-) -> bytes:
+def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
     """SCALE-encode the extend hash input tuple: (AccountId, &str).
 
     Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
     """
-    tx_bytes = from_tx_hash.encode('utf-8')
-    return (
-        miner_bytes  # AccountId: 32 bytes raw
-        + compact_encode_len(len(tx_bytes))
-        + tx_bytes  # &str (SCALE: compact length + bytes)
-    )
+    return miner_bytes + encode_str(from_tx_hash)
 
 
 def scale_encode_initiate_hash_input(
@@ -102,22 +90,17 @@ def scale_encode_initiate_hash_input(
     consensus on the full swap shape — the quorum-reaching vote cannot substitute
     any of these fields without invalidating the hash.
     """
-
-    def encode_str(s: str) -> bytes:
-        raw = s.encode('utf-8')
-        return compact_encode_len(len(raw)) + raw
-
     return (
-        miner_bytes  # AccountId: 32 bytes raw
+        miner_bytes
         + encode_str(from_tx_hash)
         + encode_str(from_chain)
         + encode_str(to_chain)
         + encode_str(miner_from_address)
         + encode_str(miner_to_address)
         + encode_str(rate)
-        + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + from_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + to_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
+        + encode_u128(tao_amount)
+        + encode_u128(from_amount)
+        + encode_u128(to_amount)
     )
 
 

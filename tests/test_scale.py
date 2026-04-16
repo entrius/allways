@@ -4,7 +4,8 @@ import struct
 from unittest.mock import MagicMock
 
 from allways.chain_providers.subtensor import SubtensorProvider
-from allways.contract_client import AllwaysContractClient, compact_encode_len
+from allways.contract_client import AllwaysContractClient
+from allways.utils.scale import compact_encode_len, decode_string
 
 
 def make_client():
@@ -228,26 +229,25 @@ class TestDecodeString:
     def test_roundtrip_short(self):
         c = make_client()
         encoded = c.encode_value('hello', 'str')
-        s, offset = c.decode_string(encoded, 0)
+        s, offset = decode_string(encoded, 0)
         assert s == 'hello'
         assert offset == len(encoded)
 
     def test_roundtrip_empty(self):
         c = make_client()
         encoded = c.encode_value('', 'str')
-        s, offset = c.decode_string(encoded, 0)
+        s, offset = decode_string(encoded, 0)
         assert s == ''
 
     def test_roundtrip_medium(self):
         c = make_client()
         text = 'x' * 100  # Still in single-byte compact mode
         encoded = c.encode_value(text, 'str')
-        s, offset = c.decode_string(encoded, 0)
+        s, offset = decode_string(encoded, 0)
         assert s == text
 
     def test_offset_past_end(self):
-        c = make_client()
-        s, offset = c.decode_string(b'\x00', 10)
+        s, offset = decode_string(b'\x00', 10)
         assert s == ''
 
     def test_roundtrip_two_byte_compact(self):
@@ -255,7 +255,7 @@ class TestDecodeString:
         # String of length 64+ triggers two-byte compact mode
         text = 'a' * 64
         encoded = c.encode_value(text, 'str')
-        s, offset = c.decode_string(encoded, 0)
+        s, offset = decode_string(encoded, 0)
         assert s == text
 
 
