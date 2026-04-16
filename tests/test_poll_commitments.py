@@ -168,11 +168,11 @@ class TestPollCommitmentsPruning:
     def test_prune_runs_via_scoring_pass_not_commitment_poll(self, tmp_path: Path):
         """Pruning moved out of the per-tick path and into the scoring round —
         verify both parts of that contract: commitment polling does NOT prune,
-        and run_scoring_pass DOES. The latest row per (hotkey, direction) is
-        preserved as a state-reconstruction anchor even when it's older than
+        and score_and_reward_miners DOES. The latest row per (hotkey, direction)
+        is preserved as a state-reconstruction anchor even when it's older than
         the cutoff, so this test uses a hotkey with two rows to exercise the
         "older one drops, newer one survives" path."""
-        from allways.validator.scoring import prune_aged_rate_events
+        from allways.validator.scoring import prune_rate_events
 
         v = make_validator(tmp_path)
         v.block = SCORING_WINDOW_BLOCKS + 1_000
@@ -200,7 +200,7 @@ class TestPollCommitmentsPruning:
         assert recent_block in surviving_blocks
 
         # 2. Scoring pass prunes the ancient row; the latest row stays as anchor.
-        prune_aged_rate_events(v)
+        prune_rate_events(v)
         surviving_blocks = {e['block'] for e in v.state_store.get_rate_events_in_range('tao', 'btc', 0, v.block + 1)}
         assert ancient_block not in surviving_blocks
         assert recent_block in surviving_blocks

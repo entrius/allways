@@ -26,7 +26,7 @@ from allways.validator.axon_handlers import (
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.scoring import run_scoring_pass
+from allways.validator.scoring import score_and_reward_miners
 from allways.validator.state_store import PendingConfirm
 from allways.validator.swap_tracker import SwapTracker
 
@@ -49,7 +49,7 @@ async def forward(self: Validator) -> None:
     # 1. House-keeping — clear per-step chain-provider caches and drop any
     #    pending confirms whose reservation has already expired.
     clear_provider_caches(self)
-    self.state_store.purge_expired_pending()
+    self.state_store.purge_expired_pending_confirms()
 
     # 2. Pending confirms → vote_initiate — drain the axon-fed queue of
     #    user swaps whose source tx has reached enough confirmations.
@@ -88,7 +88,7 @@ async def forward(self: Validator) -> None:
     # 9. Scoring (periodic) — once per scoring window. Replays the crown-time
     #    window and commits miner weights.
     if self.step % SCORING_WINDOW_BLOCKS == 0:
-        run_scoring_pass(self)
+        score_and_reward_miners(self)
 
 
 # ─── Step 1: House-keeping ──────────────────────────────────────────────

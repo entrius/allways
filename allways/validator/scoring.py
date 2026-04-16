@@ -40,19 +40,18 @@ if TYPE_CHECKING:
 # ─── Top-level scoring pass ──────────────────────────────────────────────
 
 
-def run_scoring_pass(self: Validator) -> None:
+def score_and_reward_miners(self: Validator) -> None:
     """Run a V1 scoring pass and commit weights."""
     try:
-        prune_aged_rate_events(self)
-        prune_stale_swap_outcomes(self)
         rewards, miner_uids = calculate_miner_rewards(self)
-        if len(miner_uids) > 0 and len(rewards) > 0:
-            self.update_scores(rewards, miner_uids)
+        self.update_scores(rewards, miner_uids)
+        prune_rate_events(self)
+        prune_swap_outcomes(self)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def prune_aged_rate_events(self: Validator) -> None:
+def prune_rate_events(self: Validator) -> None:
     """Delete rate events older than ``SCORING_WINDOW_BLOCKS``.
 
     The prune helper preserves the single latest row per (hotkey, direction)
@@ -64,7 +63,7 @@ def prune_aged_rate_events(self: Validator) -> None:
         self.state_store.prune_events_older_than(cutoff)
 
 
-def prune_stale_swap_outcomes(self: Validator) -> None:
+def prune_swap_outcomes(self: Validator) -> None:
     """Drop swap_outcomes rows older than the credibility window so the
     ledger stays bounded and miners can rehabilitate."""
     cutoff = self.block - CREDIBILITY_WINDOW_BLOCKS

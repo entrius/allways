@@ -146,7 +146,7 @@ class ValidatorStateStore:
             count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
             return int(count)
 
-    def purge_expired_pending(self) -> int:
+    def purge_expired_pending_confirms(self) -> int:
         """Drop pending confirms whose reservation has already expired.
 
         Returns the number of rows removed. Meant to be called once per
