@@ -170,9 +170,8 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             f'{tx_info.confirmations}/{min_confs} confirmations, tx={item.from_tx_hash[:16]}...',
         )
 
-        try_extend_reservation(self, item, current_block, swap_label, miner_short)
-
         if not tx_info.confirmed:
+            try_extend_reservation(self, item, current_block, swap_label, miner_short)
             continue
 
         # Confirmed — compute hash and vote. Only drop the queued entry once the
@@ -384,7 +383,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     tracker: SwapTracker = self.swap_tracker
     current_block = self.block
 
-    for swap in tracker.get_near_timeout_fulfilled(current_block, EXTEND_THRESHOLD_BLOCKS):
+    for swap in tracker.get_near_timeout_fulfilled(current_block):
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 

@@ -310,16 +310,19 @@ class TestGetFulfilled:
 
 class TestGetNearTimeoutFulfilled:
     def test_returns_swaps_within_threshold(self):
+        from allways.constants import EXTEND_THRESHOLD_BLOCKS
+
         tracker = make_tracker()
         near = make_swap(swap_id=1, timeout_block=100)
         near.status = SwapStatus.FULFILLED
-        far = make_swap(swap_id=2, timeout_block=500)
+        far = make_swap(swap_id=2, timeout_block=100 + EXTEND_THRESHOLD_BLOCKS * 10)
         far.status = SwapStatus.FULFILLED
         tracker.active[1] = near
         tracker.active[2] = far
 
-        # current=90, threshold=20 → near qualifies (90 >= 100 - 20), far doesn't
-        result = tracker.get_near_timeout_fulfilled(current_block=90, threshold=20)
+        # current = timeout_block - threshold → near qualifies, far doesn't
+        current_block = 100 - EXTEND_THRESHOLD_BLOCKS
+        result = tracker.get_near_timeout_fulfilled(current_block=current_block)
         assert [s.id for s in result] == [1]
 
     def test_excludes_active_status(self):
@@ -327,7 +330,7 @@ class TestGetNearTimeoutFulfilled:
         active = make_swap(swap_id=1, timeout_block=100)
         tracker.active[1] = active
 
-        assert tracker.get_near_timeout_fulfilled(current_block=90, threshold=20) == []
+        assert tracker.get_near_timeout_fulfilled(current_block=90) == []
 
 
 class TestGetTimedOut:

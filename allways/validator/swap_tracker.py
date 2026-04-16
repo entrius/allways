@@ -13,6 +13,7 @@ from typing import Dict, List, Set
 import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
+from allways.constants import EXTEND_THRESHOLD_BLOCKS
 from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
@@ -205,12 +206,14 @@ class SwapTracker:
             if s.status == SwapStatus.FULFILLED and (s.timeout_block == 0 or current_block <= s.timeout_block)
         ]
 
-    def get_near_timeout_fulfilled(self, current_block: int, threshold: int) -> List[Swap]:
-        """FULFILLED swaps approaching timeout (within threshold blocks)."""
+    def get_near_timeout_fulfilled(self, current_block: int) -> List[Swap]:
+        """FULFILLED swaps within EXTEND_THRESHOLD_BLOCKS of their timeout."""
         return [
             s
             for s in self.active.values()
-            if s.status == SwapStatus.FULFILLED and s.timeout_block > 0 and current_block >= s.timeout_block - threshold
+            if s.status == SwapStatus.FULFILLED
+            and s.timeout_block > 0
+            and current_block >= s.timeout_block - EXTEND_THRESHOLD_BLOCKS
         ]
 
     def get_timed_out(self, current_block: int) -> List[Swap]:
