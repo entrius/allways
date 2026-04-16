@@ -109,6 +109,12 @@ def initialize_pending_user_reservations(self: Validator) -> None:
     from substrateinterface import Keypair
 
     items = self.state_store.get_all()
+    # Drop extend-reservation vote receipts whose pending_confirm has been
+    # removed (vote_initiate landed, tx not found, expired, etc.).
+    live_keys = {(item.miner_hotkey, item.from_tx_hash) for item in items}
+    for stale_key in [k for k in self.extend_reservation_voted_at if k not in live_keys]:
+        del self.extend_reservation_voted_at[stale_key]
+
     if not items:
         return
 
@@ -245,22 +251,33 @@ def try_extend_reservation(
 
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
-        blocks_left = reserved_until - current_block
-        if reserved_until < current_block + EXTEND_THRESHOLD_BLOCKS:
-            miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-            extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
-            self.contract_client.vote_extend_reservation(
-                wallet=self.wallet,
-                request_hash=extend_hash,
-                miner_hotkey=item.miner_hotkey,
-                from_tx_hash=item.from_tx_hash,
-            )
-            bt.logging.info(
-                f'PendingConfirm [{swap_label} {miner_short}]: '
-                f'voted to extend reservation ({blocks_left} blocks remaining)'
-            )
+        if reserved_until >= current_block + EXTEND_THRESHOLD_BLOCKS:
+            return
+
+        vote_key = (item.miner_hotkey, item.from_tx_hash)
+        voted_at = self.extend_reservation_voted_at.get(vote_key)
+        if voted_at is not None and reserved_until <= voted_at:
+            return  # already voted under this reservation; contract hasn't extended yet
+
+        miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
+        extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
+        self.contract_client.vote_extend_reservation(
+            wallet=self.wallet,
+            request_hash=extend_hash,
+            miner_hotkey=item.miner_hotkey,
+            from_tx_hash=item.from_tx_hash,
+        )
+        self.extend_reservation_voted_at[vote_key] = reserved_until
+        bt.logging.info(
+            f'PendingConfirm [{swap_label} {miner_short}]: '
+            f'voted to extend reservation ({reserved_until - current_block} blocks remaining)'
+        )
     except ContractError as e:
-        if 'AlreadyVoted' not in str(e):
+        if 'AlreadyVoted' in str(e):
+            self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = (
+                self.contract_client.get_miner_reserved_until(item.miner_hotkey)
+            )
+        else:
             bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
     except Exception as e:
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
@@ -384,6 +401,9 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     current_block = self.block
 
     for swap in tracker.get_near_timeout_fulfilled(current_block):
+        if tracker.is_extend_timeout_voted(swap.id):
+            continue
+
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
@@ -415,15 +435,17 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             f'{blocks_left} blocks until timeout',
         )
 
-        # Dest tx exists (confirmed or not) — vote to extend timeout
         try:
-            if voting.extend_swap_timeout(self.contract_client, self.wallet, swap.id):
-                bt.logging.info(
-                    f'{ctx}: voted to extend timeout '
-                    f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
-                )
+            voting.extend_swap_timeout(self.contract_client, self.wallet, swap.id)
+            tracker.mark_extend_timeout_voted(swap.id)
+            bt.logging.info(
+                f'{ctx}: voted to extend timeout '
+                f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
+            )
         except ContractError as e:
-            if 'AlreadyVoted' not in str(e) and not is_contract_rejection(e):
+            if 'AlreadyVoted' in str(e):
+                tracker.mark_extend_timeout_voted(swap.id)
+            elif not is_contract_rejection(e):
                 bt.logging.debug(f'{ctx}: extend timeout vote: {e}')
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend timeout failed: {e}')

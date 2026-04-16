@@ -41,6 +41,10 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
+        # swap_id → timeout_block we voted under. ``is_extend_timeout_voted``
+        # auto-clears the entry once the contract has bumped the swap past the
+        # voted value so the next extension round can vote again.
+        self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
@@ -86,15 +90,32 @@ class SwapTracker:
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
+        self.extend_timeout_voted_at.pop(swap_id, None)
         self.null_retry_count.pop(swap_id, None)
 
     def mark_voted(self, swap_id: int):
-        """Mark a swap as voted on to prevent redundant vote extrinsics."""
+        """Mark a swap as voted on to prevent redundant confirm/timeout extrinsics."""
         self.voted_ids.add(swap_id)
 
     def is_voted(self, swap_id: int) -> bool:
         """Check if we've already voted on this swap."""
         return swap_id in self.voted_ids
+
+    def mark_extend_timeout_voted(self, swap_id: int) -> None:
+        swap = self.active.get(swap_id)
+        if swap is not None:
+            self.extend_timeout_voted_at[swap_id] = swap.timeout_block
+
+    def is_extend_timeout_voted(self, swap_id: int) -> bool:
+        voted_at = self.extend_timeout_voted_at.get(swap_id)
+        if voted_at is None:
+            return False
+        swap = self.active.get(swap_id)
+        if swap is not None and swap.timeout_block > voted_at:
+            # contract extended the swap → vote opens again for the next round
+            self.extend_timeout_voted_at.pop(swap_id, None)
+            return False
+        return True
 
     async def poll(self, current_block: int = 0):
         """Incremental update — called every forward step (~12s)."""
@@ -187,16 +208,14 @@ class SwapTracker:
         return False
 
     def prune_stale_voted_ids(self) -> None:
-        """Drop any voted_ids entries whose swap is no longer being tracked.
-
-        voted_ids is normally cleaned up alongside active.pop() in resolve()
-        and the refresh loop, but an exceptional path (e.g. active.pop raced
-        with a manual test fixture) can leave orphans. Cap the set to prevent
-        unbounded growth.
-        """
-        orphans = self.voted_ids - set(self.active.keys())
-        if orphans:
-            self.voted_ids -= orphans
+        """Drop any voted state for swaps no longer being tracked. Normally
+        handled inline in ``resolve``/refresh, but an exceptional path (e.g.
+        active.pop raced by a fixture) can leave orphans."""
+        active_ids = set(self.active.keys())
+        self.voted_ids -= self.voted_ids - active_ids
+        for sid in list(self.extend_timeout_voted_at.keys()):
+            if sid not in active_ids:
+                del self.extend_timeout_voted_at[sid]
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""
