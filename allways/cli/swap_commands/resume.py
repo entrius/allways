@@ -8,11 +8,10 @@ import rich_click as click
 from rich.panel import Panel
 
 from allways.chain_providers import create_chain_providers
-from allways.chains import get_chain
+from allways.chains import SUBTENSOR_BLOCK_SECONDS, get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     clear_pending_swap,
     console,
     get_cli_context,
@@ -119,7 +118,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         return
 
     remaining = reserved_until - current_block
-    console.print(f'\n[green]Reservation still active (~{remaining * SECONDS_PER_BLOCK // 60} min left)[/green]')
+    console.print(f'\n[green]Reservation still active (~{remaining * SUBTENSOR_BLOCK_SECONDS // 60} min left)[/green]')
 
     # Set up chain provider
     if 'BTC_MODE' not in os.environ:

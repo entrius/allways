@@ -8,11 +8,10 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-from allways.chains import SUPPORTED_CHAINS, get_chain
+from allways.chains import SUBTENSOR_BLOCK_SECONDS, SUPPORTED_CHAINS, get_chain
 from allways.classes import SwapStatus
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
     clear_pending_swap,
     console,
@@ -388,7 +387,7 @@ def watch_swap(client, swap_id: int, swap=None):
     try:
         with Live(render(swap), console=console, refresh_per_second=1) as live:
             while True:
-                time.sleep(SECONDS_PER_BLOCK)
+                time.sleep(SUBTENSOR_BLOCK_SECONDS)
                 try:
                     swap = client.get_swap(swap_id)
                 except ContractError:
@@ -442,9 +441,9 @@ def view_contract():
     try:
         with loading('Reading contract parameters...'):
             timeout_blocks = read_safe(client.get_fulfillment_timeout)
-            timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
+            timeout_minutes = timeout_blocks * SUBTENSOR_BLOCK_SECONDS / 60
             reservation_ttl_blocks = read_safe(client.get_reservation_ttl)
-            reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
+            reservation_ttl_minutes = reservation_ttl_blocks * SUBTENSOR_BLOCK_SECONDS / 60
             consensus_threshold = read_safe(client.get_consensus_threshold)
             min_collateral_rao = read_safe(client.get_min_collateral)
             max_collateral_rao = read_safe(client.get_max_collateral)
@@ -537,7 +536,7 @@ def view_reservation():
 
     if is_active:
         remaining = reserved_until - current_block
-        remaining_min = remaining * SECONDS_PER_BLOCK / 60
+        remaining_min = remaining * SUBTENSOR_BLOCK_SECONDS / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
     else:

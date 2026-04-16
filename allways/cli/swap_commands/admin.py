@@ -2,8 +2,9 @@
 
 import click
 
+from allways.chains import SUBTENSOR_BLOCK_SECONDS
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, to_rao
 from allways.contract_client import ContractError
 
 
@@ -33,8 +34,8 @@ def set_timeout(blocks: int):
         console.print(f'[red]Failed to read fulfillment timeout: {e}[/red]')
         return
 
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
+    current_minutes = current * SUBTENSOR_BLOCK_SECONDS / 60
+    new_minutes = blocks * SUBTENSOR_BLOCK_SECONDS / 60
 
     console.print('\n[bold]Set Fulfillment Timeout[/bold]\n')
     console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')
@@ -72,8 +73,8 @@ def set_reservation_ttl(blocks: int):
         console.print(f'[red]Failed to read reservation TTL: {e}[/red]')
         return
 
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
+    current_minutes = current * SUBTENSOR_BLOCK_SECONDS / 60
+    new_minutes = blocks * SUBTENSOR_BLOCK_SECONDS / 60
 
     console.print('\n[bold]Set Reservation TTL[/bold]\n')
     console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')

@@ -7,6 +7,7 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.classes import Swap
+from allways.constants import FEE_DIVISOR
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -23,7 +24,7 @@ class SwapVerifier:
         subtensor: bt.Subtensor,
         netuid: int,
         metagraph: Optional['bt.Metagraph'] = None,
-        fee_divisor: int = 100,
+        fee_divisor: int = FEE_DIVISOR,
     ):
         self.providers = chain_providers
         self.subtensor = subtensor

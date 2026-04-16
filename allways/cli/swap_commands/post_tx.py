@@ -3,10 +3,10 @@
 import click
 
 from allways.chain_providers import create_chain_providers
+from allways.chains import SUBTENSOR_BLOCK_SECONDS
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     clear_pending_swap,
     console,
     get_cli_context,
@@ -55,7 +55,7 @@ def post_tx_command(tx_hash: str, netuid: int):
         return
 
     remaining = reserved_until - current_block
-    remaining_min = remaining * SECONDS_PER_BLOCK / 60
+    remaining_min = remaining * SUBTENSOR_BLOCK_SECONDS / 60
     human_amount = from_smallest_unit(state.from_amount, state.from_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')

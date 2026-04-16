@@ -3,8 +3,9 @@
 import click
 from rich.table import Table
 
+from allways.chains import SUBTENSOR_BLOCK_SECONDS
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, to_rao
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
 from allways.contract_client import ContractError
 
@@ -125,7 +126,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
             cooldown_end = deactivation_block + (timeout_blocks * 2)
             if current_block < cooldown_end:
                 remaining = cooldown_end - current_block
-                remaining_min = remaining * SECONDS_PER_BLOCK / 60
+                remaining_min = remaining * SUBTENSOR_BLOCK_SECONDS / 60
                 console.print(
                     f'[red]Withdrawal cooldown active. ~{remaining} blocks (~{remaining_min:.0f} min) remaining.[/red]'
                 )

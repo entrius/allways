@@ -3,9 +3,9 @@
 import click
 from rich.table import Table
 
+from allways.chains import SUBTENSOR_BLOCK_SECONDS
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     console,
     from_rao,
     get_cli_context,
@@ -79,7 +79,7 @@ def status_command(netuid: int):
                 reserved_until = client.get_miner_reserved_until(pending.miner_hotkey)
                 if reserved_until > subtensor.get_current_block():
                     remaining = reserved_until - subtensor.get_current_block()
-                    remaining_min = remaining * SECONDS_PER_BLOCK / 60
+                    remaining_min = remaining * SUBTENSOR_BLOCK_SECONDS / 60
                     table.add_row(
                         'Pending Reservation',
                         f'{pending.from_chain.upper()}->{pending.to_chain.upper()} (~{remaining_min:.0f} min left)',

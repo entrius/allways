@@ -21,8 +21,6 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 
 console = Console()
 
-SECONDS_PER_BLOCK = 12
-
 SWAP_STATUS_COLORS = {
     SwapStatus.ACTIVE: 'yellow',
     SwapStatus.FULFILLED: 'blue',

@@ -10,12 +10,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from allways.chain_providers import create_chain_providers
-from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
+from allways.chains import SUBTENSOR_BLOCK_SECONDS, SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     PendingSwapState,
     clear_pending_swap,
     console,
@@ -286,7 +285,7 @@ def display_receipt(swap):
     tao_human = swap.tao_amount / (10**9)
 
     # Calculate fee
-    fee_divisor = 100  # 1% fee
+    fee_divisor = FEE_DIVISOR
     if swap.to_chain == 'tao':
         fee_human = tao_human / fee_divisor
         fee_unit = 'TAO'
@@ -467,7 +466,7 @@ def swap_now_command(
             current_block = subtensor.get_current_block()
             if reserved_until > current_block:
                 remaining = reserved_until - current_block
-                remaining_min = remaining * SECONDS_PER_BLOCK / 60
+                remaining_min = remaining * SUBTENSOR_BLOCK_SECONDS / 60
                 console.print(
                     f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
                 )

@@ -10,7 +10,7 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
-from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
+from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS, FEE_DIVISOR
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.utils.rate import expected_swap_amounts
 
@@ -65,7 +65,7 @@ class SwapFulfiller:
         subtensor: bt.Subtensor,
         netuid: int,
         metagraph: Optional['bt.Metagraph'] = None,
-        fee_divisor: int = 100,
+        fee_divisor: int = FEE_DIVISOR,
         sent_cache_path: Optional[Path] = None,
         my_addresses: Optional[Dict[str, str]] = None,
     ):
