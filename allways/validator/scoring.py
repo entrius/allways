@@ -26,7 +26,6 @@ import numpy as np
 from allways.constants import (
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
-    EVENT_RETENTION_BLOCKS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
@@ -54,12 +53,13 @@ def run_scoring_pass(self: Validator) -> None:
 
 
 def prune_aged_rate_events(self: Validator) -> None:
-    """Delete rate events older than ``EVENT_RETENTION_BLOCKS``.
+    """Delete rate events older than ``SCORING_WINDOW_BLOCKS``.
 
-    Retention is deliberately 2x the scoring window so ``get_latest_*_before``
-    calls at the window start can always find prior state to reconstruct from.
+    The prune helper preserves the single latest row per (hotkey, direction)
+    even when it's older than the cutoff, so window-start state reconstruction
+    still has an anchor.
     """
-    cutoff = self.block - EVENT_RETENTION_BLOCKS
+    cutoff = self.block - SCORING_WINDOW_BLOCKS
     if cutoff > 0:
         self.state_store.prune_events_older_than(cutoff)
 

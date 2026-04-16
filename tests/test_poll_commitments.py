@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from allways.classes import MinerPair
-from allways.constants import EVENT_RETENTION_BLOCKS
+from allways.constants import SCORING_WINDOW_BLOCKS
 from allways.validator.forward import poll_commitments
 from allways.validator.state_store import ValidatorStateStore
 
@@ -175,7 +175,7 @@ class TestPollCommitmentsPruning:
         from allways.validator.scoring import prune_aged_rate_events
 
         v = make_validator(tmp_path)
-        v.block = EVENT_RETENTION_BLOCKS + 1_000
+        v.block = SCORING_WINDOW_BLOCKS + 1_000
         ancient_block = 1
         recent_block = v.block - 100
 

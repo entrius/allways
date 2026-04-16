@@ -16,7 +16,7 @@ import bittensor as bt
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
-from allways.constants import EXTEND_THRESHOLD_BLOCKS, SCORING_INTERVAL_STEPS
+from allways.constants import EXTEND_THRESHOLD_BLOCKS, SCORING_WINDOW_BLOCKS
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
 from allways.validator import voting
@@ -85,9 +85,9 @@ async def forward(self: Validator) -> None:
     #    skipping the uncertain set from step 6.
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
-    # 9. Scoring (periodic) — runs every SCORING_INTERVAL_STEPS. Replays the
-    #    crown-time window and commits miner weights.
-    if self.step % SCORING_INTERVAL_STEPS == 0:
+    # 9. Scoring (periodic) — once per scoring window. Replays the crown-time
+    #    window and commits miner weights.
+    if self.step % SCORING_WINDOW_BLOCKS == 0:
         run_scoring_pass(self)
 
 

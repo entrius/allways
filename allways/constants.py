@@ -33,15 +33,10 @@ BTC_MIN_FEE_RATE = 2  # sat/vB — minimum BTC fee rate floor to avoid stuck txs
 DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS = 5
 
 # ─── Scoring ─────────────────────────────────────────────
-SCORING_WINDOW_BLOCKS = 1200  # ~4 hours at 12s/block
-SCORING_INTERVAL_STEPS = 300  # Score every 300 forward passes (~1 hour at 12s poll)
+SCORING_WINDOW_BLOCKS = 1200  # ~4 hours at 12s/block — also the scoring cadence
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — score based on current window only, no smoothing
 
 # ─── V1 Crown-Time Scoring ───────────────────────────────
-# Rate/collateral event retention. Matches the scoring window exactly — the
-# prune helpers preserve the single latest row per miner/direction even when
-# it's older, so state-at-window-start reconstruction still has an anchor.
-EVENT_RETENTION_BLOCKS = SCORING_WINDOW_BLOCKS
 # Rolling credibility window for success_rate. 30 days at 12s/block. Miners
 # with no outcomes in this window default to optimistic (1.0); miners with
 # bad history can rehabilitate by completing swaps over the next ~month.
