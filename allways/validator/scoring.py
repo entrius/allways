@@ -1,17 +1,8 @@
 """Crown-time scoring pipeline.
 
-The validator rewards miners who hold the best rate in a direction while
-all other conditions line up: collateral >= min_collateral, active on
-contract, not currently handling a swap. When conditions don't line up,
-credit falls through to the next-best rate that does.
-
-Each scoring pass walks a chronological event stream (rate + collateral +
-busy transitions) over the last ``SCORING_WINDOW_BLOCKS`` and accumulates
-per-miner crown time. Reward per miner is ``pool * share * success_rate**3``;
-unclaimed pool recycles to ``RECYCLE_UID``.
-
-Entry point is ``run_scoring_pass(validator)``, called from the forward loop
-every ``SCORING_INTERVAL_STEPS``.
+Reward per miner is ``pool * share * success_rate ** SUCCESS_EXPONENT``;
+unclaimed pool recycles to ``RECYCLE_UID``. Entry point is
+``score_and_reward_miners(validator)``.
 """
 
 from __future__ import annotations
@@ -37,11 +28,7 @@ if TYPE_CHECKING:
     from neurons.validator import Validator
 
 
-# ─── Top-level scoring pass ──────────────────────────────────────────────
-
-
 def score_and_reward_miners(self: Validator) -> None:
-    """Run a V1 scoring pass and commit weights."""
     try:
         rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
@@ -52,40 +39,20 @@ def score_and_reward_miners(self: Validator) -> None:
 
 
 def prune_rate_events(self: Validator) -> None:
-    """Delete rate events older than ``SCORING_WINDOW_BLOCKS``.
-
-    The prune helper preserves the single latest row per (hotkey, direction)
-    even when it's older than the cutoff, so window-start state reconstruction
-    still has an anchor.
-    """
     cutoff = self.block - SCORING_WINDOW_BLOCKS
     if cutoff > 0:
         self.state_store.prune_events_older_than(cutoff)
 
 
 def prune_swap_outcomes(self: Validator) -> None:
-    """Drop swap_outcomes rows older than the credibility window so the
-    ledger stays bounded and miners can rehabilitate."""
     cutoff = self.block - CREDIBILITY_WINDOW_BLOCKS
     if cutoff > 0:
         self.state_store.prune_swap_outcomes_older_than(cutoff)
 
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
-    """Crown-time based reward computation.
-
-    For each direction in ``DIRECTION_POOLS``:
-
-      1. Replay rate events (from state_store), collateral events, and busy
-         intervals (from event_watcher) chronologically over the window.
-      2. At each event boundary, determine crown holders — miners tied for
-         best rate who are in the metagraph, contract-active, not currently
-         handling a swap, and have collateral >= the cached ``min_collateral``.
-      3. Accumulate crown_blocks per hotkey, splitting evenly on ties.
-      4. ``rewards[uid] += pool * share * success_rate ** SUCCESS_EXPONENT``
-
-    Anything not distributed to miners recycles to ``RECYCLE_UID``.
-    """
+    """Replay the crown-time event stream over the window, derive per-miner
+    rewards, recycle any undistributed pool to ``RECYCLE_UID``."""
     n_uids = self.metagraph.n.item()
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
@@ -93,9 +60,6 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     window_end = self.block
     window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
 
-    # Miners must be both in the metagraph (registered) AND active on the
-    # contract (miner_active == true). Active is sourced from MinerActivated
-    # events replayed by the watcher.
     in_metagraph: Set[str] = set(self.metagraph.hotkeys)
     eligible_hotkeys: Set[str] = in_metagraph & self.event_watcher.active_miners
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
@@ -171,13 +135,9 @@ class EventKind(IntEnum):
 
 @dataclass
 class ReplayEvent:
-    """One transition in the chronological replay stream.
-
-    The ``value`` field is polymorphic by ``kind``:
-      - ``RATE``       → the new rate as float
-      - ``COLLATERAL`` → the new collateral in rao (cast to int at apply time)
-      - ``BUSY``       → the open-swap count delta: +1 or -1
-    """
+    """One transition in the chronological replay stream. ``value`` is
+    polymorphic on ``kind``: rate as float, collateral as rao, or busy delta
+    of ±1."""
 
     block: int
     hotkey: str
@@ -229,8 +189,8 @@ def merge_replay_events(
     window_start: int,
     window_end: int,
 ) -> List[ReplayEvent]:
-    """Pull rate, collateral, and busy transitions within the window and merge
-    them into one chronologically-sorted event stream."""
+    """Merge in-window rate, collateral, and busy transitions into one
+    chronologically-sorted stream."""
     events: List[ReplayEvent] = []
 
     for e in event_watcher.get_busy_events_in_range(window_start, window_end):
@@ -260,24 +220,14 @@ def replay_crown_time_window(
     eligible_hotkeys: Set[str],
     min_collateral: int,
 ) -> Dict[str, float]:
-    """Walk the merged rate + collateral + busy event stream, accumulate crown blocks.
-
-    Rates come from ``store`` (populated by commitment polling). Collateral
-    history and busy-interval transitions come from ``event_watcher`` (populated
-    by contract event replay). Returns ``{hotkey: crown_blocks_float}``. Ties
-    split credit evenly across the tied interval; miners with an open swap at
-    the time are excluded so the credit flows to the next-best idle miner
-    instead.
-    """
-    # 1. Reconstruct the "as of window_start" state for every eligible hotkey.
+    """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
+    Ties at the same rate split credit evenly; busy miners are excluded so
+    credit flows to the next-best idle miner."""
     rates, collateral, busy_count = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, eligible_hotkeys
     )
-
-    # 2. Pull every transition inside the window, merged chronologically.
     replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
 
-    # 3. Walk intervals, crediting the current crown holders for each span.
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
 
@@ -321,22 +271,9 @@ def crown_holders_at_instant(
     eligible: Set[str],
     busy: Optional[Set[str]] = None,
 ) -> List[str]:
-    """Find the crown holder(s) at a single instant in time.
-
-    The rule, in plain English: **take the miner posting the best rate — but
-    only if they satisfy every other condition. If they don't, fall through
-    to the next-best rate and try again.** Keep falling until a rate bucket
-    has at least one miner who qualifies, or return empty.
-
-    A miner qualifies at this instant when they are:
-      - in ``eligible``  — registered in the metagraph AND contract-active
-      - not in ``busy``  — not currently handling an open swap
-      - collateralized  — ``collaterals[hk] >= min_collateral``
-      - posting a rate  — ``rates[hk] > 0``
-
-    Ties at the winning rate share credit evenly (the caller splits the
-    interval duration across whatever this returns).
-    """
+    """Take the miners posting the best rate, but only if they satisfy every
+    other condition (eligible, not busy, collateral >= min, rate > 0). If the
+    best rate has no qualified miner, fall through to the next-best rate."""
     busy = busy or set()
 
     def qualifies(hotkey: str) -> bool:
@@ -347,9 +284,6 @@ def crown_holders_at_instant(
             and rates.get(hotkey, 0) > 0
         )
 
-    # Bucket hotkeys by rate, then walk from best rate downward. The first
-    # bucket with any qualified miner wins the crown — everyone at worse
-    # rates is ignored whether they qualify or not.
     by_rate: Dict[float, List[str]] = {}
     for hotkey, rate in rates.items():
         if rate > 0:

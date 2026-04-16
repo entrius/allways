@@ -1,11 +1,6 @@
-"""Incremental swap lifecycle tracker. Eliminates O(N) full scans.
-
-Swap outcomes (credibility ledger writes) are owned by
-``ContractEventWatcher``, which replays ``SwapCompleted`` / ``SwapTimedOut``
-events into ``state_store.swap_outcomes``. The tracker here just maintains
-the in-memory active set so the forward loop knows what to verify, vote on,
-and time out.
-"""
+"""Incremental swap lifecycle tracker. Maintains the in-memory active set
+so the forward loop knows what to verify, vote on, and time out. Swap
+outcomes (credibility ledger writes) are owned by ``ContractEventWatcher``."""
 
 import asyncio
 from typing import Dict, List, Set
@@ -18,19 +13,14 @@ from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
-# How many consecutive ``get_swap == None`` polls we tolerate before dropping
-# a swap from the active set. Tolerates transient RPC flakes without the
-# fragile timeout-block inference the V1 tracker used.
+# Consecutive None polls tolerated before treating a swap as resolved. Smooths
+# RPC flakes without the fragile timeout-block inference the V1 tracker used.
 NULL_SWAP_RETRY_LIMIT = 3
 
 
 class SwapTracker:
-    """Tracks swap lifecycle incrementally. No full scans after initialization.
-
-    Two layers:
-    - Discovery: scan only NEW swap IDs since last poll
-    - Monitoring: re-fetch all tracked ACTIVE/FULFILLED swaps each poll
-    """
+    """Discovery scans new swap IDs since the last poll; monitoring re-fetches
+    all tracked ACTIVE/FULFILLED swaps each poll."""
 
     def __init__(
         self,
@@ -41,15 +31,15 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
-        # swap_id → timeout_block we voted under. ``is_extend_timeout_voted``
-        # auto-clears the entry once the contract has bumped the swap past the
-        # voted value so the next extension round can vote again.
+        # swap_id → timeout_block at vote time. ``is_extend_timeout_voted``
+        # auto-clears the entry once the contract has bumped the swap past
+        # the voted value so the next extension round can vote again.
         self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
         self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
     def initialize(self, current_block: int):
-        """Cold start — scan backward from latest swap to populate active set."""
+        """Cold start: scan backward from latest swap to seed active set."""
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
             self.last_scanned_id = 0
@@ -79,11 +69,7 @@ class SwapTracker:
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
-        """Drop a swap from active tracking after this validator's vote reached quorum.
-
-        Outcome persistence is the event watcher's job — we only manage the
-        in-memory active set here.
-        """
+        """Drop a swap from tracking after our vote reached quorum."""
         swap = self.active.pop(swap_id, None)
         if swap is None:
             return
@@ -98,7 +84,6 @@ class SwapTracker:
         self.voted_ids.add(swap_id)
 
     def is_voted(self, swap_id: int) -> bool:
-        """Check if we've already voted on this swap."""
         return swap_id in self.voted_ids
 
     def mark_extend_timeout_voted(self, swap_id: int) -> None:
@@ -118,7 +103,7 @@ class SwapTracker:
         return True
 
     async def poll(self, current_block: int = 0):
-        """Incremental update — called every forward step (~12s)."""
+        """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
         except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
@@ -134,8 +119,7 @@ class SwapTracker:
         fresh: Set[int] = set()
         new_ids = list(range(self.last_scanned_id + 1, next_id))
         if new_ids:
-            # return_exceptions=True so a single flaky get_swap doesn't abort
-            # the whole discovery pass and kill the forward step.
+            # return_exceptions=True keeps one flaky get_swap from killing the step.
             swaps = await asyncio.gather(
                 *[asyncio.to_thread(self.client.get_swap, sid) for sid in new_ids],
                 return_exceptions=True,
@@ -168,10 +152,9 @@ class SwapTracker:
             return_exceptions=True,
         )
 
-        # Null and transient errors share the same retry policy — a missing
-        # swap is usually either RPC flake or a freshly-resolved entry that
-        # the event watcher will write a terminal outcome for. Give it a
-        # few tries, then drop.
+        # Null and transient errors share one retry policy — a missing swap
+        # is either an RPC flake or a freshly-resolved entry the event
+        # watcher will record. Retry a few times, then drop.
         resolved_ids: List[int] = []
         for sid, result in zip(stale_ids, swaps):
             if isinstance(result, Exception):
@@ -198,9 +181,8 @@ class SwapTracker:
         self.prune_stale_voted_ids()
 
     def bump_null_retry(self, swap_id: int) -> bool:
-        """Increment the retry counter for a swap whose refresh returned None
-        (or raised). Returns True when the retry limit is hit and the caller
-        should treat the swap as resolved."""
+        """Returns True when the retry limit is hit and the caller should
+        treat the swap as resolved."""
         retries = self.null_retry_count.get(swap_id, 0) + 1
         if retries >= NULL_SWAP_RETRY_LIMIT:
             return True

@@ -1,39 +1,12 @@
 """ContractEventWatcher — event-sourced miner state for the validator.
 
-The scoring path used to poll per-miner collateral / active flag / min_collateral
-from the contract on a cadence. That was N RPC calls per poll, the active flag
-was never actually checked, and two validators polling at different forward
-steps could derive slightly different state for the same block range.
-
-This watcher sources the same state from ``Contracts::ContractEmitted`` events
-on the Substrate chain. Each forward step calls ``sync_to(current_block)``; the
-watcher replays events from its internal cursor up to ``current_block``,
-decoding them against ``allways_swap_manager.json`` and applying them to
-in-memory dicts:
-
-- ``collateral[hotkey]`` — current collateral in rao (from CollateralPosted,
-  CollateralWithdrawn, CollateralSlashed)
-- ``active_miners: Set[hotkey]`` — miners with ``miner_active == True``
-  (from MinerActivated events)
-- ``min_collateral`` — current minimum collateral threshold (from
-  ConfigUpdated{key="min_collateral"} events)
-- ``collateral_events`` — ordered history used by the crown-time scoring
-  replay, bounded to one ``SCORING_WINDOW_BLOCKS`` (plus one anchor row per
-  hotkey so state reconstruction at window_start always has something)
-- ``busy_events`` — per-hotkey open-swap count transitions, same retention
-- swap outcomes are forwarded into ``ValidatorStateStore.insert_swap_outcome``
-  so the credibility ledger survives restarts
-
-Cold start: ``initialize`` snapshots current contract state for all metagraph
-miners, seeds busy state from in-flight swaps, then rewinds the cursor to
-``head - SCORING_WINDOW_BLOCKS``. The existing bounded ``sync_to`` catches up
-over ~24 forward steps and fills the scoring window long before the first
-scoring pass runs. Swap_outcomes is the one ledger that must persist across
-restarts and already lives in ``state.db``.
-
-Decoder: ported from ``alw-utils/.../watch_contract_events.py`` which has been
-in production on the dashboard side. Falls back to a hardcoded topic→event
-registry if the metadata JSON can't be loaded.
+Each forward step calls ``sync_to(current_block)``; the watcher replays
+``Contracts::ContractEmitted`` events from its cursor up to ``current_block``
+and applies them to in-memory state used by the crown-time scoring replay.
+Cold start backfills one scoring window so the first scoring pass after a
+restart already has a populated history. Swap outcomes are forwarded into
+``ValidatorStateStore.insert_swap_outcome`` so the credibility ledger
+survives restarts.
 """
 
 from __future__ import annotations
@@ -245,12 +218,8 @@ class CollateralEvent:
 
 @dataclass
 class BusyEvent:
-    """A transition in a miner's open-swap count.
-
-    ``delta`` is +1 on SwapInitiated and -1 on SwapCompleted/SwapTimedOut. The
-    running sum of deltas per hotkey is the number of in-flight swaps; a miner
-    is "busy" (excluded from crown) whenever that sum is > 0.
-    """
+    """``delta`` is +1 on SwapInitiated and -1 on SwapCompleted/SwapTimedOut.
+    A miner is busy (excluded from crown) whenever the running sum is > 0."""
 
     hotkey: str
     delta: int
@@ -261,28 +230,7 @@ MAX_BLOCKS_PER_SYNC = 50
 
 
 class ContractEventWatcher:
-    """Replays contract events into in-memory miner state.
-
-    Usage:
-        watcher = ContractEventWatcher(substrate, contract_address, metadata_path, state_store)
-        watcher.initialize(current_block, metagraph_hotkeys, contract_client)
-        ... every forward step ...
-        watcher.sync_to(current_block)
-
-    Scoring reads ``get_collateral_events_in_range``, ``get_latest_collateral_before``,
-    ``active_miners``, ``min_collateral`` directly off the watcher. Swap outcomes
-    are forwarded into ``state_store.insert_swap_outcome`` so the credibility
-    ledger persists across restarts.
-
-    ``initialize`` snapshots current on-chain state for every metagraph miner,
-    then advances the cursor to ``current_block``. From that point forward only
-    events drive state changes. This avoids the trap where a miner who posted
-    collateral before the replay window would look like they had zero.
-
-    ``sync_to`` is bounded to ``MAX_BLOCKS_PER_SYNC`` per call so a long outage
-    doesn't block the forward loop — the cursor catches up over multiple
-    forward steps at ~50 blocks per tick.
-    """
+    """Replays contract events into in-memory miner state."""
 
     def __init__(
         self,
@@ -301,31 +249,19 @@ class ContractEventWatcher:
         self.collateral: Dict[str, int] = {}
         self.active_miners: Set[str] = set()
         self.min_collateral: int = default_min_collateral
-        # Sorted-by-block history used by crown-time replay. Bounded to
-        # 2x the scoring window; older entries are dropped on sync.
         self.collateral_events: List[CollateralEvent] = []
-        # Per-hotkey view of collateral_events for O(log n) latest-before
-        # lookups during scoring replay. Kept in sync with the flat list.
+        # Per-hotkey view of collateral_events for O(log n) latest-before lookups.
         self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
-
-        # Per-miner open-swap count and transition history. Count > 0 means
-        # the miner is currently handling a swap and should be excluded from
-        # crown-time credit — idle runners-up earn that interval instead.
         self.open_swap_count: Dict[str, int] = {}
         self.busy_events: List[BusyEvent] = []
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
     def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
-        """Most recent collateral event for ``hotkey`` at or before ``block``.
-
-        O(log n) via binary search on the per-hotkey event list. If no events
-        exist for the hotkey at all (bootstrap-only miners), returns the
-        static snapshot at block 0 — that's the authoritative pre-event
-        state. If events exist but none fall at/before ``block``, returns
-        None: the snapshot reflects state AFTER the existing events and is
-        not valid for queries in the pre-event gap.
-        """
+        """Most recent collateral for ``hotkey`` at or before ``block``. If
+        events exist but none fall at/before ``block``, returns None — the
+        bootstrap snapshot reflects post-event state and is invalid for the
+        pre-event gap."""
         from bisect import bisect_right
 
         events = self.collateral_events_by_hotkey.get(hotkey)
@@ -349,7 +285,6 @@ class ContractEventWatcher:
         return out
 
     def get_busy_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
-        """Ordered busy transitions in ``(start_block, end_block]``."""
         out: List[dict] = []
         for ev in self.busy_events:
             if ev.block <= start_block:
@@ -360,12 +295,8 @@ class ContractEventWatcher:
         return out
 
     def get_busy_miners_at(self, block: int) -> Dict[str, int]:
-        """Reconstruct the per-hotkey open-swap count at ``block``.
-
-        Walks every busy event at or before ``block`` and applies its delta.
-        Used by the crown-time replay to seed ``currently_busy`` state at the
-        window start.
-        """
+        """Per-hotkey open-swap count at ``block``, reconstructed by replaying
+        every delta at or before ``block``."""
         counts: Dict[str, int] = {}
         for ev in self.busy_events:
             if ev.block > block:
@@ -382,13 +313,8 @@ class ContractEventWatcher:
         contract_client: Any = None,
     ) -> None:
         """Cold start: snapshot contract state for every metagraph miner, then
-        advance the cursor so only forward events drive state changes.
-
-        Callers should pass ``metagraph_hotkeys`` and a read-capable
-        ``contract_client``. If either is missing (e.g. in unit tests) the
-        watcher falls back to an empty snapshot and starts at ``current_block``
-        — scoring will simply not credit any miner until events arrive.
-        """
+        rewind the cursor by one scoring window so ``sync_to`` backfills it
+        before the first scoring pass runs."""
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
@@ -409,9 +335,8 @@ class ContractEventWatcher:
                     self.min_collateral = raw_min
             except Exception as e:
                 bt.logging.debug(f'EventWatcher bootstrap: min_collateral read failed: {e}')
-            # Seed busy state from any in-flight swaps. Without this a miner
-            # serving a swap at watcher-startup would be treated as idle until
-            # the next terminal event flipped them free.
+            # Without this seed, a miner already serving a swap at startup
+            # would be treated as idle until the next terminal event.
             try:
                 in_flight = contract_client.get_active_swaps() or []
                 seen_hotkeys = set()
@@ -432,20 +357,11 @@ class ContractEventWatcher:
                 f'EventWatcher initialized: {len(self.collateral)} collateral entries, '
                 f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
             )
-        # Rewind the cursor so ``sync_to`` backfills the full scoring window
-        # on cold start. The existing bounded-chunk sync loop catches up over
-        # ~24 forward steps (50 blocks/step × 1200 blocks), finishing long
-        # before the first scoring pass at step SCORING_INTERVAL_STEPS.
         self.cursor = max(0, current_block - SCORING_WINDOW_BLOCKS)
 
     def sync_to(self, current_block: int) -> None:
-        """Catch up from cursor to ``current_block`` in bounded chunks.
-
-        At most ``MAX_BLOCKS_PER_SYNC`` blocks are processed per call so a
-        multi-minute outage doesn't freeze the forward loop on one sync. The
-        cursor advances incrementally across forward steps until it catches
-        up to head.
-        """
+        """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
+        chunks so a long outage doesn't freeze the forward loop."""
         if current_block <= self.cursor:
             return
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
@@ -513,9 +429,8 @@ class ContractEventWatcher:
 
     def apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
         if name == 'CollateralPosted':
-            # `total` is the authoritative post-event balance — use it as a
-            # SET so we don't drift when the replay window is missing prior
-            # events. Fall back to an add if `total` isn't present.
+            # Prefer ``total`` (authoritative post-event balance) so we don't
+            # drift when the replay window misses prior events.
             hotkey = values.get('miner', '')
             total = values.get('total')
             if total is not None:
@@ -530,9 +445,7 @@ class ContractEventWatcher:
             else:
                 self.adjust_collateral(block_num, hotkey, -int(values.get('amount', 0)))
         elif name == 'CollateralSlashed':
-            # Slashed has no `total` / `remaining` field — it only carries the
-            # slash amount. Subtract from the current snapshot (which was
-            # seeded at initialize() or updated by a prior Posted/Withdrawn).
+            # Slashed only carries the slash amount, no post-event balance.
             self.adjust_collateral(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
         elif name == 'MinerActivated':
             hotkey = values.get('miner', '')
@@ -549,8 +462,6 @@ class ContractEventWatcher:
                 except (TypeError, ValueError):
                     pass
         elif name == 'SwapInitiated':
-            # Miner becomes busy — excluded from crown-time credit until a
-            # terminal event (Completed/TimedOut) frees them.
             miner = values.get('miner', '')
             if miner:
                 self.apply_busy_delta(block_num, miner, +1)
@@ -578,12 +489,8 @@ class ContractEventWatcher:
                 self.apply_busy_delta(block_num, miner, -1)
 
     def apply_busy_delta(self, block_num: int, hotkey: str, delta: int) -> None:
-        """Apply a ±1 transition to ``hotkey``'s open-swap count.
-
-        Floors the count at zero: a terminal event we observe with no matching
-        SwapInitiated in history (e.g. a swap that started before the watcher
-        bootstrapped) is dropped rather than letting the count go negative.
-        """
+        """Apply a ±1 transition. Drops any -1 with no matching prior +1
+        rather than letting the open-swap count go negative."""
         if delta == 0:
             return
         current = self.open_swap_count.get(hotkey, 0)
@@ -594,7 +501,6 @@ class ContractEventWatcher:
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
 
     def set_collateral(self, block_num: int, hotkey: str, new_total: int) -> None:
-        """Record an authoritative post-event collateral balance for ``hotkey``."""
         if not hotkey:
             return
         new_total = max(0, new_total)
@@ -604,22 +510,16 @@ class ContractEventWatcher:
         self.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
 
     def adjust_collateral(self, block_num: int, hotkey: str, delta: int) -> None:
-        """Add a delta to the current collateral snapshot and emit an event row."""
         if not hotkey:
             return
         new_total = max(0, self.collateral.get(hotkey, 0) + delta)
         self.set_collateral(block_num, hotkey, new_total)
 
     def prune_old_collateral_events(self, current_block: int) -> None:
-        """Drop collateral and busy events older than one scoring window.
-
-        The single latest collateral event per hotkey is always preserved
-        (even if it's older than the cutoff), so crown-time replay can still
-        reconstruct window-start state for miners who haven't posted or
-        withdrawn inside the window. Busy events are only pruned when the
-        hotkey's current open-swap count is zero — never drop a +1 whose
-        matching -1 hasn't been observed yet.
-        """
+        """Drop collateral and busy events older than one scoring window. The
+        latest collateral row per hotkey is preserved as a state-reconstruction
+        anchor; busy events are kept while the open-swap count is still > 0
+        so the matching -1 isn't orphaned."""
         cutoff = current_block - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return

@@ -1,12 +1,6 @@
-"""Thin wrappers around the 3 vote extrinsics a validator sends on swaps.
-
-All three functions return ``bool`` — True on success, False on any error
-(contract rejection, RPC failure, etc.). The caller logs the outcome and
-uses the bool to decide whether to advance local state.
-
-Keep these as module-level functions, not a class — they're pure
-transformations of (client, wallet, swap_id) → bool with no retained state.
-"""
+"""Thin wrappers around the swap-vote extrinsics. confirm_swap and
+timeout_swap return False on any error; extend_swap_timeout propagates so
+the caller can distinguish ``AlreadyVoted`` from real failures."""
 
 import bittensor as bt
 
@@ -36,13 +30,7 @@ def timeout_swap(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int)
 
 
 def extend_swap_timeout(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int) -> bool:
-    """Vote to extend a FULFILLED swap's deadline when the dest tx needs
-    more confirmations before timeout fires.
-
-    Unlike confirm/timeout, this function lets exceptions propagate so
-    callers can distinguish expected rejections (``AlreadyVoted``,
-    ``ContractReverted``) from real errors. Returning True here means the
-    extrinsic was accepted, not that the swap is actually extended.
-    """
+    """Vote to extend a FULFILLED swap's deadline. Lets exceptions propagate
+    so the caller can distinguish ``AlreadyVoted`` from real errors."""
     client.vote_extend_timeout(wallet=wallet, swap_id=swap_id)
     return True

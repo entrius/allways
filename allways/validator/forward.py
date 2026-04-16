@@ -1,10 +1,4 @@
-"""Validator forward pass — the orchestrator called every step by the base neuron.
-
-The forward loop does all the per-step validator work (rate sampling, event
-sync, pending-confirm drain, fulfillment verification, timeout enforcement).
-Scoring lives in its own module (``allways.validator.scoring``) and is invoked
-only on the periodic scoring interval.
-"""
+"""Validator forward pass — orchestrator called every step by the base neuron."""
 
 from __future__ import annotations
 
@@ -35,73 +29,44 @@ if TYPE_CHECKING:
 
 
 async def forward(self: Validator) -> None:
-    """One validator forward step.
-
-    Every step is the same flow, organized into numbered phases below. Each
-    phase updates validator state the next phase may depend on, so ordering
-    matters — don't reshuffle without re-reading the dependencies.
-    """
+    """One validator forward step. Phase order matters — each phase may depend
+    on state mutated by the previous one."""
     bt.logging.info(f'Forward step {self.step}')
 
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
 
-    # 1. House-keeping — clear per-step chain-provider caches and drop any
-    #    pending confirms whose reservation has already expired.
     clear_provider_caches(self)
     self.state_store.purge_expired_pending_confirms()
 
-    # 2. Pending confirms → vote_initiate — drain the axon-fed queue of
-    #    user swaps whose source tx has reached enough confirmations.
     initialize_pending_user_reservations(self)
 
-    # 3. Rate sampling — read every miner commitment in a single query_map
-    #    RPC and persist direction-level diffs into rate_events (the input
-    #    to crown-time scoring).
     poll_commitments(self)
 
-    # 4. Event sync — replay Contracts::ContractEmitted events for collateral,
-    #    active flag, min_collateral, swap outcomes, and busy intervals.
     try:
         self.event_watcher.sync_to(self.block)
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
-    # 5. Swap tracker refresh — pull newly-initiated and resolved swaps.
+    # Pull newly-initiated and resolved swaps off the contract.
     await tracker.poll(self.block)
 
-    # 6. Fulfillment confirm — verify FULFILLED swaps end-to-end and vote
-    #    confirm_swap. Returns the swaps where the provider was unreachable
-    #    this cycle so the timeout phase knows to skip them (transient
-    #    outage shouldn't trigger a slash).
+    # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
+    # set is swap IDs where the provider was unreachable this cycle, so the
+    # timeout phase knows to skip them (transient outage shouldn't slash).
     uncertain_swaps = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
 
-    # 7. Timeout extend — for FULFILLED swaps nearing deadline with a dest tx
-    #    visible on-chain, vote to extend the timeout so the tx has time to
-    #    confirm.
     extend_fulfilled_near_timeout(self)
-
-    # 8. Timeout enforce — slash FULFILLED/ACTIVE swaps past their deadline,
-    #    skipping the uncertain set from step 6.
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
-    # 9. Scoring (periodic) — once per scoring window. Replays the crown-time
-    #    window and commits miner weights.
     if self.step % SCORING_WINDOW_BLOCKS == 0:
         score_and_reward_miners(self)
 
 
-# ─── Step 1: House-keeping ──────────────────────────────────────────────
-
-
 def clear_provider_caches(self: Validator) -> None:
-    """Clear per-poll caches on chain providers."""
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
-
-
-# ─── Step 2: Pending confirms → vote_initiate ───────────────────────────
 
 
 def initialize_pending_user_reservations(self: Validator) -> None:
@@ -130,7 +95,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         chain_def = self.chain_providers.get(item.from_chain)
         min_confs = chain_def.get_chain().min_confirmations if chain_def else '?'
 
-        # Skip if swap already initiated (another validator reached quorum)
         try:
             if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
                 self.state_store.remove(item.miner_hotkey)
@@ -139,7 +103,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         except Exception as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
 
-        # Re-verify tx with main-loop chain provider
         provider = self.chain_providers.get(item.from_chain)
         if provider is None:
             self.state_store.remove(item.miner_hotkey)
@@ -180,10 +143,9 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             try_extend_reservation(self, item, current_block, swap_label, miner_short)
             continue
 
-        # Confirmed — compute hash and vote. Only drop the queued entry once the
-        # vote is accepted (or the contract tells us someone else already
-        # initiated it). On transient RPC/network failure we leave the entry in
-        # place so the next forward step retries instead of silently losing it.
+        # Only drop the queued entry once the vote is accepted (or the contract
+        # rejects it as already-initiated). Transient RPC failures leave the
+        # entry queued so the next forward step retries.
         try:
             miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
             hash_input = scale_encode_initiate_hash_input(
@@ -226,9 +188,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
         except ContractError as e:
             if is_contract_rejection(e):
-                # Contract rejected — in practice this means another validator
-                # already reached initiate quorum, so the entry is no longer
-                # actionable. Drop it.
                 self.state_store.remove(item.miner_hotkey)
                 bt.logging.info(
                     f'PendingConfirm [{swap_label} {miner_short}]: contract rejected (likely already initiated)'
@@ -283,38 +242,18 @@ def try_extend_reservation(
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
 
 
-# ─── Step 3: Commitment polling ─────────────────────────────────────────
-
-
 def poll_commitments(self: Validator) -> None:
-    """Rate-side validator tick.
+    """Read every miner commitment via one query_map RPC and persist diffs.
 
-    Fires every forward step because ``read_miner_commitments`` is a single
-    ``query_map`` RPC — the cost is one round-trip regardless of miner count,
-    so per-block sampling is cheap and gives the crown-time series its
-    tightest possible accuracy (~1 block granularity).
-
-    Two steps:
-
-    1. ``refresh_miner_rates`` — pull the current commitment snapshot and
-       persist any direction-level diffs vs the in-memory cache.
-    2. ``purge_deregistered_hotkeys`` — drop any hotkeys that have left the
-       metagraph since the last poll.
-
-    Event retention pruning lives in ``run_scoring_pass`` — it's bounded-growth
-    hygiene, not correctness, so the once-per-scoring-round cadence is enough.
+    Cost is one round-trip regardless of miner count, so per-block sampling
+    gives the crown-time series ~1-block accuracy. Event retention pruning
+    runs in the scoring round, not here.
     """
     refresh_miner_rates(self)
     purge_deregistered_hotkeys(self)
 
 
 def refresh_miner_rates(self: Validator) -> None:
-    """Pull all miner commitments and persist direction-level rate diffs.
-
-    Rate events matching the cached ``last_known_rates`` value are skipped.
-    Accepted events update the cache; deduped inserts also update the cache
-    so we don't retry the same blocked write on every subsequent poll.
-    """
     try:
         pairs = read_miner_commitments(self.subtensor, self.config.netuid)
     except Exception as e:
@@ -346,7 +285,6 @@ def refresh_miner_rates(self: Validator) -> None:
 
 
 def purge_deregistered_hotkeys(self: Validator) -> None:
-    """Drop rates/collateral/outcomes for hotkeys that left the metagraph."""
     current_hotkeys = set(self.metagraph.hotkeys)
     stale = {hk for (hk, _, _) in self.last_known_rates.keys()} - current_hotkeys
     if not stale:
@@ -356,16 +294,14 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
 
 
-# ─── Steps 6-8: Fulfillment confirm, extend, timeout enforce ────────────
-
-
 async def confirm_miner_fulfillments(
     self: Validator,
     tracker: SwapTracker,
     verifier: SwapVerifier,
     current_block: int,
 ) -> Set[int]:
-    """Verify FULFILLED swaps; returns IDs where provider was unreachable so enforce_swap_timeouts skips them."""
+    """Verify FULFILLED swaps and vote confirm. Returns swap IDs whose
+    provider was unreachable so the caller can skip them on timeout enforce."""
     uncertain: Set[int] = set()
     fulfilled = [s for s in tracker.get_fulfilled(current_block) if not tracker.is_voted(s.id)]
     if not fulfilled:
@@ -391,12 +327,8 @@ async def confirm_miner_fulfillments(
 
 
 def extend_fulfilled_near_timeout(self: Validator) -> None:
-    """Extend timeout for FULFILLED swaps where dest tx exists but isn't confirmed yet.
-
-    Mirrors reservation extension logic: when a swap is nearing timeout but the
-    miner has sent the dest funds (tx visible on-chain), vote to extend the
-    timeout so the transaction has time to confirm.
-    """
+    """Vote to extend timeout for FULFILLED swaps whose dest tx is visible
+    on-chain but not yet at min confirmations."""
     tracker: SwapTracker = self.swap_tracker
     current_block = self.block
 
@@ -407,7 +339,6 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
-        # Check if dest tx exists on-chain (even if unconfirmed)
         provider = self.chain_providers.get(swap.to_chain)
         if not provider or not swap.to_tx_hash:
             continue
@@ -424,15 +355,14 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             continue
 
         if tx_info is None:
-            continue  # dest tx not found — don't extend, let it time out
+            continue  # dest tx not found — let it time out
 
-        blocks_left = swap.timeout_block - current_block
         chain_def = provider.get_chain()
         log_on_change(
             f'dest_confs:{swap.id}',
             tx_info.confirmations,
             f'{ctx}: {tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations, '
-            f'{blocks_left} blocks until timeout',
+            f'{swap.timeout_block - current_block} blocks until timeout',
         )
 
         try:
