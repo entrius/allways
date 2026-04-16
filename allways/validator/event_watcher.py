@@ -226,6 +226,17 @@ class BusyEvent:
     block: int
 
 
+@dataclass
+class ActiveEvent:
+    """Transition of a miner's on-chain active flag. Replayed per-block so
+    scoring judges active state as-of each block in the window, not as-of
+    the scoring moment."""
+
+    hotkey: str
+    active: bool
+    block: int
+
+
 MAX_BLOCKS_PER_SYNC = 50
 
 
@@ -254,6 +265,8 @@ class ContractEventWatcher:
         self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
         self.open_swap_count: Dict[str, int] = {}
         self.busy_events: List[BusyEvent] = []
+        self.active_events: List[ActiveEvent] = []
+        self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
@@ -303,6 +316,30 @@ class ContractEventWatcher:
                 break
             counts[ev.hotkey] = counts.get(ev.hotkey, 0) + ev.delta
         return {hk: c for hk, c in counts.items() if c > 0}
+
+    def get_active_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
+        """Active-flag transitions in ``(start_block, end_block]``, oldest first."""
+        out: List[dict] = []
+        for ev in self.active_events:
+            if ev.block <= start_block:
+                continue
+            if ev.block > end_block:
+                break
+            out.append({'hotkey': ev.hotkey, 'active': ev.active, 'block': ev.block})
+        return out
+
+    def get_active_miners_at(self, block: int) -> Set[str]:
+        """Active set at ``block``, reconstructed by replaying every active
+        transition at or before ``block``. The bootstrap seeds an event at
+        ``cursor`` for each hotkey the contract reports as active at cold
+        start, so pre-cursor state is anchored the same way the collateral
+        snapshot is."""
+        latest: Dict[str, bool] = {}
+        for ev in self.active_events:
+            if ev.block > block:
+                break
+            latest[ev.hotkey] = ev.active
+        return {hk for hk, is_active in latest.items() if is_active}
 
     # ─── Sync loop ──────────────────────────────────────────────────────
 
@@ -358,6 +395,13 @@ class ContractEventWatcher:
                 f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
             )
         self.cursor = max(0, current_block - SCORING_WINDOW_BLOCKS)
+        # Anchor the historical active set at the cursor so scoring sees the
+        # bootstrap state at window_start. Subsequent MinerActivated events
+        # replayed during sync_to apply on top.
+        for hotkey in list(self.active_miners):
+            event = ActiveEvent(hotkey=hotkey, active=True, block=self.cursor)
+            self.active_events.append(event)
+            self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
@@ -451,10 +495,8 @@ class ContractEventWatcher:
             hotkey = values.get('miner', '')
             if not hotkey:
                 return
-            if values.get('active'):
-                self.active_miners.add(hotkey)
-            else:
-                self.active_miners.discard(hotkey)
+            active = bool(values.get('active'))
+            self.record_active_transition(block_num, hotkey, active)
         elif name == 'ConfigUpdated':
             if values.get('key') == 'min_collateral':
                 try:
@@ -487,6 +529,23 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+
+    def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
+        """Apply an on-chain active-flag transition to both the current-state
+        snapshot and the historical event log. A no-op if the flag already
+        matches — duplicate MinerActivated emissions don't pollute the log."""
+        if not hotkey:
+            return
+        currently_active = hotkey in self.active_miners
+        if currently_active == active:
+            return
+        if active:
+            self.active_miners.add(hotkey)
+        else:
+            self.active_miners.discard(hotkey)
+        event = ActiveEvent(hotkey=hotkey, active=active, block=block_num)
+        self.active_events.append(event)
+        self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
 
     def apply_busy_delta(self, block_num: int, hotkey: str, delta: int) -> None:
         """Apply a ±1 transition. Drops any -1 with no matching prior +1
@@ -540,3 +599,17 @@ class ContractEventWatcher:
         if self.busy_events:
             open_now = {hk for hk, c in self.open_swap_count.items() if c > 0}
             self.busy_events = [ev for ev in self.busy_events if ev.block >= cutoff or ev.hotkey in open_now]
+        if self.active_events:
+            latest_per_hotkey: Dict[str, ActiveEvent] = {}
+            for ev in self.active_events:
+                latest_per_hotkey[ev.hotkey] = ev
+            self.active_events = [
+                ev for ev in self.active_events if ev.block >= cutoff or latest_per_hotkey.get(ev.hotkey) is ev
+            ]
+            for hotkey, events in list(self.active_events_by_hotkey.items()):
+                latest = events[-1] if events else None
+                pruned = [ev for ev in events if ev.block >= cutoff or ev is latest]
+                if pruned:
+                    self.active_events_by_hotkey[hotkey] = pruned
+                else:
+                    del self.active_events_by_hotkey[hotkey]
