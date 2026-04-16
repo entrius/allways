@@ -639,8 +639,12 @@ def swap_now_command(
     # Step 5: Enter receive address
     receive_address = receive_address_opt or click.prompt(f'Your {to_chain.upper()} receive address')
     to_provider = chain_providers.get(to_chain)
-    if to_provider and hasattr(to_provider, 'is_valid_address') and not to_provider.is_valid_address(receive_address):
-        console.print(f'[yellow]Warning: address may not be valid for {to_chain.upper()}[/yellow]')
+    if not to_provider:
+        console.print(f'[red]No chain provider for {to_chain.upper()}[/red]')
+        return
+    if not to_provider.is_valid_address(receive_address):
+        console.print(f'[red]Invalid {to_chain.upper()} address: {receive_address}[/red]')
+        return
 
     # Step 6: Source address (use public key — no password needed yet)
     if from_address_opt:
