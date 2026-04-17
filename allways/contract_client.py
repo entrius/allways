@@ -73,6 +73,7 @@ CONTRACT_SELECTORS = {
     'claim_slash': bytes.fromhex('cf3c3dd9'),
     'deactivate': bytes.fromhex('339db2a5'),
     'vote_activate': bytes.fromhex('00088a2d'),
+    'vote_deactivate': bytes.fromhex('dac13f65'),
     'transfer_ownership': bytes.fromhex('107e33ea'),
     'add_validator': bytes.fromhex('82f48fa6'),
     'remove_validator': bytes.fromhex('62135acd'),
@@ -152,6 +153,7 @@ CONTRACT_ARG_TYPES = {
         ('rate', 'str'),
     ],
     'vote_activate': [('miner', 'AccountId')],
+    'vote_deactivate': [('miner', 'AccountId')],
     'mark_fulfilled': [('swap_id', 'u64'), ('to_tx_hash', 'str'), ('to_tx_block', 'u32'), ('to_amount', 'u128')],
     'confirm_swap': [('swap_id', 'u64')],
     'timeout_swap': [('swap_id', 'u64')],
@@ -1076,6 +1078,15 @@ class AllwaysContractClient:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('vote_activate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
         bt.logging.info(f'Vote activate for miner {miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def vote_deactivate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
+        """Vote to deactivate a miner that has fallen below the collateral
+        floor. Validator-quorum gated; contract rejects unless
+        ``collateral < min_collateral``."""
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('vote_deactivate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
+        bt.logging.info(f'Vote deactivate for miner {miner_hotkey}: {tx_hash}')
         return tx_hash
 
     def mark_fulfilled(
