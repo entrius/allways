@@ -14,61 +14,23 @@ remediation path.
 from __future__ import annotations
 
 import json
-import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
-from substrateinterface.utils.ss58 import ss58_encode
 
 from allways.constants import SCORING_WINDOW_BLOCKS
+from allways.utils.scale import (
+    decode_account_id,
+    decode_bool,
+    decode_string,
+    decode_u32,
+    decode_u64,
+    decode_u128,
+    strip_hex_prefix,
+)
 from allways.validator.state_store import ValidatorStateStore
-
-SS58_PREFIX = 42
-
-
-# ─── SCALE field decoders (ported from alw-utils watch_contract_events) ─────
-
-
-def decode_u32(data: bytes, offset: int) -> Tuple[int, int]:
-    return struct.unpack_from('<I', data, offset)[0], offset + 4
-
-
-def decode_u64(data: bytes, offset: int) -> Tuple[int, int]:
-    return struct.unpack_from('<Q', data, offset)[0], offset + 8
-
-
-def decode_u128(data: bytes, offset: int) -> Tuple[int, int]:
-    lo = struct.unpack_from('<Q', data, offset)[0]
-    hi = struct.unpack_from('<Q', data, offset + 8)[0]
-    return lo + (hi << 64), offset + 16
-
-
-def decode_bool(data: bytes, offset: int) -> Tuple[bool, int]:
-    return data[offset] != 0, offset + 1
-
-
-def decode_account_id(data: bytes, offset: int) -> Tuple[str, int]:
-    raw = data[offset : offset + 32]
-    return ss58_encode(raw, SS58_PREFIX), offset + 32
-
-
-def decode_string(data: bytes, offset: int) -> Tuple[str, int]:
-    first = data[offset]
-    mode = first & 0x03
-    if mode == 0:
-        str_len = first >> 2
-        offset += 1
-    elif mode == 1:
-        str_len = (data[offset] | (data[offset + 1] << 8)) >> 2
-        offset += 2
-    else:
-        str_len = (data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)) >> 2
-        offset += 4
-    s = data[offset : offset + str_len].decode('utf-8', errors='replace')
-    return s, offset + str_len
-
 
 DATA_DECODERS = {
     'u32': decode_u32,
@@ -81,11 +43,11 @@ DATA_DECODERS = {
 
 
 def topic_account_id(topic_bytes: bytes) -> str:
-    return ss58_encode(topic_bytes[:32], SS58_PREFIX)
+    return decode_account_id(topic_bytes, 0)[0]
 
 
 def topic_u64(topic_bytes: bytes) -> int:
-    return struct.unpack_from('<Q', topic_bytes, 0)[0]
+    return decode_u64(topic_bytes, 0)[0]
 
 
 def topic_bool(topic_bytes: bytes) -> bool:
@@ -196,9 +158,8 @@ def to_bytes(val: Any) -> bytes:
     if isinstance(val, bytes):
         return val
     if isinstance(val, str):
-        s = val.replace('0x', '')
         try:
-            return bytes.fromhex(s)
+            return bytes.fromhex(strip_hex_prefix(val))
         except ValueError:
             return val.encode('utf-8')
     if isinstance(val, (list, tuple)):
