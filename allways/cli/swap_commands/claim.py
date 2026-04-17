@@ -3,7 +3,7 @@
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading
+from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, print_contract_error
 from allways.contract_client import ContractError
 
 
@@ -26,7 +26,7 @@ def claim_command(swap_id: int, yes: bool):
     try:
         pending_rao = client.get_pending_slash(swap_id)
     except ContractError as e:
-        console.print(f'[red]Failed to read pending slash: {e}[/red]')
+        print_contract_error('Failed to read pending slash', e)
         return
 
     if pending_rao == 0:
@@ -46,4 +46,4 @@ def claim_command(swap_id: int, yes: bool):
             client.claim_slash(wallet=wallet, swap_id=swap_id)
         console.print(f'[green]Successfully claimed {from_rao(pending_rao):.4f} TAO from swap #{swap_id}![/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to claim slash: {e}[/red]\n')
+        print_contract_error('Failed to claim slash', e)
