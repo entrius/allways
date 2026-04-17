@@ -66,9 +66,8 @@ mod allways_swap_manager {
         reservation_from_amount: Mapping<AccountId, Balance>,
         reservation_to_amount: Mapping<AccountId, Balance>,
 
-        // Cooldown strike tracking (lazy eval)
-        address_strike_count: Mapping<String, u8>,
-        address_last_expired: Mapping<String, u32>,
+        // Cooldown strike tracking (lazy eval) — (strike_count, last_expired_block)
+        address_cooldown: Mapping<String, (u8, u32)>,
         // Financials
         accumulated_fees: Balance,
         total_recycled_fees: Balance,
@@ -305,8 +304,7 @@ mod allways_swap_manager {
                 reservation_from_amount: Mapping::default(),
                 reservation_to_amount: Mapping::default(),
 
-                address_strike_count: Mapping::default(),
-                address_last_expired: Mapping::default(),
+                address_cooldown: Mapping::default(),
                 accumulated_fees: 0,
                 total_recycled_fees: 0,
                 pending_slashes: Mapping::default(),
@@ -449,9 +447,8 @@ mod allways_swap_manager {
             // Lazy strike: expired confirmed reservation -> record strike
             if reserved_until > 0 {
                 if let Some(expired_addr) = self.reservation_from_addr.get(miner) {
-                    let strikes = self.address_strike_count.get(&expired_addr).unwrap_or(0);
-                    self.address_strike_count.insert(&expired_addr, &strikes.saturating_add(1));
-                    self.address_last_expired.insert(&expired_addr, &current_block);
+                    let (strikes, _) = self.address_cooldown.get(&expired_addr).unwrap_or((0, 0));
+                    self.address_cooldown.insert(&expired_addr, &(strikes.saturating_add(1), current_block));
                 }
                 self.clear_confirmed_reservation(miner);
                 self.env().emit_event(ReservationCancelled { miner });
@@ -796,8 +793,7 @@ mod allways_swap_manager {
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
 
-                self.address_strike_count.remove(&swap.user_from_address);
-                self.address_last_expired.remove(&swap.user_from_address);
+                self.address_cooldown.remove(&swap.user_from_address);
 
                 self.env().emit_event(SwapCompleted {
                     swap_id,
@@ -1380,10 +1376,7 @@ mod allways_swap_manager {
 
         #[ink(message)]
         pub fn get_cooldown(&self, from_address: String) -> (u8, u32) {
-            (
-                self.address_strike_count.get(&from_address).unwrap_or(0),
-                self.address_last_expired.get(&from_address).unwrap_or(0),
-            )
+            self.address_cooldown.get(&from_address).unwrap_or((0, 0))
         }
     }
 }
