@@ -272,9 +272,8 @@ CONTRACT_ERROR_VARIANTS = {
     25: ('PendingConflict', 'A pending vote exists for a different request'),
     26: ('SameChain', 'Source and destination chains must be different'),
     27: ('SystemHalted', 'System is halted — no new activity allowed'),
-    28: ('SufficientCollateral', 'Miner collateral is at or above floor; vote_deactivate not applicable'),
-    29: ('HasActiveSwap', 'Cannot deactivate: miner has an active swap in progress'),
-    30: ('CurrentlyReserved', 'Cannot deactivate: miner is currently reserved'),
+    28: ('HasActiveSwap', 'Cannot deactivate: miner has an active swap in progress'),
+    29: ('CurrentlyReserved', 'Cannot deactivate: miner is currently reserved'),
 }
 
 
@@ -1081,9 +1080,9 @@ class AllwaysContractClient:
         return tx_hash
 
     def vote_deactivate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        """Vote to deactivate a miner that has fallen below the collateral
-        floor. Validator-quorum gated; contract rejects unless
-        ``collateral < min_collateral``."""
+        """Vote to deactivate a miner. Validator-quorum only — the contract
+        trusts the quorum and applies no collateral/status gate beyond the
+        miner currently being active."""
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('vote_deactivate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
         bt.logging.info(f'Vote deactivate for miner {miner_hotkey}: {tx_hash}')
