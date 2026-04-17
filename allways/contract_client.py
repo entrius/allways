@@ -90,8 +90,7 @@ CONTRACT_SELECTORS = {
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
     'get_miner_has_active_swap': bytes.fromhex('1d07dec1'),
-    # Placeholder; updated from regenerated metadata in the final pass.
-    'get_miner_snapshot': bytes.fromhex('00000000'),
+    'get_miner_snapshot': bytes.fromhex('ffd9e2e6'),
     'is_validator': bytes.fromhex('f844fc5f'),
     'get_next_swap_id': bytes.fromhex('d80244d2'),
     'get_fulfillment_timeout': bytes.fromhex('e820174a'),

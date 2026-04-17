@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0xa6e7bc76bc200d3fe120bf76ebe3f046a8044f3ea7ba24dc6d4a5cc60b28983c",
+    "hash": "0x68e1be2b905df637e25accde78726d1fab806718976b37349cb9c13e5371d8ed",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -109,7 +109,7 @@
             "ink_primitives",
             "ConstructorResult"
           ],
-          "type": 95
+          "type": 68
         },
         "selector": "0x9bae9d5e"
       }
@@ -138,13 +138,13 @@
         "displayName": [
           "ChainExtension"
         ],
-        "type": 114
+        "type": 88
       },
       "hash": {
         "displayName": [
           "Hash"
         ],
-        "type": 61
+        "type": 43
       },
       "maxEventTopics": 4,
       "staticBufferSize": 16384,
@@ -893,7 +893,7 @@
                 "types",
                 "VoteType"
               ],
-              "type": 113
+              "type": 87
             }
           },
           {
@@ -921,7 +921,7 @@
         "ink",
         "LangError"
       ],
-      "type": 96
+      "type": 69
     },
     "messages": [
       {
@@ -936,7 +936,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x31b3f423"
       },
@@ -962,7 +962,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xe098e62d"
       },
@@ -974,7 +974,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 61
+              "type": 43
             }
           },
           {
@@ -1051,7 +1051,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xff3b86a0"
       },
@@ -1077,7 +1077,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xc4cb59cb"
       },
@@ -1089,7 +1089,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 61
+              "type": 43
             }
           },
           {
@@ -1121,7 +1121,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xf668d950"
       },
@@ -1133,7 +1133,7 @@
               "displayName": [
                 "Hash"
               ],
-              "type": 61
+              "type": 43
             }
           },
           {
@@ -1273,7 +1273,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x90c444d8"
       },
@@ -1328,7 +1328,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x2dbeeb8d"
       },
@@ -1356,7 +1356,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xd0065335"
       },
@@ -1384,7 +1384,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x5325f39c"
       },
@@ -1414,7 +1414,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x0fb2d2e5"
       },
@@ -1442,7 +1442,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xcf3c3dd9"
       },
@@ -1460,7 +1460,9 @@
         ],
         "default": false,
         "docs": [
-          " Deactivate a miner — only the miner themselves can deactivate."
+          " Deactivate a miner — only the miner themselves can deactivate, and only",
+          " when idle. Blocks mid-swap or while reserved so miners cannot dodge",
+          " in-flight obligations via self-deactivation."
         ],
         "label": "deactivate",
         "mutates": true,
@@ -1470,7 +1472,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x339db2a5"
       },
@@ -1498,9 +1500,48 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x00088a2d"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Vote to deactivate a miner — validator-only, quorum required.",
+          "",
+          " Trust-based: on quorum the miner's active flag is cleared, full stop.",
+          " No collateral, status, or balance gates beyond \"currently active\".",
+          " Deliberately unconstrained so the validator consensus can cover any",
+          " remediation case (min_collateral raise, protocol abuse, operational",
+          " emergencies). Abuse protection comes from the quorum itself — the",
+          " same trust envelope as `vote_activate` / `vote_reserve`.",
+          "",
+          " Not blocked mid-swap: the existing swap lifecycle proceeds via its",
+          " persisted assignment. Miner cannot re-activate while below the",
+          " collateral floor because `vote_activate` still checks it."
+        ],
+        "label": "vote_deactivate",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 70
+        },
+        "selector": "0xdac13f65"
       },
       {
         "args": [
@@ -1524,7 +1565,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x107e33ea"
       },
@@ -1550,7 +1591,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x82f48fa6"
       },
@@ -1576,7 +1617,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x62135acd"
       },
@@ -1602,7 +1643,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xe9cb777b"
       },
@@ -1628,7 +1669,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xb3f48b5e"
       },
@@ -1654,7 +1695,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xb7fae7fd"
       },
@@ -1680,7 +1721,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0xc0d8ec47"
       },
@@ -1706,7 +1747,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x800e1573"
       },
@@ -1732,7 +1773,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x3e868f32"
       },
@@ -1758,7 +1799,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x50dfe685"
       },
@@ -1784,7 +1825,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x3143d9e3"
       },
@@ -1810,7 +1851,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x8fe1c210"
       },
@@ -1826,7 +1867,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 97
+          "type": 70
         },
         "selector": "0x97756ea1"
       },
@@ -1852,7 +1893,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 100
+          "type": 73
         },
         "selector": "0xa35f1bbf"
       },
@@ -1878,7 +1919,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0xf48343ad"
       },
@@ -1904,7 +1945,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 103
+          "type": 76
         },
         "selector": "0x25652be8"
       },
@@ -1930,35 +1971,9 @@
             "ink",
             "MessageResult"
           ],
-          "type": 103
+          "type": 76
         },
         "selector": "0x1d07dec1"
-      },
-      {
-        "args": [
-          {
-            "label": "miner",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          }
-        ],
-        "default": false,
-        "docs": [],
-        "label": "get_miner_last_resolved_block",
-        "mutates": false,
-        "payable": false,
-        "returnType": {
-          "displayName": [
-            "ink",
-            "MessageResult"
-          ],
-          "type": 104
-        },
-        "selector": "0xa4b68d1f"
       },
       {
         "args": [
@@ -1982,7 +1997,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 103
+          "type": 76
         },
         "selector": "0xf844fc5f"
       },
@@ -1998,7 +2013,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 105
+          "type": 77
         },
         "selector": "0xd80244d2"
       },
@@ -2014,7 +2029,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0xe820174a"
       },
@@ -2030,7 +2045,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0x233a7832"
       },
@@ -2046,25 +2061,9 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0x54945717"
-      },
-      {
-        "args": [],
-        "default": false,
-        "docs": [],
-        "label": "get_required_votes_count",
-        "mutates": false,
-        "payable": false,
-        "returnType": {
-          "displayName": [
-            "ink",
-            "MessageResult"
-          ],
-          "type": 104
-        },
-        "selector": "0xfe07130d"
       },
       {
         "args": [],
@@ -2078,7 +2077,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0xbf3b5d4e"
       },
@@ -2094,7 +2093,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0x9910e939"
       },
@@ -2110,7 +2109,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 79
         },
         "selector": "0x07fcd0b1"
       },
@@ -2126,7 +2125,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 103
+          "type": 76
         },
         "selector": "0xec540804"
       },
@@ -2142,7 +2141,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 106
+          "type": 79
         },
         "selector": "0x3847e06c"
       },
@@ -2168,7 +2167,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0x48c78c4a"
       },
@@ -2184,7 +2183,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0xfca7daa4"
       },
@@ -2200,7 +2199,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 102
+          "type": 75
         },
         "selector": "0x97826e04"
       },
@@ -2226,7 +2225,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0xd5ed7150"
       },
@@ -2242,7 +2241,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0xf7e24a31"
       },
@@ -2268,9 +2267,40 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0x361acc31"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Composite miner read: (collateral, active, has_active_swap,",
+          " reserved_until, deactivation_block). One RPC for the CLI views",
+          " that otherwise make four to six separate contract reads per",
+          " render."
+        ],
+        "label": "get_miner_snapshot",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 80
+        },
+        "selector": "0xffd9e2e6"
       },
       {
         "args": [],
@@ -2284,7 +2314,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 107
+          "type": 82
         },
         "selector": "0x2c283460"
       },
@@ -2300,7 +2330,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0xa30ab5c4"
       },
@@ -2317,33 +2347,12 @@
           }
         ],
         "default": false,
-        "docs": [],
-        "label": "get_activation_vote_count",
-        "mutates": false,
-        "payable": false,
-        "returnType": {
-          "displayName": [
-            "ink",
-            "MessageResult"
-          ],
-          "type": 104
-        },
-        "selector": "0x154595d0"
-      },
-      {
-        "args": [
-          {
-            "label": "miner",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          }
+        "docs": [
+          " Returns the reservation amounts (tao, from, to) if one exists.",
+          " Callers that also need `reserved_until` can query",
+          " `get_miner_reserved_until` separately — it's a cheap single-field",
+          " read on the same struct."
         ],
-        "default": false,
-        "docs": [],
         "label": "get_reservation_data",
         "mutates": false,
         "payable": false,
@@ -2352,7 +2361,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 108
+          "type": 83
         },
         "selector": "0x79fe2717"
       },
@@ -2378,35 +2387,9 @@
             "ink",
             "MessageResult"
           ],
-          "type": 104
+          "type": 78
         },
         "selector": "0x3781315a"
-      },
-      {
-        "args": [
-          {
-            "label": "miner",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          }
-        ],
-        "default": false,
-        "docs": [],
-        "label": "get_extend_vote_count",
-        "mutates": false,
-        "payable": false,
-        "returnType": {
-          "displayName": [
-            "ink",
-            "MessageResult"
-          ],
-          "type": 104
-        },
-        "selector": "0x24fa0aae"
       },
       {
         "args": [
@@ -2430,7 +2413,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 111
+          "type": 86
         },
         "selector": "0x19a837c6"
       }
@@ -2801,72 +2784,12 @@
                 "root": {
                   "layout": {
                     "leaf": {
-                      "key": "0xe9ec6cd5",
-                      "ty": 5
-                    }
-                  },
-                  "root_key": "0xe9ec6cd5",
-                  "ty": 18
-                }
-              },
-              "name": "swap_confirm_votes"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xaf897260",
-                      "ty": 3
-                    }
-                  },
-                  "root_key": "0xaf897260",
-                  "ty": 22
-                }
-              },
-              "name": "swap_confirm_vote_count"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xc6e30f20",
-                      "ty": 5
-                    }
-                  },
-                  "root_key": "0xc6e30f20",
-                  "ty": 25
-                }
-              },
-              "name": "swap_timeout_votes"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xbde6b9bf",
-                      "ty": 3
-                    }
-                  },
-                  "root_key": "0xbde6b9bf",
-                  "ty": 28
-                }
-              },
-              "name": "swap_timeout_vote_count"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
                       "key": "0xe47028c4",
                       "ty": 5
                     }
                   },
                   "root_key": "0xe47028c4",
-                  "ty": 31
+                  "ty": 18
                 }
               },
               "name": "used_from_tx"
@@ -2881,7 +2804,7 @@
                     }
                   },
                   "root_key": "0xf62525e8",
-                  "ty": 34
+                  "ty": 21
                 }
               },
               "name": "collateral"
@@ -2896,7 +2819,7 @@
                     }
                   },
                   "root_key": "0x67d295fa",
-                  "ty": 37
+                  "ty": 24
                 }
               },
               "name": "miner_active"
@@ -2911,40 +2834,10 @@
                     }
                   },
                   "root_key": "0x236f4565",
-                  "ty": 40
+                  "ty": 27
                 }
               },
               "name": "miner_has_active_swap"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0x6ff1c750",
-                      "ty": 3
-                    }
-                  },
-                  "root_key": "0x6ff1c750",
-                  "ty": 43
-                }
-              },
-              "name": "miner_reserved_until"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0x80e900bc",
-                      "ty": 3
-                    }
-                  },
-                  "root_key": "0x80e900bc",
-                  "ty": 46
-                }
-              },
-              "name": "miner_last_resolved_block"
             },
             {
               "layout": {
@@ -2956,7 +2849,7 @@
                     }
                   },
                   "root_key": "0x8e2b6134",
-                  "ty": 49
+                  "ty": 30
                 }
               },
               "name": "miner_deactivation_block"
@@ -2980,7 +2873,7 @@
                     }
                   },
                   "root_key": "0x26e30584",
-                  "ty": 52
+                  "ty": 33
                 }
               },
               "name": "request_votes"
@@ -2995,7 +2888,7 @@
                     }
                   },
                   "root_key": "0xd6c62dcd",
-                  "ty": 55
+                  "ty": 37
                 }
               },
               "name": "request_vote_count"
@@ -3010,7 +2903,7 @@
                     }
                   },
                   "root_key": "0x681b05e3",
-                  "ty": 58
+                  "ty": 40
                 }
               },
               "name": "request_created"
@@ -3021,11 +2914,11 @@
                   "layout": {
                     "leaf": {
                       "key": "0x57f4431e",
-                      "ty": 61
+                      "ty": 43
                     }
                   },
                   "root_key": "0x57f4431e",
-                  "ty": 62
+                  "ty": 44
                 }
               },
               "name": "request_hash"
@@ -3040,7 +2933,7 @@
                     }
                   },
                   "root_key": "0x7467cc7b",
-                  "ty": 65
+                  "ty": 47
                 }
               },
               "name": "miner_active_request"
@@ -3050,105 +2943,119 @@
                 "root": {
                   "layout": {
                     "leaf": {
-                      "key": "0x278e3f4b",
-                      "ty": 61
+                      "key": "0xb0bed7f4",
+                      "ty": 11
                     }
                   },
-                  "root_key": "0x278e3f4b",
-                  "ty": 69
+                  "root_key": "0xb0bed7f4",
+                  "ty": 51
                 }
               },
-              "name": "reservation_hash"
+              "name": "pending_swap_votes"
             },
             {
               "layout": {
                 "root": {
                   "layout": {
-                    "leaf": {
-                      "key": "0x319fbf9f",
-                      "ty": 12
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 43
+                            }
+                          },
+                          "name": "hash"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 12
+                            }
+                          },
+                          "name": "from_addr"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 4
+                            }
+                          },
+                          "name": "tao_amount"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 4
+                            }
+                          },
+                          "name": "from_amount"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 4
+                            }
+                          },
+                          "name": "to_amount"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 3
+                            }
+                          },
+                          "name": "reserved_until"
+                        }
+                      ],
+                      "name": "Reservation"
                     }
                   },
-                  "root_key": "0x319fbf9f",
-                  "ty": 72
+                  "root_key": "0x834add48",
+                  "ty": 55
                 }
               },
-              "name": "reservation_from_addr"
+              "name": "reservations"
             },
             {
               "layout": {
                 "root": {
                   "layout": {
-                    "leaf": {
-                      "key": "0x696675ed",
-                      "ty": 4
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x049f2f6f",
+                              "ty": 2
+                            }
+                          },
+                          "name": "0"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x049f2f6f",
+                              "ty": 3
+                            }
+                          },
+                          "name": "1"
+                        }
+                      ],
+                      "name": "(A, B)"
                     }
                   },
-                  "root_key": "0x696675ed",
-                  "ty": 75
+                  "root_key": "0x049f2f6f",
+                  "ty": 59
                 }
               },
-              "name": "reservation_tao_amount"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xebb5923a",
-                      "ty": 4
-                    }
-                  },
-                  "root_key": "0xebb5923a",
-                  "ty": 78
-                }
-              },
-              "name": "reservation_from_amount"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xfbc51616",
-                      "ty": 4
-                    }
-                  },
-                  "root_key": "0xfbc51616",
-                  "ty": 81
-                }
-              },
-              "name": "reservation_to_amount"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0xebebacef",
-                      "ty": 2
-                    }
-                  },
-                  "root_key": "0xebebacef",
-                  "ty": 84
-                }
-              },
-              "name": "address_strike_count"
-            },
-            {
-              "layout": {
-                "root": {
-                  "layout": {
-                    "leaf": {
-                      "key": "0x936b90dc",
-                      "ty": 3
-                    }
-                  },
-                  "root_key": "0x936b90dc",
-                  "ty": 87
-                }
-              },
-              "name": "address_last_expired"
+              "name": "address_cooldown"
             },
             {
               "layout": {
@@ -3197,7 +3104,7 @@
                     }
                   },
                   "root_key": "0x0a1285bc",
-                  "ty": 90
+                  "ty": 63
                 }
               },
               "name": "pending_slashes"
@@ -3207,7 +3114,7 @@
         }
       },
       "root_key": "0x00000000",
-      "ty": 94
+      "ty": 67
     }
   },
   "types": [
@@ -3618,7 +3525,7 @@
         "params": [
           {
             "name": "K",
-            "type": 19
+            "type": 12
           },
           {
             "name": "V",
@@ -3626,7 +3533,7 @@
           },
           {
             "name": "KeyType",
-            "type": 20
+            "type": 19
           }
         ],
         "path": [
@@ -3641,11 +3548,23 @@
       "id": 19,
       "type": {
         "def": {
-          "tuple": [
-            11,
-            0
-          ]
-        }
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 20
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
       }
     },
     {
@@ -3656,322 +3575,19 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 21
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ResolverKey"
+          "ManualKey"
         ]
       }
     },
     {
       "id": 21,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 22,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 11
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 23
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 23,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 24
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 24,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 25,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 19
-          },
-          {
-            "name": "V",
-            "type": 5
-          },
-          {
-            "name": "KeyType",
-            "type": 26
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 26,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 27
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 27,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 28,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 11
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 29
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 29,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 30
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 30,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 31,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 12
-          },
-          {
-            "name": "V",
-            "type": 5
-          },
-          {
-            "name": "KeyType",
-            "type": 32
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 32,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 33
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 33,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 34,
       "type": {
         "def": {
           "composite": {}
@@ -3987,6 +3603,286 @@
           },
           {
             "name": "KeyType",
+            "type": 22
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 23
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 25
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 26
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 26,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 28
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 29
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 30,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 3
+          },
+          {
+            "name": "KeyType",
+            "type": 31
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 31,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 32
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 10
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 34
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
             "type": 35
           }
         ],
@@ -3996,6 +3892,17 @@
           "mapping",
           "Mapping"
         ]
+      }
+    },
+    {
+      "id": 34,
+      "type": {
+        "def": {
+          "tuple": [
+            11,
+            0
+          ]
+        }
       }
     },
     {
@@ -4049,11 +3956,11 @@
         "params": [
           {
             "name": "K",
-            "type": 0
+            "type": 11
           },
           {
             "name": "V",
-            "type": 5
+            "type": 3
           },
           {
             "name": "KeyType",
@@ -4119,11 +4026,11 @@
         "params": [
           {
             "name": "K",
-            "type": 0
+            "type": 11
           },
           {
             "name": "V",
-            "type": 5
+            "type": 3
           },
           {
             "name": "KeyType",
@@ -4184,27 +4091,19 @@
       "id": 43,
       "type": {
         "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 44
+          "composite": {
+            "fields": [
+              {
+                "type": 1,
+                "typeName": "[u8; 32]"
+              }
+            ]
           }
-        ],
+        },
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_primitives",
+          "types",
+          "Hash"
         ]
       }
     },
@@ -4216,18 +4115,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 8
+            "name": "K",
+            "type": 11
           },
           {
-            "name": "R",
+            "name": "V",
+            "type": 43
+          },
+          {
+            "name": "KeyType",
             "type": 45
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4239,14 +4143,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 10
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 46
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -4258,23 +4166,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 47
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4286,58 +4185,16 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 48
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 48,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 49,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
             "name": "K",
-            "type": 0
+            "type": 48
           },
           {
             "name": "V",
-            "type": 3
+            "type": 11
           },
           {
             "name": "KeyType",
-            "type": 50
+            "type": 49
           }
         ],
         "path": [
@@ -4349,7 +4206,18 @@
       }
     },
     {
-      "id": 50,
+      "id": 48,
+      "type": {
+        "def": {
+          "tuple": [
+            0,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "id": 49,
       "type": {
         "def": {
           "composite": {}
@@ -4361,7 +4229,7 @@
           },
           {
             "name": "R",
-            "type": 51
+            "type": 50
           }
         ],
         "path": [
@@ -4372,7 +4240,7 @@
       }
     },
     {
-      "id": 51,
+      "id": 50,
       "type": {
         "def": {
           "composite": {}
@@ -4391,7 +4259,7 @@
       }
     },
     {
-      "id": 52,
+      "id": 51,
       "type": {
         "def": {
           "composite": {}
@@ -4399,11 +4267,11 @@
         "params": [
           {
             "name": "K",
-            "type": 19
+            "type": 52
           },
           {
             "name": "V",
-            "type": 5
+            "type": 11
           },
           {
             "name": "KeyType",
@@ -4416,6 +4284,17 @@
           "mapping",
           "Mapping"
         ]
+      }
+    },
+    {
+      "id": 52,
+      "type": {
+        "def": {
+          "tuple": [
+            11,
+            2
+          ]
+        }
       }
     },
     {
@@ -4469,15 +4348,15 @@
         "params": [
           {
             "name": "K",
-            "type": 11
+            "type": 0
           },
           {
             "name": "V",
-            "type": 3
+            "type": 56
           },
           {
             "name": "KeyType",
-            "type": 56
+            "type": 57
           }
         ],
         "path": [
@@ -4492,22 +4371,45 @@
       "id": 56,
       "type": {
         "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 57
+          "composite": {
+            "fields": [
+              {
+                "name": "hash",
+                "type": 43,
+                "typeName": "Hash"
+              },
+              {
+                "name": "from_addr",
+                "type": 12,
+                "typeName": "String"
+              },
+              {
+                "name": "tao_amount",
+                "type": 4,
+                "typeName": "Balance"
+              },
+              {
+                "name": "from_amount",
+                "type": 4,
+                "typeName": "Balance"
+              },
+              {
+                "name": "to_amount",
+                "type": 4,
+                "typeName": "Balance"
+              },
+              {
+                "name": "reserved_until",
+                "type": 3,
+                "typeName": "u32"
+              }
+            ]
           }
-        ],
+        },
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "allways_swap_manager",
+          "types",
+          "Reservation"
         ]
       }
     },
@@ -4519,14 +4421,18 @@
         },
         "params": [
           {
-            "name": "ParentKey",
-            "type": 10
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 58
           }
         ],
         "path": [
           "ink_storage_traits",
           "impls",
-          "ManualKey"
+          "ResolverKey"
         ]
       }
     },
@@ -4538,23 +4444,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 11
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 59
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4566,18 +4463,23 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 8
+            "name": "K",
+            "type": 12
           },
           {
-            "name": "R",
+            "name": "V",
             "type": 60
+          },
+          {
+            "name": "KeyType",
+            "type": 61
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
@@ -4585,38 +4487,33 @@
       "id": 60,
       "type": {
         "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
+          "tuple": [
+            2,
+            3
+          ]
+        }
       }
     },
     {
       "id": 61,
       "type": {
         "def": {
-          "composite": {
-            "fields": [
-              {
-                "type": 1,
-                "typeName": "[u8; 32]"
-              }
-            ]
-          }
+          "composite": {}
         },
+        "params": [
+          {
+            "name": "L",
+            "type": 8
+          },
+          {
+            "name": "R",
+            "type": 62
+          }
+        ],
         "path": [
-          "ink_primitives",
-          "types",
-          "Hash"
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
         ]
       }
     },
@@ -4628,23 +4525,14 @@
         },
         "params": [
           {
-            "name": "K",
-            "type": 11
-          },
-          {
-            "name": "V",
-            "type": 61
-          },
-          {
-            "name": "KeyType",
-            "type": 63
+            "name": "ParentKey",
+            "type": 10
           }
         ],
         "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
         ]
       }
     },
@@ -4656,641 +4544,28 @@
         },
         "params": [
           {
-            "name": "L",
-            "type": 8
+            "name": "K",
+            "type": 11
           },
           {
-            "name": "R",
+            "name": "V",
             "type": 64
+          },
+          {
+            "name": "KeyType",
+            "type": 65
           }
         ],
         "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
         ]
       }
     },
     {
       "id": 64,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 65,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 66
-          },
-          {
-            "name": "V",
-            "type": 11
-          },
-          {
-            "name": "KeyType",
-            "type": 67
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 66,
-      "type": {
-        "def": {
-          "tuple": [
-            0,
-            2
-          ]
-        }
-      }
-    },
-    {
-      "id": 67,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 68
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 68,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 69,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 61
-          },
-          {
-            "name": "KeyType",
-            "type": 70
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 70,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 71
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 71,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 72,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 12
-          },
-          {
-            "name": "KeyType",
-            "type": 73
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 73,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 74
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 74,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 75,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
-            "type": 76
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 76,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 77
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 77,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 78,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
-            "type": 79
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 79,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 80
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 80,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 81,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 0
-          },
-          {
-            "name": "V",
-            "type": 4
-          },
-          {
-            "name": "KeyType",
-            "type": 82
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 82,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 83
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 83,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 84,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 12
-          },
-          {
-            "name": "V",
-            "type": 2
-          },
-          {
-            "name": "KeyType",
-            "type": 85
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 85,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 86
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 86,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 87,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 12
-          },
-          {
-            "name": "V",
-            "type": 3
-          },
-          {
-            "name": "KeyType",
-            "type": 88
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 88,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "L",
-            "type": 8
-          },
-          {
-            "name": "R",
-            "type": 89
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ResolverKey"
-        ]
-      }
-    },
-    {
-      "id": 89,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "ParentKey",
-            "type": 10
-          }
-        ],
-        "path": [
-          "ink_storage_traits",
-          "impls",
-          "ManualKey"
-        ]
-      }
-    },
-    {
-      "id": 90,
-      "type": {
-        "def": {
-          "composite": {}
-        },
-        "params": [
-          {
-            "name": "K",
-            "type": 11
-          },
-          {
-            "name": "V",
-            "type": 91
-          },
-          {
-            "name": "KeyType",
-            "type": 92
-          }
-        ],
-        "path": [
-          "ink_storage",
-          "lazy",
-          "mapping",
-          "Mapping"
-        ]
-      }
-    },
-    {
-      "id": 91,
       "type": {
         "def": {
           "tuple": [
@@ -5301,7 +4576,7 @@
       }
     },
     {
-      "id": 92,
+      "id": 65,
       "type": {
         "def": {
           "composite": {}
@@ -5313,7 +4588,7 @@
           },
           {
             "name": "R",
-            "type": 93
+            "type": 66
           }
         ],
         "path": [
@@ -5324,7 +4599,7 @@
       }
     },
     {
-      "id": 93,
+      "id": 66,
       "type": {
         "def": {
           "composite": {}
@@ -5343,7 +4618,7 @@
       }
     },
     {
-      "id": 94,
+      "id": 67,
       "type": {
         "def": {
           "composite": {
@@ -5419,58 +4694,28 @@
                 "typeName": "<Mapping<u64, SwapData> as::ink::storage::traits::AutoStorableHint\n<::ink::storage::traits::ManualKey<1645419819u32, ()>,>>::Type"
               },
               {
-                "name": "swap_confirm_votes",
-                "type": 18,
-                "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3580685545u32,\n()>,>>::Type"
-              },
-              {
-                "name": "swap_confirm_vote_count",
-                "type": 22,
-                "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<1618119087u32, ()>,>>::Type"
-              },
-              {
-                "name": "swap_timeout_votes",
-                "type": 25,
-                "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<537912262u32, ()\n>,>>::Type"
-              },
-              {
-                "name": "swap_timeout_vote_count",
-                "type": 28,
-                "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3216631485u32, ()>,>>::Type"
-              },
-              {
                 "name": "used_from_tx",
-                "type": 31,
+                "type": 18,
                 "typeName": "<Mapping<String, bool> as::ink::storage::traits::AutoStorableHint\n<::ink::storage::traits::ManualKey<3290984676u32, ()>,>>::Type"
               },
               {
                 "name": "collateral",
-                "type": 34,
+                "type": 21,
                 "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3894748662u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_active",
-                "type": 37,
+                "type": 24,
                 "typeName": "<Mapping<AccountId, bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<4204122727u32,\n()>,>>::Type"
               },
               {
                 "name": "miner_has_active_swap",
-                "type": 40,
+                "type": 27,
                 "typeName": "<Mapping<AccountId, bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1699049251u32,\n()>,>>::Type"
               },
               {
-                "name": "miner_reserved_until",
-                "type": 43,
-                "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1355280751u32,\n()>,>>::Type"
-              },
-              {
-                "name": "miner_last_resolved_block",
-                "type": 46,
-                "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3154176384u32,\n()>,>>::Type"
-              },
-              {
                 "name": "miner_deactivation_block",
-                "type": 49,
+                "type": 30,
                 "typeName": "<Mapping<AccountId, u32> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<878783374u32, ()\n>,>>::Type"
               },
               {
@@ -5480,63 +4725,43 @@
               },
               {
                 "name": "request_votes",
-                "type": 52,
+                "type": 33,
                 "typeName": "<Mapping<(u64, AccountId), bool> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2214978342u32,\n()>,>>::Type"
               },
               {
                 "name": "request_vote_count",
-                "type": 55,
+                "type": 37,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3442329302u32, ()>,>>::Type"
               },
               {
                 "name": "request_created",
-                "type": 58,
+                "type": 40,
                 "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<3808762728u32, ()>,>>::Type"
               },
               {
                 "name": "request_hash",
-                "type": 62,
+                "type": 44,
                 "typeName": "<Mapping<u64, Hash> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<507769943u32, ()>,>>::Type"
               },
               {
                 "name": "miner_active_request",
-                "type": 65,
+                "type": 47,
                 "typeName": "<Mapping<(AccountId, u8), u64> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2076993396u32,\n()>,>>::Type"
               },
               {
-                "name": "reservation_hash",
-                "type": 69,
-                "typeName": "<Mapping<AccountId, Hash> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1262456359u32,\n()>,>>::Type"
+                "name": "pending_swap_votes",
+                "type": 51,
+                "typeName": "<Mapping<(u64, u8), u64> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<4107779760u32,\n()>,>>::Type"
               },
               {
-                "name": "reservation_from_addr",
-                "type": 72,
-                "typeName": "<Mapping<AccountId, String> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2680135473u32,\n()>,>>::Type"
+                "name": "reservations",
+                "type": 55,
+                "typeName": "<Mapping<AccountId, Reservation> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1222462083u32,\n()>,>>::Type"
               },
               {
-                "name": "reservation_tao_amount",
-                "type": 75,
-                "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3983894121u32,\n()>,>>::Type"
-              },
-              {
-                "name": "reservation_from_amount",
-                "type": 78,
-                "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<982693355u32, ()\n>,>>::Type"
-              },
-              {
-                "name": "reservation_to_amount",
-                "type": 81,
-                "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<370591227u32, ()\n>,>>::Type"
-              },
-              {
-                "name": "address_strike_count",
-                "type": 84,
-                "typeName": "<Mapping<String, u8> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<4021087211u32, ()>,>>::Type"
-              },
-              {
-                "name": "address_last_expired",
-                "type": 87,
-                "typeName": "<Mapping<String, u32> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<3700452243u32, ()>,>>::Type"
+                "name": "address_cooldown",
+                "type": 59,
+                "typeName": "<Mapping<String, (u8, u32)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1865391876u32,\n()>,>>::Type"
               },
               {
                 "name": "accumulated_fees",
@@ -5550,7 +4775,7 @@
               },
               {
                 "name": "pending_slashes",
-                "type": 90,
+                "type": 63,
                 "typeName": "<Mapping<u64, (AccountId, Balance)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3162837514u32,\n()>,>>::Type"
               }
             ]
@@ -5564,7 +4789,7 @@
       }
     },
     {
-      "id": 95,
+      "id": 68,
       "type": {
         "def": {
           "variant": {
@@ -5581,7 +4806,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -5597,7 +4822,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -5606,7 +4831,7 @@
       }
     },
     {
-      "id": 96,
+      "id": 69,
       "type": {
         "def": {
           "variant": {
@@ -5625,7 +4850,7 @@
       }
     },
     {
-      "id": 97,
+      "id": 70,
       "type": {
         "def": {
           "variant": {
@@ -5633,7 +4858,7 @@
               {
                 "fields": [
                   {
-                    "type": 98
+                    "type": 71
                   }
                 ],
                 "index": 0,
@@ -5642,7 +4867,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -5654,11 +4879,11 @@
         "params": [
           {
             "name": "T",
-            "type": 98
+            "type": 71
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -5667,7 +4892,7 @@
       }
     },
     {
-      "id": 98,
+      "id": 71,
       "type": {
         "def": {
           "variant": {
@@ -5684,7 +4909,7 @@
               {
                 "fields": [
                   {
-                    "type": 99
+                    "type": 72
                   }
                 ],
                 "index": 1,
@@ -5700,7 +4925,7 @@
           },
           {
             "name": "E",
-            "type": 99
+            "type": 72
           }
         ],
         "path": [
@@ -5709,7 +4934,7 @@
       }
     },
     {
-      "id": 99,
+      "id": 72,
       "type": {
         "def": {
           "variant": {
@@ -5736,94 +4961,90 @@
               },
               {
                 "index": 5,
-                "name": "ZeroAmount"
-              },
-              {
-                "index": 6,
                 "name": "MinerNotActive"
               },
               {
-                "index": 7,
+                "index": 6,
                 "name": "MinerStillActive"
               },
               {
-                "index": 8,
+                "index": 7,
                 "name": "TransferFailed"
               },
               {
-                "index": 9,
+                "index": 8,
                 "name": "NotTimedOut"
               },
               {
-                "index": 10,
+                "index": 9,
                 "name": "NotAssignedMiner"
               },
               {
-                "index": 11,
+                "index": 10,
                 "name": "NotValidator"
               },
               {
-                "index": 12,
+                "index": 11,
                 "name": "DuplicateSourceTx"
               },
               {
-                "index": 13,
+                "index": 12,
                 "name": "InvalidAmount"
               },
               {
-                "index": 14,
+                "index": 13,
                 "name": "NoPendingSlash"
               },
               {
-                "index": 15,
+                "index": 14,
                 "name": "InputEmpty"
               },
               {
-                "index": 16,
+                "index": 15,
                 "name": "InputTooLong"
               },
               {
-                "index": 17,
+                "index": 16,
                 "name": "MinerHasActiveSwap"
               },
               {
-                "index": 18,
+                "index": 17,
                 "name": "WithdrawalCooldown"
               },
               {
-                "index": 19,
+                "index": 18,
                 "name": "AmountBelowMinimum"
               },
               {
-                "index": 20,
+                "index": 19,
                 "name": "AmountAboveMaximum"
               },
               {
-                "index": 21,
+                "index": 20,
                 "name": "MinerReserved"
               },
               {
-                "index": 22,
+                "index": 21,
                 "name": "NoReservation"
               },
               {
-                "index": 23,
+                "index": 22,
                 "name": "ExceedsMaxCollateral"
               },
               {
-                "index": 24,
+                "index": 23,
                 "name": "HashMismatch"
               },
               {
-                "index": 25,
+                "index": 24,
                 "name": "PendingConflict"
               },
               {
-                "index": 26,
+                "index": 25,
                 "name": "SameChain"
               },
               {
-                "index": 27,
+                "index": 26,
                 "name": "SystemHalted"
               }
             ]
@@ -5837,7 +5058,7 @@
       }
     },
     {
-      "id": 100,
+      "id": 73,
       "type": {
         "def": {
           "variant": {
@@ -5845,7 +5066,7 @@
               {
                 "fields": [
                   {
-                    "type": 101
+                    "type": 74
                   }
                 ],
                 "index": 0,
@@ -5854,7 +5075,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -5866,11 +5087,11 @@
         "params": [
           {
             "name": "T",
-            "type": 101
+            "type": 74
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -5879,7 +5100,7 @@
       }
     },
     {
-      "id": 101,
+      "id": 74,
       "type": {
         "def": {
           "variant": {
@@ -5912,7 +5133,7 @@
       }
     },
     {
-      "id": 102,
+      "id": 75,
       "type": {
         "def": {
           "variant": {
@@ -5929,7 +5150,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -5945,7 +5166,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -5954,7 +5175,7 @@
       }
     },
     {
-      "id": 103,
+      "id": 76,
       "type": {
         "def": {
           "variant": {
@@ -5971,7 +5192,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -5987,7 +5208,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -5996,49 +5217,7 @@
       }
     },
     {
-      "id": 104,
-      "type": {
-        "def": {
-          "variant": {
-            "variants": [
-              {
-                "fields": [
-                  {
-                    "type": 3
-                  }
-                ],
-                "index": 0,
-                "name": "Ok"
-              },
-              {
-                "fields": [
-                  {
-                    "type": 96
-                  }
-                ],
-                "index": 1,
-                "name": "Err"
-              }
-            ]
-          }
-        },
-        "params": [
-          {
-            "name": "T",
-            "type": 3
-          },
-          {
-            "name": "E",
-            "type": 96
-          }
-        ],
-        "path": [
-          "Result"
-        ]
-      }
-    },
-    {
-      "id": 105,
+      "id": 77,
       "type": {
         "def": {
           "variant": {
@@ -6055,7 +5234,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -6071,7 +5250,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -6080,7 +5259,49 @@
       }
     },
     {
-      "id": 106,
+      "id": 78,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 3
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 69
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 3
+          },
+          {
+            "name": "E",
+            "type": 69
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 79,
       "type": {
         "def": {
           "variant": {
@@ -6097,7 +5318,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -6113,7 +5334,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -6122,7 +5343,63 @@
       }
     },
     {
-      "id": 107,
+      "id": 80,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 81
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 69
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 81
+          },
+          {
+            "name": "E",
+            "type": 69
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 81,
+      "type": {
+        "def": {
+          "tuple": [
+            4,
+            5,
+            5,
+            3,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "id": 82,
       "type": {
         "def": {
           "variant": {
@@ -6139,7 +5416,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -6155,7 +5432,7 @@
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -6164,7 +5441,7 @@
       }
     },
     {
-      "id": 108,
+      "id": 83,
       "type": {
         "def": {
           "variant": {
@@ -6172,7 +5449,7 @@
               {
                 "fields": [
                   {
-                    "type": 109
+                    "type": 84
                   }
                 ],
                 "index": 0,
@@ -6181,7 +5458,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -6193,11 +5470,11 @@
         "params": [
           {
             "name": "T",
-            "type": 109
+            "type": 84
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -6206,7 +5483,7 @@
       }
     },
     {
-      "id": 109,
+      "id": 84,
       "type": {
         "def": {
           "variant": {
@@ -6218,7 +5495,7 @@
               {
                 "fields": [
                   {
-                    "type": 110
+                    "type": 85
                   }
                 ],
                 "index": 1,
@@ -6230,7 +5507,7 @@
         "params": [
           {
             "name": "T",
-            "type": 110
+            "type": 85
           }
         ],
         "path": [
@@ -6239,21 +5516,19 @@
       }
     },
     {
-      "id": 110,
+      "id": 85,
       "type": {
         "def": {
           "tuple": [
-            12,
             4,
             4,
-            4,
-            3
+            4
           ]
         }
       }
     },
     {
-      "id": 111,
+      "id": 86,
       "type": {
         "def": {
           "variant": {
@@ -6261,7 +5536,7 @@
               {
                 "fields": [
                   {
-                    "type": 112
+                    "type": 60
                   }
                 ],
                 "index": 0,
@@ -6270,7 +5545,7 @@
               {
                 "fields": [
                   {
-                    "type": 96
+                    "type": 69
                   }
                 ],
                 "index": 1,
@@ -6282,11 +5557,11 @@
         "params": [
           {
             "name": "T",
-            "type": 112
+            "type": 60
           },
           {
             "name": "E",
-            "type": 96
+            "type": 69
           }
         ],
         "path": [
@@ -6295,18 +5570,7 @@
       }
     },
     {
-      "id": 112,
-      "type": {
-        "def": {
-          "tuple": [
-            2,
-            3
-          ]
-        }
-      }
-    },
-    {
-      "id": 113,
+      "id": 87,
       "type": {
         "def": {
           "variant": {
@@ -6334,7 +5598,7 @@
       }
     },
     {
-      "id": 114,
+      "id": 88,
       "type": {
         "def": {
           "variant": {}
