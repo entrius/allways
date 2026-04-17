@@ -20,8 +20,6 @@ from allways.chain_providers import create_chain_providers
 from allways.constants import (
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
     FEE_DIVISOR,
-    MIN_COLLATERAL_TAO,
-    TAO_TO_RAO,
 )
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
@@ -76,18 +74,16 @@ class Validator(BaseValidatorNeuron):
         # extension round is open.
         self.extend_reservation_voted_at: dict[tuple[str, str], int] = {}
 
-        # Event-sourced miner state. Replaces the old _poll_collaterals +
-        # _refresh_min_collateral polling loops. ``sync_to(current_block)``
-        # runs each forward step; scoring reads collateral/active/min from
-        # the watcher's in-memory dicts.
-        fallback_min_collateral = int(MIN_COLLATERAL_TAO * TAO_TO_RAO)
+        # Event-sourced miner state. ``sync_to(current_block)`` runs each
+        # forward step; scoring reads the active set from the watcher's
+        # in-memory dicts and trusts the contract's active flag for all
+        # collateral-floor invariants.
         metadata_path = Path(__file__).resolve().parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
         self.event_watcher = ContractEventWatcher(
             substrate=self.subtensor.substrate,
             contract_address=self.contract_client.contract_address,
             metadata_path=metadata_path,
             state_store=self.state_store,
-            default_min_collateral=fallback_min_collateral,
         )
         self.event_watcher.initialize(
             current_block=self.block,

@@ -73,32 +73,6 @@ class TestRegistryLoad:
             assert expected in names, f'missing event {expected}'
 
 
-class TestCollateralDelta:
-    def test_posted_increments_collateral(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 500_000_000})
-        assert w.collateral['hk_a'] == 500_000_000
-        events = w.get_collateral_events_in_range(0, 1000)
-        assert len(events) == 1
-        assert events[0]['block'] == 100
-        w.state_store.close()
-
-    def test_withdrawn_decrements(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 1_000})
-        w.apply_event(200, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 300})
-        assert w.collateral['hk_a'] == 700
-        w.state_store.close()
-
-    def test_slashed_decrements_and_floors_at_zero(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 500})
-        w.apply_event(200, 'CollateralSlashed', {'miner': 'hk_a', 'amount': 1_000})
-        # Slashed for more than we have — floor at 0
-        assert w.collateral['hk_a'] == 0
-        w.state_store.close()
-
-
 class TestActiveFlag:
     def test_activation_adds_to_set(self, tmp_path: Path):
         w = make_watcher(tmp_path)
@@ -106,17 +80,6 @@ class TestActiveFlag:
         assert 'hk_a' in w.active_miners
         w.apply_event(200, 'MinerActivated', {'miner': 'hk_a', 'active': False})
         assert 'hk_a' not in w.active_miners
-        w.state_store.close()
-
-
-class TestConfigUpdated:
-    def test_min_collateral_config_updates_field(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'ConfigUpdated', {'key': 'min_collateral', 'value': 250_000_000})
-        assert w.min_collateral == 250_000_000
-        # Unrelated config keys do not affect min_collateral
-        w.apply_event(200, 'ConfigUpdated', {'key': 'reservation_ttl', 'value': 1200})
-        assert w.min_collateral == 250_000_000
         w.state_store.close()
 
 
@@ -193,9 +156,7 @@ class TestBusyIntervals:
 
         w = make_watcher(tmp_path)
         client = MagicMock()
-        client.get_miner_collateral.return_value = 0
         client.get_miner_active_flag.return_value = False
-        client.get_min_collateral.return_value = 0
         client.get_active_swaps.return_value = [
             type('S', (), {'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
             type('S', (), {'miner_hotkey': 'hk_b', 'initiated_block': 80})(),
@@ -299,21 +260,17 @@ class TestSCALEDecoder:
 class TestBootstrap:
     """initialize() snapshotting behavior — the M1 fix."""
 
-    def test_bootstrap_seeds_collateral_and_active_from_contract(self, tmp_path: Path):
+    def test_bootstrap_seeds_active_from_contract(self, tmp_path: Path):
         from allways.constants import SCORING_WINDOW_BLOCKS
 
         w = make_watcher(tmp_path)
         client = MagicMock()
-        client.get_miner_collateral.side_effect = lambda hk: {'hk_a': 10, 'hk_b': 20}.get(hk, 0)
         client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
-        client.get_min_collateral.return_value = 5
 
         current_block = SCORING_WINDOW_BLOCKS + 500  # well past the backfill floor
         w.initialize(current_block=current_block, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
 
-        assert w.collateral == {'hk_a': 10, 'hk_b': 20}
         assert w.active_miners == {'hk_a'}
-        assert w.min_collateral == 5
         # Cursor rewinds one scoring window so sync_to backfills the crown-time history.
         assert w.cursor == current_block - SCORING_WINDOW_BLOCKS
         w.state_store.close()
@@ -321,76 +278,12 @@ class TestBootstrap:
     def test_bootstrap_tolerates_contract_read_failures(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         client = MagicMock()
-        client.get_miner_collateral.side_effect = RuntimeError('rpc down')
         client.get_miner_active_flag.side_effect = RuntimeError('rpc down')
-        client.get_min_collateral.side_effect = RuntimeError('rpc down')
 
         # Pre-window start (current_block < SCORING_WINDOW_BLOCKS) — cursor clamps at 0.
         w.initialize(current_block=500, metagraph_hotkeys=['hk_a'], contract_client=client)
 
         # Everything defaults to empty/starting state, no exception propagated
-        assert w.collateral == {}
         assert w.active_miners == set()
         assert w.cursor == 0
-        w.state_store.close()
-
-
-class TestSetCollateral:
-    def test_set_collateral_uses_total_from_collateral_posted(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 1_000, 'total': 10_000})
-        # total (not amount) is authoritative
-        assert w.collateral['hk_a'] == 10_000
-        w.state_store.close()
-
-    def test_set_collateral_uses_remaining_from_withdrawn(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 10_000, 'total': 10_000})
-        w.apply_event(200, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 3_000, 'remaining': 7_000})
-        assert w.collateral['hk_a'] == 7_000
-        w.state_store.close()
-
-    def test_latest_before_uses_bisect_index(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        for block, amount in [(100, 1), (200, 2), (300, 3), (400, 4)]:
-            w.set_collateral(block, 'hk_a', amount)
-        # Before first event → None
-        assert w.get_latest_collateral_before('hk_a', block=50) is None
-        # On-boundary → hit that event
-        assert w.get_latest_collateral_before('hk_a', block=200) == (2, 200)
-        # Between events → previous event
-        assert w.get_latest_collateral_before('hk_a', block=250) == (2, 200)
-        # After last event → last event
-        assert w.get_latest_collateral_before('hk_a', block=9999) == (4, 400)
-        w.state_store.close()
-
-    def test_latest_before_falls_back_to_snapshot_when_no_events(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        # No events yet; only bootstrap-seeded collateral
-        w.collateral['hk_seed'] = 500
-        result = w.get_latest_collateral_before('hk_seed', block=1000)
-        assert result == (500, 0)
-        w.state_store.close()
-
-
-class TestCollateralEventsInRange:
-    def test_events_are_block_filtered(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 1_000})
-        w.apply_event(200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 2_000})
-        w.apply_event(300, 'CollateralPosted', {'miner': 'hk_a', 'amount': 3_000})
-        # Range is (start, end]: block 100 is excluded, 200/300 included
-        events = w.get_collateral_events_in_range(100, 300)
-        assert [e['block'] for e in events] == [200, 300]
-        w.state_store.close()
-
-    def test_latest_before_returns_most_recent(self, tmp_path: Path):
-        w = make_watcher(tmp_path)
-        w.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 1_000})
-        w.apply_event(200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 500})
-        result = w.get_latest_collateral_before('hk_a', block=150)
-        assert result is not None
-        collateral, block = result
-        assert collateral == 1_000
-        assert block == 100
         w.state_store.close()
