@@ -670,44 +670,6 @@ class AllwaysContractClient:
             return self.decode_swap_data(data, offset=1)
         return None
 
-    def read_result_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
-        """Read a method that returns Result<Option<SwapData>, ContractError>."""
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args, caller=caller)
-        if data is None or len(data) < 1:
-            return None
-        # Result discriminant: 0x00 = Ok, 0x01 = Err
-        if data[0] != 0x00:
-            if len(data) >= 2:
-                variant = CONTRACT_ERROR_VARIANTS.get(data[1])
-                if variant:
-                    bt.logging.debug(f'{method}: contract error — {variant[0]}')
-            return None
-        if len(data) < 2:
-            return None
-        # Option discriminant
-        if data[1] == 0x00:
-            return None
-        if data[1] == 0x01:
-            return self.decode_swap_data(data, offset=2)
-        return None
-
-    def read_result_u128(self, method: str, args: dict = None, caller=None) -> int:
-        """Read a method that returns Result<u128, ContractError>."""
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args, caller=caller)
-        if data is None or len(data) < 1:
-            raise ContractError(f'{method}: no response')
-        if data[0] != 0x00:
-            if len(data) >= 2:
-                variant = CONTRACT_ERROR_VARIANTS.get(data[1])
-                if variant:
-                    name, description = variant
-                    raise ContractError(f'{method}: {name} — {description}')
-            raise ContractError(f'{method}: contract rejected')
-        v = self.extract_u128(data[1:])
-        return v if v is not None else 0
-
     # =========================================================================
     # Query Functions (Read-only)
     # =========================================================================
