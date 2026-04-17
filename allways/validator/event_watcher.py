@@ -210,13 +210,6 @@ def to_bytes(val: Any) -> bytes:
 
 
 @dataclass
-class CollateralEvent:
-    hotkey: str
-    collateral_rao: int
-    block: int
-
-
-@dataclass
 class BusyEvent:
     """``delta`` is +1 on SwapInitiated and -1 on SwapCompleted/SwapTimedOut.
     A miner is busy (excluded from crown) whenever the running sum is > 0."""
@@ -250,7 +243,7 @@ class ConfigEvent:
     block: int
 
 
-CONFIG_KEYS_TRACKED = ('min_collateral', 'max_collateral', 'halted')
+CONFIG_KEYS_TRACKED = ('max_collateral', 'halted')
 
 
 MAX_BLOCKS_PER_SYNC = 50
@@ -265,7 +258,6 @@ class ContractEventWatcher:
         contract_address: str,
         metadata_path: Path,
         state_store: ValidatorStateStore,
-        default_min_collateral: int = 0,
     ):
         self.substrate = substrate
         self.contract_address = contract_address
@@ -273,12 +265,7 @@ class ContractEventWatcher:
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
 
-        self.collateral: Dict[str, int] = {}
         self.active_miners: Set[str] = set()
-        self.min_collateral: int = default_min_collateral
-        self.collateral_events: List[CollateralEvent] = []
-        # Per-hotkey view of collateral_events for O(log n) latest-before lookups.
-        self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
         self.open_swap_count: Dict[str, int] = {}
         self.busy_events: List[BusyEvent] = []
         self.active_events: List[ActiveEvent] = []
@@ -291,7 +278,6 @@ class ContractEventWatcher:
         # event fired, since ``config_current`` reflects the LATEST state and
         # would be wrong as a pre-event fallback.
         self.config_current: Dict[str, int] = {
-            'min_collateral': default_min_collateral,
             'max_collateral': 0,
             'halted': 0,
         }
@@ -300,33 +286,6 @@ class ContractEventWatcher:
         self.config_events_by_key: Dict[str, List[ConfigEvent]] = {}
 
     # ─── Public API consumed by scoring ─────────────────────────────────
-
-    def get_latest_collateral_before(self, hotkey: str, block: int) -> Optional[Tuple[int, int]]:
-        """Most recent collateral for ``hotkey`` at or before ``block``. If
-        events exist but none fall at/before ``block``, returns None — the
-        bootstrap snapshot reflects post-event state and is invalid for the
-        pre-event gap."""
-        from bisect import bisect_right
-
-        events = self.collateral_events_by_hotkey.get(hotkey)
-        if not events:
-            snapshot = self.collateral.get(hotkey)
-            return (snapshot, 0) if snapshot is not None else None
-        idx = bisect_right([e.block for e in events], block) - 1
-        if idx < 0:
-            return None
-        ev = events[idx]
-        return ev.collateral_rao, ev.block
-
-    def get_collateral_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
-        out: List[dict] = []
-        for ev in self.collateral_events:
-            if ev.block <= start_block:
-                continue
-            if ev.block > end_block:
-                break
-            out.append({'hotkey': ev.hotkey, 'collateral_rao': ev.collateral_rao, 'block': ev.block})
-        return out
 
     def get_busy_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
         out: List[dict] = []
@@ -420,25 +379,10 @@ class ContractEventWatcher:
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
-                    collateral = contract_client.get_miner_collateral(hotkey) or 0
-                except Exception as e:
-                    bt.logging.debug(f'EventWatcher bootstrap: collateral read failed for {hotkey[:8]}: {e}')
-                    collateral = 0
-                if collateral > 0:
-                    self.collateral[hotkey] = collateral
-                try:
                     if contract_client.get_miner_active_flag(hotkey):
                         self.active_miners.add(hotkey)
                 except Exception as e:
                     bt.logging.debug(f'EventWatcher bootstrap: active flag read failed for {hotkey[:8]}: {e}')
-            try:
-                raw_min = contract_client.get_min_collateral() or 0
-                if raw_min > 0:
-                    self.min_collateral = raw_min
-                    self.config_current['min_collateral'] = int(raw_min)
-                    self.config_initial['min_collateral'] = int(raw_min)
-            except Exception as e:
-                bt.logging.debug(f'EventWatcher bootstrap: min_collateral read failed: {e}')
             try:
                 raw_max = contract_client.get_max_collateral() or 0
                 self.config_current['max_collateral'] = int(raw_max)
@@ -470,10 +414,7 @@ class ContractEventWatcher:
                     bt.logging.info(f'EventWatcher bootstrap: seeded {len(seen_hotkeys)} miners as busy from contract')
             except Exception as e:
                 bt.logging.debug(f'EventWatcher bootstrap: active swaps read failed: {e}')
-            bt.logging.info(
-                f'EventWatcher initialized: {len(self.collateral)} collateral entries, '
-                f'{len(self.active_miners)} active miners, min_collateral={self.min_collateral}'
-            )
+            bt.logging.info(f'EventWatcher initialized: {len(self.active_miners)} active miners')
         self.cursor = max(0, current_block - SCORING_WINDOW_BLOCKS)
         # Anchor the historical active set at the cursor so scoring sees the
         # bootstrap state at window_start. Subsequent MinerActivated events
@@ -500,7 +441,7 @@ class ContractEventWatcher:
         for block_num in range(self.cursor + 1, end + 1):
             self.process_block(block_num)
         self.cursor = end
-        self.prune_old_collateral_events(current_block)
+        self.prune_old_events(current_block)
 
     def process_block(self, block_num: int) -> None:
         try:
@@ -560,26 +501,7 @@ class ContractEventWatcher:
         return event_def.name, values
 
     def apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
-        if name == 'CollateralPosted':
-            # Prefer ``total`` (authoritative post-event balance) so we don't
-            # drift when the replay window misses prior events.
-            hotkey = values.get('miner', '')
-            total = values.get('total')
-            if total is not None:
-                self.set_collateral(block_num, hotkey, int(total))
-            else:
-                self.adjust_collateral(block_num, hotkey, +int(values.get('amount', 0)))
-        elif name == 'CollateralWithdrawn':
-            hotkey = values.get('miner', '')
-            remaining = values.get('remaining')
-            if remaining is not None:
-                self.set_collateral(block_num, hotkey, int(remaining))
-            else:
-                self.adjust_collateral(block_num, hotkey, -int(values.get('amount', 0)))
-        elif name == 'CollateralSlashed':
-            # Slashed only carries the slash amount, no post-event balance.
-            self.adjust_collateral(block_num, values.get('miner', ''), -int(values.get('amount', 0)))
-        elif name == 'MinerActivated':
+        if name == 'MinerActivated':
             hotkey = values.get('miner', '')
             if not hotkey:
                 return
@@ -632,9 +554,6 @@ class ContractEventWatcher:
         if current == int(value):
             return
         self.config_current[key] = int(value)
-        if key == 'min_collateral':
-            # Legacy mirror — some call sites still read ``self.min_collateral``.
-            self.min_collateral = int(value)
         event = ConfigEvent(key=key, value=int(value), block=block_num)
         self.config_events.append(event)
         self.config_events_by_key.setdefault(key, []).append(event)
@@ -668,43 +587,14 @@ class ContractEventWatcher:
         self.open_swap_count[hotkey] = new_count
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
 
-    def set_collateral(self, block_num: int, hotkey: str, new_total: int) -> None:
-        if not hotkey:
-            return
-        new_total = max(0, new_total)
-        self.collateral[hotkey] = new_total
-        event = CollateralEvent(hotkey=hotkey, collateral_rao=new_total, block=block_num)
-        self.collateral_events.append(event)
-        self.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
-
-    def adjust_collateral(self, block_num: int, hotkey: str, delta: int) -> None:
-        if not hotkey:
-            return
-        new_total = max(0, self.collateral.get(hotkey, 0) + delta)
-        self.set_collateral(block_num, hotkey, new_total)
-
-    def prune_old_collateral_events(self, current_block: int) -> None:
-        """Drop collateral and busy events older than one scoring window. The
-        latest collateral row per hotkey is preserved as a state-reconstruction
-        anchor; busy events are kept while the open-swap count is still > 0
-        so the matching -1 isn't orphaned."""
+    def prune_old_events(self, current_block: int) -> None:
+        """Drop busy, active, and config events older than one scoring window.
+        Latest event per (hotkey/key) is preserved as a state-reconstruction
+        anchor; busy events are kept while the open-swap count is still > 0 so
+        the matching -1 isn't orphaned."""
         cutoff = current_block - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return
-        if self.collateral_events:
-            latest_per_hotkey = {}
-            for ev in self.collateral_events:
-                latest_per_hotkey[ev.hotkey] = ev  # last write wins (events are append-order)
-            self.collateral_events = [
-                ev for ev in self.collateral_events if ev.block >= cutoff or latest_per_hotkey.get(ev.hotkey) is ev
-            ]
-            for hotkey, events in list(self.collateral_events_by_hotkey.items()):
-                latest = events[-1] if events else None
-                pruned = [ev for ev in events if ev.block >= cutoff or ev is latest]
-                if pruned:
-                    self.collateral_events_by_hotkey[hotkey] = pruned
-                else:
-                    del self.collateral_events_by_hotkey[hotkey]
         if self.busy_events:
             open_now = {hk for hk, c in self.open_swap_count.items() if c > 0}
             self.busy_events = [ev for ev in self.busy_events if ev.block >= cutoff or ev.hotkey in open_now]
