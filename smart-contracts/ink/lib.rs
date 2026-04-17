@@ -1046,15 +1046,16 @@ mod allways_swap_manager {
 
         /// Vote to deactivate a miner — validator-only, quorum required.
         ///
-        /// Dormant escape hatch for the `min_collateral` raise case: if the owner
-        /// raises the collateral floor above an active miner's balance, validators
-        /// can use this to bring the active flag back in sync with on-chain reality.
-        /// Gated on `collateral < min_collateral` so validators cannot use it to
-        /// deactivate compliant miners by collusion.
+        /// Trust-based: on quorum the miner's active flag is cleared, full stop.
+        /// No collateral, status, or balance gates beyond "currently active".
+        /// Deliberately unconstrained so the validator consensus can cover any
+        /// remediation case (min_collateral raise, protocol abuse, operational
+        /// emergencies). Abuse protection comes from the quorum itself — the
+        /// same trust envelope as `vote_activate` / `vote_reserve`.
         ///
-        /// Not blocked mid-swap: the existing swap lifecycle proceeds via persisted
-        /// assignment. Miner cannot re-activate until they top up collateral because
-        /// `vote_activate` already checks the floor.
+        /// Not blocked mid-swap: the existing swap lifecycle proceeds via its
+        /// persisted assignment. Miner cannot re-activate while below the
+        /// collateral floor because `vote_activate` still checks it.
         #[ink(message)]
         pub fn vote_deactivate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
@@ -1062,10 +1063,6 @@ mod allways_swap_manager {
 
             if !self.miner_active.get(miner).unwrap_or(false) {
                 return Err(Error::InvalidStatus);
-            }
-            let miner_collateral = self.collateral.get(miner).unwrap_or(0);
-            if miner_collateral >= self.min_collateral {
-                return Err(Error::SufficientCollateral);
             }
 
             let request_id = match self.get_active_request(miner, REQ_DEACTIVATE) {
