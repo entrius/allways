@@ -90,13 +90,11 @@ CONTRACT_SELECTORS = {
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
     'get_miner_has_active_swap': bytes.fromhex('1d07dec1'),
-    'get_miner_last_resolved_block': bytes.fromhex('a4b68d1f'),
     'is_validator': bytes.fromhex('f844fc5f'),
     'get_next_swap_id': bytes.fromhex('d80244d2'),
     'get_fulfillment_timeout': bytes.fromhex('e820174a'),
     'get_min_collateral': bytes.fromhex('233a7832'),
     'get_max_collateral': bytes.fromhex('54945717'),
-    'get_required_votes_count': bytes.fromhex('fe07130d'),
     'get_accumulated_fees': bytes.fromhex('bf3b5d4e'),
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
@@ -109,12 +107,10 @@ CONTRACT_SELECTORS = {
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
-    'get_activation_vote_count': bytes.fromhex('154595d0'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
     'vote_extend_reservation': bytes.fromhex('f668d950'),
-    'get_extend_vote_count': bytes.fromhex('24fa0aae'),
     'vote_extend_timeout': bytes.fromhex('0fb2d2e5'),
     'set_halted': bytes.fromhex('8fe1c210'),
     'get_halted': bytes.fromhex('ec540804'),
@@ -175,17 +171,14 @@ CONTRACT_ARG_TYPES = {
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
     'get_miner_has_active_swap': [('hotkey', 'AccountId')],
-    'get_miner_last_resolved_block': [('miner', 'AccountId')],
     'is_validator': [('account', 'AccountId')],
     'get_next_swap_id': [],
     'get_fulfillment_timeout': [],
     'get_min_collateral': [],
     'get_max_collateral': [],
-    'get_required_votes_count': [],
     'get_miner_deactivation_block': [('miner', 'AccountId')],
     'get_consensus_threshold': [],
     'get_validator_count': [],
-    'get_activation_vote_count': [('miner', 'AccountId')],
     'get_reservation_data': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'vote_extend_reservation': [
@@ -193,7 +186,6 @@ CONTRACT_ARG_TYPES = {
         ('miner', 'AccountId'),
         ('from_tx_hash', 'str'),
     ],
-    'get_extend_vote_count': [('miner', 'AccountId')],
     'vote_extend_timeout': [('swap_id', 'u64')],
     'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
@@ -820,9 +812,6 @@ class AllwaysContractClient:
     def get_miner_has_active_swap(self, hotkey: str) -> bool:
         return self.read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
 
-    def get_miner_last_resolved_block(self, hotkey: str) -> int:
-        return self.read_u32('get_miner_last_resolved_block', {'miner': hotkey})
-
     def get_next_swap_id(self) -> int:
         return self.read_u64('get_next_swap_id')
 
@@ -834,9 +823,6 @@ class AllwaysContractClient:
 
     def get_max_collateral(self) -> int:
         return self.read_u128('get_max_collateral')
-
-    def get_required_votes_count(self) -> int:
-        return self.read_u32('get_required_votes_count')
 
     def get_miner_deactivation_block(self, hotkey: str) -> int:
         return self.read_u32('get_miner_deactivation_block', {'miner': hotkey})
@@ -851,14 +837,8 @@ class AllwaysContractClient:
     def get_validator_count(self) -> int:
         return self.read_u32('get_validator_count')
 
-    def get_activation_vote_count(self, hotkey: str) -> int:
-        return self.read_u32('get_activation_vote_count', {'miner': hotkey})
-
     def get_pending_reserve_vote_count(self, miner_hotkey: str) -> int:
         return self.read_u32('get_pending_reserve_vote_count', {'miner': miner_hotkey})
-
-    def get_extend_vote_count(self, miner_hotkey: str) -> int:
-        return self.read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
     def get_cooldown(self, from_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""

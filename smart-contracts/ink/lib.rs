@@ -46,7 +46,6 @@ mod allways_swap_manager {
         miner_active: Mapping<AccountId, bool>,
         miner_has_active_swap: Mapping<AccountId, bool>,
         miner_reserved_until: Mapping<AccountId, u32>,
-        miner_last_resolved_block: Mapping<AccountId, u32>,
         miner_deactivation_block: Mapping<AccountId, u32>,
 
         // Consensus voting — all vote types use unique request IDs (like swap IDs).
@@ -291,7 +290,6 @@ mod allways_swap_manager {
                 miner_active: Mapping::default(),
                 miner_has_active_swap: Mapping::default(),
                 miner_reserved_until: Mapping::default(),
-                miner_last_resolved_block: Mapping::default(),
                 miner_deactivation_block: Mapping::default(),
 
                 next_request_id: 1,
@@ -797,7 +795,6 @@ mod allways_swap_manager {
                 }
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
-                self.miner_last_resolved_block.insert(swap.miner, &swap.completed_block);
 
                 self.address_strike_count.remove(&swap.user_from_address);
                 self.address_last_expired.remove(&swap.user_from_address);
@@ -882,7 +879,6 @@ mod allways_swap_manager {
                 }
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
-                self.miner_last_resolved_block.insert(swap.miner, &swap.completed_block);
 
                 self.env().emit_event(SwapTimedOut {
                     swap_id,
@@ -1267,11 +1263,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn get_miner_last_resolved_block(&self, miner: AccountId) -> u32 {
-            self.miner_last_resolved_block.get(miner).unwrap_or(0)
-        }
-
-        #[ink(message)]
         pub fn is_validator(&self, account: AccountId) -> bool {
             self.validators.get(account).unwrap_or(false)
         }
@@ -1294,11 +1285,6 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_max_collateral(&self) -> Balance {
             self.max_collateral
-        }
-
-        #[ink(message)]
-        pub fn get_required_votes_count(&self) -> u32 {
-            self.get_required_votes()
         }
 
         #[ink(message)]
@@ -1367,14 +1353,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn get_activation_vote_count(&self, miner: AccountId) -> u32 {
-            match self.miner_active_request.get((miner, REQ_ACTIVATE)) {
-                Some(id) => self.request_vote_count.get(id).unwrap_or(0),
-                None => 0,
-            }
-        }
-
-        #[ink(message)]
         pub fn get_reservation_data(
             &self,
             miner: AccountId,
@@ -1395,14 +1373,6 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_pending_reserve_vote_count(&self, miner: AccountId) -> u32 {
             match self.miner_active_request.get((miner, REQ_RESERVE)) {
-                Some(id) => self.request_vote_count.get(id).unwrap_or(0),
-                None => 0,
-            }
-        }
-
-        #[ink(message)]
-        pub fn get_extend_vote_count(&self, miner: AccountId) -> u32 {
-            match self.miner_active_request.get((miner, REQ_EXTEND)) {
                 Some(id) => self.request_vote_count.get(id).unwrap_or(0),
                 None => 0,
             }

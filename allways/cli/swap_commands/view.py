@@ -448,8 +448,8 @@ def view_contract():
             consensus_threshold = read_safe(client.get_consensus_threshold)
             min_collateral_rao = read_safe(client.get_min_collateral)
             max_collateral_rao = read_safe(client.get_max_collateral)
-            required_votes = read_safe(client.get_required_votes_count)
             validator_count = read_safe(client.get_validator_count)
+            required_votes = max(1, (validator_count * consensus_threshold + 99) // 100) if validator_count > 0 else 1
             next_swap_id = read_safe(client.get_next_swap_id)
             min_swap_rao = read_safe(client.get_min_swap_amount)
             max_swap_rao = read_safe(client.get_max_swap_amount)
