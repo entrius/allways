@@ -30,7 +30,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
 def to_smallest_unit(amount: float, chain_id: str) -> int:
@@ -610,31 +610,29 @@ def swap_now_command(
         f' (after {preview_fee_pct:g}% fee)'
     )
 
-    if from_chain == 'tao':
-        tao_amount = from_amount
-    elif to_chain == 'tao':
-        tao_amount = to_amount
-    else:
-        tao_amount = 0
+    tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
 
-    # Validate against contract min/max swap bounds
+    # Validate against contract min/max swap bounds + selected miner's
+    # collateral. Mirrors vote_reserve (bounds) and vote_initiate
+    # (collateral) so we fail loudly here instead of after the user has
+    # reserved and sent funds.
     try:
         min_swap = client.get_min_swap_amount()
         max_swap = client.get_max_swap_amount()
-        if min_swap > 0 and tao_amount < min_swap:
-            console.print(
-                f'[red]Amount too low. Minimum swap: {from_rao(min_swap):.4f} TAO equivalent '
-                f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
-            )
-            return
-        if max_swap > 0 and tao_amount > max_swap:
-            console.print(
-                f'[red]Amount too high. Maximum swap: {from_rao(max_swap):.4f} TAO equivalent '
-                f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
-            )
-            return
     except ContractError:
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
+        min_swap, max_swap = 0, 0
+
+    viable, reason = check_swap_viability(tao_amount, selected_collateral, min_swap, max_swap)
+    if not viable:
+        console.print(
+            f'[red]Swap cannot be initiated at this amount: {reason} '
+            f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
+        )
+        console.print(
+            '[dim]Try a different amount, pick another miner, or run `alw swap quote` to see viable rows.[/dim]'
+        )
+        return
 
     fee_divisor = FEE_DIVISOR
     user_receives = apply_fee_deduction(to_amount, fee_divisor)

@@ -16,7 +16,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
 @click.command('quote')
@@ -107,13 +107,41 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     canon_from_decimals = get_chain(canon_from).decimals
     dst_chain_def = get_chain(to_chain)
 
-    # Contract-side bounds. Missing bounds mean unlimited (0 sentinel).
+    # Contract-side bounds are global — check before per-miner viability so
+    # a user who requested an out-of-bounds amount gets one clear reason
+    # instead of N rows each blaming collateral. Bounds are enforced against
+    # the TAO leg (see vote_reserve in lib.rs).
     try:
         min_swap_rao = client.get_min_swap_amount()
         max_swap_rao = client.get_max_swap_amount()
     except ContractError:
         min_swap_rao = 0
         max_swap_rao = 0
+
+    # Global bounds (min/max swap) are the same for every miner — check once
+    # up front so a bounds-violating amount gets one clear reason instead of
+    # N rows each blaming collateral. Use any row's rate to derive the TAO
+    # leg; only the direction matters, not the miner.
+    sample_pair = available[0][0]
+    sample_to_amount = calculate_to_amount(
+        from_amount, sample_pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals
+    )
+    request_tao_rao = derive_tao_leg(from_chain, from_amount, to_chain, sample_to_amount)
+
+    if min_swap_rao > 0 and request_tao_rao < min_swap_rao:
+        console.print(
+            f'\n[red]Amount below contract minimum: {from_rao(request_tao_rao):.4f} TAO equivalent '
+            f'< {from_rao(min_swap_rao):.4f} TAO min.[/red]\n'
+            f'[dim]No miner can accept this — increase --amount.[/dim]\n'
+        )
+        return
+    if max_swap_rao > 0 and request_tao_rao > max_swap_rao:
+        console.print(
+            f'\n[red]Amount above contract maximum: {from_rao(request_tao_rao):.4f} TAO equivalent '
+            f'> {from_rao(max_swap_rao):.4f} TAO max.[/red]\n'
+            f'[dim]No miner can accept this — decrease --amount.[/dim]\n'
+        )
+        return
 
     console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')
 
@@ -131,24 +159,13 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
         human_receives = user_receives / (10**dst_chain_def.decimals)
 
-        # tao_amount per contract's vote_initiate: the TAO side of the swap
-        # regardless of direction.
-        if from_chain == 'tao':
-            tao_amount_rao = from_amount
-        elif to_chain == 'tao':
-            tao_amount_rao = to_amount
-        else:
-            tao_amount_rao = 0
-
-        if tao_amount_rao > collateral:
-            status = f'[red]insufficient collateral ({from_rao(tao_amount_rao):.4f} TAO needed)[/red]'
-        elif min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
-            status = f'[red]below min swap ({from_rao(min_swap_rao):.4f} TAO)[/red]'
-        elif max_swap_rao > 0 and tao_amount_rao > max_swap_rao:
-            status = f'[red]above max swap ({from_rao(max_swap_rao):.4f} TAO)[/red]'
-        else:
+        tao_amount_rao = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
+        viable, reason = check_swap_viability(tao_amount_rao, collateral, min_swap_rao, max_swap_rao)
+        if viable:
             status = '[green]available[/green]'
             viable_count += 1
+        else:
+            status = f'[red]{reason}[/red]'
 
         table.add_row(
             str(idx),
