@@ -220,6 +220,29 @@ mod allways_swap_manager {
             }
             Ok(())
         }
+
+        /// Deduct up to `amount` from a miner's collateral, clamped to what
+        /// they hold. Auto-deactivates the miner if the remaining balance falls
+        /// below min_collateral while they're still flagged active. Returns the
+        /// amount actually deducted.
+        ///
+        /// Shared between confirm_swap (fee) and timeout_swap (slash) so the
+        /// floor-breach guard lives in one place and can't drift between them.
+        fn apply_collateral_penalty(&mut self, miner: AccountId, amount: Balance) -> Balance {
+            let current = self.collateral.get(miner).unwrap_or(0);
+            let actual = core::cmp::min(amount, current);
+            if actual == 0 {
+                return 0;
+            }
+            let remaining = current.saturating_sub(actual);
+            self.collateral.insert(miner, &remaining);
+            if remaining < self.min_collateral && self.miner_active.get(miner).unwrap_or(false) {
+                self.miner_active.insert(miner, &false);
+                self.miner_deactivation_block.insert(miner, &self.env().block_number());
+                self.env().emit_event(MinerActivated { miner, active: false });
+            }
+            actual
+        }
     }
 
     impl AllwaysSwapManager {
@@ -691,26 +714,14 @@ mod allways_swap_manager {
                 swap.completed_block = self.env().block_number();
 
                 // Fee from miner collateral -> accumulated_fees. 1% hardcoded.
+                // apply_collateral_penalty auto-deactivates the miner if this
+                // drops them below min_collateral, keeping the guard in sync
+                // with timeout_swap.
                 #[allow(clippy::arithmetic_side_effects)]
                 let fee = swap.tao_amount.saturating_div(FEE_DIVISOR);
-                let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
-                let actual_fee = core::cmp::min(fee, miner_collateral);
-                let new_collateral = miner_collateral.saturating_sub(actual_fee);
+                let actual_fee = self.apply_collateral_penalty(swap.miner, fee);
                 if actual_fee > 0 {
-                    self.collateral.insert(swap.miner, &new_collateral);
                     self.accumulated_fees = self.accumulated_fees.saturating_add(actual_fee);
-                }
-
-                // If the fee deduction drops the miner below min_collateral,
-                // deactivate them here so validators don't keep crediting
-                // crown-time to a miner that can no longer honor swaps.
-                // Mirrors the same guard in timeout_swap.
-                if new_collateral < self.min_collateral
-                    && self.miner_active.get(swap.miner).unwrap_or(false)
-                {
-                    self.miner_active.insert(swap.miner, &false);
-                    self.miner_deactivation_block.insert(swap.miner, &self.env().block_number());
-                    self.env().emit_event(MinerActivated { miner: swap.miner, active: false });
                 }
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
@@ -766,14 +777,11 @@ mod allways_swap_manager {
                 swap.status = SwapStatus::TimedOut;
                 swap.completed_block = self.env().block_number();
 
-                let slash_amount = swap.tao_amount;
-                let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
-                let actual_slash = core::cmp::min(slash_amount, miner_collateral);
-
-                let new_collateral = miner_collateral.saturating_sub(actual_slash);
+                // Slash miner collateral up to the full tao_amount; the helper
+                // also auto-deactivates the miner if this drops them below
+                // min_collateral.
+                let actual_slash = self.apply_collateral_penalty(swap.miner, swap.tao_amount);
                 if actual_slash > 0 {
-                    self.collateral.insert(swap.miner, &new_collateral);
-
                     if self.env().transfer(swap.user, actual_slash).is_ok() {
                         self.env().emit_event(CollateralSlashed {
                             miner: swap.miner,
@@ -788,12 +796,6 @@ mod allways_swap_manager {
                             amount: actual_slash,
                         });
                     }
-                }
-
-                if new_collateral < self.min_collateral {
-                    self.miner_active.insert(swap.miner, &false);
-                    self.miner_deactivation_block.insert(swap.miner, &self.env().block_number());
-                    self.env().emit_event(MinerActivated { miner: swap.miner, active: false });
                 }
 
                 self.miner_has_active_swap.insert(swap.miner, &false);
