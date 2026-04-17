@@ -107,6 +107,14 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     canon_from_decimals = get_chain(canon_from).decimals
     dst_chain_def = get_chain(to_chain)
 
+    # Contract-side bounds. Missing bounds mean unlimited (0 sentinel).
+    try:
+        min_swap_rao = client.get_min_swap_amount()
+        max_swap_rao = client.get_max_swap_amount()
+    except ContractError:
+        min_swap_rao = 0
+        max_swap_rao = 0
+
     console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')
 
     table = Table(show_header=True)
@@ -115,11 +123,32 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     table.add_column(f'Rate ({to_chain.upper()}/{from_chain.upper()})', style='green')
     table.add_column('You Receive', style='bold green')
     table.add_column('Collateral', style='yellow')
+    table.add_column('Status', style='bold')
 
+    viable_count = 0
     for idx, (pair, collateral) in enumerate(available, 1):
         to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
         human_receives = user_receives / (10**dst_chain_def.decimals)
+
+        # tao_amount per contract's vote_initiate: the TAO side of the swap
+        # regardless of direction.
+        if from_chain == 'tao':
+            tao_amount_rao = from_amount
+        elif to_chain == 'tao':
+            tao_amount_rao = to_amount
+        else:
+            tao_amount_rao = 0
+
+        if tao_amount_rao > collateral:
+            status = f'[red]insufficient collateral ({from_rao(tao_amount_rao):.4f} TAO needed)[/red]'
+        elif min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
+            status = f'[red]below min swap ({from_rao(min_swap_rao):.4f} TAO)[/red]'
+        elif max_swap_rao > 0 and tao_amount_rao > max_swap_rao:
+            status = f'[red]above max swap ({from_rao(max_swap_rao):.4f} TAO)[/red]'
+        else:
+            status = '[green]available[/green]'
+            viable_count += 1
 
         table.add_row(
             str(idx),
@@ -127,7 +156,15 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
             f'{pair.rate:g}',
             f'{human_receives:.8f} {to_chain.upper()}',
             f'{from_rao(collateral):.4f} TAO',
+            status,
         )
 
     console.print(table)
-    console.print(f'  [dim](after {fee_pct:g}% fee)[/dim]\n')
+    console.print(f'  [dim](after {fee_pct:g}% fee)[/dim]')
+    if viable_count == 0:
+        console.print(
+            '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
+            'or wait for more collateral to be posted.[/yellow]\n'
+        )
+    else:
+        console.print()
