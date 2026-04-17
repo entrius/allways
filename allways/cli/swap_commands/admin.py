@@ -3,7 +3,16 @@
 import click
 
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.cli.swap_commands.helpers import (
+    SECONDS_PER_BLOCK,
+    console,
+    from_rao,
+    get_cli_context,
+    is_valid_ss58,
+    loading,
+    print_contract_error,
+    to_rao,
+)
 from allways.contract_client import ContractError
 
 
@@ -30,7 +39,7 @@ def set_timeout(blocks: int):
     try:
         current = client.get_fulfillment_timeout()
     except ContractError as e:
-        console.print(f'[red]Failed to read fulfillment timeout: {e}[/red]')
+        print_contract_error('Failed to read fulfillment timeout', e)
         return
 
     current_minutes = current * SECONDS_PER_BLOCK / 60
@@ -49,7 +58,7 @@ def set_timeout(blocks: int):
             client.set_fulfillment_timeout(wallet=wallet, blocks=blocks)
         console.print(f'[green]Fulfillment timeout set to {blocks} blocks[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set fulfillment timeout: {e}[/red]\n')
+        print_contract_error('Failed to set fulfillment timeout', e)
 
 
 @admin_group.command('set-reservation-ttl', show_disclaimer=True)
@@ -69,7 +78,7 @@ def set_reservation_ttl(blocks: int):
     try:
         current = client.get_reservation_ttl()
     except ContractError as e:
-        console.print(f'[red]Failed to read reservation TTL: {e}[/red]')
+        print_contract_error('Failed to read reservation TTL', e)
         return
 
     current_minutes = current * SECONDS_PER_BLOCK / 60
@@ -88,7 +97,7 @@ def set_reservation_ttl(blocks: int):
             client.set_reservation_ttl(wallet=wallet, blocks=blocks)
         console.print(f'[green]Reservation TTL set to {blocks} blocks[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set reservation TTL: {e}[/red]\n')
+        print_contract_error('Failed to set reservation TTL', e)
 
 
 @admin_group.command('set-min-collateral', show_disclaimer=True)
@@ -110,7 +119,7 @@ def set_min_collateral(amount_tao: float):
     try:
         current_rao = client.get_min_collateral()
     except ContractError as e:
-        console.print(f'[red]Failed to read min collateral: {e}[/red]')
+        print_contract_error('Failed to read min collateral', e)
         return
 
     console.print('\n[bold]Set Minimum Collateral[/bold]\n')
@@ -126,7 +135,7 @@ def set_min_collateral(amount_tao: float):
             client.set_min_collateral_amount(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Minimum collateral set to {amount_tao:.4f} TAO[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set minimum collateral: {e}[/red]\n')
+        print_contract_error('Failed to set minimum collateral', e)
 
 
 @admin_group.command('set-max-collateral', show_disclaimer=True)
@@ -149,7 +158,7 @@ def set_max_collateral(amount_tao: float):
     try:
         current_rao = client.get_max_collateral()
     except ContractError as e:
-        console.print(f'[red]Failed to read max collateral: {e}[/red]')
+        print_contract_error('Failed to read max collateral', e)
         return
 
     console.print('\n[bold]Set Maximum Collateral[/bold]\n')
@@ -165,7 +174,7 @@ def set_max_collateral(amount_tao: float):
             client.set_max_collateral_amount(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Maximum collateral set to {amount_tao:.4f} TAO[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set maximum collateral: {e}[/red]\n')
+        print_contract_error('Failed to set maximum collateral', e)
 
 
 @admin_group.command('set-min-swap', show_disclaimer=True)
@@ -188,7 +197,7 @@ def set_min_swap(amount_tao: float):
     try:
         current_rao = client.get_min_swap_amount()
     except ContractError as e:
-        console.print(f'[red]Failed to read min swap amount: {e}[/red]')
+        print_contract_error('Failed to read min swap amount', e)
         return
 
     console.print('\n[bold]Set Minimum Swap Amount[/bold]\n')
@@ -204,7 +213,7 @@ def set_min_swap(amount_tao: float):
             client.set_min_swap_amount(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Minimum swap amount set to {amount_tao:.4f} TAO[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set minimum swap amount: {e}[/red]\n')
+        print_contract_error('Failed to set minimum swap amount', e)
 
 
 @admin_group.command('set-max-swap', show_disclaimer=True)
@@ -227,7 +236,7 @@ def set_max_swap(amount_tao: float):
     try:
         current_rao = client.get_max_swap_amount()
     except ContractError as e:
-        console.print(f'[red]Failed to read max swap amount: {e}[/red]')
+        print_contract_error('Failed to read max swap amount', e)
         return
 
     console.print('\n[bold]Set Maximum Swap Amount[/bold]\n')
@@ -243,7 +252,7 @@ def set_max_swap(amount_tao: float):
             client.set_max_swap_amount(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Maximum swap amount set to {amount_tao:.4f} TAO[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set maximum swap amount: {e}[/red]\n')
+        print_contract_error('Failed to set maximum swap amount', e)
 
 
 @admin_group.command('set-threshold', show_disclaimer=True)
@@ -263,7 +272,7 @@ def set_threshold(percent: int):
     try:
         current = client.get_consensus_threshold()
     except ContractError as e:
-        console.print(f'[red]Failed to read threshold: {e}[/red]')
+        print_contract_error('Failed to read threshold', e)
         return
 
     console.print('\n[bold]Set Consensus Threshold[/bold]\n')
@@ -279,7 +288,7 @@ def set_threshold(percent: int):
             client.set_consensus_threshold(wallet=wallet, percent=percent)
         console.print(f'[green]Consensus threshold set to {percent}%[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set consensus threshold: {e}[/red]\n')
+        print_contract_error('Failed to set consensus threshold', e)
 
 
 @admin_group.command('add-vali', show_disclaimer=True)
@@ -295,7 +304,7 @@ def add_vali(hotkey: str):
     try:
         already_registered = client.is_validator(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to check validator status: {e}[/red]')
+        print_contract_error('Failed to check validator status', e)
         return
 
     console.print('\n[bold]Add Validator[/bold]\n')
@@ -315,7 +324,7 @@ def add_vali(hotkey: str):
             client.add_validator(wallet=wallet, validator=hotkey)
         console.print(f'[green]Validator {hotkey} added[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to add validator: {e}[/red]\n')
+        print_contract_error('Failed to add validator', e)
 
 
 @admin_group.command('remove-vali', show_disclaimer=True)
@@ -331,7 +340,7 @@ def remove_vali(hotkey: str):
     try:
         is_registered = client.is_validator(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to check validator status: {e}[/red]')
+        print_contract_error('Failed to check validator status', e)
         return
 
     console.print('\n[bold]Remove Validator[/bold]\n')
@@ -351,7 +360,7 @@ def remove_vali(hotkey: str):
             client.remove_validator(wallet=wallet, validator=hotkey)
         console.print(f'[green]Validator {hotkey} removed[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to remove validator: {e}[/red]\n')
+        print_contract_error('Failed to remove validator', e)
 
 
 @admin_group.command('set-recycle-address', show_disclaimer=True)
@@ -362,10 +371,25 @@ def set_recycle_address(account_id: str):
     [dim]Examples:
         $ alw admin set-recycle-address 5Cxyz...[/dim]
     """
+    if not is_valid_ss58(account_id):
+        console.print('[red]Not a valid SS58 address[/red]')
+        return
+
     _, wallet, _, client = get_cli_context()
 
+    try:
+        current = client.get_recycle_address()
+    except ContractError:
+        current = ''
+
     console.print('\n[bold]Set Recycle Address[/bold]\n')
-    console.print(f'  Address: {account_id}\n')
+    if current:
+        console.print(f'  Current: {current}')
+    console.print(f'  New:     {account_id}\n')
+
+    if current == account_id:
+        console.print('[yellow]This address is already set. Nothing to do.[/yellow]')
+        return
 
     if not click.confirm('Confirm?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -376,7 +400,7 @@ def set_recycle_address(account_id: str):
             client.set_recycle_address(wallet=wallet, address=account_id)
         console.print(f'[green]Recycle address set to {account_id}[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to set recycle address: {e}[/red]\n')
+        print_contract_error('Failed to set recycle address', e)
 
 
 @admin_group.command('recycle-fees', show_disclaimer=True)
@@ -388,8 +412,22 @@ def recycle_fees():
     """
     _, wallet, _, client = get_cli_context()
 
+    try:
+        accumulated = client.get_accumulated_fees()
+        destination = client.get_recycle_address()
+        total_recycled = client.get_total_recycled_fees()
+    except ContractError as e:
+        print_contract_error('Failed to read fee state', e)
+        return
+
     console.print('\n[bold]Recycle Fees[/bold]\n')
-    console.print('  Action: transfer all accumulated fees to recycle address\n')
+    console.print(f'  Amount:       {from_rao(accumulated):.6f} TAO')
+    console.print(f'  Destination:  {destination}')
+    console.print(f'  Total recycled so far: {from_rao(total_recycled):.6f} TAO\n')
+
+    if accumulated == 0:
+        console.print('[yellow]No fees to recycle.[/yellow]')
+        return
 
     if not click.confirm('Confirm recycling fees?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -398,9 +436,9 @@ def recycle_fees():
     try:
         with loading('Submitting transaction...'):
             client.recycle_fees(wallet=wallet)
-        console.print('[green]Fees recycled successfully[/green]\n')
+        console.print(f'[green]Recycled {from_rao(accumulated):.6f} TAO to {destination}[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to recycle fees: {e}[/red]\n')
+        print_contract_error('Failed to recycle fees', e)
 
 
 @admin_group.command('transfer-ownership', show_disclaimer=True)
@@ -411,12 +449,20 @@ def transfer_ownership(account_id: str):
     [dim]Examples:
         $ alw admin transfer-ownership 5Cxyz...[/dim]
     """
+    if not is_valid_ss58(account_id):
+        console.print('[red]Not a valid SS58 address[/red]')
+        return
+
     _, wallet, _, client = get_cli_context()
 
     try:
         current_owner = client.get_owner()
     except ContractError as e:
-        console.print(f'[red]Failed to read current owner: {e}[/red]')
+        print_contract_error('Failed to read current owner', e)
+        return
+
+    if current_owner == account_id:
+        console.print('[yellow]This account is already the owner. Nothing to do.[/yellow]')
         return
 
     console.print('\n[bold red]Transfer Ownership[/bold red]\n')
@@ -434,7 +480,7 @@ def transfer_ownership(account_id: str):
             client.transfer_ownership(wallet=wallet, new_owner=account_id)
         console.print(f'[green]Ownership transferred to {account_id}[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to transfer ownership: {e}[/red]\n')
+        print_contract_error('Failed to transfer ownership', e)
 
 
 @click.group('danger', cls=StyledGroup, show_disclaimer=True)
@@ -457,16 +503,22 @@ def halt_system():
     try:
         already_halted = client.get_halted()
     except ContractError as e:
-        console.print(f'[red]Failed to read halt status: {e}[/red]')
+        print_contract_error('Failed to read halt status', e)
         return
 
     if already_halted:
         console.print('[yellow]System is already halted[/yellow]')
         return
 
+    try:
+        active_swaps = client.get_active_swaps()
+    except ContractError:
+        active_swaps = []
+
     console.print('\n[bold red]Halt System[/bold red]\n')
     console.print('  This will block all new swap reservations.')
     console.print('  Existing swaps will continue to completion.\n')
+    console.print(f'  In-flight swaps that will be unaffected: {len(active_swaps)}\n')
 
     if not click.confirm('Confirm halting the system?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -477,7 +529,7 @@ def halt_system():
             client.set_halted(wallet=wallet, halted=True)
         console.print('[red]System is now halted — no new reservations[/red]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to halt system: {e}[/red]\n')
+        print_contract_error('Failed to halt system', e)
 
 
 @danger_group.command('resume', show_disclaimer=True)
@@ -492,7 +544,7 @@ def resume_system():
     try:
         is_halted = client.get_halted()
     except ContractError as e:
-        console.print(f'[red]Failed to read halt status: {e}[/red]')
+        print_contract_error('Failed to read halt status', e)
         return
 
     if not is_halted:
@@ -511,7 +563,7 @@ def resume_system():
             client.set_halted(wallet=wallet, halted=False)
         console.print('[green]System resumed — new reservations are now allowed[/green]\n')
     except ContractError as e:
-        console.print(f'[red]Failed to resume system: {e}[/red]\n')
+        print_contract_error('Failed to resume system', e)
 
 
 admin_group.add_command(danger_group)

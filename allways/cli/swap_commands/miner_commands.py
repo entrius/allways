@@ -14,6 +14,7 @@ from allways.cli.swap_commands.helpers import (
     from_rao,
     get_cli_context,
     loading,
+    print_contract_error,
     read_miner_commitment,
 )
 from allways.contract_client import ContractError
@@ -50,7 +51,7 @@ def miner_status(hotkey: str):
             is_active = client.get_miner_active_flag(hotkey)
             has_active_swap = client.get_miner_has_active_swap(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to read miner data: {e}[/red]')
+        print_contract_error('Failed to read miner data', e)
         return
 
     table = Table(title='Collateral & Status', show_header=True)
@@ -260,7 +261,7 @@ def miner_deactivate():
             f'[dim]Collateral withdrawal available after {timeout * 2} blocks (~{timeout * 2 * 12 // 60} min)[/dim]\n'
         )
     except ContractError as e:
-        console.print(f'[red]Failed to deactivate: {e}[/red]\n')
+        print_contract_error('Failed to deactivate', e)
 
 
 @miner_group.command('mark-fulfilled')
@@ -303,4 +304,4 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, ye
             )
         console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
     except ContractError as e:
-        console.print(f'[red]Failed to mark fulfilled: {e}[/red]\n')
+        print_contract_error('Failed to mark fulfilled', e)

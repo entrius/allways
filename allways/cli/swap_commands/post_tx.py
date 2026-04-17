@@ -11,6 +11,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     get_cli_context,
     load_pending_swap,
+    print_contract_error,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
@@ -45,7 +46,7 @@ def post_tx_command(tx_hash: str, netuid: int):
         reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
         current_block = subtensor.get_current_block()
     except ContractError as e:
-        console.print(f'[red]Failed to read reservation status: {e}[/red]')
+        print_contract_error('Failed to read reservation status', e)
         return
 
     if reserved_until <= current_block:

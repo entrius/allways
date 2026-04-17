@@ -4,9 +4,17 @@ import click
 from rich.table import Table
 
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.cli.swap_commands.helpers import (
+    SECONDS_PER_BLOCK,
+    console,
+    from_rao,
+    get_cli_context,
+    loading,
+    print_contract_error,
+    to_rao,
+)
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
-from allways.contract_client import ContractError
+from allways.contract_client import ContractError, is_contract_rejection
 
 
 @click.group('collateral', cls=StyledGroup, show_disclaimer=True)
@@ -66,6 +74,12 @@ def collateral_deposit(amount: float | None, yes: bool):
             )
             return
     except ContractError as e:
+        # Contract rejection on a read means the contract told us this
+        # deposit is invalid (e.g. ExceedsMaxCollateral) — abort. A plain
+        # RPC failure is transient, so we warn and continue.
+        if is_contract_rejection(e):
+            print_contract_error('Pre-flight check rejected deposit', e)
+            return
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
         console.print(f'[yellow]Warning: balance check failed ({e}), proceeding anyway[/yellow]')
@@ -79,7 +93,7 @@ def collateral_deposit(amount: float | None, yes: bool):
             client.post_collateral(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Successfully deposited {amount} TAO collateral![/green]')
     except ContractError as e:
-        console.print(f'[red]Failed to deposit collateral: {e}[/red]')
+        print_contract_error('Failed to deposit collateral', e)
 
 
 @collateral_group.command('withdraw', show_disclaimer=True)
@@ -149,6 +163,9 @@ def collateral_withdraw(amount: float | None, yes: bool):
             )
             return
     except ContractError as e:
+        if is_contract_rejection(e):
+            print_contract_error('Pre-flight check rejected withdrawal', e)
+            return
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
@@ -162,7 +179,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
             client.withdraw_collateral(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Successfully withdrew {amount} TAO collateral![/green]')
     except ContractError as e:
-        console.print(f'[red]Failed to withdraw collateral: {e}[/red]')
+        print_contract_error('Failed to withdraw collateral', e)
 
 
 @collateral_group.command('view')
@@ -184,7 +201,7 @@ def collateral_view(hotkey: str):
             collateral_rao = client.get_miner_collateral(hotkey)
             is_active = client.get_miner_active_flag(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to read collateral: {e}[/red]')
+        print_contract_error('Failed to read collateral', e)
         return
 
     console.print('\n[bold]Collateral Status[/bold]\n')
