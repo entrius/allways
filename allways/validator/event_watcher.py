@@ -3,10 +3,12 @@
 Each forward step calls ``sync_to(current_block)``; the watcher replays
 ``Contracts::ContractEmitted`` events from its cursor up to ``current_block``
 and applies them to in-memory state used by the crown-time scoring replay.
-Cold start backfills one scoring window so the first scoring pass after a
-restart already has a populated history. Swap outcomes are forwarded into
-``ValidatorStateStore.insert_swap_outcome`` so the credibility ledger
-survives restarts.
+Tracks three things: the current on-chain active set (for rate-gating),
+per-hotkey busy deltas (reservations → swap resolution), and swap outcomes
+forwarded into ``ValidatorStateStore.insert_swap_outcome`` so the
+credibility ledger survives restarts. Collateral and config scalars are
+trusted to the contract — see ``vote_deactivate`` for the min-raise
+remediation path.
 """
 
 from __future__ import annotations
@@ -230,22 +232,6 @@ class ActiveEvent:
     block: int
 
 
-@dataclass
-class ConfigEvent:
-    """Transition of a global contract config scalar (min_collateral,
-    max_collateral, halted). Replayed per-block so scoring evaluates
-    eligibility against the config that was in force at each block, not
-    the current value — an admin-side config change doesn't retroactively
-    disqualify blocks the miner legitimately earned."""
-
-    key: str
-    value: int
-    block: int
-
-
-CONFIG_KEYS_TRACKED = ('max_collateral', 'halted')
-
-
 MAX_BLOCKS_PER_SYNC = 50
 
 
@@ -270,20 +256,6 @@ class ContractEventWatcher:
         self.busy_events: List[BusyEvent] = []
         self.active_events: List[ActiveEvent] = []
         self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
-        # Current-value mirror + historical log for tracked config scalars.
-        # ``max_collateral``/``halted`` default to 0 until the first event is
-        # seen, matching the contract constructor defaults. ``config_initial``
-        # is the frozen pre-event snapshot — used as the fallback for
-        # ``get_config_at`` when the caller asks about a block before any
-        # event fired, since ``config_current`` reflects the LATEST state and
-        # would be wrong as a pre-event fallback.
-        self.config_current: Dict[str, int] = {
-            'max_collateral': 0,
-            'halted': 0,
-        }
-        self.config_initial: Dict[str, int] = dict(self.config_current)
-        self.config_events: List[ConfigEvent] = []
-        self.config_events_by_key: Dict[str, List[ConfigEvent]] = {}
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
@@ -331,40 +303,6 @@ class ContractEventWatcher:
             latest[ev.hotkey] = ev.active
         return {hk for hk, is_active in latest.items() if is_active}
 
-    def get_config_at(self, key: str, block: int) -> int:
-        """Scalar config value (``min_collateral``, ``max_collateral``,
-        ``halted``) at ``block``, reconstructed from the config event log.
-
-        Fallback semantics:
-        - No events for key → return ``config_current[key]`` (= ``config_initial``
-          unchanged, mirrors the collateral snapshot fallback).
-        - Events exist but none at/before ``block`` → return
-          ``config_initial[key]``, not current. ``config_current`` reflects
-          the latest event and would be wrong as a pre-event fallback."""
-        events = self.config_events_by_key.get(key)
-        if not events:
-            return int(self.config_current.get(key, 0))
-        latest_value: Optional[int] = None
-        for ev in events:
-            if ev.block > block:
-                break
-            latest_value = ev.value
-        if latest_value is None:
-            return int(self.config_initial.get(key, 0))
-        return int(latest_value)
-
-    def get_config_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
-        """Config transitions in ``(start_block, end_block]``, oldest first.
-        Emits only keys in ``CONFIG_KEYS_TRACKED``."""
-        out: List[dict] = []
-        for ev in self.config_events:
-            if ev.block <= start_block:
-                continue
-            if ev.block > end_block:
-                break
-            out.append({'key': ev.key, 'value': ev.value, 'block': ev.block})
-        return out
-
     # ─── Sync loop ──────────────────────────────────────────────────────
 
     def initialize(
@@ -383,19 +321,6 @@ class ContractEventWatcher:
                         self.active_miners.add(hotkey)
                 except Exception as e:
                     bt.logging.debug(f'EventWatcher bootstrap: active flag read failed for {hotkey[:8]}: {e}')
-            try:
-                raw_max = contract_client.get_max_collateral() or 0
-                self.config_current['max_collateral'] = int(raw_max)
-                self.config_initial['max_collateral'] = int(raw_max)
-            except Exception as e:
-                bt.logging.debug(f'EventWatcher bootstrap: max_collateral read failed: {e}')
-            try:
-                raw_halted = contract_client.get_halted()
-                halted_int = 1 if bool(raw_halted) else 0
-                self.config_current['halted'] = halted_int
-                self.config_initial['halted'] = halted_int
-            except Exception as e:
-                bt.logging.debug(f'EventWatcher bootstrap: halted read failed: {e}')
             # Without this seed, a miner already serving a swap at startup
             # would be treated as idle until the next terminal event.
             try:
@@ -423,14 +348,6 @@ class ContractEventWatcher:
             event = ActiveEvent(hotkey=hotkey, active=True, block=self.cursor)
             self.active_events.append(event)
             self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
-        # Anchor the config state at cursor for the same reason. A subsequent
-        # ConfigUpdated event within the window is a no-op at cursor but
-        # correctly overrides for later blocks.
-        for key in CONFIG_KEYS_TRACKED:
-            value = int(self.config_current.get(key, 0))
-            event = ConfigEvent(key=key, value=value, block=self.cursor)
-            self.config_events.append(event)
-            self.config_events_by_key.setdefault(key, []).append(event)
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
@@ -507,14 +424,6 @@ class ContractEventWatcher:
                 return
             active = bool(values.get('active'))
             self.record_active_transition(block_num, hotkey, active)
-        elif name == 'ConfigUpdated':
-            key = values.get('key', '')
-            raw = values.get('value', 0)
-            try:
-                val = int(raw)
-            except (TypeError, ValueError):
-                return
-            self.record_config_transition(block_num, key, val)
         elif name == 'SwapInitiated':
             miner = values.get('miner', '')
             if miner:
@@ -541,22 +450,6 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
-
-    def record_config_transition(self, block_num: int, key: str, value: int) -> None:
-        """Apply a contract config scalar transition to both the current-
-        state mirror and the historical event log. No-op if the value is
-        unchanged — duplicate ``ConfigUpdated`` emissions don't bloat the
-        log. Only tracks keys in ``CONFIG_KEYS_TRACKED``; unknown keys are
-        silently ignored."""
-        if key not in CONFIG_KEYS_TRACKED:
-            return
-        current = int(self.config_current.get(key, 0))
-        if current == int(value):
-            return
-        self.config_current[key] = int(value)
-        event = ConfigEvent(key=key, value=int(value), block=block_num)
-        self.config_events.append(event)
-        self.config_events_by_key.setdefault(key, []).append(event)
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
@@ -588,10 +481,10 @@ class ContractEventWatcher:
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
 
     def prune_old_events(self, current_block: int) -> None:
-        """Drop busy, active, and config events older than one scoring window.
-        Latest event per (hotkey/key) is preserved as a state-reconstruction
-        anchor; busy events are kept while the open-swap count is still > 0 so
-        the matching -1 isn't orphaned."""
+        """Drop busy and active events older than one scoring window. Latest
+        active event per hotkey is preserved as a state-reconstruction anchor;
+        busy events are kept while the open-swap count is still > 0 so the
+        matching -1 isn't orphaned."""
         cutoff = current_block - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return
@@ -612,17 +505,3 @@ class ContractEventWatcher:
                     self.active_events_by_hotkey[hotkey] = pruned
                 else:
                     del self.active_events_by_hotkey[hotkey]
-        if self.config_events:
-            latest_per_key: Dict[str, ConfigEvent] = {}
-            for ev in self.config_events:
-                latest_per_key[ev.key] = ev
-            self.config_events = [
-                ev for ev in self.config_events if ev.block >= cutoff or latest_per_key.get(ev.key) is ev
-            ]
-            for key, events in list(self.config_events_by_key.items()):
-                latest = events[-1] if events else None
-                pruned = [ev for ev in events if ev.block >= cutoff or ev is latest]
-                if pruned:
-                    self.config_events_by_key[key] = pruned
-                else:
-                    del self.config_events_by_key[key]
