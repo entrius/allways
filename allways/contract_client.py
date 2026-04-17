@@ -90,6 +90,8 @@ CONTRACT_SELECTORS = {
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
     'get_miner_has_active_swap': bytes.fromhex('1d07dec1'),
+    # Placeholder; updated from regenerated metadata in the final pass.
+    'get_miner_snapshot': bytes.fromhex('00000000'),
     'is_validator': bytes.fromhex('f844fc5f'),
     'get_next_swap_id': bytes.fromhex('d80244d2'),
     'get_fulfillment_timeout': bytes.fromhex('e820174a'),
@@ -171,6 +173,7 @@ CONTRACT_ARG_TYPES = {
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
     'get_miner_has_active_swap': [('hotkey', 'AccountId')],
+    'get_miner_snapshot': [('miner', 'AccountId')],
     'is_validator': [('account', 'AccountId')],
     'get_next_swap_id': [],
     'get_fulfillment_timeout': [],
@@ -808,6 +811,23 @@ class AllwaysContractClient:
 
     def get_miner_has_active_swap(self, hotkey: str) -> bool:
         return self.read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
+
+    def get_miner_snapshot(self, hotkey: str) -> Tuple[int, bool, bool, int, int]:
+        """Composite miner read: (collateral, active, has_active_swap,
+        reserved_until, deactivation_block). One RPC round-trip.
+        """
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_miner_snapshot', {'miner': hotkey})
+        if data is None or len(data) < 26:
+            return (0, False, False, 0, 0)
+        collateral_lo = struct.unpack_from('<Q', data, 0)[0]
+        collateral_hi = struct.unpack_from('<Q', data, 8)[0]
+        collateral = collateral_lo + (collateral_hi << 64)
+        active = data[16] != 0
+        has_active_swap = data[17] != 0
+        reserved_until = struct.unpack_from('<I', data, 18)[0]
+        deactivation_block = struct.unpack_from('<I', data, 22)[0]
+        return (collateral, active, has_active_swap, reserved_until, deactivation_block)
 
     def get_next_swap_id(self) -> int:
         return self.read_u64('get_next_swap_id')

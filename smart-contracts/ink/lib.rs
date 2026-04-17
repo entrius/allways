@@ -1244,6 +1244,24 @@ mod allways_swap_manager {
             self.miner_deactivation_block.get(miner).unwrap_or(0)
         }
 
+        /// Composite miner read: (collateral, active, has_active_swap,
+        /// reserved_until, deactivation_block). One RPC for the CLI views
+        /// that otherwise make four to six separate contract reads per
+        /// render.
+        #[ink(message)]
+        pub fn get_miner_snapshot(
+            &self,
+            miner: AccountId,
+        ) -> (Balance, bool, bool, u32, u32) {
+            (
+                self.collateral.get(miner).unwrap_or(0),
+                self.miner_active.get(miner).unwrap_or(false),
+                self.miner_has_active_swap.get(miner).unwrap_or(false),
+                self.reserved_until_of(miner),
+                self.miner_deactivation_block.get(miner).unwrap_or(0),
+            )
+        }
+
         #[ink(message)]
         pub fn get_consensus_threshold(&self) -> u8 {
             self.consensus_threshold_percent

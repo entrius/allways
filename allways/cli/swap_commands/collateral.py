@@ -114,12 +114,15 @@ def collateral_withdraw(amount: float | None, yes: bool):
         hotkey = wallet.hotkey.ss58_address
         current_block = subtensor.get_current_block()
 
-        is_active = client.get_miner_active_flag(hotkey)
+        # Single composite read instead of five separate RPCs.
+        current_collateral_rao, is_active, has_active_swap, reserved_until, deactivation_block = (
+            client.get_miner_snapshot(hotkey)
+        )
+
         if is_active:
             console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
             return
 
-        deactivation_block = client.get_miner_deactivation_block(hotkey)
         if deactivation_block > 0:
             timeout_blocks = client.get_fulfillment_timeout()
             cooldown_end = deactivation_block + (timeout_blocks * 2)
@@ -131,17 +134,14 @@ def collateral_withdraw(amount: float | None, yes: bool):
                 )
                 return
 
-        reserved_until = client.get_miner_reserved_until(hotkey)
         if reserved_until >= current_block:
             console.print('[red]Cannot withdraw while miner is reserved for a swap.[/red]')
             return
 
-        has_active_swap = client.get_miner_has_active_swap(hotkey)
         if has_active_swap:
             console.print('[red]Cannot withdraw while miner has an active swap.[/red]')
             return
 
-        current_collateral_rao = client.get_miner_collateral(hotkey)
         if amount_rao > current_collateral_rao:
             console.print(
                 f'[red]Insufficient collateral. Current: {from_rao(current_collateral_rao):.4f} TAO, '
