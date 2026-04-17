@@ -162,8 +162,10 @@ mod allways_swap_manager {
             Ok(count)
         }
 
-        /// Get the active request ID for a miner+type, clearing expired ones.
-        fn get_active_request(&mut self, miner: AccountId, req_type: u8) -> Option<u64> {
+        /// Return the active request ID for (miner, req_type), or clear it and
+        /// return None if it's expired. Mutates state — the name makes that
+        /// contract explicit so callers don't assume a side-effect-free read.
+        fn take_or_expire_active_request(&mut self, miner: AccountId, req_type: u8) -> Option<u64> {
             let id = self.miner_active_request.get((miner, req_type))?;
             let created = self.request_created.get(id).unwrap_or(0);
             if self.env().block_number() > created.saturating_add(self.reservation_ttl) {
@@ -208,7 +210,7 @@ mod allways_swap_manager {
             F: FnOnce(&mut Self) -> Result<(), Error>,
         {
             let caller = self.env().caller();
-            let id = match self.get_active_request(miner, req_type) {
+            let id = match self.take_or_expire_active_request(miner, req_type) {
                 Some(id) => {
                     if self.request_hash.get(id).unwrap_or_default() != request_hash {
                         return Err(Error::PendingConflict);
