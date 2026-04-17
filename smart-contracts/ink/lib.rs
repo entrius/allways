@@ -119,71 +119,13 @@ mod allways_swap_manager {
             core::cmp::max(1, required)
         }
 
-        fn compute_reserve_hash(
-            miner: &AccountId,
-            user_from_address: &str,
-            from_chain: &str,
-            to_chain: &str,
-            tao_amount: Balance,
-            from_amount: Balance,
-            to_amount: Balance,
-        ) -> Hash {
+        /// Keccak-hash any SCALE-encodable value. Call sites pass the full
+        /// tuple of fields bound into the request hash — the hash algorithm
+        /// and field order must match the off-chain signer, so keep these
+        /// tuples stable when refactoring.
+        fn hash_request<T: scale::Encode>(value: &T) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(
-                    miner,
-                    user_from_address,
-                    from_chain,
-                    to_chain,
-                    tao_amount,
-                    from_amount,
-                    to_amount,
-                ),
-                &mut output,
-            );
-            Hash::from(output)
-        }
-
-        fn compute_initiate_hash(
-            miner: &AccountId,
-            from_tx_hash: &str,
-            from_chain: &str,
-            to_chain: &str,
-            miner_from_address: &str,
-            miner_to_address: &str,
-            rate: &str,
-            tao_amount: Balance,
-            from_amount: Balance,
-            to_amount: Balance,
-        ) -> Hash {
-            let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(
-                    miner,
-                    from_tx_hash,
-                    from_chain,
-                    to_chain,
-                    miner_from_address,
-                    miner_to_address,
-                    rate,
-                    tao_amount,
-                    from_amount,
-                    to_amount,
-                ),
-                &mut output,
-            );
-            Hash::from(output)
-        }
-
-        fn compute_extend_hash(
-            miner: &AccountId,
-            from_tx_hash: &str,
-        ) -> Hash {
-            let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, from_tx_hash),
-                &mut output,
-            );
+            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(value, &mut output);
             Hash::from(output)
         }
 
@@ -395,7 +337,7 @@ mod allways_swap_manager {
 
             // Verify hash — from_chain and to_chain are included in the hash,
             // so validators must agree on the direction. No separate check needed.
-            let computed = Self::compute_reserve_hash(
+            let computed = Self::hash_request(&(
                 &miner,
                 &user_from_address,
                 &from_chain,
@@ -403,7 +345,7 @@ mod allways_swap_manager {
                 tao_amount,
                 from_amount,
                 to_amount,
-            );
+            ));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
@@ -503,7 +445,7 @@ mod allways_swap_manager {
             let current_block = self.env().block_number();
 
             // Verify hash
-            let computed = Self::compute_extend_hash(&miner, &from_tx_hash);
+            let computed = Self::hash_request(&(&miner, &from_tx_hash));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
@@ -580,7 +522,7 @@ mod allways_swap_manager {
 
             // Verify hash — covers the full swap shape so no field can be substituted
             // by a malicious validator casting the quorum-reaching vote.
-            let computed = Self::compute_initiate_hash(
+            let computed = Self::hash_request(&(
                 &miner,
                 &from_tx_hash,
                 &from_chain,
@@ -591,7 +533,7 @@ mod allways_swap_manager {
                 tao_amount,
                 from_amount,
                 to_amount,
-            );
+            ));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
