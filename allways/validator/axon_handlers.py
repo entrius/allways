@@ -438,7 +438,7 @@ async def handle_swap_confirm(
                 reject_synapse(synapse, 'Reservation data not found', ctx)
                 return synapse
 
-            res_tao_amount, res_source_amount, res_dest_amount = res_data[1], res_data[2], res_data[3]
+            res_tao_amount, res_source_amount, res_dest_amount = res_data
 
             commitment = load_swap_commitment(validator, miner)
             if commitment is None:

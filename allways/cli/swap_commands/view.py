@@ -33,11 +33,17 @@ def view_group():
 
 
 @view_group.command('miners')
-def view_miners():
+@click.option('--full', is_flag=True, help='Show untruncated addresses and hotkeys')
+def view_miners(full: bool):
     """View active miners and their trading pairs.
 
+    [dim]Status column shows live runtime state per miner: reserved (with
+    locked TAO amount), has-swap, or cooldown (withdrawal cooldown blocks
+    remaining after deactivation).[/dim]
+
     [dim]Examples:
-        $ alw view miners[/dim]
+        $ alw view miners
+        $ alw view miners --full[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -53,27 +59,68 @@ def view_miners():
     src_up = pairs[0].from_chain.upper()
     dst_up = pairs[0].to_chain.upper()
 
+    # Withdrawal cooldown = 2 * fulfillment_timeout_blocks after deactivation.
+    try:
+        fulfillment_timeout = client.get_fulfillment_timeout()
+        current_block = subtensor.get_current_block()
+    except ContractError:
+        fulfillment_timeout = 0
+        current_block = 0
+
     table = Table(show_header=True)
     table.add_column('UID', style='cyan')
     table.add_column(f'{src_up}→{dst_up}', style='green')
     table.add_column(f'{dst_up}→{src_up}', style='green')
     table.add_column('Collateral (TAO)', style='magenta')
     table.add_column('Active', style='bold')
+    table.add_column('Status', style='yellow')
     table.add_column(f'{src_up} Addr', style='dim')
     table.add_column(f'{dst_up} Addr', style='dim')
 
+    def _trunc(s: str) -> str:
+        if full or not s:
+            return s
+        return s[:16] + '...' if len(s) > 16 else s
+
     for pair in pairs:
         try:
-            collateral_rao = client.get_miner_collateral(pair.hotkey)
+            collateral_rao, is_active, has_swap, reserved_until, deactivation_block = client.get_miner_snapshot(
+                pair.hotkey
+            )
             collateral_str = f'{from_rao(collateral_rao):.4f}'
-        except ContractError:
-            collateral_str = '[dim]—[/dim]'
-
-        try:
-            is_active = client.get_miner_active_flag(pair.hotkey)
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
         except ContractError:
+            collateral_str = '[dim]—[/dim]'
             active_str = '[dim]—[/dim]'
+            reserved_until = 0
+            deactivation_block = 0
+            has_swap = False
+
+        status_parts = []
+        if has_swap:
+            status_parts.append('[blue]in-swap[/blue]')
+        if reserved_until and current_block and reserved_until > current_block:
+            try:
+                resv = client.get_reservation_data(pair.hotkey)
+            except ContractError:
+                resv = None
+            if resv:
+                tao_amount, _, _ = resv
+                status_parts.append(f'[yellow]reserved {from_rao(tao_amount):.4f} TAO[/yellow]')
+            else:
+                status_parts.append('[yellow]reserved[/yellow]')
+        if deactivation_block and fulfillment_timeout and current_block:
+            cooldown_end = deactivation_block + 2 * fulfillment_timeout
+            remaining = cooldown_end - current_block
+            if remaining > 0:
+                status_parts.append(f'[red]cooldown {remaining}b[/red]')
+
+        if status_parts:
+            status_str = ' · '.join(status_parts)
+        elif is_active:
+            status_str = '[green]available[/green]'
+        else:
+            status_str = '[dim]offline[/dim]'
 
         fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
         if pair.counter_rate > 0:
@@ -89,12 +136,15 @@ def view_miners():
             ctr_display,
             collateral_str,
             active_str,
-            pair.from_address[:16] + '...',
-            pair.to_address[:16] + '...',
+            status_str,
+            _trunc(pair.from_address),
+            _trunc(pair.to_address),
         )
 
     console.print(table)
     console.print(f'\n[dim]Total miners: {len(pairs)}[/dim]\n')
+    if not full:
+        console.print('[dim]Use --full to show untruncated addresses.[/dim]\n')
 
 
 @view_group.command('rates')
@@ -431,32 +481,25 @@ def view_contract():
 
     console.print('\n[bold]Contract Parameters[/bold]\n')
 
-    def read_safe(fn, default=None):
-        try:
-            return fn()
-        except ContractError:
-            if default is not None:
-                return default
-            raise
-
     try:
         with loading('Reading contract parameters...'):
-            timeout_blocks = read_safe(client.get_fulfillment_timeout)
+            timeout_blocks = client.get_fulfillment_timeout()
             timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
-            reservation_ttl_blocks = read_safe(client.get_reservation_ttl)
+            reservation_ttl_blocks = client.get_reservation_ttl()
             reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
-            consensus_threshold = read_safe(client.get_consensus_threshold)
-            min_collateral_rao = read_safe(client.get_min_collateral)
-            max_collateral_rao = read_safe(client.get_max_collateral)
-            required_votes = read_safe(client.get_required_votes_count)
-            validator_count = read_safe(client.get_validator_count)
-            next_swap_id = read_safe(client.get_next_swap_id)
-            min_swap_rao = read_safe(client.get_min_swap_amount)
-            max_swap_rao = read_safe(client.get_max_swap_amount)
-            accumulated_fees_rao = read_safe(client.get_accumulated_fees)
-            total_recycled_rao = read_safe(client.get_total_recycled_fees)
-            owner = read_safe(client.get_owner)
-            recycle_address = read_safe(client.get_recycle_address, default=None)
+            consensus_threshold = client.get_consensus_threshold()
+            min_collateral_rao = client.get_min_collateral()
+            max_collateral_rao = client.get_max_collateral()
+            validator_count = client.get_validator_count()
+            required_votes = max(1, (validator_count * consensus_threshold + 99) // 100) if validator_count > 0 else 1
+            next_swap_id = client.get_next_swap_id()
+            min_swap_rao = client.get_min_swap_amount()
+            max_swap_rao = client.get_max_swap_amount()
+            accumulated_fees_rao = client.get_accumulated_fees()
+            total_recycled_rao = client.get_total_recycled_fees()
+            owner = client.get_owner()
+            recycle_address = client.get_recycle_address()
+            halted = client.get_halted()
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
         return
@@ -484,6 +527,7 @@ def view_contract():
     table.add_row('Owner', owner)
     if recycle_address:
         table.add_row('Recycle Address', recycle_address)
+    table.add_row('System Status', '[red]HALTED[/red]' if halted else '[green]Running[/green]')
 
     console.print(table)
     console.print()
@@ -506,11 +550,24 @@ def view_reservation():
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
 
-    # Validate against on-chain state
+    # Validate against on-chain state. When the reservation struct is gone,
+    # disambiguate expired-by-TTL from consumed-by-vote_initiate by probing
+    # the miner for an active swap we can match back to this reservation.
+    consumed_swap = None
     try:
         with loading('Reading reservation...'):
             reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
             current_block = subtensor.get_current_block()
+            on_chain_reservation = client.get_reservation_data(state.miner_hotkey)
+            if reserved_until == 0 and on_chain_reservation is None:
+                if client.get_miner_has_active_swap(state.miner_hotkey):
+                    for swap in client.get_miner_active_swaps(state.miner_hotkey):
+                        if (
+                            swap.user_from_address == state.user_from_address
+                            or swap.user_to_address == state.receive_address
+                        ):
+                            consumed_swap = swap
+                            break
     except ContractError as e:
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
         return
@@ -535,14 +592,25 @@ def view_reservation():
     table.add_row('Receive Address', state.receive_address)
     table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
 
+    if on_chain_reservation:
+        chain_tao, chain_from, chain_to = on_chain_reservation
+        mismatch = chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount
+        if mismatch:
+            table.add_row('Chain Amounts', '[red]mismatch with local state[/red]')
+        else:
+            table.add_row('Chain Amounts', f'[green]✓ locked {from_rao(chain_tao):.4f} TAO[/green]')
+
     if is_active:
         remaining = reserved_until - current_block
         remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+    elif consumed_swap is not None:
+        table.add_row('Status', f'[green]INITIATED (swap #{consumed_swap.id})[/green]')
+        table.add_row('Swap Status', consumed_swap.status.name)
     else:
-        table.add_row('Status', '[red]EXPIRED[/red]')
-        table.add_row('Time Remaining', 'Expired')
+        table.add_row('Status', '[yellow]NO LONGER ACTIVE[/yellow]')
+        table.add_row('Time Remaining', '—')
 
     console.print(table)
 
@@ -551,7 +619,18 @@ def view_reservation():
             f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} to the address above, then run:'
         )
         console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
-    else:
-        console.print('\n[yellow]This reservation has expired. Run `alw swap now` to start a new one.[/yellow]')
+    elif consumed_swap is not None:
+        console.print(
+            f'\n[green]Reservation was consumed into swap #{consumed_swap.id} — it is in progress on-chain.[/green]'
+        )
+        console.print(f'[dim]Watch with: alw view swap {consumed_swap.id} --watch[/dim]')
         clear_pending_swap()
-        console.print('[dim]Stale state file cleared.[/dim]\n')
+        console.print('[dim]Local reservation state cleared.[/dim]\n')
+    else:
+        console.print(
+            '\n[yellow]Reservation is no longer active on-chain.[/yellow]\n'
+            '[dim]Either the reservation expired before you sent funds, or your swap already '
+            'initiated and has since completed. Check: alw view swaps[/dim]'
+        )
+        clear_pending_swap()
+        console.print('[dim]Local reservation state cleared.[/dim]\n')

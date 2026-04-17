@@ -113,8 +113,15 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         return
 
     if not reservation_active:
+        # Reservation is cleared either on expiry or when vote_initiate succeeds.
+        # A silent initiate means the swap is already in flight or has completed —
+        # surface both possibilities rather than assuming expiry.
         clear_pending_swap()
-        console.print('\n[red]Reservation has expired.[/red]')
+        console.print('\n[yellow]Reservation is no longer active.[/yellow]')
+        console.print(
+            '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
+            'or completed. Check with: alw view swaps[/dim]\n'
+        )
         console.print('[dim]Start a new swap with: alw swap now[/dim]')
         return
 

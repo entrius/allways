@@ -13,7 +13,7 @@ from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
-from allways.contract_client import AllwaysContractClient
+from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -34,6 +34,37 @@ SWAP_STATUS_COLORS = {
 def loading(message: str, spinner: str = 'dots', color: str = 'cyan'):
     """Return a Rich spinner context manager for long-running operations."""
     return console.status(f'[{color}]{message}[/{color}]', spinner=spinner, spinner_style=color)
+
+
+def print_contract_error(action: str, e: BaseException) -> None:
+    """Print a contract error with contract-rejection vs RPC-failure distinction.
+
+    Contract rejections (NotOwner, NotValidator, InvalidStatus, etc.) are the
+    user's expected failure mode for bad state and we surface the variant
+    name plainly. RPC or client-side failures get a retryable framing so the
+    user knows to check connectivity rather than their input.
+    """
+    if isinstance(e, ContractError) and is_contract_rejection(e):
+        console.print(f'[red]{action}: contract rejected — {e}[/red]')
+    else:
+        console.print(f'[red]{action}: {e}[/red]')
+        console.print('[dim]This looks like an RPC or client failure — try again.[/dim]')
+
+
+def is_valid_ss58(address: str) -> bool:
+    """Check if a string is a syntactically valid SS58 address.
+
+    Does not verify the account exists on-chain — only that the encoding is
+    well-formed. Useful as a pre-flight guard before submitting an admin
+    extrinsic whose typo would silently fail.
+    """
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+
+        ss58_decode(address)
+        return True
+    except Exception:
+        return False
 
 
 # Global flags that can appear anywhere in the command line.

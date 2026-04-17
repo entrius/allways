@@ -30,12 +30,37 @@ if TYPE_CHECKING:
 
 def score_and_reward_miners(self: Validator) -> None:
     try:
-        rewards, miner_uids = calculate_miner_rewards(self)
+        if _contract_is_halted(self):
+            rewards, miner_uids = build_halted_rewards(self)
+        else:
+            rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
         prune_rate_events(self)
         prune_swap_outcomes(self)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
+
+
+def _contract_is_halted(self: Validator) -> bool:
+    """Best-effort halt check. RPC flakiness should not zero every miner's
+    reward, so any exception falls through to normal scoring."""
+    try:
+        return bool(self.contract_client.get_halted())
+    except Exception as e:
+        bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
+        return False
+
+
+def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
+    """During a halt, no miner earns crown; the full pool recycles."""
+    n_uids = self.metagraph.n.item()
+    rewards = np.zeros(n_uids, dtype=np.float32)
+    if n_uids == 0:
+        return rewards, set()
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
+    rewards[recycle_uid] = 1.0
+    bt.logging.info('V1 scoring: halted, recycled full pool')
+    return rewards, set(range(n_uids))
 
 
 def prune_rate_events(self: Validator) -> None:
@@ -60,14 +85,18 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     window_end = self.block
     window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
 
-    in_metagraph: Set[str] = set(self.metagraph.hotkeys)
-    eligible_hotkeys: Set[str] = in_metagraph & self.event_watcher.active_miners
+    # A miner's *current* active flag is irrelevant to whether they earned
+    # crown during the replay window. The only at-scoring-time check is
+    # metagraph membership, because a dereg'd miner has no UID to credit.
+    # Active, rate, and busy are all evaluated per-block via event replay
+    # inside replay_crown_time_window. Collateral-floor invariants are
+    # trusted to the contract's active flag.
+    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
-    min_collateral = int(self.event_watcher.min_collateral or 0)
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         crown_blocks = replay_crown_time_window(
@@ -77,8 +106,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             to_chain=to_chain,
             window_start=window_start,
             window_end=window_end,
-            eligible_hotkeys=eligible_hotkeys,
-            min_collateral=min_collateral,
+            rewardable_hotkeys=rewardable_hotkeys,
         )
         total = sum(crown_blocks.values())
         if total == 0:
@@ -121,23 +149,24 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
 class EventKind(IntEnum):
     """Ordering of coincident-block transitions in the crown-time replay.
 
-    At the same block number, busy transitions apply before collateral
-    changes, which apply before rate changes. So if a user reserves a miner
-    in the same block that miner's best rate was posted, the reservation
-    ends crown credit *before* the rate attribution — matching the intent
-    that a busy miner doesn't earn a new interval.
+    ACTIVE applies first because the on-chain active flag is the per-miner
+    tell-all. Then BUSY (reservation ends crown for that miner), then
+    RATE. So if a user reserves a miner in the same block that miner's
+    best rate was posted, the reservation ends crown credit *before* the
+    rate attribution — matching the intent that a busy miner doesn't earn
+    a new interval.
     """
 
-    BUSY = 0
-    COLLATERAL = 1
+    ACTIVE = 0
+    BUSY = 1
     RATE = 2
 
 
 @dataclass
 class ReplayEvent:
     """One transition in the chronological replay stream. ``value`` is
-    polymorphic on ``kind``: rate as float, collateral as rao, or busy delta
-    of ±1."""
+    polymorphic on ``kind``: rate as float, busy delta of ±1, or active as
+    0/1."""
 
     block: int
     hotkey: str
@@ -155,30 +184,20 @@ def reconstruct_window_start_state(
     from_chain: str,
     to_chain: str,
     window_start: int,
-    eligible_hotkeys: Set[str],
-) -> Tuple[Dict[str, float], Dict[str, int], Dict[str, int]]:
-    """Snapshot rates, collateral, and busy counts as they stood at window_start."""
+    rewardable_hotkeys: Set[str],
+) -> Tuple[Dict[str, float], Dict[str, int], Set[str]]:
+    """Snapshot rates, busy counts, and the active set as they stood at
+    window_start."""
     rates: Dict[str, float] = {}
-    collateral: Dict[str, int] = {}
     busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
+    active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
-    for hotkey in eligible_hotkeys:
+    for hotkey in rewardable_hotkeys:
         latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
         if latest_rate is not None:
             rates[hotkey] = latest_rate[0]
 
-        latest_col = event_watcher.get_latest_collateral_before(hotkey, window_start)
-        if latest_col is not None:
-            collateral[hotkey] = latest_col[0]
-        else:
-            # No event before window_start — fall back to the watcher's current
-            # snapshot so a miner whose only collateral event predates retention
-            # still gets credited accurately.
-            snapshot = event_watcher.collateral.get(hotkey)
-            if snapshot is not None:
-                collateral[hotkey] = snapshot
-
-    return rates, collateral, busy_count
+    return rates, busy_count, active_set
 
 
 def merge_replay_events(
@@ -189,19 +208,17 @@ def merge_replay_events(
     window_start: int,
     window_end: int,
 ) -> List[ReplayEvent]:
-    """Merge in-window rate, collateral, and busy transitions into one
+    """Merge in-window active, busy, and rate transitions into one
     chronologically-sorted stream."""
     events: List[ReplayEvent] = []
 
+    for e in event_watcher.get_active_events_in_range(window_start, window_end):
+        events.append(
+            ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.ACTIVE, value=1.0 if e['active'] else 0.0)
+        )
+
     for e in event_watcher.get_busy_events_in_range(window_start, window_end):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.BUSY, value=float(e['delta'])))
-
-    for e in event_watcher.get_collateral_events_in_range(window_start, window_end):
-        events.append(
-            ReplayEvent(
-                block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
-            )
-        )
 
     for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.RATE, value=float(e['rate'])))
@@ -217,14 +234,18 @@ def replay_crown_time_window(
     to_chain: str,
     window_start: int,
     window_end: int,
-    eligible_hotkeys: Set[str],
-    min_collateral: int,
+    rewardable_hotkeys: Set[str],
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
-    Ties at the same rate split credit evenly; busy miners are excluded so
-    credit flows to the next-best idle miner."""
-    rates, collateral, busy_count = reconstruct_window_start_state(
-        store, event_watcher, from_chain, to_chain, window_start, eligible_hotkeys
+    Ties at the same rate split credit evenly. A miner qualifies for crown
+    at an instant iff they are on the current metagraph, were active at
+    that instant, not busy, and had a positive rate posted. Active/rate/busy
+    are evaluated per-block via the replay — a miner's status at scoring
+    time is irrelevant other than metagraph membership (used to credit the
+    UID). Collateral-floor invariants are trusted to the contract's active
+    flag; halt state is handled at ``score_and_reward_miners`` entry."""
+    rates, busy_count, active_set = reconstruct_window_start_state(
+        store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
     )
     replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
 
@@ -236,7 +257,12 @@ def replay_crown_time_window(
         if duration <= 0:
             return
         busy_set = {hk for hk, c in busy_count.items() if c > 0}
-        holders = crown_holders_at_instant(rates, collateral, min_collateral, eligible_hotkeys, busy=busy_set)
+        holders = crown_holders_at_instant(
+            rates,
+            rewardable_hotkeys,
+            busy=busy_set,
+            active=active_set,
+        )
         if not holders:
             return
         split = duration / len(holders)
@@ -246,14 +272,17 @@ def replay_crown_time_window(
     def apply_event(event: ReplayEvent) -> None:
         if event.kind is EventKind.RATE:
             rates[event.hotkey] = event.value
-        elif event.kind is EventKind.COLLATERAL:
-            collateral[event.hotkey] = int(event.value)
-        else:  # BUSY
+        elif event.kind is EventKind.BUSY:
             new_count = busy_count.get(event.hotkey, 0) + int(event.value)
             if new_count > 0:
                 busy_count[event.hotkey] = new_count
             else:
                 busy_count.pop(event.hotkey, None)
+        else:  # ACTIVE
+            if event.value > 0:
+                active_set.add(event.hotkey)
+            else:
+                active_set.discard(event.hotkey)
 
     for event in replay_events:
         credit_interval(prev_block, event.block)
@@ -266,23 +295,28 @@ def replay_crown_time_window(
 
 def crown_holders_at_instant(
     rates: Dict[str, float],
-    collaterals: Dict[str, int],
-    min_collateral: int,
-    eligible: Set[str],
+    rewardable: Set[str],
     busy: Optional[Set[str]] = None,
+    active: Optional[Set[str]] = None,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
-    other condition (eligible, not busy, collateral >= min, rate > 0). If the
-    best rate has no qualified miner, fall through to the next-best rate."""
+    other condition (rewardable, active, not busy, rate > 0). If the best
+    rate has no qualified miner, fall through to the next-best rate.
+
+    Collateral-floor gating is trusted to the contract's active flag —
+    miners who drop below the floor get auto-deactivated on-chain (fee /
+    slash paths) or kicked via ``vote_deactivate`` in the min-raise edge
+    case. Halt state is handled at ``score_and_reward_miners`` entry, not
+    in this helper.
+
+    ``active`` defaults to None for tests that don't care about the
+    historical active flag; replay callers pass the reconstructed set."""
     busy = busy or set()
 
     def qualifies(hotkey: str) -> bool:
-        return (
-            hotkey in eligible
-            and hotkey not in busy
-            and collaterals.get(hotkey, 0) >= min_collateral
-            and rates.get(hotkey, 0) > 0
-        )
+        if active is not None and hotkey not in active:
+            return False
+        return hotkey in rewardable and hotkey not in busy and rates.get(hotkey, 0) > 0
 
     by_rate: Dict[float, List[str]] = {}
     for hotkey, rate in rates.items():

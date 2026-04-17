@@ -93,10 +93,8 @@ def status_command(netuid: int):
 
         # Miner status
         try:
-            collateral = client.get_miner_collateral(hotkey)
+            collateral, is_active, has_swap, _, _ = client.get_miner_snapshot(hotkey)
             if collateral > 0:
-                is_active = client.get_miner_active_flag(hotkey)
-                has_swap = client.get_miner_has_active_swap(hotkey)
                 status_str = '[green]Active[/green]' if is_active else '[red]Inactive[/red]'
                 if has_swap:
                     status_str += ' (has active swap)'

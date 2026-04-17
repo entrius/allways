@@ -30,7 +30,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
 def to_smallest_unit(amount: float, chain_id: str) -> int:
@@ -81,7 +81,7 @@ def sign_and_broadcast_confirm(
             from_key,
         )
     except Exception as e:
-        console.print(f'[red]Failed to sign source proof: {e}[/red]')
+        console.print(f'[red]Failed to sign source proof ({type(e).__name__}): {e}[/red]')
         return 0, 0
 
     if not from_proof:
@@ -169,7 +169,7 @@ def broadcast_reserve_with_retry(
             from_key,
         )
     except Exception as e:
-        console.print(f'[red]Failed to sign source address proof: {e}[/red]')
+        console.print(f'[red]Failed to sign source address proof ({type(e).__name__}): {e}[/red]')
         return None
 
     if not from_address_proof:
@@ -237,7 +237,7 @@ def broadcast_reserve_with_retry(
                 continue
             return None
 
-        with console.status(f'[dim]Waiting for quorum ({accepted} votes submitted)...[/dim]'):
+        with console.status(f'[dim]Waiting for quorum ({accepted} votes submitted)...[/dim]') as status:
             quorum_errors = 0
             for _ in range(30):
                 time.sleep(2)
@@ -246,6 +246,11 @@ def broadcast_reserve_with_retry(
                     if reserved_until > current_block:
                         reserved = True
                         break
+                    vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
+                    status.update(
+                        f'[dim]Waiting for quorum — {vote_count} on-chain vote(s) so far '
+                        f'({accepted} broadcast)...[/dim]'
+                    )
                     quorum_errors = 0
                 except ContractError:
                     quorum_errors += 1
@@ -285,14 +290,13 @@ def display_receipt(swap):
     dst_human = swap.to_amount / (10**dst_chain_def.decimals)
     tao_human = swap.tao_amount / (10**9)
 
-    # Calculate fee
-    fee_divisor = 100  # 1% fee
-    if swap.to_chain == 'tao':
-        fee_human = tao_human / fee_divisor
-        fee_unit = 'TAO'
-    else:
-        fee_human = dst_human / fee_divisor
-        fee_unit = swap.to_chain.upper()
+    # swap.to_amount is the post-fee amount the miner sent (see
+    # fulfillment.py::send_dest_funds). The raw rate-quoted amount was
+    # to_amount / (1 - 1/FEE_DIVISOR), and the protocol fee is 1/FEE_DIVISOR
+    # of that raw amount. Shown in TAO since that's the side the fee is
+    # recorded against (mirrors accumulated_fees on-chain).
+    fee_pct = 100 / FEE_DIVISOR
+    protocol_fee_tao = tao_human / FEE_DIVISOR
 
     src_tx = swap.from_tx_hash[:20] + '...' if len(swap.from_tx_hash) > 20 else swap.from_tx_hash
     dst_tx = swap.to_tx_hash[:20] + '...' if len(swap.to_tx_hash) > 20 else swap.to_tx_hash
@@ -300,7 +304,7 @@ def display_receipt(swap):
     receipt = (
         f'  [green]Sent:      {src_human:g} {swap.from_chain.upper()}[/green]\n'
         f'  [green]Received:  {dst_human:.8f} {swap.to_chain.upper()}[/green]\n'
-        f'  [dim]Fee:       {fee_human:.8f} {fee_unit} (1%)[/dim]\n'
+        f'  [dim]Protocol fee: {protocol_fee_tao:.6f} TAO ({fee_pct:g}% of swap)[/dim]\n'
         f'\n'
         f'  Source TX: [cyan]{src_tx}[/cyan]\n'
         f'  Dest TX:   [cyan]{dst_tx}[/cyan]\n'
@@ -606,37 +610,40 @@ def swap_now_command(
         f' (after {preview_fee_pct:g}% fee)'
     )
 
-    if from_chain == 'tao':
-        tao_amount = from_amount
-    elif to_chain == 'tao':
-        tao_amount = to_amount
-    else:
-        tao_amount = 0
+    tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
 
-    # Validate against contract min/max swap bounds
+    # Validate against contract min/max swap bounds + selected miner's
+    # collateral. Mirrors vote_reserve (bounds) and vote_initiate
+    # (collateral) so we fail loudly here instead of after the user has
+    # reserved and sent funds.
     try:
         min_swap = client.get_min_swap_amount()
         max_swap = client.get_max_swap_amount()
-        if min_swap > 0 and tao_amount < min_swap:
-            console.print(
-                f'[red]Amount too low. Minimum swap: {from_rao(min_swap):.4f} TAO equivalent '
-                f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
-            )
-            return
-        if max_swap > 0 and tao_amount > max_swap:
-            console.print(
-                f'[red]Amount too high. Maximum swap: {from_rao(max_swap):.4f} TAO equivalent '
-                f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
-            )
-            return
     except ContractError:
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
+        min_swap, max_swap = 0, 0
+
+    viable, reason = check_swap_viability(tao_amount, selected_collateral, min_swap, max_swap)
+    if not viable:
+        console.print(
+            f'[red]Swap cannot be initiated at this amount: {reason} '
+            f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
+        )
+        console.print(
+            '[dim]Try a different amount, pick another miner, or run `alw swap quote` to see viable rows.[/dim]'
+        )
+        return
 
     fee_divisor = FEE_DIVISOR
     user_receives = apply_fee_deduction(to_amount, fee_divisor)
     fee_percent = 100 / fee_divisor
 
     # Step 5: Enter receive address
+    if not receive_address_opt:
+        console.print(
+            f'  [dim]Enter only your PUBLIC {to_chain.upper()} address. '
+            f'Never paste a private key, seed phrase, or WIF here.[/dim]'
+        )
     receive_address = receive_address_opt or click.prompt(f'Your {to_chain.upper()} receive address')
     to_provider = chain_providers.get(to_chain)
     if to_provider and hasattr(to_provider, 'is_valid_address') and not to_provider.is_valid_address(receive_address):
@@ -649,6 +656,9 @@ def swap_now_command(
         user_from_address = wallet.coldkeypub.ss58_address
         console.print(f'  Source: [dim]{user_from_address}[/dim] (from wallet)')
     else:
+        console.print(
+            f'  [dim]Enter only your PUBLIC {from_chain.upper()} address. Never paste a private key or WIF here.[/dim]'
+        )
         user_from_address = click.prompt(f'Your {from_chain.upper()} source address')
 
     # Step 6b: Verify sender has enough funds
@@ -779,7 +789,7 @@ def swap_now_command(
                     )
                 console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
             except Exception as e:
-                console.print(f'[red]Transfer error: {e}[/red]')
+                console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
                 console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
                 return
         else:

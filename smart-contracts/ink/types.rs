@@ -1,5 +1,5 @@
 use ink::prelude::string::String;
-use ink::primitives::AccountId;
+use ink::primitives::{AccountId, Hash};
 use scale::{Decode, Encode};
 
 type Balance = u128;
@@ -22,6 +22,23 @@ pub enum VoteType {
     Confirm = 0,
     Timeout = 1,
     ExtendTimeout = 2,
+}
+
+/// Confirmed reservation for a miner after validator quorum.
+///
+/// Replaces the six per-miner reservation_* / miner_reserved_until Mappings.
+/// `from_addr` stays here (not stripped) because the contract needs it on
+/// expiry to strike against the user's source address (see `vote_reserve`
+/// lazy-strike path). All six fields are read, written, and cleared together.
+#[derive(Debug, Clone, Encode, Decode)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout))]
+pub struct Reservation {
+    pub hash: Hash,
+    pub from_addr: String,
+    pub tao_amount: Balance,
+    pub from_amount: Balance,
+    pub to_amount: Balance,
+    pub reserved_until: u32,
 }
 
 /// Full swap data stored on-chain
