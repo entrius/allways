@@ -544,12 +544,24 @@ def view_reservation():
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
 
-    # Validate against on-chain state
+    # Validate against on-chain state. When the reservation struct is gone,
+    # disambiguate expired-by-TTL from consumed-by-vote_initiate by probing
+    # the miner for an active swap we can match back to this reservation.
+    consumed_swap = None
     try:
         with loading('Reading reservation...'):
             reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
             current_block = subtensor.get_current_block()
             on_chain_reservation = client.get_reservation_data(state.miner_hotkey)
+            if reserved_until == 0 and on_chain_reservation is None:
+                if client.get_miner_has_active_swap(state.miner_hotkey):
+                    for swap in client.get_miner_active_swaps(state.miner_hotkey):
+                        if (
+                            swap.user_from_address == state.user_from_address
+                            or swap.user_to_address == state.receive_address
+                        ):
+                            consumed_swap = swap
+                            break
     except ContractError as e:
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
         return
@@ -587,9 +599,12 @@ def view_reservation():
         remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+    elif consumed_swap is not None:
+        table.add_row('Status', f'[green]INITIATED (swap #{consumed_swap.id})[/green]')
+        table.add_row('Swap Status', consumed_swap.status.name)
     else:
-        table.add_row('Status', '[red]EXPIRED[/red]')
-        table.add_row('Time Remaining', 'Expired')
+        table.add_row('Status', '[yellow]NO LONGER ACTIVE[/yellow]')
+        table.add_row('Time Remaining', '—')
 
     console.print(table)
 
@@ -598,7 +613,18 @@ def view_reservation():
             f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} to the address above, then run:'
         )
         console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
-    else:
-        console.print('\n[yellow]This reservation has expired. Run `alw swap now` to start a new one.[/yellow]')
+    elif consumed_swap is not None:
+        console.print(
+            f'\n[green]Reservation was consumed into swap #{consumed_swap.id} — it is in progress on-chain.[/green]'
+        )
+        console.print(f'[dim]Watch with: alw view swap {consumed_swap.id} --watch[/dim]')
         clear_pending_swap()
-        console.print('[dim]Stale state file cleared.[/dim]\n')
+        console.print('[dim]Local reservation state cleared.[/dim]\n')
+    else:
+        console.print(
+            '\n[yellow]Reservation is no longer active on-chain.[/yellow]\n'
+            '[dim]Either the reservation expired before you sent funds, or your swap already '
+            'initiated and has since completed. Check: alw view swaps[/dim]'
+        )
+        clear_pending_swap()
+        console.print('[dim]Local reservation state cleared.[/dim]\n')
