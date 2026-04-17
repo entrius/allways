@@ -269,6 +269,10 @@ CONTRACT_ERROR_VARIANTS = {
     24: ('HashMismatch', 'Request hash does not match computed hash'),
     25: ('PendingConflict', 'A pending vote exists for a different request'),
     26: ('SameChain', 'Source and destination chains must be different'),
+    27: ('SystemHalted', 'System is halted — no new activity allowed'),
+    28: ('SufficientCollateral', 'Miner collateral is at or above floor; vote_deactivate not applicable'),
+    29: ('HasActiveSwap', 'Cannot deactivate: miner has an active swap in progress'),
+    30: ('CurrentlyReserved', 'Cannot deactivate: miner is currently reserved'),
 }
 
 

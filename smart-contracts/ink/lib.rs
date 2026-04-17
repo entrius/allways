@@ -985,12 +985,20 @@ mod allways_swap_manager {
         // Miner Activation / Deactivation
         // =====================================================================
 
-        /// Deactivate a miner — only the miner themselves can deactivate.
+        /// Deactivate a miner — only the miner themselves can deactivate, and only
+        /// when idle. Blocks mid-swap or while reserved so miners cannot dodge
+        /// in-flight obligations via self-deactivation.
         #[ink(message)]
         pub fn deactivate(&mut self, miner: AccountId) -> Result<(), Error> {
             let caller = self.env().caller();
             if caller != miner {
                 return Err(Error::NotAssignedMiner);
+            }
+            if self.miner_has_active_swap.get(miner).unwrap_or(false) {
+                return Err(Error::HasActiveSwap);
+            }
+            if self.miner_reserved_until.get(miner).unwrap_or(0) >= self.env().block_number() {
+                return Err(Error::CurrentlyReserved);
             }
             self.miner_deactivation_block.insert(miner, &self.env().block_number());
             self.miner_active.insert(miner, &false);
