@@ -4,7 +4,7 @@ mod types;
 mod errors;
 mod events;
 
-use types::{SwapData, SwapStatus, VoteType};
+use types::{Reservation, SwapData, SwapStatus, VoteType};
 use errors::Error;
 
 #[ink::contract]
@@ -45,7 +45,6 @@ mod allways_swap_manager {
         collateral: Mapping<AccountId, Balance>,
         miner_active: Mapping<AccountId, bool>,
         miner_has_active_swap: Mapping<AccountId, bool>,
-        miner_reserved_until: Mapping<AccountId, u32>,
         miner_deactivation_block: Mapping<AccountId, u32>,
 
         // Consensus voting — all vote types use unique request IDs (like swap IDs).
@@ -59,12 +58,9 @@ mod allways_swap_manager {
         // Active request ID per miner per vote type (activation=0, reserve=1, initiate=2)
         miner_active_request: Mapping<(AccountId, u8), u64>,
 
-        // Confirmed reservation data (post-quorum)
-        reservation_hash: Mapping<AccountId, Hash>,
-        reservation_from_addr: Mapping<AccountId, String>,
-        reservation_tao_amount: Mapping<AccountId, Balance>,
-        reservation_from_amount: Mapping<AccountId, Balance>,
-        reservation_to_amount: Mapping<AccountId, Balance>,
+        // Confirmed reservations (post-quorum); absorbs the prior six
+        // reservation_* / miner_reserved_until Mappings into one struct.
+        reservations: Mapping<AccountId, Reservation>,
 
         // Cooldown strike tracking (lazy eval) — (strike_count, last_expired_block)
         address_cooldown: Mapping<String, (u8, u32)>,
@@ -192,12 +188,11 @@ mod allways_swap_manager {
         }
 
         fn clear_confirmed_reservation(&mut self, miner: AccountId) {
-            self.miner_reserved_until.remove(miner);
-            self.reservation_hash.remove(miner);
-            self.reservation_from_addr.remove(miner);
-            self.reservation_tao_amount.remove(miner);
-            self.reservation_from_amount.remove(miner);
-            self.reservation_to_amount.remove(miner);
+            self.reservations.remove(miner);
+        }
+
+        fn reserved_until_of(&self, miner: AccountId) -> u32 {
+            self.reservations.get(miner).map(|r| r.reserved_until).unwrap_or(0)
         }
 
         /// Allocate a new request ID and return it. Also records the miner's active request.
@@ -288,7 +283,6 @@ mod allways_swap_manager {
                 collateral: Mapping::default(),
                 miner_active: Mapping::default(),
                 miner_has_active_swap: Mapping::default(),
-                miner_reserved_until: Mapping::default(),
                 miner_deactivation_block: Mapping::default(),
 
                 next_request_id: 1,
@@ -298,11 +292,7 @@ mod allways_swap_manager {
                 request_hash: Mapping::default(),
                 miner_active_request: Mapping::default(),
 
-                reservation_hash: Mapping::default(),
-                reservation_from_addr: Mapping::default(),
-                reservation_tao_amount: Mapping::default(),
-                reservation_from_amount: Mapping::default(),
-                reservation_to_amount: Mapping::default(),
+                reservations: Mapping::default(),
 
                 address_cooldown: Mapping::default(),
                 accumulated_fees: 0,
@@ -357,8 +347,7 @@ mod allways_swap_manager {
                 }
             }
 
-            let reserved_until = self.miner_reserved_until.get(caller).unwrap_or(0);
-            if reserved_until >= self.env().block_number() {
+            if self.reserved_until_of(caller) >= self.env().block_number() {
                 return Err(Error::MinerReserved);
             }
 
@@ -440,16 +429,15 @@ mod allways_swap_manager {
             }
 
             // Check confirmed reservation
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
+            let existing = self.reservations.get(miner);
+            let reserved_until = existing.as_ref().map(|r| r.reserved_until).unwrap_or(0);
             if reserved_until >= current_block {
                 return Err(Error::MinerReserved);
             }
             // Lazy strike: expired confirmed reservation -> record strike
-            if reserved_until > 0 {
-                if let Some(expired_addr) = self.reservation_from_addr.get(miner) {
-                    let (strikes, _) = self.address_cooldown.get(&expired_addr).unwrap_or((0, 0));
-                    self.address_cooldown.insert(&expired_addr, &(strikes.saturating_add(1), current_block));
-                }
+            if let Some(prev) = existing {
+                let (strikes, _) = self.address_cooldown.get(&prev.from_addr).unwrap_or((0, 0));
+                self.address_cooldown.insert(&prev.from_addr, &(strikes.saturating_add(1), current_block));
                 self.clear_confirmed_reservation(miner);
                 self.env().emit_event(ReservationCancelled { miner });
             }
@@ -472,12 +460,17 @@ mod allways_swap_manager {
             // Check quorum
             if vote_count >= self.get_required_votes() {
                 let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
-                self.miner_reserved_until.insert(miner, &new_reserved_until);
-                self.reservation_hash.insert(miner, &request_hash);
-                self.reservation_from_addr.insert(miner, &user_from_address);
-                self.reservation_tao_amount.insert(miner, &tao_amount);
-                self.reservation_from_amount.insert(miner, &from_amount);
-                self.reservation_to_amount.insert(miner, &to_amount);
+                self.reservations.insert(
+                    miner,
+                    &Reservation {
+                        hash: request_hash,
+                        from_addr: user_from_address,
+                        tao_amount,
+                        from_amount,
+                        to_amount,
+                        reserved_until: new_reserved_until,
+                    },
+                );
                 self.clear_request(miner, REQ_RESERVE);
 
                 self.env().emit_event(MinerReserved {
@@ -524,9 +517,9 @@ mod allways_swap_manager {
             }
 
             // Reservation data must exist (a prior reserve quorum succeeded)
-            if self.reservation_tao_amount.get(miner).unwrap_or(0) == 0 {
+            let Some(mut reservation) = self.reservations.get(miner) else {
                 return Err(Error::NoReservation);
-            }
+            };
 
             // Get or create request ID for this extend round
             let request_id = match self.get_active_request(miner, REQ_EXTEND) {
@@ -545,7 +538,8 @@ mod allways_swap_manager {
             // Check quorum — extend reservation
             if vote_count >= self.get_required_votes() {
                 let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
-                self.miner_reserved_until.insert(miner, &new_reserved_until);
+                reservation.reserved_until = new_reserved_until;
+                self.reservations.insert(miner, &reservation);
                 self.clear_request(miner, REQ_EXTEND);
 
                 self.env().emit_event(ReservationExtended {
@@ -623,14 +617,16 @@ mod allways_swap_manager {
             // Note: direction is bound via the reserve hash + initiate hash, not
             // via stored state — both hashes cover from_chain/to_chain, so
             // validator consensus agrees on the direction at both steps.
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
-            if reserved_until < current_block {
+            let Some(reservation) = self.reservations.get(miner) else {
+                return Err(Error::NoReservation);
+            };
+            if reservation.reserved_until < current_block {
                 return Err(Error::NoReservation);
             }
-            let res_tao = self.reservation_tao_amount.get(miner).unwrap_or(0);
-            let res_source = self.reservation_from_amount.get(miner).unwrap_or(0);
-            let res_dest = self.reservation_to_amount.get(miner).unwrap_or(0);
-            if tao_amount != res_tao || from_amount != res_source || to_amount != res_dest {
+            if tao_amount != reservation.tao_amount
+                || from_amount != reservation.from_amount
+                || to_amount != reservation.to_amount
+            {
                 return Err(Error::InvalidAmount);
             }
 
@@ -989,7 +985,7 @@ mod allways_swap_manager {
             if self.miner_has_active_swap.get(miner).unwrap_or(false) {
                 return Err(Error::HasActiveSwap);
             }
-            if self.miner_reserved_until.get(miner).unwrap_or(0) >= self.env().block_number() {
+            if self.reserved_until_of(miner) >= self.env().block_number() {
                 return Err(Error::CurrentlyReserved);
             }
             self.miner_deactivation_block.insert(miner, &self.env().block_number());
@@ -1325,7 +1321,7 @@ mod allways_swap_manager {
 
         #[ink(message)]
         pub fn get_miner_reserved_until(&self, miner: AccountId) -> u32 {
-            self.miner_reserved_until.get(miner).unwrap_or(0)
+            self.reserved_until_of(miner)
         }
 
         #[ink(message)]
@@ -1348,22 +1344,18 @@ mod allways_swap_manager {
             self.validator_count
         }
 
+        /// Returns the reservation amounts (tao, from, to) if one exists.
+        /// Callers that also need `reserved_until` can query
+        /// `get_miner_reserved_until` separately — it's a cheap single-field
+        /// read on the same struct.
         #[ink(message)]
         pub fn get_reservation_data(
             &self,
             miner: AccountId,
-        ) -> Option<(String, Balance, Balance, Balance, u32)> {
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
-            if reserved_until == 0 {
-                return None;
-            }
-            Some((
-                self.reservation_from_addr.get(miner).unwrap_or_default(),
-                self.reservation_tao_amount.get(miner).unwrap_or(0),
-                self.reservation_from_amount.get(miner).unwrap_or(0),
-                self.reservation_to_amount.get(miner).unwrap_or(0),
-                reserved_until,
-            ))
+        ) -> Option<(Balance, Balance, Balance)> {
+            self.reservations
+                .get(miner)
+                .map(|r| (r.tao_amount, r.from_amount, r.to_amount))
         }
 
         #[ink(message)]

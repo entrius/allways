@@ -880,10 +880,11 @@ class AllwaysContractClient:
     def get_reservation_ttl(self) -> int:
         return self.read_u32('get_reservation_ttl')
 
-    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
-        """Get reservation data for a miner.
+    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[int, int, int]]:
+        """Get reservation amounts for a miner.
 
-        Returns (from_addr, tao_amount, from_amount, to_amount, reserved_until) or None.
+        Returns (tao_amount, from_amount, to_amount) or None. Callers that
+        also need reserved_until should use ``get_miner_reserved_until``.
         """
         self.ensure_initialized()
         data = self.raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
@@ -895,20 +896,7 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # String from_addr: compact length + UTF-8 bytes
-        first = data[o]
-        mode = first & 0x03
-        if mode == 0:
-            addr_len = first >> 2
-            o += 1
-        elif mode == 1:
-            addr_len = (data[o] | (data[o + 1] << 8)) >> 2
-            o += 2
-        else:
-            return None
-        from_addr = data[o : o + addr_len].decode('utf-8')
-        o += addr_len
-        # 3 x u128 + 1 x u32
+        # 3 x u128
         tao_lo = struct.unpack_from('<Q', data, o)[0]
         tao_hi = struct.unpack_from('<Q', data, o + 8)[0]
         tao_amount = tao_lo + (tao_hi << 64)
@@ -920,9 +908,7 @@ class AllwaysContractClient:
         dst_lo = struct.unpack_from('<Q', data, o)[0]
         dst_hi = struct.unpack_from('<Q', data, o + 8)[0]
         to_amount = dst_lo + (dst_hi << 64)
-        o += 16
-        reserved_until = struct.unpack_from('<I', data, o)[0]
-        return (from_addr, tao_amount, from_amount, to_amount, reserved_until)
+        return (tao_amount, from_amount, to_amount)
 
     # =========================================================================
     # Transaction Functions (Write)
