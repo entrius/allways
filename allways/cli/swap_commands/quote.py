@@ -20,33 +20,50 @@ from allways.utils.rate import apply_fee_deduction, calculate_to_amount
 
 
 @click.command('quote')
-@click.option('--from', 'from_chain', required=True, type=str, help='Source chain (e.g. btc, tao)')
-@click.option('--to', 'to_chain', required=True, type=str, help='Destination chain (e.g. btc, tao)')
-@click.option('--amount', required=True, type=float, help='Amount to send in source chain units')
+@click.option('--from', 'from_chain', default=None, type=str, help='Source chain (e.g. btc, tao)')
+@click.option('--to', 'to_chain', default=None, type=str, help='Destination chain (e.g. btc, tao)')
+@click.option('--amount', default=None, type=float, help='Amount to send in source chain units')
 def quote_command(from_chain: str, to_chain: str, amount: float):
     """Preview rates and estimated receive amounts for a swap.
 
     \b
     Shows all available miners, their rates, and what you would receive
-    after fees — without committing to a swap.
+    after fees — without committing to a swap. Omit any flag to be prompted.
 
     \b
     Examples:
+        alw swap quote
         alw swap quote --from btc --to tao --amount 0.1
         alw swap quote --from tao --to btc --amount 50
     """
-    from_chain = from_chain.lower()
-    to_chain = to_chain.lower()
+    supported = sorted(SUPPORTED_CHAINS.keys())
+    chain_choices = click.Choice(supported, case_sensitive=False)
 
+    if not from_chain:
+        from_chain = click.prompt(f'Source chain ({"/".join(supported)})', type=chain_choices)
+    from_chain = from_chain.lower()
     if from_chain not in SUPPORTED_CHAINS:
         console.print(f'[red]Unknown source chain: {from_chain}[/red]')
         return
+
+    if not to_chain:
+        remaining = [c for c in supported if c != from_chain]
+        default_to = remaining[0] if remaining else None
+        to_chain = click.prompt(
+            f'Destination chain ({"/".join(remaining) if remaining else ""})',
+            type=click.Choice(remaining, case_sensitive=False) if remaining else chain_choices,
+            default=default_to,
+        )
+    to_chain = to_chain.lower()
     if to_chain not in SUPPORTED_CHAINS:
         console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
         return
     if from_chain == to_chain:
         console.print('[red]Source and destination chains must be different[/red]')
         return
+
+    if amount is None:
+        amount = click.prompt(f'Amount to send ({from_chain.upper()})', type=float)
     if amount <= 0:
         console.print('[red]Amount must be positive[/red]')
         return
