@@ -82,6 +82,7 @@ mod allways_swap_manager {
     const REQ_INITIATE: u8 = 2;
     const REQ_EXTEND: u8 = 3;
     const REQ_EXTEND_TIMEOUT: u8 = 4;
+    const REQ_DEACTIVATE: u8 = 5;
 
     // Hardcoded 1% protocol fee. Immutable — not even the owner can change it.
     // Callers on both the miner and validator side hardcode the same value so
@@ -1030,6 +1031,50 @@ mod allways_swap_manager {
                 self.miner_deactivation_block.remove(miner);
                 self.clear_request(miner, REQ_ACTIVATE);
                 self.env().emit_event(MinerActivated { miner, active: true });
+            }
+
+            Ok(())
+        }
+
+        /// Vote to deactivate a miner — validator-only, quorum required.
+        ///
+        /// Dormant escape hatch for the `min_collateral` raise case: if the owner
+        /// raises the collateral floor above an active miner's balance, validators
+        /// can use this to bring the active flag back in sync with on-chain reality.
+        /// Gated on `collateral < min_collateral` so validators cannot use it to
+        /// deactivate compliant miners by collusion.
+        ///
+        /// Not blocked mid-swap: the existing swap lifecycle proceeds via persisted
+        /// assignment. Miner cannot re-activate until they top up collateral because
+        /// `vote_activate` already checks the floor.
+        #[ink(message)]
+        pub fn vote_deactivate(&mut self, miner: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+            let caller = self.env().caller();
+
+            if !self.miner_active.get(miner).unwrap_or(false) {
+                return Err(Error::InvalidStatus);
+            }
+            let miner_collateral = self.collateral.get(miner).unwrap_or(0);
+            if miner_collateral >= self.min_collateral {
+                return Err(Error::SufficientCollateral);
+            }
+
+            let request_id = match self.get_active_request(miner, REQ_DEACTIVATE) {
+                Some(id) => id,
+                None => {
+                    let hash = Hash::default();
+                    self.new_request(miner, REQ_DEACTIVATE, hash)
+                }
+            };
+
+            let vote_count = self.record_vote(request_id, caller)?;
+
+            if vote_count >= self.get_required_votes() {
+                self.miner_active.insert(miner, &false);
+                self.miner_deactivation_block.insert(miner, &self.env().block_number());
+                self.clear_request(miner, REQ_DEACTIVATE);
+                self.env().emit_event(MinerActivated { miner, active: false });
             }
 
             Ok(())

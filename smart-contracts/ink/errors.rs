@@ -60,4 +60,6 @@ pub enum Error {
     SameChain,
     /// System is halted — no new activity allowed
     SystemHalted,
+    /// Miner collateral meets or exceeds floor; vote_deactivate not applicable
+    SufficientCollateral,
 }
