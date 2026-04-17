@@ -374,7 +374,7 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let amount = self.env().transferred_value();
             if amount == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
 
             let current = self.collateral.get(caller).unwrap_or(0);
@@ -396,7 +396,7 @@ mod allways_swap_manager {
         pub fn withdraw_collateral(&mut self, amount: Balance) -> Result<(), Error> {
             let caller = self.env().caller();
             if amount == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
             if self.miner_active.get(caller).unwrap_or(false) {
                 return Err(Error::MinerStillActive);
@@ -918,10 +918,10 @@ mod allways_swap_manager {
                 return Err(Error::NotAssignedMiner);
             }
             if self.miner_has_active_swap.get(miner).unwrap_or(false) {
-                return Err(Error::HasActiveSwap);
+                return Err(Error::MinerHasActiveSwap);
             }
             if self.reserved_until_of(miner) >= self.env().block_number() {
-                return Err(Error::CurrentlyReserved);
+                return Err(Error::MinerReserved);
             }
             self.miner_deactivation_block.insert(miner, &self.env().block_number());
             self.miner_active.insert(miner, &false);
@@ -1126,7 +1126,7 @@ mod allways_swap_manager {
 
             let fees = self.accumulated_fees;
             if fees == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
 
             self.env().transfer(self.recycle_address, fees)
