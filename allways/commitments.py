@@ -3,10 +3,13 @@
 from typing import List, Optional
 
 import bittensor as bt
+from substrateinterface.utils.ss58 import ss58_encode
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
 from allways.constants import COMMITMENT_VERSION
+
+SS58_PREFIX = 42
 
 
 def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[MinerPair]:
@@ -145,7 +148,18 @@ def read_miner_commitments(subtensor: bt.Subtensor, netuid: int) -> List[MinerPa
             params=[netuid],
         )
         for key, metadata in result:
-            hotkey = str(key.value) if hasattr(key, 'value') else str(key)
+            # query_map returns the second-map key (hotkey AccountId) as raw
+            # bytes inside a single-element tuple, not an SS58 string. Encode
+            # it so we can look the miner up in the metagraph's hotkey index.
+            raw = key.value if hasattr(key, 'value') else key
+            if isinstance(raw, tuple) and len(raw) == 1:
+                raw = raw[0]
+            if isinstance(raw, (tuple, list)):
+                raw = bytes(raw)
+            if isinstance(raw, (bytes, bytearray)) and len(raw) == 32:
+                hotkey = ss58_encode(bytes(raw), SS58_PREFIX)
+            else:
+                hotkey = str(raw)
             uid = hotkey_to_uid.get(hotkey)
             if uid is None:
                 continue  # miner dereg'd but commitment still in storage
