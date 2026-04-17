@@ -185,6 +185,41 @@ mod allways_swap_manager {
             self.request_created.remove(request_id);
             self.request_hash.remove(request_id);
         }
+
+        /// Shared consensus-vote flow for miner-keyed request types (reserve,
+        /// initiate, activate, deactivate, extend-reservation, extend-timeout).
+        ///
+        /// Resolves or allocates a request_id keyed by (miner, req_type), records
+        /// the caller's vote, and runs `on_quorum` once the quorum is reached.
+        /// Votes on an existing round are rejected when `request_hash` differs
+        /// (PendingConflict) — callers that don't bind a hash pass Hash::default().
+        fn consensus_vote<F>(
+            &mut self,
+            miner: AccountId,
+            req_type: u8,
+            request_hash: Hash,
+            on_quorum: F,
+        ) -> Result<(), Error>
+        where
+            F: FnOnce(&mut Self) -> Result<(), Error>,
+        {
+            let caller = self.env().caller();
+            let id = match self.get_active_request(miner, req_type) {
+                Some(id) => {
+                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
+                        return Err(Error::PendingConflict);
+                    }
+                    id
+                }
+                None => self.new_request(miner, req_type, request_hash),
+            };
+            let votes = self.record_vote(id, caller)?;
+            if votes >= self.get_required_votes() {
+                on_quorum(self)?;
+                self.clear_request(miner, req_type);
+            }
+            Ok(())
+        }
     }
 
     impl AllwaysSwapManager {
@@ -332,7 +367,6 @@ mod allways_swap_manager {
         ) -> Result<(), Error> {
             self.ensure_validator()?;
             self.ensure_not_halted()?;
-            let caller = self.env().caller();
             let current_block = self.env().block_number();
 
             // Verify hash — from_chain and to_chain are included in the hash,
@@ -384,25 +418,9 @@ mod allways_swap_manager {
                 self.env().emit_event(ReservationCancelled { miner });
             }
 
-            // Get or create request ID for this reserve round
-            let request_id = match self.get_active_request(miner, REQ_RESERVE) {
-                Some(id) => {
-                    // Existing round — verify same hash
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_RESERVE, request_hash),
-            };
-
-            // Record vote (rejects duplicates via request_id keying)
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum
-            if vote_count >= self.get_required_votes() {
-                let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
-                self.reservations.insert(
+            self.consensus_vote(miner, REQ_RESERVE, request_hash, move |this| {
+                let new_reserved_until = this.env().block_number().saturating_add(this.reservation_ttl);
+                this.reservations.insert(
                     miner,
                     &Reservation {
                         hash: request_hash,
@@ -413,15 +431,12 @@ mod allways_swap_manager {
                         reserved_until: new_reserved_until,
                     },
                 );
-                self.clear_request(miner, REQ_RESERVE);
-
-                self.env().emit_event(MinerReserved {
+                this.env().emit_event(MinerReserved {
                     miner,
                     reserved_until: new_reserved_until,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         #[ink(message)]
@@ -441,8 +456,6 @@ mod allways_swap_manager {
             from_tx_hash: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let current_block = self.env().block_number();
 
             // Verify hash
             let computed = Self::hash_request(&(&miner, &from_tx_hash));
@@ -459,38 +472,26 @@ mod allways_swap_manager {
             }
 
             // Reservation data must exist (a prior reserve quorum succeeded)
-            let Some(mut reservation) = self.reservations.get(miner) else {
+            if self.reservations.get(miner).is_none() {
                 return Err(Error::NoReservation);
-            };
+            }
 
-            // Get or create request ID for this extend round
-            let request_id = match self.get_active_request(miner, REQ_EXTEND) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_EXTEND, request_hash),
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum — extend reservation
-            if vote_count >= self.get_required_votes() {
-                let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
+            self.consensus_vote(miner, REQ_EXTEND, request_hash, move |this| {
+                // Re-read on quorum — the pre-check above already proved it exists
+                // at call time, but the closure runs after consensus so we reload.
+                let Some(mut reservation) = this.reservations.get(miner) else {
+                    return Err(Error::NoReservation);
+                };
+                let new_reserved_until =
+                    this.env().block_number().saturating_add(this.reservation_ttl);
                 reservation.reserved_until = new_reserved_until;
-                self.reservations.insert(miner, &reservation);
-                self.clear_request(miner, REQ_EXTEND);
-
-                self.env().emit_event(ReservationExtended {
+                this.reservations.insert(miner, &reservation);
+                this.env().emit_event(ReservationExtended {
                     miner,
                     reserved_until: new_reserved_until,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         // =====================================================================
@@ -517,7 +518,6 @@ mod allways_swap_manager {
             rate: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
             let current_block = self.env().block_number();
 
             // Verify hash — covers the full swap shape so no field can be substituted
@@ -572,29 +572,15 @@ mod allways_swap_manager {
                 return Err(Error::InvalidAmount);
             }
 
-            // Get or create request ID for this initiate round
-            let request_id = match self.get_active_request(miner, REQ_INITIATE) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_INITIATE, request_hash),
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum — create swap
-            if vote_count >= self.get_required_votes() {
-                let miner_collateral = self.collateral.get(miner).unwrap_or(0);
+            self.consensus_vote(miner, REQ_INITIATE, request_hash, move |this| {
+                let miner_collateral = this.collateral.get(miner).unwrap_or(0);
                 if tao_amount > miner_collateral {
                     return Err(Error::InsufficientCollateral);
                 }
 
-                let swap_id = self.next_swap_id;
-                self.next_swap_id = self.next_swap_id.saturating_add(1);
+                let swap_id = this.next_swap_id;
+                this.next_swap_id = this.next_swap_id.saturating_add(1);
+                let current_block = this.env().block_number();
 
                 let swap = SwapData {
                     id: swap_id,
@@ -616,28 +602,26 @@ mod allways_swap_manager {
                     to_tx_block: 0,
                     status: SwapStatus::Active,
                     initiated_block: current_block,
-                    timeout_block: current_block.saturating_add(self.fulfillment_timeout_blocks),
+                    timeout_block: current_block.saturating_add(this.fulfillment_timeout_blocks),
                     fulfilled_block: 0,
                     completed_block: 0,
                 };
 
-                self.used_from_tx.insert(from_tx_hash, &true);
-                self.miner_has_active_swap.insert(miner, &true);
-                self.swaps.insert(swap_id, &swap);
+                this.used_from_tx.insert(from_tx_hash, &true);
+                this.miner_has_active_swap.insert(miner, &true);
+                this.swaps.insert(swap_id, &swap);
 
-                self.clear_confirmed_reservation(miner);
-                self.clear_request(miner, REQ_INITIATE);
+                this.clear_confirmed_reservation(miner);
 
-                self.env().emit_event(SwapInitiated {
+                this.env().emit_event(SwapInitiated {
                     swap_id,
                     user,
                     miner,
                     from_amount,
                     initiated_block: current_block,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         /// Mark a swap as fulfilled — miner direct (caller == swap.miner)
@@ -941,7 +925,6 @@ mod allways_swap_manager {
         pub fn vote_activate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
             self.ensure_not_halted()?;
-            let caller = self.env().caller();
 
             if self.miner_active.get(miner).unwrap_or(false) {
                 return Err(Error::InvalidStatus);
@@ -951,27 +934,14 @@ mod allways_swap_manager {
                 return Err(Error::InsufficientCollateral);
             }
 
-            // Get or create request ID for this activation round
-            let request_id = match self.get_active_request(miner, REQ_ACTIVATE) {
-                Some(id) => id,
-                None => {
-                    // No hash needed for activation (just miner identity)
-                    let hash = Hash::default();
-                    self.new_request(miner, REQ_ACTIVATE, hash)
-                }
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            if vote_count >= self.get_required_votes() {
-                self.miner_active.insert(miner, &true);
-                self.miner_deactivation_block.remove(miner);
-                self.clear_request(miner, REQ_ACTIVATE);
-                self.env().emit_event(MinerActivated { miner, active: true });
-            }
-
-            Ok(())
+            // Activation hash is just the miner identity — deterministic so every
+            // validator binds the same round.
+            self.consensus_vote(miner, REQ_ACTIVATE, Hash::default(), move |this| {
+                this.miner_active.insert(miner, &true);
+                this.miner_deactivation_block.remove(miner);
+                this.env().emit_event(MinerActivated { miner, active: true });
+                Ok(())
+            })
         }
 
         /// Vote to deactivate a miner — validator-only, quorum required.
@@ -989,30 +959,17 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_deactivate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
 
             if !self.miner_active.get(miner).unwrap_or(false) {
                 return Err(Error::InvalidStatus);
             }
 
-            let request_id = match self.get_active_request(miner, REQ_DEACTIVATE) {
-                Some(id) => id,
-                None => {
-                    let hash = Hash::default();
-                    self.new_request(miner, REQ_DEACTIVATE, hash)
-                }
-            };
-
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            if vote_count >= self.get_required_votes() {
-                self.miner_active.insert(miner, &false);
-                self.miner_deactivation_block.insert(miner, &self.env().block_number());
-                self.clear_request(miner, REQ_DEACTIVATE);
-                self.env().emit_event(MinerActivated { miner, active: false });
-            }
-
-            Ok(())
+            self.consensus_vote(miner, REQ_DEACTIVATE, Hash::default(), move |this| {
+                this.miner_active.insert(miner, &false);
+                this.miner_deactivation_block.insert(miner, &this.env().block_number());
+                this.env().emit_event(MinerActivated { miner, active: false });
+                Ok(())
+            })
         }
 
         // =====================================================================
