@@ -114,7 +114,13 @@ def view_miners(full: bool):
             remaining = cooldown_end - current_block
             if remaining > 0:
                 status_parts.append(f'[red]cooldown {remaining}b[/red]')
-        status_str = ' · '.join(status_parts) if status_parts else '[dim]—[/dim]'
+
+        if status_parts:
+            status_str = ' · '.join(status_parts)
+        elif is_active:
+            status_str = '[green]available[/green]'
+        else:
+            status_str = '[dim]offline[/dim]'
 
         fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
         if pair.counter_rate > 0:
