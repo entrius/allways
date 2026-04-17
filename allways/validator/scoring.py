@@ -30,12 +30,37 @@ if TYPE_CHECKING:
 
 def score_and_reward_miners(self: Validator) -> None:
     try:
-        rewards, miner_uids = calculate_miner_rewards(self)
+        if _contract_is_halted(self):
+            rewards, miner_uids = build_halted_rewards(self)
+        else:
+            rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
         prune_rate_events(self)
         prune_swap_outcomes(self)
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
+
+
+def _contract_is_halted(self: Validator) -> bool:
+    """Best-effort halt check. RPC flakiness should not zero every miner's
+    reward, so any exception falls through to normal scoring."""
+    try:
+        return bool(self.contract_client.get_halted())
+    except Exception as e:
+        bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
+        return False
+
+
+def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
+    """During a halt, no miner earns crown; the full pool recycles."""
+    n_uids = self.metagraph.n.item()
+    rewards = np.zeros(n_uids, dtype=np.float32)
+    if n_uids == 0:
+        return rewards, set()
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
+    rewards[recycle_uid] = 1.0
+    bt.logging.info('V1 scoring: halted, recycled full pool')
+    return rewards, set(range(n_uids))
 
 
 def prune_rate_events(self: Validator) -> None:

@@ -12,6 +12,7 @@ from allways.validator.scoring import (
     calculate_miner_rewards,
     crown_holders_at_instant,
     replay_crown_time_window,
+    score_and_reward_miners,
     success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
@@ -1288,3 +1289,46 @@ class TestHistoricalConfigState:
         collaterals = {'a': 1_000_000_000_000}
         holders = crown_holders_at_instant(rates, collaterals, MIN_COLLATERAL, rewardable={'a'}, max_collateral=0)
         assert holders == ['a']
+
+
+class TestHaltShortCircuit:
+    """Halt check at the scoring entry sidesteps event replay: full pool
+    recycles, rewards skip the crown-time path entirely."""
+
+    def _make_validator_with_halt(self, tmp_path: Path, halt_return, hotkeys: list[str]) -> SimpleNamespace:
+        hotkeys = pad_hotkeys_to_cover_recycle(hotkeys)
+        v = make_validator(tmp_path, hotkeys)
+        contract_client = MagicMock()
+        if isinstance(halt_return, Exception):
+            contract_client.get_halted.side_effect = halt_return
+        else:
+            contract_client.get_halted.return_value = halt_return
+        v.contract_client = contract_client
+        captured = {}
+
+        def capture(rewards, miner_uids):
+            captured['rewards'] = rewards
+            captured['miner_uids'] = miner_uids
+
+        v.update_scores = capture
+        return v, captured
+
+    def test_halted_short_circuits_to_full_recycle(self, tmp_path: Path):
+        v, captured = self._make_validator_with_halt(tmp_path, halt_return=True, hotkeys=['hk_a', 'hk_b'])
+        score_and_reward_miners(v)
+        rewards = captured['rewards']
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        assert rewards[recycle_uid] == 1.0
+        # every other uid must be exactly zero
+        assert float(rewards.sum()) == 1.0
+
+    def test_halted_rpc_error_still_scores(self, tmp_path: Path):
+        """If the halt RPC fails, scoring proceeds as normal rather than
+        zeroing every miner's reward."""
+        v, captured = self._make_validator_with_halt(tmp_path, halt_return=RuntimeError('rpc down'), hotkeys=['hk_a'])
+        # No rate / collateral seeded → replay credits nothing → full pool
+        # still recycles, but via the normal path (not the halt short-circuit).
+        score_and_reward_miners(v)
+        rewards = captured['rewards']
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        assert rewards[recycle_uid] > 0  # recycle got something via normal path
