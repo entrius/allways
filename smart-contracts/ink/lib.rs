@@ -35,10 +35,6 @@ mod allways_swap_manager {
         // Swap state
         next_swap_id: u64,
         swaps: Mapping<u64, SwapData>,
-        swap_confirm_votes: Mapping<(u64, AccountId), bool>,
-        swap_confirm_vote_count: Mapping<u64, u32>,
-        swap_timeout_votes: Mapping<(u64, AccountId), bool>,
-        swap_timeout_vote_count: Mapping<u64, u32>,
         used_from_tx: Mapping<String, bool>,
 
         // Miner state
@@ -55,8 +51,13 @@ mod allways_swap_manager {
         request_created: Mapping<u64, u32>,
         request_hash: Mapping<u64, Hash>,
 
-        // Active request ID per miner per vote type (activation=0, reserve=1, initiate=2)
+        // Active request ID per miner per miner-keyed vote type
+        // (activation/reserve/initiate/extend/deactivate/extend-timeout).
         miner_active_request: Mapping<(AccountId, u8), u64>,
+
+        // Active request ID per swap per swap-keyed vote type (confirm/timeout).
+        // Uses the same request_* vote tables as miner-keyed votes.
+        pending_swap_votes: Mapping<(u64, u8), u64>,
 
         // Confirmed reservations (post-quorum); absorbs the prior six
         // reservation_* / miner_reserved_until Mappings into one struct.
@@ -70,13 +71,16 @@ mod allways_swap_manager {
         pending_slashes: Mapping<u64, (AccountId, Balance)>,
     }
 
-    // Request type constants
+    // Request type constants — miner-keyed
     const REQ_ACTIVATE: u8 = 0;
     const REQ_RESERVE: u8 = 1;
     const REQ_INITIATE: u8 = 2;
     const REQ_EXTEND: u8 = 3;
     const REQ_EXTEND_TIMEOUT: u8 = 4;
     const REQ_DEACTIVATE: u8 = 5;
+    // Swap-keyed request types (used with pending_swap_votes).
+    const REQ_CONFIRM: u8 = 6;
+    const REQ_TIMEOUT: u8 = 7;
 
     // Hardcoded 1% protocol fee. Immutable — not even the owner can change it.
     // Callers on both the miner and validator side hardcode the same value so
@@ -221,6 +225,68 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        /// Shared consensus-vote flow for swap-keyed request types
+        /// (confirm/timeout/extend_timeout).
+        ///
+        /// Allocates a request_id keyed by (swap_id, req_type), emits a
+        /// VoteCast event on every vote so dashboards can track progress,
+        /// and runs `on_quorum` once the quorum is reached. The hash is
+        /// derived from (swap_id, req_type) so every validator binds the
+        /// same round without needing to sign anything off-chain.
+        fn consensus_swap_vote<F>(
+            &mut self,
+            swap_id: u64,
+            req_type: u8,
+            vote_type: VoteType,
+            on_quorum: F,
+        ) -> Result<(), Error>
+        where
+            F: FnOnce(&mut Self) -> Result<(), Error>,
+        {
+            let caller = self.env().caller();
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[..8].copy_from_slice(&swap_id.to_le_bytes());
+            hash_bytes[8] = req_type;
+            let request_hash = Hash::from(hash_bytes);
+
+            let id = match self.pending_swap_votes.get((swap_id, req_type)) {
+                Some(id) => id,
+                None => {
+                    let new_id = self.next_request_id;
+                    self.next_request_id = new_id.saturating_add(1);
+                    self.request_hash.insert(new_id, &request_hash);
+                    self.request_created.insert(new_id, &self.env().block_number());
+                    self.pending_swap_votes.insert((swap_id, req_type), &new_id);
+                    new_id
+                }
+            };
+            let votes = self.record_vote(id, caller)?;
+
+            self.env().emit_event(VoteCast {
+                swap_id,
+                validator: caller,
+                vote_type,
+                vote_count: votes,
+            });
+
+            if votes >= self.get_required_votes() {
+                on_quorum(self)?;
+                self.clear_request_data(id);
+                self.pending_swap_votes.remove((swap_id, req_type));
+            }
+            Ok(())
+        }
+
+        /// Clear every pending swap-vote round for a resolved swap.
+        fn clear_pending_swap_votes(&mut self, swap_id: u64) {
+            for req_type in [REQ_CONFIRM, REQ_TIMEOUT, REQ_EXTEND_TIMEOUT] {
+                if let Some(id) = self.pending_swap_votes.get((swap_id, req_type)) {
+                    self.clear_request_data(id);
+                    self.pending_swap_votes.remove((swap_id, req_type));
+                }
+            }
+        }
+
         /// Deduct up to `amount` from a miner's collateral, clamped to what
         /// they hold. Auto-deactivates the miner if the remaining balance falls
         /// below min_collateral while they're still flagged active. Returns the
@@ -274,10 +340,6 @@ mod allways_swap_manager {
 
                 next_swap_id: 1,
                 swaps: Mapping::default(),
-                swap_confirm_votes: Mapping::default(),
-                swap_confirm_vote_count: Mapping::default(),
-                swap_timeout_votes: Mapping::default(),
-                swap_timeout_vote_count: Mapping::default(),
                 used_from_tx: Mapping::default(),
 
                 collateral: Mapping::default(),
@@ -291,6 +353,7 @@ mod allways_swap_manager {
                 request_created: Mapping::default(),
                 request_hash: Mapping::default(),
                 miner_active_request: Mapping::default(),
+                pending_swap_votes: Mapping::default(),
 
                 reservations: Mapping::default(),
 
@@ -688,30 +751,19 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn confirm_swap(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
             }
-            if self.swap_confirm_votes.get((swap_id, caller)).unwrap_or(false) {
-                return Err(Error::AlreadyVoted);
-            }
 
-            self.swap_confirm_votes.insert((swap_id, caller), &true);
-            let vote_count = self.swap_confirm_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
-            self.swap_confirm_vote_count.insert(swap_id, &vote_count);
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::Confirm,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
+            self.consensus_swap_vote(swap_id, REQ_CONFIRM, VoteType::Confirm, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
                 swap.status = SwapStatus::Completed;
-                swap.completed_block = self.env().block_number();
+                swap.completed_block = this.env().block_number();
 
                 // Fee from miner collateral -> accumulated_fees. 1% hardcoded.
                 // apply_collateral_penalty auto-deactivates the miner if this
@@ -719,38 +771,32 @@ mod allways_swap_manager {
                 // with timeout_swap.
                 #[allow(clippy::arithmetic_side_effects)]
                 let fee = swap.tao_amount.saturating_div(FEE_DIVISOR);
-                let actual_fee = self.apply_collateral_penalty(swap.miner, fee);
+                let actual_fee = this.apply_collateral_penalty(swap.miner, fee);
                 if actual_fee > 0 {
-                    self.accumulated_fees = self.accumulated_fees.saturating_add(actual_fee);
+                    this.accumulated_fees = this.accumulated_fees.saturating_add(actual_fee);
                 }
 
-                self.miner_has_active_swap.insert(swap.miner, &false);
+                this.miner_has_active_swap.insert(swap.miner, &false);
+                this.address_cooldown.remove(&swap.user_from_address);
 
-                self.address_cooldown.remove(&swap.user_from_address);
-
-                self.env().emit_event(SwapCompleted {
+                this.env().emit_event(SwapCompleted {
                     swap_id,
                     miner: swap.miner,
                     tao_amount: swap.tao_amount,
                     fee_amount: actual_fee,
                 });
 
-                self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-            } else {
-                self.swaps.insert(swap_id, &swap);
-            }
-            Ok(())
+                this.swaps.remove(swap_id);
+                this.clear_pending_swap_votes(swap_id);
+                Ok(())
+            })
         }
 
         /// Timeout a swap — validator-only, quorum mechanism
         #[ink(message)]
         pub fn timeout_swap(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Active && swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
@@ -758,39 +804,29 @@ mod allways_swap_manager {
             if self.env().block_number() < swap.timeout_block {
                 return Err(Error::NotTimedOut);
             }
-            if self.swap_timeout_votes.get((swap_id, caller)).unwrap_or(false) {
-                return Err(Error::AlreadyVoted);
-            }
 
-            self.swap_timeout_votes.insert((swap_id, caller), &true);
-            let vote_count = self.swap_timeout_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
-            self.swap_timeout_vote_count.insert(swap_id, &vote_count);
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::Timeout,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
+            self.consensus_swap_vote(swap_id, REQ_TIMEOUT, VoteType::Timeout, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
                 swap.status = SwapStatus::TimedOut;
-                swap.completed_block = self.env().block_number();
+                swap.completed_block = this.env().block_number();
 
                 // Slash miner collateral up to the full tao_amount; the helper
                 // also auto-deactivates the miner if this drops them below
                 // min_collateral.
-                let actual_slash = self.apply_collateral_penalty(swap.miner, swap.tao_amount);
+                let actual_slash = this.apply_collateral_penalty(swap.miner, swap.tao_amount);
                 if actual_slash > 0 {
-                    if self.env().transfer(swap.user, actual_slash).is_ok() {
-                        self.env().emit_event(CollateralSlashed {
+                    if this.env().transfer(swap.user, actual_slash).is_ok() {
+                        this.env().emit_event(CollateralSlashed {
                             miner: swap.miner,
                             amount: actual_slash,
                             recipient: swap.user,
                         });
                     } else {
-                        self.pending_slashes.insert(swap_id, &(swap.user, actual_slash));
-                        self.env().emit_event(SlashPending {
+                        this.pending_slashes.insert(swap_id, &(swap.user, actual_slash));
+                        this.env().emit_event(SlashPending {
                             swap_id,
                             user: swap.user,
                             amount: actual_slash,
@@ -798,23 +834,19 @@ mod allways_swap_manager {
                     }
                 }
 
-                self.miner_has_active_swap.insert(swap.miner, &false);
+                this.miner_has_active_swap.insert(swap.miner, &false);
 
-                self.env().emit_event(SwapTimedOut {
+                this.env().emit_event(SwapTimedOut {
                     swap_id,
                     miner: swap.miner,
                     tao_amount: swap.tao_amount,
                     slash_amount: actual_slash,
                 });
 
-                self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-            } else {
-                self.swaps.insert(swap_id, &swap);
-            }
-            Ok(())
+                this.swaps.remove(swap_id);
+                this.clear_pending_swap_votes(swap_id);
+                Ok(())
+            })
         }
 
         /// Extend swap timeout — validator-only, quorum mechanism.
@@ -823,54 +855,29 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
             }
 
-            // Deterministic hash from swap_id for the request system
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes[..8].copy_from_slice(&swap_id.to_le_bytes());
-            let request_hash = Hash::from(hash_bytes);
-
-            // Get or create request for this extend round
-            let request_id = match self.get_active_request(swap.miner, REQ_EXTEND_TIMEOUT) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(swap.miner, REQ_EXTEND_TIMEOUT, request_hash),
-            };
-
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::ExtendTimeout,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
-                let current_block = self.env().block_number();
-                let new_timeout = current_block.saturating_add(self.fulfillment_timeout_blocks);
+            self.consensus_swap_vote(swap_id, REQ_EXTEND_TIMEOUT, VoteType::ExtendTimeout, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
+                let new_timeout = this.env().block_number().saturating_add(this.fulfillment_timeout_blocks);
                 swap.timeout_block = new_timeout;
-                self.swaps.insert(swap_id, &swap);
-
-                // Clear request — allows validators to vote again for another extension
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-
-                self.env().emit_event(SwapTimeoutExtended {
+                this.swaps.insert(swap_id, &swap);
+                // clear_pending_swap_votes runs in consensus_swap_vote after this
+                // closure via the standard cleanup path — the caller can vote
+                // again for another extension on the next round.
+                this.env().emit_event(SwapTimeoutExtended {
                     swap_id,
                     new_timeout_block: new_timeout,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         /// Claim a pending slash payout (user calls after failed transfer)
