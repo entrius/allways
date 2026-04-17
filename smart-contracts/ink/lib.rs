@@ -4,7 +4,7 @@ mod types;
 mod errors;
 mod events;
 
-use types::{SwapData, SwapStatus, VoteType};
+use types::{Reservation, SwapData, SwapStatus, VoteType};
 use errors::Error;
 
 #[ink::contract]
@@ -35,18 +35,12 @@ mod allways_swap_manager {
         // Swap state
         next_swap_id: u64,
         swaps: Mapping<u64, SwapData>,
-        swap_confirm_votes: Mapping<(u64, AccountId), bool>,
-        swap_confirm_vote_count: Mapping<u64, u32>,
-        swap_timeout_votes: Mapping<(u64, AccountId), bool>,
-        swap_timeout_vote_count: Mapping<u64, u32>,
         used_from_tx: Mapping<String, bool>,
 
         // Miner state
         collateral: Mapping<AccountId, Balance>,
         miner_active: Mapping<AccountId, bool>,
         miner_has_active_swap: Mapping<AccountId, bool>,
-        miner_reserved_until: Mapping<AccountId, u32>,
-        miner_last_resolved_block: Mapping<AccountId, u32>,
         miner_deactivation_block: Mapping<AccountId, u32>,
 
         // Consensus voting — all vote types use unique request IDs (like swap IDs).
@@ -57,32 +51,36 @@ mod allways_swap_manager {
         request_created: Mapping<u64, u32>,
         request_hash: Mapping<u64, Hash>,
 
-        // Active request ID per miner per vote type (activation=0, reserve=1, initiate=2)
+        // Active request ID per miner per miner-keyed vote type
+        // (activation/reserve/initiate/extend/deactivate/extend-timeout).
         miner_active_request: Mapping<(AccountId, u8), u64>,
 
-        // Confirmed reservation data (post-quorum)
-        reservation_hash: Mapping<AccountId, Hash>,
-        reservation_from_addr: Mapping<AccountId, String>,
-        reservation_tao_amount: Mapping<AccountId, Balance>,
-        reservation_from_amount: Mapping<AccountId, Balance>,
-        reservation_to_amount: Mapping<AccountId, Balance>,
+        // Active request ID per swap per swap-keyed vote type (confirm/timeout).
+        // Uses the same request_* vote tables as miner-keyed votes.
+        pending_swap_votes: Mapping<(u64, u8), u64>,
 
-        // Cooldown strike tracking (lazy eval)
-        address_strike_count: Mapping<String, u8>,
-        address_last_expired: Mapping<String, u32>,
+        // Confirmed reservations (post-quorum); absorbs the prior six
+        // reservation_* / miner_reserved_until Mappings into one struct.
+        reservations: Mapping<AccountId, Reservation>,
+
+        // Cooldown strike tracking (lazy eval) — (strike_count, last_expired_block)
+        address_cooldown: Mapping<String, (u8, u32)>,
         // Financials
         accumulated_fees: Balance,
         total_recycled_fees: Balance,
         pending_slashes: Mapping<u64, (AccountId, Balance)>,
     }
 
-    // Request type constants
+    // Request type constants — miner-keyed
     const REQ_ACTIVATE: u8 = 0;
     const REQ_RESERVE: u8 = 1;
     const REQ_INITIATE: u8 = 2;
     const REQ_EXTEND: u8 = 3;
     const REQ_EXTEND_TIMEOUT: u8 = 4;
     const REQ_DEACTIVATE: u8 = 5;
+    // Swap-keyed request types (used with pending_swap_votes).
+    const REQ_CONFIRM: u8 = 6;
+    const REQ_TIMEOUT: u8 = 7;
 
     // Hardcoded 1% protocol fee. Immutable — not even the owner can change it.
     // Callers on both the miner and validator side hardcode the same value so
@@ -125,81 +123,22 @@ mod allways_swap_manager {
             core::cmp::max(1, required)
         }
 
-        fn compute_reserve_hash(
-            miner: &AccountId,
-            user_from_address: &str,
-            from_chain: &str,
-            to_chain: &str,
-            tao_amount: Balance,
-            from_amount: Balance,
-            to_amount: Balance,
-        ) -> Hash {
+        /// Keccak-hash any SCALE-encodable value. Call sites pass the full
+        /// tuple of fields bound into the request hash — the hash algorithm
+        /// and field order must match the off-chain signer, so keep these
+        /// tuples stable when refactoring.
+        fn hash_request<T: scale::Encode>(value: &T) -> Hash {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(
-                    miner,
-                    user_from_address,
-                    from_chain,
-                    to_chain,
-                    tao_amount,
-                    from_amount,
-                    to_amount,
-                ),
-                &mut output,
-            );
-            Hash::from(output)
-        }
-
-        fn compute_initiate_hash(
-            miner: &AccountId,
-            from_tx_hash: &str,
-            from_chain: &str,
-            to_chain: &str,
-            miner_from_address: &str,
-            miner_to_address: &str,
-            rate: &str,
-            tao_amount: Balance,
-            from_amount: Balance,
-            to_amount: Balance,
-        ) -> Hash {
-            let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(
-                    miner,
-                    from_tx_hash,
-                    from_chain,
-                    to_chain,
-                    miner_from_address,
-                    miner_to_address,
-                    rate,
-                    tao_amount,
-                    from_amount,
-                    to_amount,
-                ),
-                &mut output,
-            );
-            Hash::from(output)
-        }
-
-        fn compute_extend_hash(
-            miner: &AccountId,
-            from_tx_hash: &str,
-        ) -> Hash {
-            let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
-            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(
-                &(miner, from_tx_hash),
-                &mut output,
-            );
+            ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(value, &mut output);
             Hash::from(output)
         }
 
         fn clear_confirmed_reservation(&mut self, miner: AccountId) {
-            self.miner_reserved_until.remove(miner);
-            self.reservation_hash.remove(miner);
-            self.reservation_from_addr.remove(miner);
-            self.reservation_tao_amount.remove(miner);
-            self.reservation_from_amount.remove(miner);
-            self.reservation_to_amount.remove(miner);
+            self.reservations.remove(miner);
+        }
+
+        fn reserved_until_of(&self, miner: AccountId) -> u32 {
+            self.reservations.get(miner).map(|r| r.reserved_until).unwrap_or(0)
         }
 
         /// Allocate a new request ID and return it. Also records the miner's active request.
@@ -223,8 +162,10 @@ mod allways_swap_manager {
             Ok(count)
         }
 
-        /// Get the active request ID for a miner+type, clearing expired ones.
-        fn get_active_request(&mut self, miner: AccountId, req_type: u8) -> Option<u64> {
+        /// Return the active request ID for (miner, req_type), or clear it and
+        /// return None if it's expired. Mutates state — the name makes that
+        /// contract explicit so callers don't assume a side-effect-free read.
+        fn take_or_expire_active_request(&mut self, miner: AccountId, req_type: u8) -> Option<u64> {
             let id = self.miner_active_request.get((miner, req_type))?;
             let created = self.request_created.get(id).unwrap_or(0);
             if self.env().block_number() > created.saturating_add(self.reservation_ttl) {
@@ -249,6 +190,126 @@ mod allways_swap_manager {
             self.request_vote_count.remove(request_id);
             self.request_created.remove(request_id);
             self.request_hash.remove(request_id);
+        }
+
+        /// Shared consensus-vote flow for miner-keyed request types (reserve,
+        /// initiate, activate, deactivate, extend-reservation, extend-timeout).
+        ///
+        /// Resolves or allocates a request_id keyed by (miner, req_type), records
+        /// the caller's vote, and runs `on_quorum` once the quorum is reached.
+        /// Votes on an existing round are rejected when `request_hash` differs
+        /// (PendingConflict) — callers that don't bind a hash pass Hash::default().
+        fn consensus_vote<F>(
+            &mut self,
+            miner: AccountId,
+            req_type: u8,
+            request_hash: Hash,
+            on_quorum: F,
+        ) -> Result<(), Error>
+        where
+            F: FnOnce(&mut Self) -> Result<(), Error>,
+        {
+            let caller = self.env().caller();
+            let id = match self.take_or_expire_active_request(miner, req_type) {
+                Some(id) => {
+                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
+                        return Err(Error::PendingConflict);
+                    }
+                    id
+                }
+                None => self.new_request(miner, req_type, request_hash),
+            };
+            let votes = self.record_vote(id, caller)?;
+            if votes >= self.get_required_votes() {
+                on_quorum(self)?;
+                self.clear_request(miner, req_type);
+            }
+            Ok(())
+        }
+
+        /// Shared consensus-vote flow for swap-keyed request types
+        /// (confirm/timeout/extend_timeout).
+        ///
+        /// Allocates a request_id keyed by (swap_id, req_type), emits a
+        /// VoteCast event on every vote so dashboards can track progress,
+        /// and runs `on_quorum` once the quorum is reached. The hash is
+        /// derived from (swap_id, req_type) so every validator binds the
+        /// same round without needing to sign anything off-chain.
+        fn consensus_swap_vote<F>(
+            &mut self,
+            swap_id: u64,
+            req_type: u8,
+            vote_type: VoteType,
+            on_quorum: F,
+        ) -> Result<(), Error>
+        where
+            F: FnOnce(&mut Self) -> Result<(), Error>,
+        {
+            let caller = self.env().caller();
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[..8].copy_from_slice(&swap_id.to_le_bytes());
+            hash_bytes[8] = req_type;
+            let request_hash = Hash::from(hash_bytes);
+
+            let id = match self.pending_swap_votes.get((swap_id, req_type)) {
+                Some(id) => id,
+                None => {
+                    let new_id = self.next_request_id;
+                    self.next_request_id = new_id.saturating_add(1);
+                    self.request_hash.insert(new_id, &request_hash);
+                    self.request_created.insert(new_id, &self.env().block_number());
+                    self.pending_swap_votes.insert((swap_id, req_type), &new_id);
+                    new_id
+                }
+            };
+            let votes = self.record_vote(id, caller)?;
+
+            self.env().emit_event(VoteCast {
+                swap_id,
+                validator: caller,
+                vote_type,
+                vote_count: votes,
+            });
+
+            if votes >= self.get_required_votes() {
+                on_quorum(self)?;
+                self.clear_request_data(id);
+                self.pending_swap_votes.remove((swap_id, req_type));
+            }
+            Ok(())
+        }
+
+        /// Clear every pending swap-vote round for a resolved swap.
+        fn clear_pending_swap_votes(&mut self, swap_id: u64) {
+            for req_type in [REQ_CONFIRM, REQ_TIMEOUT, REQ_EXTEND_TIMEOUT] {
+                if let Some(id) = self.pending_swap_votes.get((swap_id, req_type)) {
+                    self.clear_request_data(id);
+                    self.pending_swap_votes.remove((swap_id, req_type));
+                }
+            }
+        }
+
+        /// Deduct up to `amount` from a miner's collateral, clamped to what
+        /// they hold. Auto-deactivates the miner if the remaining balance falls
+        /// below min_collateral while they're still flagged active. Returns the
+        /// amount actually deducted.
+        ///
+        /// Shared between confirm_swap (fee) and timeout_swap (slash) so the
+        /// floor-breach guard lives in one place and can't drift between them.
+        fn apply_collateral_penalty(&mut self, miner: AccountId, amount: Balance) -> Balance {
+            let current = self.collateral.get(miner).unwrap_or(0);
+            let actual = core::cmp::min(amount, current);
+            if actual == 0 {
+                return 0;
+            }
+            let remaining = current.saturating_sub(actual);
+            self.collateral.insert(miner, &remaining);
+            if remaining < self.min_collateral && self.miner_active.get(miner).unwrap_or(false) {
+                self.miner_active.insert(miner, &false);
+                self.miner_deactivation_block.insert(miner, &self.env().block_number());
+                self.env().emit_event(MinerActivated { miner, active: false });
+            }
+            actual
         }
     }
 
@@ -281,17 +342,11 @@ mod allways_swap_manager {
 
                 next_swap_id: 1,
                 swaps: Mapping::default(),
-                swap_confirm_votes: Mapping::default(),
-                swap_confirm_vote_count: Mapping::default(),
-                swap_timeout_votes: Mapping::default(),
-                swap_timeout_vote_count: Mapping::default(),
                 used_from_tx: Mapping::default(),
 
                 collateral: Mapping::default(),
                 miner_active: Mapping::default(),
                 miner_has_active_swap: Mapping::default(),
-                miner_reserved_until: Mapping::default(),
-                miner_last_resolved_block: Mapping::default(),
                 miner_deactivation_block: Mapping::default(),
 
                 next_request_id: 1,
@@ -300,15 +355,11 @@ mod allways_swap_manager {
                 request_created: Mapping::default(),
                 request_hash: Mapping::default(),
                 miner_active_request: Mapping::default(),
+                pending_swap_votes: Mapping::default(),
 
-                reservation_hash: Mapping::default(),
-                reservation_from_addr: Mapping::default(),
-                reservation_tao_amount: Mapping::default(),
-                reservation_from_amount: Mapping::default(),
-                reservation_to_amount: Mapping::default(),
+                reservations: Mapping::default(),
 
-                address_strike_count: Mapping::default(),
-                address_last_expired: Mapping::default(),
+                address_cooldown: Mapping::default(),
                 accumulated_fees: 0,
                 total_recycled_fees: 0,
                 pending_slashes: Mapping::default(),
@@ -325,7 +376,7 @@ mod allways_swap_manager {
             let caller = self.env().caller();
             let amount = self.env().transferred_value();
             if amount == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
 
             let current = self.collateral.get(caller).unwrap_or(0);
@@ -347,7 +398,7 @@ mod allways_swap_manager {
         pub fn withdraw_collateral(&mut self, amount: Balance) -> Result<(), Error> {
             let caller = self.env().caller();
             if amount == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
             if self.miner_active.get(caller).unwrap_or(false) {
                 return Err(Error::MinerStillActive);
@@ -361,8 +412,7 @@ mod allways_swap_manager {
                 }
             }
 
-            let reserved_until = self.miner_reserved_until.get(caller).unwrap_or(0);
-            if reserved_until >= self.env().block_number() {
+            if self.reserved_until_of(caller) >= self.env().block_number() {
                 return Err(Error::MinerReserved);
             }
 
@@ -405,12 +455,11 @@ mod allways_swap_manager {
         ) -> Result<(), Error> {
             self.ensure_validator()?;
             self.ensure_not_halted()?;
-            let caller = self.env().caller();
             let current_block = self.env().block_number();
 
             // Verify hash — from_chain and to_chain are included in the hash,
             // so validators must agree on the direction. No separate check needed.
-            let computed = Self::compute_reserve_hash(
+            let computed = Self::hash_request(&(
                 &miner,
                 &user_from_address,
                 &from_chain,
@@ -418,7 +467,7 @@ mod allways_swap_manager {
                 tao_amount,
                 from_amount,
                 to_amount,
-            );
+            ));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
@@ -444,54 +493,38 @@ mod allways_swap_manager {
             }
 
             // Check confirmed reservation
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
+            let existing = self.reservations.get(miner);
+            let reserved_until = existing.as_ref().map(|r| r.reserved_until).unwrap_or(0);
             if reserved_until >= current_block {
                 return Err(Error::MinerReserved);
             }
             // Lazy strike: expired confirmed reservation -> record strike
-            if reserved_until > 0 {
-                if let Some(expired_addr) = self.reservation_from_addr.get(miner) {
-                    let strikes = self.address_strike_count.get(&expired_addr).unwrap_or(0);
-                    self.address_strike_count.insert(&expired_addr, &strikes.saturating_add(1));
-                    self.address_last_expired.insert(&expired_addr, &current_block);
-                }
+            if let Some(prev) = existing {
+                let (strikes, _) = self.address_cooldown.get(&prev.from_addr).unwrap_or((0, 0));
+                self.address_cooldown.insert(&prev.from_addr, &(strikes.saturating_add(1), current_block));
                 self.clear_confirmed_reservation(miner);
                 self.env().emit_event(ReservationCancelled { miner });
             }
 
-            // Get or create request ID for this reserve round
-            let request_id = match self.get_active_request(miner, REQ_RESERVE) {
-                Some(id) => {
-                    // Existing round — verify same hash
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_RESERVE, request_hash),
-            };
-
-            // Record vote (rejects duplicates via request_id keying)
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum
-            if vote_count >= self.get_required_votes() {
-                let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
-                self.miner_reserved_until.insert(miner, &new_reserved_until);
-                self.reservation_hash.insert(miner, &request_hash);
-                self.reservation_from_addr.insert(miner, &user_from_address);
-                self.reservation_tao_amount.insert(miner, &tao_amount);
-                self.reservation_from_amount.insert(miner, &from_amount);
-                self.reservation_to_amount.insert(miner, &to_amount);
-                self.clear_request(miner, REQ_RESERVE);
-
-                self.env().emit_event(MinerReserved {
+            self.consensus_vote(miner, REQ_RESERVE, request_hash, move |this| {
+                let new_reserved_until = this.env().block_number().saturating_add(this.reservation_ttl);
+                this.reservations.insert(
+                    miner,
+                    &Reservation {
+                        hash: request_hash,
+                        from_addr: user_from_address,
+                        tao_amount,
+                        from_amount,
+                        to_amount,
+                        reserved_until: new_reserved_until,
+                    },
+                );
+                this.env().emit_event(MinerReserved {
                     miner,
                     reserved_until: new_reserved_until,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         #[ink(message)]
@@ -511,11 +544,9 @@ mod allways_swap_manager {
             from_tx_hash: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let current_block = self.env().block_number();
 
             // Verify hash
-            let computed = Self::compute_extend_hash(&miner, &from_tx_hash);
+            let computed = Self::hash_request(&(&miner, &from_tx_hash));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
@@ -529,37 +560,26 @@ mod allways_swap_manager {
             }
 
             // Reservation data must exist (a prior reserve quorum succeeded)
-            if self.reservation_tao_amount.get(miner).unwrap_or(0) == 0 {
+            if self.reservations.get(miner).is_none() {
                 return Err(Error::NoReservation);
             }
 
-            // Get or create request ID for this extend round
-            let request_id = match self.get_active_request(miner, REQ_EXTEND) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_EXTEND, request_hash),
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum — extend reservation
-            if vote_count >= self.get_required_votes() {
-                let new_reserved_until = current_block.saturating_add(self.reservation_ttl);
-                self.miner_reserved_until.insert(miner, &new_reserved_until);
-                self.clear_request(miner, REQ_EXTEND);
-
-                self.env().emit_event(ReservationExtended {
+            self.consensus_vote(miner, REQ_EXTEND, request_hash, move |this| {
+                // Re-read on quorum — the pre-check above already proved it exists
+                // at call time, but the closure runs after consensus so we reload.
+                let Some(mut reservation) = this.reservations.get(miner) else {
+                    return Err(Error::NoReservation);
+                };
+                let new_reserved_until =
+                    this.env().block_number().saturating_add(this.reservation_ttl);
+                reservation.reserved_until = new_reserved_until;
+                this.reservations.insert(miner, &reservation);
+                this.env().emit_event(ReservationExtended {
                     miner,
                     reserved_until: new_reserved_until,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         // =====================================================================
@@ -586,12 +606,11 @@ mod allways_swap_manager {
             rate: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
             let current_block = self.env().block_number();
 
             // Verify hash — covers the full swap shape so no field can be substituted
             // by a malicious validator casting the quorum-reaching vote.
-            let computed = Self::compute_initiate_hash(
+            let computed = Self::hash_request(&(
                 &miner,
                 &from_tx_hash,
                 &from_chain,
@@ -602,7 +621,7 @@ mod allways_swap_manager {
                 tao_amount,
                 from_amount,
                 to_amount,
-            );
+            ));
             if computed != request_hash {
                 return Err(Error::HashMismatch);
             }
@@ -628,40 +647,28 @@ mod allways_swap_manager {
             // Note: direction is bound via the reserve hash + initiate hash, not
             // via stored state — both hashes cover from_chain/to_chain, so
             // validator consensus agrees on the direction at both steps.
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
-            if reserved_until < current_block {
+            let Some(reservation) = self.reservations.get(miner) else {
+                return Err(Error::NoReservation);
+            };
+            if reservation.reserved_until < current_block {
                 return Err(Error::NoReservation);
             }
-            let res_tao = self.reservation_tao_amount.get(miner).unwrap_or(0);
-            let res_source = self.reservation_from_amount.get(miner).unwrap_or(0);
-            let res_dest = self.reservation_to_amount.get(miner).unwrap_or(0);
-            if tao_amount != res_tao || from_amount != res_source || to_amount != res_dest {
+            if tao_amount != reservation.tao_amount
+                || from_amount != reservation.from_amount
+                || to_amount != reservation.to_amount
+            {
                 return Err(Error::InvalidAmount);
             }
 
-            // Get or create request ID for this initiate round
-            let request_id = match self.get_active_request(miner, REQ_INITIATE) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(miner, REQ_INITIATE, request_hash),
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            // Check quorum — create swap
-            if vote_count >= self.get_required_votes() {
-                let miner_collateral = self.collateral.get(miner).unwrap_or(0);
+            self.consensus_vote(miner, REQ_INITIATE, request_hash, move |this| {
+                let miner_collateral = this.collateral.get(miner).unwrap_or(0);
                 if tao_amount > miner_collateral {
                     return Err(Error::InsufficientCollateral);
                 }
 
-                let swap_id = self.next_swap_id;
-                self.next_swap_id = self.next_swap_id.saturating_add(1);
+                let swap_id = this.next_swap_id;
+                this.next_swap_id = this.next_swap_id.saturating_add(1);
+                let current_block = this.env().block_number();
 
                 let swap = SwapData {
                     id: swap_id,
@@ -683,28 +690,26 @@ mod allways_swap_manager {
                     to_tx_block: 0,
                     status: SwapStatus::Active,
                     initiated_block: current_block,
-                    timeout_block: current_block.saturating_add(self.fulfillment_timeout_blocks),
+                    timeout_block: current_block.saturating_add(this.fulfillment_timeout_blocks),
                     fulfilled_block: 0,
                     completed_block: 0,
                 };
 
-                self.used_from_tx.insert(from_tx_hash, &true);
-                self.miner_has_active_swap.insert(miner, &true);
-                self.swaps.insert(swap_id, &swap);
+                this.used_from_tx.insert(from_tx_hash, &true);
+                this.miner_has_active_swap.insert(miner, &true);
+                this.swaps.insert(swap_id, &swap);
 
-                self.clear_confirmed_reservation(miner);
-                self.clear_request(miner, REQ_INITIATE);
+                this.clear_confirmed_reservation(miner);
 
-                self.env().emit_event(SwapInitiated {
+                this.env().emit_event(SwapInitiated {
                     swap_id,
                     user,
                     miner,
                     from_amount,
                     initiated_block: current_block,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         /// Mark a swap as fulfilled — miner direct (caller == swap.miner)
@@ -748,83 +753,52 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn confirm_swap(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
             }
-            if self.swap_confirm_votes.get((swap_id, caller)).unwrap_or(false) {
-                return Err(Error::AlreadyVoted);
-            }
 
-            self.swap_confirm_votes.insert((swap_id, caller), &true);
-            let vote_count = self.swap_confirm_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
-            self.swap_confirm_vote_count.insert(swap_id, &vote_count);
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::Confirm,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
+            self.consensus_swap_vote(swap_id, REQ_CONFIRM, VoteType::Confirm, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
                 swap.status = SwapStatus::Completed;
-                swap.completed_block = self.env().block_number();
+                swap.completed_block = this.env().block_number();
 
                 // Fee from miner collateral -> accumulated_fees. 1% hardcoded.
+                // apply_collateral_penalty auto-deactivates the miner if this
+                // drops them below min_collateral, keeping the guard in sync
+                // with timeout_swap.
                 #[allow(clippy::arithmetic_side_effects)]
                 let fee = swap.tao_amount.saturating_div(FEE_DIVISOR);
-                let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
-                let actual_fee = core::cmp::min(fee, miner_collateral);
-                let new_collateral = miner_collateral.saturating_sub(actual_fee);
+                let actual_fee = this.apply_collateral_penalty(swap.miner, fee);
                 if actual_fee > 0 {
-                    self.collateral.insert(swap.miner, &new_collateral);
-                    self.accumulated_fees = self.accumulated_fees.saturating_add(actual_fee);
+                    this.accumulated_fees = this.accumulated_fees.saturating_add(actual_fee);
                 }
 
-                // If the fee deduction drops the miner below min_collateral,
-                // deactivate them here so validators don't keep crediting
-                // crown-time to a miner that can no longer honor swaps.
-                // Mirrors the same guard in timeout_swap.
-                if new_collateral < self.min_collateral
-                    && self.miner_active.get(swap.miner).unwrap_or(false)
-                {
-                    self.miner_active.insert(swap.miner, &false);
-                    self.miner_deactivation_block.insert(swap.miner, &self.env().block_number());
-                    self.env().emit_event(MinerActivated { miner: swap.miner, active: false });
-                }
+                this.miner_has_active_swap.insert(swap.miner, &false);
+                this.address_cooldown.remove(&swap.user_from_address);
 
-                self.miner_has_active_swap.insert(swap.miner, &false);
-                self.miner_last_resolved_block.insert(swap.miner, &swap.completed_block);
-
-                self.address_strike_count.remove(&swap.user_from_address);
-                self.address_last_expired.remove(&swap.user_from_address);
-
-                self.env().emit_event(SwapCompleted {
+                this.env().emit_event(SwapCompleted {
                     swap_id,
                     miner: swap.miner,
                     tao_amount: swap.tao_amount,
                     fee_amount: actual_fee,
                 });
 
-                self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-            } else {
-                self.swaps.insert(swap_id, &swap);
-            }
-            Ok(())
+                this.swaps.remove(swap_id);
+                this.clear_pending_swap_votes(swap_id);
+                Ok(())
+            })
         }
 
         /// Timeout a swap — validator-only, quorum mechanism
         #[ink(message)]
         pub fn timeout_swap(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Active && swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
@@ -832,42 +806,29 @@ mod allways_swap_manager {
             if self.env().block_number() < swap.timeout_block {
                 return Err(Error::NotTimedOut);
             }
-            if self.swap_timeout_votes.get((swap_id, caller)).unwrap_or(false) {
-                return Err(Error::AlreadyVoted);
-            }
 
-            self.swap_timeout_votes.insert((swap_id, caller), &true);
-            let vote_count = self.swap_timeout_vote_count.get(swap_id).unwrap_or(0).saturating_add(1);
-            self.swap_timeout_vote_count.insert(swap_id, &vote_count);
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::Timeout,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
+            self.consensus_swap_vote(swap_id, REQ_TIMEOUT, VoteType::Timeout, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
                 swap.status = SwapStatus::TimedOut;
-                swap.completed_block = self.env().block_number();
+                swap.completed_block = this.env().block_number();
 
-                let slash_amount = swap.tao_amount;
-                let miner_collateral = self.collateral.get(swap.miner).unwrap_or(0);
-                let actual_slash = core::cmp::min(slash_amount, miner_collateral);
-
-                let new_collateral = miner_collateral.saturating_sub(actual_slash);
+                // Slash miner collateral up to the full tao_amount; the helper
+                // also auto-deactivates the miner if this drops them below
+                // min_collateral.
+                let actual_slash = this.apply_collateral_penalty(swap.miner, swap.tao_amount);
                 if actual_slash > 0 {
-                    self.collateral.insert(swap.miner, &new_collateral);
-
-                    if self.env().transfer(swap.user, actual_slash).is_ok() {
-                        self.env().emit_event(CollateralSlashed {
+                    if this.env().transfer(swap.user, actual_slash).is_ok() {
+                        this.env().emit_event(CollateralSlashed {
                             miner: swap.miner,
                             amount: actual_slash,
                             recipient: swap.user,
                         });
                     } else {
-                        self.pending_slashes.insert(swap_id, &(swap.user, actual_slash));
-                        self.env().emit_event(SlashPending {
+                        this.pending_slashes.insert(swap_id, &(swap.user, actual_slash));
+                        this.env().emit_event(SlashPending {
                             swap_id,
                             user: swap.user,
                             amount: actual_slash,
@@ -875,30 +836,19 @@ mod allways_swap_manager {
                     }
                 }
 
-                if new_collateral < self.min_collateral {
-                    self.miner_active.insert(swap.miner, &false);
-                    self.miner_deactivation_block.insert(swap.miner, &self.env().block_number());
-                    self.env().emit_event(MinerActivated { miner: swap.miner, active: false });
-                }
+                this.miner_has_active_swap.insert(swap.miner, &false);
 
-                self.miner_has_active_swap.insert(swap.miner, &false);
-                self.miner_last_resolved_block.insert(swap.miner, &swap.completed_block);
-
-                self.env().emit_event(SwapTimedOut {
+                this.env().emit_event(SwapTimedOut {
                     swap_id,
                     miner: swap.miner,
                     tao_amount: swap.tao_amount,
                     slash_amount: actual_slash,
                 });
 
-                self.swaps.remove(swap_id);
-                self.swap_confirm_vote_count.remove(swap_id);
-                self.swap_timeout_vote_count.remove(swap_id);
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-            } else {
-                self.swaps.insert(swap_id, &swap);
-            }
-            Ok(())
+                this.swaps.remove(swap_id);
+                this.clear_pending_swap_votes(swap_id);
+                Ok(())
+            })
         }
 
         /// Extend swap timeout — validator-only, quorum mechanism.
@@ -907,54 +857,29 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
-            let mut swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
             }
 
-            // Deterministic hash from swap_id for the request system
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes[..8].copy_from_slice(&swap_id.to_le_bytes());
-            let request_hash = Hash::from(hash_bytes);
-
-            // Get or create request for this extend round
-            let request_id = match self.get_active_request(swap.miner, REQ_EXTEND_TIMEOUT) {
-                Some(id) => {
-                    if self.request_hash.get(id).unwrap_or_default() != request_hash {
-                        return Err(Error::PendingConflict);
-                    }
-                    id
-                }
-                None => self.new_request(swap.miner, REQ_EXTEND_TIMEOUT, request_hash),
-            };
-
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            self.env().emit_event(VoteCast {
-                swap_id,
-                validator: caller,
-                vote_type: VoteType::ExtendTimeout,
-                vote_count,
-            });
-
-            if vote_count >= self.get_required_votes() {
-                let current_block = self.env().block_number();
-                let new_timeout = current_block.saturating_add(self.fulfillment_timeout_blocks);
+            self.consensus_swap_vote(swap_id, REQ_EXTEND_TIMEOUT, VoteType::ExtendTimeout, move |this| {
+                let mut swap = match this.swaps.get(swap_id) {
+                    Some(s) => s,
+                    None => return Err(Error::SwapNotFound),
+                };
+                let new_timeout = this.env().block_number().saturating_add(this.fulfillment_timeout_blocks);
                 swap.timeout_block = new_timeout;
-                self.swaps.insert(swap_id, &swap);
-
-                // Clear request — allows validators to vote again for another extension
-                self.clear_request(swap.miner, REQ_EXTEND_TIMEOUT);
-
-                self.env().emit_event(SwapTimeoutExtended {
+                this.swaps.insert(swap_id, &swap);
+                // clear_pending_swap_votes runs in consensus_swap_vote after this
+                // closure via the standard cleanup path — the caller can vote
+                // again for another extension on the next round.
+                this.env().emit_event(SwapTimeoutExtended {
                     swap_id,
                     new_timeout_block: new_timeout,
                 });
-            }
-
-            Ok(())
+                Ok(())
+            })
         }
 
         /// Claim a pending slash payout (user calls after failed transfer)
@@ -995,10 +920,10 @@ mod allways_swap_manager {
                 return Err(Error::NotAssignedMiner);
             }
             if self.miner_has_active_swap.get(miner).unwrap_or(false) {
-                return Err(Error::HasActiveSwap);
+                return Err(Error::MinerHasActiveSwap);
             }
-            if self.miner_reserved_until.get(miner).unwrap_or(0) >= self.env().block_number() {
-                return Err(Error::CurrentlyReserved);
+            if self.reserved_until_of(miner) >= self.env().block_number() {
+                return Err(Error::MinerReserved);
             }
             self.miner_deactivation_block.insert(miner, &self.env().block_number());
             self.miner_active.insert(miner, &false);
@@ -1011,7 +936,6 @@ mod allways_swap_manager {
         pub fn vote_activate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
             self.ensure_not_halted()?;
-            let caller = self.env().caller();
 
             if self.miner_active.get(miner).unwrap_or(false) {
                 return Err(Error::InvalidStatus);
@@ -1021,27 +945,14 @@ mod allways_swap_manager {
                 return Err(Error::InsufficientCollateral);
             }
 
-            // Get or create request ID for this activation round
-            let request_id = match self.get_active_request(miner, REQ_ACTIVATE) {
-                Some(id) => id,
-                None => {
-                    // No hash needed for activation (just miner identity)
-                    let hash = Hash::default();
-                    self.new_request(miner, REQ_ACTIVATE, hash)
-                }
-            };
-
-            // Record vote
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            if vote_count >= self.get_required_votes() {
-                self.miner_active.insert(miner, &true);
-                self.miner_deactivation_block.remove(miner);
-                self.clear_request(miner, REQ_ACTIVATE);
-                self.env().emit_event(MinerActivated { miner, active: true });
-            }
-
-            Ok(())
+            // Activation hash is just the miner identity — deterministic so every
+            // validator binds the same round.
+            self.consensus_vote(miner, REQ_ACTIVATE, Hash::default(), move |this| {
+                this.miner_active.insert(miner, &true);
+                this.miner_deactivation_block.remove(miner);
+                this.env().emit_event(MinerActivated { miner, active: true });
+                Ok(())
+            })
         }
 
         /// Vote to deactivate a miner — validator-only, quorum required.
@@ -1059,30 +970,17 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_deactivate(&mut self, miner: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
-            let caller = self.env().caller();
 
             if !self.miner_active.get(miner).unwrap_or(false) {
                 return Err(Error::InvalidStatus);
             }
 
-            let request_id = match self.get_active_request(miner, REQ_DEACTIVATE) {
-                Some(id) => id,
-                None => {
-                    let hash = Hash::default();
-                    self.new_request(miner, REQ_DEACTIVATE, hash)
-                }
-            };
-
-            let vote_count = self.record_vote(request_id, caller)?;
-
-            if vote_count >= self.get_required_votes() {
-                self.miner_active.insert(miner, &false);
-                self.miner_deactivation_block.insert(miner, &self.env().block_number());
-                self.clear_request(miner, REQ_DEACTIVATE);
-                self.env().emit_event(MinerActivated { miner, active: false });
-            }
-
-            Ok(())
+            self.consensus_vote(miner, REQ_DEACTIVATE, Hash::default(), move |this| {
+                this.miner_active.insert(miner, &false);
+                this.miner_deactivation_block.insert(miner, &this.env().block_number());
+                this.env().emit_event(MinerActivated { miner, active: false });
+                Ok(())
+            })
         }
 
         // =====================================================================
@@ -1230,7 +1128,7 @@ mod allways_swap_manager {
 
             let fees = self.accumulated_fees;
             if fees == 0 {
-                return Err(Error::ZeroAmount);
+                return Err(Error::InvalidAmount);
             }
 
             self.env().transfer(self.recycle_address, fees)
@@ -1267,11 +1165,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn get_miner_last_resolved_block(&self, miner: AccountId) -> u32 {
-            self.miner_last_resolved_block.get(miner).unwrap_or(0)
-        }
-
-        #[ink(message)]
         pub fn is_validator(&self, account: AccountId) -> bool {
             self.validators.get(account).unwrap_or(false)
         }
@@ -1294,11 +1187,6 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_max_collateral(&self) -> Balance {
             self.max_collateral
-        }
-
-        #[ink(message)]
-        pub fn get_required_votes_count(&self) -> u32 {
-            self.get_required_votes()
         }
 
         #[ink(message)]
@@ -1343,7 +1231,7 @@ mod allways_swap_manager {
 
         #[ink(message)]
         pub fn get_miner_reserved_until(&self, miner: AccountId) -> u32 {
-            self.miner_reserved_until.get(miner).unwrap_or(0)
+            self.reserved_until_of(miner)
         }
 
         #[ink(message)]
@@ -1356,6 +1244,24 @@ mod allways_swap_manager {
             self.miner_deactivation_block.get(miner).unwrap_or(0)
         }
 
+        /// Composite miner read: (collateral, active, has_active_swap,
+        /// reserved_until, deactivation_block). One RPC for the CLI views
+        /// that otherwise make four to six separate contract reads per
+        /// render.
+        #[ink(message)]
+        pub fn get_miner_snapshot(
+            &self,
+            miner: AccountId,
+        ) -> (Balance, bool, bool, u32, u32) {
+            (
+                self.collateral.get(miner).unwrap_or(0),
+                self.miner_active.get(miner).unwrap_or(false),
+                self.miner_has_active_swap.get(miner).unwrap_or(false),
+                self.reserved_until_of(miner),
+                self.miner_deactivation_block.get(miner).unwrap_or(0),
+            )
+        }
+
         #[ink(message)]
         pub fn get_consensus_threshold(&self) -> u8 {
             self.consensus_threshold_percent
@@ -1366,30 +1272,18 @@ mod allways_swap_manager {
             self.validator_count
         }
 
-        #[ink(message)]
-        pub fn get_activation_vote_count(&self, miner: AccountId) -> u32 {
-            match self.miner_active_request.get((miner, REQ_ACTIVATE)) {
-                Some(id) => self.request_vote_count.get(id).unwrap_or(0),
-                None => 0,
-            }
-        }
-
+        /// Returns the reservation amounts (tao, from, to) if one exists.
+        /// Callers that also need `reserved_until` can query
+        /// `get_miner_reserved_until` separately — it's a cheap single-field
+        /// read on the same struct.
         #[ink(message)]
         pub fn get_reservation_data(
             &self,
             miner: AccountId,
-        ) -> Option<(String, Balance, Balance, Balance, u32)> {
-            let reserved_until = self.miner_reserved_until.get(miner).unwrap_or(0);
-            if reserved_until == 0 {
-                return None;
-            }
-            Some((
-                self.reservation_from_addr.get(miner).unwrap_or_default(),
-                self.reservation_tao_amount.get(miner).unwrap_or(0),
-                self.reservation_from_amount.get(miner).unwrap_or(0),
-                self.reservation_to_amount.get(miner).unwrap_or(0),
-                reserved_until,
-            ))
+        ) -> Option<(Balance, Balance, Balance)> {
+            self.reservations
+                .get(miner)
+                .map(|r| (r.tao_amount, r.from_amount, r.to_amount))
         }
 
         #[ink(message)]
@@ -1401,19 +1295,8 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn get_extend_vote_count(&self, miner: AccountId) -> u32 {
-            match self.miner_active_request.get((miner, REQ_EXTEND)) {
-                Some(id) => self.request_vote_count.get(id).unwrap_or(0),
-                None => 0,
-            }
-        }
-
-        #[ink(message)]
         pub fn get_cooldown(&self, from_address: String) -> (u8, u32) {
-            (
-                self.address_strike_count.get(&from_address).unwrap_or(0),
-                self.address_last_expired.get(&from_address).unwrap_or(0),
-            )
+            self.address_cooldown.get(&from_address).unwrap_or((0, 0))
         }
     }
 }

@@ -14,8 +14,6 @@ pub enum Error {
     AlreadyVoted,
     /// Swap is not in the expected status for this operation
     InvalidStatus,
-    /// Amount must be greater than zero
-    ZeroAmount,
     /// Miner is not active (not activated via set_active)
     MinerNotActive,
     /// Miner is still active (must deactivate before withdrawing)
@@ -60,8 +58,4 @@ pub enum Error {
     SameChain,
     /// System is halted — no new activity allowed
     SystemHalted,
-    /// Miner has an active swap; self-deactivation blocked until swap resolves
-    HasActiveSwap,
-    /// Miner is currently reserved; self-deactivation blocked until reservation expires
-    CurrentlyReserved,
 }

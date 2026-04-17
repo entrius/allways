@@ -90,13 +90,12 @@ CONTRACT_SELECTORS = {
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
     'get_miner_has_active_swap': bytes.fromhex('1d07dec1'),
-    'get_miner_last_resolved_block': bytes.fromhex('a4b68d1f'),
+    'get_miner_snapshot': bytes.fromhex('ffd9e2e6'),
     'is_validator': bytes.fromhex('f844fc5f'),
     'get_next_swap_id': bytes.fromhex('d80244d2'),
     'get_fulfillment_timeout': bytes.fromhex('e820174a'),
     'get_min_collateral': bytes.fromhex('233a7832'),
     'get_max_collateral': bytes.fromhex('54945717'),
-    'get_required_votes_count': bytes.fromhex('fe07130d'),
     'get_accumulated_fees': bytes.fromhex('bf3b5d4e'),
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
@@ -109,12 +108,10 @@ CONTRACT_SELECTORS = {
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
-    'get_activation_vote_count': bytes.fromhex('154595d0'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
     'vote_extend_reservation': bytes.fromhex('f668d950'),
-    'get_extend_vote_count': bytes.fromhex('24fa0aae'),
     'vote_extend_timeout': bytes.fromhex('0fb2d2e5'),
     'set_halted': bytes.fromhex('8fe1c210'),
     'get_halted': bytes.fromhex('ec540804'),
@@ -175,17 +172,15 @@ CONTRACT_ARG_TYPES = {
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
     'get_miner_has_active_swap': [('hotkey', 'AccountId')],
-    'get_miner_last_resolved_block': [('miner', 'AccountId')],
+    'get_miner_snapshot': [('miner', 'AccountId')],
     'is_validator': [('account', 'AccountId')],
     'get_next_swap_id': [],
     'get_fulfillment_timeout': [],
     'get_min_collateral': [],
     'get_max_collateral': [],
-    'get_required_votes_count': [],
     'get_miner_deactivation_block': [('miner', 'AccountId')],
     'get_consensus_threshold': [],
     'get_validator_count': [],
-    'get_activation_vote_count': [('miner', 'AccountId')],
     'get_reservation_data': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'vote_extend_reservation': [
@@ -193,7 +188,6 @@ CONTRACT_ARG_TYPES = {
         ('miner', 'AccountId'),
         ('from_tx_hash', 'str'),
     ],
-    'get_extend_vote_count': [('miner', 'AccountId')],
     'vote_extend_timeout': [('swap_id', 'u64')],
     'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
@@ -249,31 +243,28 @@ CONTRACT_ERROR_VARIANTS = {
     2: ('SwapNotFound', 'Swap ID not found'),
     3: ('AlreadyVoted', 'Validator has already voted on this swap'),
     4: ('InvalidStatus', 'Swap is not in the expected status for this operation'),
-    5: ('ZeroAmount', 'Amount must be greater than zero'),
-    6: ('MinerNotActive', 'Miner is not active'),
-    7: ('MinerStillActive', 'Miner is still active (must deactivate before withdrawing)'),
-    8: ('TransferFailed', 'Transfer failed'),
-    9: ('NotTimedOut', 'Swap has not timed out yet'),
-    10: ('NotAssignedMiner', 'Caller is not the assigned miner for this swap'),
-    11: ('NotValidator', 'Caller is not a registered validator'),
-    12: ('DuplicateSourceTx', 'Source transaction hash already used in another swap'),
-    13: ('InvalidAmount', 'Swap amounts must be greater than zero'),
-    14: ('NoPendingSlash', 'No pending slash to claim'),
-    15: ('InputEmpty', 'Required input is empty'),
-    16: ('InputTooLong', 'Input string exceeds maximum allowed length'),
-    17: ('MinerHasActiveSwap', 'Miner already has an active swap'),
-    18: ('WithdrawalCooldown', 'Withdrawal cooldown not met'),
-    19: ('AmountBelowMinimum', 'Swap amount below minimum'),
-    20: ('AmountAboveMaximum', 'Swap amount above maximum'),
-    21: ('MinerReserved', 'Miner is already reserved by another user'),
-    22: ('NoReservation', 'No active reservation for this miner'),
-    23: ('ExceedsMaxCollateral', 'Collateral exceeds maximum allowed'),
-    24: ('HashMismatch', 'Request hash does not match computed hash'),
-    25: ('PendingConflict', 'A pending vote exists for a different request'),
-    26: ('SameChain', 'Source and destination chains must be different'),
-    27: ('SystemHalted', 'System is halted — no new activity allowed'),
-    28: ('HasActiveSwap', 'Cannot deactivate: miner has an active swap in progress'),
-    29: ('CurrentlyReserved', 'Cannot deactivate: miner is currently reserved'),
+    5: ('MinerNotActive', 'Miner is not active'),
+    6: ('MinerStillActive', 'Miner is still active (must deactivate before withdrawing)'),
+    7: ('TransferFailed', 'Transfer failed'),
+    8: ('NotTimedOut', 'Swap has not timed out yet'),
+    9: ('NotAssignedMiner', 'Caller is not the assigned miner for this swap'),
+    10: ('NotValidator', 'Caller is not a registered validator'),
+    11: ('DuplicateSourceTx', 'Source transaction hash already used in another swap'),
+    12: ('InvalidAmount', 'Swap amounts must be greater than zero'),
+    13: ('NoPendingSlash', 'No pending slash to claim'),
+    14: ('InputEmpty', 'Required input is empty'),
+    15: ('InputTooLong', 'Input string exceeds maximum allowed length'),
+    16: ('MinerHasActiveSwap', 'Miner already has an active swap'),
+    17: ('WithdrawalCooldown', 'Withdrawal cooldown not met'),
+    18: ('AmountBelowMinimum', 'Swap amount below minimum'),
+    19: ('AmountAboveMaximum', 'Swap amount above maximum'),
+    20: ('MinerReserved', 'Miner is already reserved by another user'),
+    21: ('NoReservation', 'No active reservation for this miner'),
+    22: ('ExceedsMaxCollateral', 'Collateral exceeds maximum allowed'),
+    23: ('HashMismatch', 'Request hash does not match computed hash'),
+    24: ('PendingConflict', 'A pending vote exists for a different request'),
+    25: ('SameChain', 'Source and destination chains must be different'),
+    26: ('SystemHalted', 'System is halted — no new activity allowed'),
 }
 
 
@@ -820,8 +811,22 @@ class AllwaysContractClient:
     def get_miner_has_active_swap(self, hotkey: str) -> bool:
         return self.read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
 
-    def get_miner_last_resolved_block(self, hotkey: str) -> int:
-        return self.read_u32('get_miner_last_resolved_block', {'miner': hotkey})
+    def get_miner_snapshot(self, hotkey: str) -> Tuple[int, bool, bool, int, int]:
+        """Composite miner read: (collateral, active, has_active_swap,
+        reserved_until, deactivation_block). One RPC round-trip.
+        """
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_miner_snapshot', {'miner': hotkey})
+        if data is None or len(data) < 26:
+            return (0, False, False, 0, 0)
+        collateral_lo = struct.unpack_from('<Q', data, 0)[0]
+        collateral_hi = struct.unpack_from('<Q', data, 8)[0]
+        collateral = collateral_lo + (collateral_hi << 64)
+        active = data[16] != 0
+        has_active_swap = data[17] != 0
+        reserved_until = struct.unpack_from('<I', data, 18)[0]
+        deactivation_block = struct.unpack_from('<I', data, 22)[0]
+        return (collateral, active, has_active_swap, reserved_until, deactivation_block)
 
     def get_next_swap_id(self) -> int:
         return self.read_u64('get_next_swap_id')
@@ -834,9 +839,6 @@ class AllwaysContractClient:
 
     def get_max_collateral(self) -> int:
         return self.read_u128('get_max_collateral')
-
-    def get_required_votes_count(self) -> int:
-        return self.read_u32('get_required_votes_count')
 
     def get_miner_deactivation_block(self, hotkey: str) -> int:
         return self.read_u32('get_miner_deactivation_block', {'miner': hotkey})
@@ -851,14 +853,8 @@ class AllwaysContractClient:
     def get_validator_count(self) -> int:
         return self.read_u32('get_validator_count')
 
-    def get_activation_vote_count(self, hotkey: str) -> int:
-        return self.read_u32('get_activation_vote_count', {'miner': hotkey})
-
     def get_pending_reserve_vote_count(self, miner_hotkey: str) -> int:
         return self.read_u32('get_pending_reserve_vote_count', {'miner': miner_hotkey})
-
-    def get_extend_vote_count(self, miner_hotkey: str) -> int:
-        return self.read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
     def get_cooldown(self, from_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""
@@ -900,10 +896,11 @@ class AllwaysContractClient:
     def get_reservation_ttl(self) -> int:
         return self.read_u32('get_reservation_ttl')
 
-    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
-        """Get reservation data for a miner.
+    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[int, int, int]]:
+        """Get reservation amounts for a miner.
 
-        Returns (from_addr, tao_amount, from_amount, to_amount, reserved_until) or None.
+        Returns (tao_amount, from_amount, to_amount) or None. Callers that
+        also need reserved_until should use ``get_miner_reserved_until``.
         """
         self.ensure_initialized()
         data = self.raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
@@ -915,20 +912,7 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # String from_addr: compact length + UTF-8 bytes
-        first = data[o]
-        mode = first & 0x03
-        if mode == 0:
-            addr_len = first >> 2
-            o += 1
-        elif mode == 1:
-            addr_len = (data[o] | (data[o + 1] << 8)) >> 2
-            o += 2
-        else:
-            return None
-        from_addr = data[o : o + addr_len].decode('utf-8')
-        o += addr_len
-        # 3 x u128 + 1 x u32
+        # 3 x u128
         tao_lo = struct.unpack_from('<Q', data, o)[0]
         tao_hi = struct.unpack_from('<Q', data, o + 8)[0]
         tao_amount = tao_lo + (tao_hi << 64)
@@ -940,9 +924,7 @@ class AllwaysContractClient:
         dst_lo = struct.unpack_from('<Q', data, o)[0]
         dst_hi = struct.unpack_from('<Q', data, o + 8)[0]
         to_amount = dst_lo + (dst_hi << 64)
-        o += 16
-        reserved_until = struct.unpack_from('<I', data, o)[0]
-        return (from_addr, tao_amount, from_amount, to_amount, reserved_until)
+        return (tao_amount, from_amount, to_amount)
 
     # =========================================================================
     # Transaction Functions (Write)
