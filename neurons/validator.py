@@ -73,6 +73,9 @@ class Validator(BaseValidatorNeuron):
         # contract bumps reserved_until past the voted value, so the next
         # extension round is open.
         self.extend_reservation_voted_at: dict[tuple[str, str], int] = {}
+        # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
+        # Used to absorb mempool propagation lag before dropping a pending entry.
+        self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
 
         # Event-sourced miner state. ``sync_to(current_block)`` runs each
         # forward step; scoring reads the active set from the watcher's
