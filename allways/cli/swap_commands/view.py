@@ -1,5 +1,6 @@
 """alw view - View swaps, miners, and rates."""
 
+import os
 import time
 from dataclasses import replace
 
@@ -24,6 +25,8 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
+
+DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
 
 
 @click.group('view', cls=StyledGroup)
@@ -370,6 +373,9 @@ def display_swap(swap, chain_info=True):
 def view_swap(swap_id: int, watch: bool):
     """View details of a specific swap.
 
+    If the swap is no longer in contract storage (completed or timed out), a
+    dashboard URL is shown where resolved swap history is available.
+
     [dim]Examples:
         $ alw view swap 42
         $ alw view swap 42 --watch[/dim]
@@ -390,9 +396,11 @@ def view_swap(swap_id: int, watch: bool):
             next_id = None
 
         if next_id is not None and swap_id < next_id:
+            dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
             console.print(
                 f'[green]Swap {swap_id} has been resolved (completed or timed out).[/green]\n'
-                f'[dim]Resolved swaps are removed from on-chain storage.[/dim]'
+                f'[dim]Resolved swaps are removed from on-chain storage. '
+                f'View history at:[/dim] {dashboard_url}/swap/{swap_id}'
             )
         elif next_id is not None:
             console.print(f'[red]Swap {swap_id} does not exist. Next swap ID: {next_id}.[/red]')
