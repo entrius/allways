@@ -84,3 +84,39 @@ def apply_fee_deduction(to_amount: int, fee_divisor: int) -> int:
     Both MUST use this function to guarantee identical results.
     """
     return to_amount - to_amount // fee_divisor
+
+
+def derive_tao_leg(from_chain: str, from_amount: int, to_chain: str, to_amount: int) -> int:
+    """Return the TAO leg (in rao) of a swap, mirroring vote_initiate.
+
+    tao_amount is always the TAO side regardless of direction. Returns 0 if
+    neither side is TAO (no tao leg — currently unreachable since every
+    supported chain bridges through TAO, but kept deterministic).
+    """
+    if from_chain == 'tao':
+        return from_amount
+    if to_chain == 'tao':
+        return to_amount
+    return 0
+
+
+def check_swap_viability(
+    tao_amount_rao: int,
+    miner_collateral_rao: int,
+    min_swap_rao: int,
+    max_swap_rao: int,
+) -> tuple[bool, str]:
+    """Check whether a swap can pass vote_initiate for a given miner.
+
+    Mirrors the guards in lib.rs::vote_reserve (bounds) and vote_initiate
+    (collateral). Returns (viable, reason) — reason is empty on success.
+    Bounds are global and should be checked against any single rate before
+    the per-miner loop; collateral is per-miner.
+    """
+    if min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
+        return False, f'below min swap ({min_swap_rao / 1_000_000_000:.4f} TAO)'
+    if max_swap_rao > 0 and tao_amount_rao > max_swap_rao:
+        return False, f'above max swap ({max_swap_rao / 1_000_000_000:.4f} TAO)'
+    if tao_amount_rao > miner_collateral_rao:
+        return False, f'insufficient collateral ({tao_amount_rao / 1_000_000_000:.4f} TAO needed)'
+    return True, ''

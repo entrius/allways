@@ -18,8 +18,9 @@ from substrateinterface import Keypair
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, compact_encode_len, is_contract_rejection
+from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
 if TYPE_CHECKING:
@@ -46,36 +47,23 @@ def scale_encode_reserve_hash_input(
         &(miner, user_from_address, from_chain, to_chain, tao_amount, from_amount, to_amount)
     ).
     """
-    src_bytes = from_chain.encode('utf-8')
-    dst_bytes = to_chain.encode('utf-8')
     return (
-        miner_bytes  # AccountId: 32 bytes raw
-        + compact_encode_len(len(from_addr_bytes))
-        + from_addr_bytes  # String: compact length + UTF-8 bytes
-        + compact_encode_len(len(src_bytes))
-        + src_bytes  # String: compact length + UTF-8 bytes
-        + compact_encode_len(len(dst_bytes))
-        + dst_bytes  # String: compact length + UTF-8 bytes
-        + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + from_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + to_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
+        miner_bytes
+        + encode_bytes(from_addr_bytes)
+        + encode_str(from_chain)
+        + encode_str(to_chain)
+        + encode_u128(tao_amount)
+        + encode_u128(from_amount)
+        + encode_u128(to_amount)
     )
 
 
-def scale_encode_extend_hash_input(
-    miner_bytes: bytes,
-    from_tx_hash: str,
-) -> bytes:
+def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
     """SCALE-encode the extend hash input tuple: (AccountId, &str).
 
     Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
     """
-    tx_bytes = from_tx_hash.encode('utf-8')
-    return (
-        miner_bytes  # AccountId: 32 bytes raw
-        + compact_encode_len(len(tx_bytes))
-        + tx_bytes  # &str (SCALE: compact length + bytes)
-    )
+    return miner_bytes + encode_str(from_tx_hash)
 
 
 def scale_encode_initiate_hash_input(
@@ -102,22 +90,17 @@ def scale_encode_initiate_hash_input(
     consensus on the full swap shape — the quorum-reaching vote cannot substitute
     any of these fields without invalidating the hash.
     """
-
-    def encode_str(s: str) -> bytes:
-        raw = s.encode('utf-8')
-        return compact_encode_len(len(raw)) + raw
-
     return (
-        miner_bytes  # AccountId: 32 bytes raw
+        miner_bytes
         + encode_str(from_tx_hash)
         + encode_str(from_chain)
         + encode_str(to_chain)
         + encode_str(miner_from_address)
         + encode_str(miner_to_address)
         + encode_str(rate)
-        + tao_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + from_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
-        + to_amount.to_bytes(16, 'little')  # u128: 16 bytes LE
+        + encode_u128(tao_amount)
+        + encode_u128(from_amount)
+        + encode_u128(to_amount)
     )
 
 
@@ -443,6 +426,9 @@ async def handle_swap_confirm(
         if not synapse.from_address or not synapse.from_tx_proof:
             reject_synapse(synapse, 'Missing source address or proof', ctx)
             return synapse
+        if not synapse.to_address:
+            reject_synapse(synapse, 'Missing destination address', ctx)
+            return synapse
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
@@ -455,7 +441,7 @@ async def handle_swap_confirm(
                 reject_synapse(synapse, 'Reservation data not found', ctx)
                 return synapse
 
-            res_tao_amount, res_source_amount, res_dest_amount = res_data[1], res_data[2], res_data[3]
+            res_tao_amount, res_source_amount, res_dest_amount = res_data
 
             commitment = load_swap_commitment(validator, miner)
             if commitment is None:
@@ -478,6 +464,17 @@ async def handle_swap_confirm(
             provider = validator.axon_chain_providers.get(swap_from_chain)
             if provider is None:
                 reject_synapse(synapse, f'Unsupported chain: {swap_from_chain}', ctx)
+                return synapse
+
+            # Validate destination address format — prevents a user from locking a
+            # miner's reservation with an unfulfillable to_address that only fails
+            # once the miner attempts to send (or silently accepts garbage on-chain).
+            to_provider = validator.axon_chain_providers.get(swap_to_chain)
+            if to_provider is None:
+                reject_synapse(synapse, f'Unsupported destination chain: {swap_to_chain}', ctx)
+                return synapse
+            if not to_provider.is_valid_address(synapse.to_address):
+                reject_synapse(synapse, 'Invalid destination address format', ctx)
                 return synapse
 
             # Defend against user-snipes-miner by passing expected_sender: a user

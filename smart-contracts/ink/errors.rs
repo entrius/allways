@@ -14,8 +14,6 @@ pub enum Error {
     AlreadyVoted,
     /// Swap is not in the expected status for this operation
     InvalidStatus,
-    /// Amount must be greater than zero
-    ZeroAmount,
     /// Miner is not active (not activated via set_active)
     MinerNotActive,
     /// Miner is still active (must deactivate before withdrawing)

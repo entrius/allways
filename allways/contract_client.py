@@ -56,6 +56,22 @@ except ImportError:
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
+from allways.utils.scale import (
+    ACCOUNT_ID_BYTES,
+    U32_BYTES,
+    U64_BYTES,
+    U128_BYTES,
+    compact_encode_len,
+    decode_account_id,
+    decode_string,
+    decode_u32,
+    decode_u64,
+    decode_u128,
+    encode_bytes,
+    encode_str,
+    encode_u128,
+    strip_hex_prefix,
+)
 
 # =========================================================================
 # Contract selectors (from metadata — deterministic per contract build)
@@ -73,6 +89,7 @@ CONTRACT_SELECTORS = {
     'claim_slash': bytes.fromhex('cf3c3dd9'),
     'deactivate': bytes.fromhex('339db2a5'),
     'vote_activate': bytes.fromhex('00088a2d'),
+    'vote_deactivate': bytes.fromhex('dac13f65'),
     'transfer_ownership': bytes.fromhex('107e33ea'),
     'add_validator': bytes.fromhex('82f48fa6'),
     'remove_validator': bytes.fromhex('62135acd'),
@@ -89,13 +106,12 @@ CONTRACT_SELECTORS = {
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
     'get_miner_has_active_swap': bytes.fromhex('1d07dec1'),
-    'get_miner_last_resolved_block': bytes.fromhex('a4b68d1f'),
+    'get_miner_snapshot': bytes.fromhex('ffd9e2e6'),
     'is_validator': bytes.fromhex('f844fc5f'),
     'get_next_swap_id': bytes.fromhex('d80244d2'),
     'get_fulfillment_timeout': bytes.fromhex('e820174a'),
     'get_min_collateral': bytes.fromhex('233a7832'),
     'get_max_collateral': bytes.fromhex('54945717'),
-    'get_required_votes_count': bytes.fromhex('fe07130d'),
     'get_accumulated_fees': bytes.fromhex('bf3b5d4e'),
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
@@ -108,12 +124,10 @@ CONTRACT_SELECTORS = {
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
-    'get_activation_vote_count': bytes.fromhex('154595d0'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
     'vote_extend_reservation': bytes.fromhex('f668d950'),
-    'get_extend_vote_count': bytes.fromhex('24fa0aae'),
     'vote_extend_timeout': bytes.fromhex('0fb2d2e5'),
     'set_halted': bytes.fromhex('8fe1c210'),
     'get_halted': bytes.fromhex('ec540804'),
@@ -152,6 +166,7 @@ CONTRACT_ARG_TYPES = {
         ('rate', 'str'),
     ],
     'vote_activate': [('miner', 'AccountId')],
+    'vote_deactivate': [('miner', 'AccountId')],
     'mark_fulfilled': [('swap_id', 'u64'), ('to_tx_hash', 'str'), ('to_tx_block', 'u32'), ('to_amount', 'u128')],
     'confirm_swap': [('swap_id', 'u64')],
     'timeout_swap': [('swap_id', 'u64')],
@@ -173,17 +188,15 @@ CONTRACT_ARG_TYPES = {
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
     'get_miner_has_active_swap': [('hotkey', 'AccountId')],
-    'get_miner_last_resolved_block': [('miner', 'AccountId')],
+    'get_miner_snapshot': [('miner', 'AccountId')],
     'is_validator': [('account', 'AccountId')],
     'get_next_swap_id': [],
     'get_fulfillment_timeout': [],
     'get_min_collateral': [],
     'get_max_collateral': [],
-    'get_required_votes_count': [],
     'get_miner_deactivation_block': [('miner', 'AccountId')],
     'get_consensus_threshold': [],
     'get_validator_count': [],
-    'get_activation_vote_count': [('miner', 'AccountId')],
     'get_reservation_data': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'vote_extend_reservation': [
@@ -191,7 +204,6 @@ CONTRACT_ARG_TYPES = {
         ('miner', 'AccountId'),
         ('from_tx_hash', 'str'),
     ],
-    'get_extend_vote_count': [('miner', 'AccountId')],
     'vote_extend_timeout': [('swap_id', 'u64')],
     'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
@@ -212,23 +224,6 @@ DEFAULT_GAS_LIMIT = {'ref_time': 10_000_000_000, 'proof_size': 500_000}
 _EXTRINSIC_NOT_FOUND = tuple(t for t in [ExtrinsicNotFound, AsyncExtrinsicNotFound] if t is not None)
 
 
-def compact_encode_len(length: int) -> bytes:
-    """SCALE compact-encode a length prefix. Shared by contract client and axon handlers."""
-    if length < 64:
-        return bytes([length << 2])
-    elif length < 16384:
-        return bytes([((length << 2) | 1) & 0xFF, length >> 6])
-    else:
-        return bytes(
-            [
-                ((length << 2) | 2) & 0xFF,
-                (length >> 6) & 0xFF,
-                (length >> 14) & 0xFF,
-                (length >> 22) & 0xFF,
-            ]
-        )
-
-
 # ContractExecResult byte layout offsets (after gas prefix)
 _GAS_PREFIX_BYTES = 16  # Skip gas consumed/required
 _RESULT_OK_OFFSET = 10  # Byte indicating Ok(0x00) vs Err in Result
@@ -247,28 +242,28 @@ CONTRACT_ERROR_VARIANTS = {
     2: ('SwapNotFound', 'Swap ID not found'),
     3: ('AlreadyVoted', 'Validator has already voted on this swap'),
     4: ('InvalidStatus', 'Swap is not in the expected status for this operation'),
-    5: ('ZeroAmount', 'Amount must be greater than zero'),
-    6: ('MinerNotActive', 'Miner is not active'),
-    7: ('MinerStillActive', 'Miner is still active (must deactivate before withdrawing)'),
-    8: ('TransferFailed', 'Transfer failed'),
-    9: ('NotTimedOut', 'Swap has not timed out yet'),
-    10: ('NotAssignedMiner', 'Caller is not the assigned miner for this swap'),
-    11: ('NotValidator', 'Caller is not a registered validator'),
-    12: ('DuplicateSourceTx', 'Source transaction hash already used in another swap'),
-    13: ('InvalidAmount', 'Swap amounts must be greater than zero'),
-    14: ('NoPendingSlash', 'No pending slash to claim'),
-    15: ('InputEmpty', 'Required input is empty'),
-    16: ('InputTooLong', 'Input string exceeds maximum allowed length'),
-    17: ('MinerHasActiveSwap', 'Miner already has an active swap'),
-    18: ('WithdrawalCooldown', 'Withdrawal cooldown not met'),
-    19: ('AmountBelowMinimum', 'Swap amount below minimum'),
-    20: ('AmountAboveMaximum', 'Swap amount above maximum'),
-    21: ('MinerReserved', 'Miner is already reserved by another user'),
-    22: ('NoReservation', 'No active reservation for this miner'),
-    23: ('ExceedsMaxCollateral', 'Collateral exceeds maximum allowed'),
-    24: ('HashMismatch', 'Request hash does not match computed hash'),
-    25: ('PendingConflict', 'A pending vote exists for a different request'),
-    26: ('SameChain', 'Source and destination chains must be different'),
+    5: ('MinerNotActive', 'Miner is not active'),
+    6: ('MinerStillActive', 'Miner is still active (must deactivate before withdrawing)'),
+    7: ('TransferFailed', 'Transfer failed'),
+    8: ('NotTimedOut', 'Swap has not timed out yet'),
+    9: ('NotAssignedMiner', 'Caller is not the assigned miner for this swap'),
+    10: ('NotValidator', 'Caller is not a registered validator'),
+    11: ('DuplicateSourceTx', 'Source transaction hash already used in another swap'),
+    12: ('InvalidAmount', 'Swap amounts must be greater than zero'),
+    13: ('NoPendingSlash', 'No pending slash to claim'),
+    14: ('InputEmpty', 'Required input is empty'),
+    15: ('InputTooLong', 'Input string exceeds maximum allowed length'),
+    16: ('MinerHasActiveSwap', 'Miner already has an active swap'),
+    17: ('WithdrawalCooldown', 'Withdrawal cooldown not met'),
+    18: ('AmountBelowMinimum', 'Swap amount below minimum'),
+    19: ('AmountAboveMaximum', 'Swap amount above maximum'),
+    20: ('MinerReserved', 'Miner is already reserved by another user'),
+    21: ('NoReservation', 'No active reservation for this miner'),
+    22: ('ExceedsMaxCollateral', 'Collateral exceeds maximum allowed'),
+    23: ('HashMismatch', 'Request hash does not match computed hash'),
+    24: ('PendingConflict', 'A pending vote exists for a different request'),
+    25: ('SameChain', 'Source and destination chains must be different'),
+    26: ('SystemHalted', 'System is halted — no new activity allowed'),
 }
 
 
@@ -370,7 +365,7 @@ class AllwaysContractClient:
             if not result.get('result'):
                 return None
 
-            raw = bytes.fromhex(result['result'].replace('0x', ''))
+            raw = bytes.fromhex(strip_hex_prefix(result['result']))
             if len(raw) < 32:
                 return None
 
@@ -380,7 +375,7 @@ class AllwaysContractClient:
             if len(r) < _DATA_COMPACT_OFFSET or r[_RESULT_OK_OFFSET] != 0x00:
                 return None
 
-            flags = struct.unpack_from('<I', r, _FLAGS_OFFSET)[0]
+            flags, _ = decode_u32(r, _FLAGS_OFFSET)
             is_revert = bool(flags & 1)
 
             data_compact = r[_DATA_COMPACT_OFFSET]
@@ -509,18 +504,17 @@ class AllwaysContractClient:
             return struct.pack('B', int(value))
         elif type_tag == 'hash':
             if isinstance(value, str):
-                return bytes.fromhex(value.replace('0x', ''))
-            return bytes(value)[:32].ljust(32, b'\x00')
+                return bytes.fromhex(strip_hex_prefix(value))
+            return bytes(value)[:ACCOUNT_ID_BYTES].ljust(ACCOUNT_ID_BYTES, b'\x00')
         elif type_tag == 'bytes':
             data = value if isinstance(value, (bytes, bytearray)) else value.encode('utf-8')
-            return compact_encode_len(len(data)) + data
+            return encode_bytes(data)
         elif type_tag == 'u32':
             return struct.pack('<I', int(value))
         elif type_tag == 'u64':
             return struct.pack('<Q', int(value))
         elif type_tag == 'u128':
-            v = int(value)
-            return struct.pack('<QQ', v & 0xFFFFFFFFFFFFFFFF, v >> 64)
+            return encode_u128(int(value))
         elif type_tag == 'bool':
             return b'\x01' if value else b'\x00'
         elif type_tag == 'AccountId':
@@ -528,8 +522,7 @@ class AllwaysContractClient:
                 return bytes.fromhex(self.subtensor.substrate.ss58_decode(value))
             return bytes(value)
         elif type_tag == 'str':
-            data = value.encode('utf-8') if isinstance(value, str) else value
-            return compact_encode_len(len(data)) + data
+            return encode_str(value) if isinstance(value, str) else encode_bytes(value)
         elif type_tag == 'vec_u64':
             items = list(value)
             encoded = compact_encode_len(len(items))
@@ -539,21 +532,19 @@ class AllwaysContractClient:
         raise ValueError(f'Unsupported type: {type_tag}')
 
     def extract_u32(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 4:
+        if not data or len(data) < U32_BYTES:
             return None
-        return struct.unpack_from('<I', data, 0)[0]
+        return decode_u32(data, 0)[0]
 
     def extract_u64(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 8:
+        if not data or len(data) < U64_BYTES:
             return None
-        return struct.unpack_from('<Q', data, 0)[0]
+        return decode_u64(data, 0)[0]
 
     def extract_u128(self, data: bytes) -> Optional[int]:
-        if not data or len(data) < 16:
+        if not data or len(data) < U128_BYTES:
             return None
-        low = struct.unpack_from('<Q', data, 0)[0]
-        high = struct.unpack_from('<Q', data, 8)[0]
-        return low + (high << 64)
+        return decode_u128(data, 0)[0]
 
     def extract_bool(self, data: bytes) -> Optional[bool]:
         if not data:
@@ -561,86 +552,38 @@ class AllwaysContractClient:
         return data[0] != 0
 
     def extract_account_id(self, data: bytes) -> Optional[str]:
-        if not data or len(data) < 32:
+        if not data or len(data) < ACCOUNT_ID_BYTES:
             return None
-        return self.subtensor.substrate.ss58_encode(data[:32].hex())
-
-    def decode_string(self, data: bytes, offset: int) -> Tuple[str, int]:
-        """Decode a SCALE compact-prefixed string. Returns (string, new_offset)."""
-        if offset >= len(data):
-            return '', offset
-        first = data[offset]
-        mode = first & 0x03
-        if mode == 0:
-            str_len = first >> 2
-            offset += 1
-        elif mode == 1:
-            if offset + 1 >= len(data):
-                return '', offset
-            str_len = (data[offset] | (data[offset + 1] << 8)) >> 2
-            offset += 2
-        else:
-            if offset + 3 >= len(data):
-                return '', offset
-            str_len = (
-                data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)
-            ) >> 2
-            offset += 4
-        if offset + str_len > len(data):
-            return '', offset
-        s = data[offset : offset + str_len].decode('utf-8', errors='replace')
-        return s, offset + str_len
+        return decode_account_id(data, 0)[0]
 
     def decode_swap_data(self, data: bytes, offset: int = 0) -> Optional[Swap]:
         """Decode a SwapData struct from raw SCALE bytes."""
         try:
             o = offset
-
-            swap_id = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            user = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
-            o += 32
-            miner = self.subtensor.substrate.ss58_encode(data[o : o + 32].hex())
-            o += 32
-            from_chain, o = self.decode_string(data, o)
-            to_chain, o = self.decode_string(data, o)
-            from_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            from_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            from_amount = from_amount_lo + (from_amount_hi << 64)
-            to_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            to_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            to_amount = to_amount_lo + (to_amount_hi << 64)
-            tao_amount_lo = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            tao_amount_hi = struct.unpack_from('<Q', data, o)[0]
-            o += 8
-            tao_amount = tao_amount_lo + (tao_amount_hi << 64)
-            user_from_address, o = self.decode_string(data, o)
-            user_to_address, o = self.decode_string(data, o)
-            miner_from_address, o = self.decode_string(data, o)
-            miner_to_address, o = self.decode_string(data, o)
-            rate, o = self.decode_string(data, o)
-            from_tx_hash, o = self.decode_string(data, o)
-            from_tx_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            to_tx_hash, o = self.decode_string(data, o)
-            to_tx_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
+            swap_id, o = decode_u64(data, o)
+            user, o = decode_account_id(data, o)
+            miner, o = decode_account_id(data, o)
+            from_chain, o = decode_string(data, o)
+            to_chain, o = decode_string(data, o)
+            from_amount, o = decode_u128(data, o)
+            to_amount, o = decode_u128(data, o)
+            tao_amount, o = decode_u128(data, o)
+            user_from_address, o = decode_string(data, o)
+            user_to_address, o = decode_string(data, o)
+            miner_from_address, o = decode_string(data, o)
+            miner_to_address, o = decode_string(data, o)
+            rate, o = decode_string(data, o)
+            from_tx_hash, o = decode_string(data, o)
+            from_tx_block, o = decode_u32(data, o)
+            to_tx_hash, o = decode_string(data, o)
+            to_tx_block, o = decode_u32(data, o)
             status_byte = data[o]
             o += 1
             status = SwapStatus(status_byte) if status_byte <= 3 else SwapStatus.ACTIVE
-            initiated_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            timeout_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            fulfilled_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
-            completed_block = struct.unpack_from('<I', data, o)[0]
-            o += 4
+            initiated_block, o = decode_u32(data, o)
+            timeout_block, o = decode_u32(data, o)
+            fulfilled_block, o = decode_u32(data, o)
+            completed_block, o = decode_u32(data, o)
 
             return Swap(
                 id=swap_id,
@@ -727,44 +670,6 @@ class AllwaysContractClient:
             return self.decode_swap_data(data, offset=1)
         return None
 
-    def read_result_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
-        """Read a method that returns Result<Option<SwapData>, ContractError>."""
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args, caller=caller)
-        if data is None or len(data) < 1:
-            return None
-        # Result discriminant: 0x00 = Ok, 0x01 = Err
-        if data[0] != 0x00:
-            if len(data) >= 2:
-                variant = CONTRACT_ERROR_VARIANTS.get(data[1])
-                if variant:
-                    bt.logging.debug(f'{method}: contract error — {variant[0]}')
-            return None
-        if len(data) < 2:
-            return None
-        # Option discriminant
-        if data[1] == 0x00:
-            return None
-        if data[1] == 0x01:
-            return self.decode_swap_data(data, offset=2)
-        return None
-
-    def read_result_u128(self, method: str, args: dict = None, caller=None) -> int:
-        """Read a method that returns Result<u128, ContractError>."""
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args, caller=caller)
-        if data is None or len(data) < 1:
-            raise ContractError(f'{method}: no response')
-        if data[0] != 0x00:
-            if len(data) >= 2:
-                variant = CONTRACT_ERROR_VARIANTS.get(data[1])
-                if variant:
-                    name, description = variant
-                    raise ContractError(f'{method}: {name} — {description}')
-            raise ContractError(f'{method}: contract rejected')
-        v = self.extract_u128(data[1:])
-        return v if v is not None else 0
-
     # =========================================================================
     # Query Functions (Read-only)
     # =========================================================================
@@ -815,8 +720,22 @@ class AllwaysContractClient:
     def get_miner_has_active_swap(self, hotkey: str) -> bool:
         return self.read_bool('get_miner_has_active_swap', {'hotkey': hotkey})
 
-    def get_miner_last_resolved_block(self, hotkey: str) -> int:
-        return self.read_u32('get_miner_last_resolved_block', {'miner': hotkey})
+    def get_miner_snapshot(self, hotkey: str) -> Tuple[int, bool, bool, int, int]:
+        """Composite miner read: (collateral, active, has_active_swap,
+        reserved_until, deactivation_block). One RPC round-trip.
+        """
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_miner_snapshot', {'miner': hotkey})
+        if data is None or len(data) < 26:
+            return (0, False, False, 0, 0)
+        collateral_lo = struct.unpack_from('<Q', data, 0)[0]
+        collateral_hi = struct.unpack_from('<Q', data, 8)[0]
+        collateral = collateral_lo + (collateral_hi << 64)
+        active = data[16] != 0
+        has_active_swap = data[17] != 0
+        reserved_until = struct.unpack_from('<I', data, 18)[0]
+        deactivation_block = struct.unpack_from('<I', data, 22)[0]
+        return (collateral, active, has_active_swap, reserved_until, deactivation_block)
 
     def get_next_swap_id(self) -> int:
         return self.read_u64('get_next_swap_id')
@@ -829,9 +748,6 @@ class AllwaysContractClient:
 
     def get_max_collateral(self) -> int:
         return self.read_u128('get_max_collateral')
-
-    def get_required_votes_count(self) -> int:
-        return self.read_u32('get_required_votes_count')
 
     def get_miner_deactivation_block(self, hotkey: str) -> int:
         return self.read_u32('get_miner_deactivation_block', {'miner': hotkey})
@@ -846,14 +762,8 @@ class AllwaysContractClient:
     def get_validator_count(self) -> int:
         return self.read_u32('get_validator_count')
 
-    def get_activation_vote_count(self, hotkey: str) -> int:
-        return self.read_u32('get_activation_vote_count', {'miner': hotkey})
-
     def get_pending_reserve_vote_count(self, miner_hotkey: str) -> int:
         return self.read_u32('get_pending_reserve_vote_count', {'miner': miner_hotkey})
-
-    def get_extend_vote_count(self, miner_hotkey: str) -> int:
-        return self.read_u32('get_extend_vote_count', {'miner': miner_hotkey})
 
     def get_cooldown(self, from_address: str) -> Tuple[int, int]:
         """Returns (strike_count, last_expired_block) for a source address."""
@@ -862,7 +772,7 @@ class AllwaysContractClient:
         if data is None or len(data) < 5:
             return (0, 0)
         strike_count = data[0]
-        last_expired = struct.unpack_from('<I', data, 1)[0]
+        last_expired, _ = decode_u32(data, 1)
         return (strike_count, last_expired)
 
     def get_accumulated_fees(self) -> int:
@@ -895,10 +805,11 @@ class AllwaysContractClient:
     def get_reservation_ttl(self) -> int:
         return self.read_u32('get_reservation_ttl')
 
-    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[str, int, int, int, int]]:
-        """Get reservation data for a miner.
+    def get_reservation_data(self, miner_hotkey: str) -> Optional[Tuple[int, int, int]]:
+        """Get reservation amounts for a miner.
 
-        Returns (from_addr, tao_amount, from_amount, to_amount, reserved_until) or None.
+        Returns (tao_amount, from_amount, to_amount) or None. Callers that
+        also need reserved_until should use ``get_miner_reserved_until``.
         """
         self.ensure_initialized()
         data = self.raw_contract_read('get_reservation_data', {'miner': miner_hotkey})
@@ -910,34 +821,10 @@ class AllwaysContractClient:
         if data[0] != 0x01:
             return None
         o = 1
-        # String from_addr: compact length + UTF-8 bytes
-        first = data[o]
-        mode = first & 0x03
-        if mode == 0:
-            addr_len = first >> 2
-            o += 1
-        elif mode == 1:
-            addr_len = (data[o] | (data[o + 1] << 8)) >> 2
-            o += 2
-        else:
-            return None
-        from_addr = data[o : o + addr_len].decode('utf-8')
-        o += addr_len
-        # 3 x u128 + 1 x u32
-        tao_lo = struct.unpack_from('<Q', data, o)[0]
-        tao_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        tao_amount = tao_lo + (tao_hi << 64)
-        o += 16
-        src_lo = struct.unpack_from('<Q', data, o)[0]
-        src_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        from_amount = src_lo + (src_hi << 64)
-        o += 16
-        dst_lo = struct.unpack_from('<Q', data, o)[0]
-        dst_hi = struct.unpack_from('<Q', data, o + 8)[0]
-        to_amount = dst_lo + (dst_hi << 64)
-        o += 16
-        reserved_until = struct.unpack_from('<I', data, o)[0]
-        return (from_addr, tao_amount, from_amount, to_amount, reserved_until)
+        tao_amount, o = decode_u128(data, o)
+        from_amount, o = decode_u128(data, o)
+        to_amount, _ = decode_u128(data, o)
+        return (tao_amount, from_amount, to_amount)
 
     # =========================================================================
     # Transaction Functions (Write)
@@ -1072,6 +959,15 @@ class AllwaysContractClient:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('vote_activate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
         bt.logging.info(f'Vote activate for miner {miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def vote_deactivate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
+        """Vote to deactivate a miner. Validator-quorum only — the contract
+        trusts the quorum and applies no collateral/status gate beyond the
+        miner currently being active."""
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('vote_deactivate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
+        bt.logging.info(f'Vote deactivate for miner {miner_hotkey}: {tx_hash}')
         return tx_hash
 
     def mark_fulfilled(
