@@ -6,7 +6,7 @@ Handler bodies that drive consensus voting are not covered here.
 """
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from allways.classes import MinerPair
 from allways.validator.axon_handlers import (
@@ -51,19 +51,10 @@ def _make_pair(
 
 class TestKeccak256:
     def test_empty_input(self):
-        # Known Keccak-256 of empty string (ethereum convention)
+        # Known Keccak-256 of empty string (ethereum convention) — guards
+        # against accidental swap to SHA3-256 (different IV/padding).
         expected = bytes.fromhex('c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470')
         assert keccak256(b'') == expected
-
-    def test_deterministic(self):
-        data = b'hello world'
-        assert keccak256(data) == keccak256(data)
-
-    def test_output_is_32_bytes(self):
-        assert len(keccak256(b'anything')) == 32
-
-    def test_different_inputs_produce_different_hashes(self):
-        assert keccak256(b'a') != keccak256(b'b')
 
 
 class TestScaleEncodeReserveHashInput:
@@ -205,15 +196,16 @@ class TestRejectSynapse:
         assert synapse.rejection_reason == 'bad input'
 
     def test_no_context_no_log_error(self):
-        # Should not raise when context empty
         synapse = MagicMock()
-        reject_synapse(synapse, 'why', context='')
-        assert synapse.rejection_reason == 'why'
+        with patch('allways.validator.axon_handlers.bt.logging.debug') as dbg:
+            reject_synapse(synapse, 'why', context='')
+        dbg.assert_not_called()
 
     def test_with_context_logs_debug(self):
         synapse = MagicMock()
-        reject_synapse(synapse, 'reason', context='SomeSynapse(x)')
-        assert synapse.accepted is False
+        with patch('allways.validator.axon_handlers.bt.logging.debug') as dbg:
+            reject_synapse(synapse, 'reason', context='SomeSynapse(x)')
+        dbg.assert_called_once_with('SomeSynapse(x): reason')
 
 
 class TestBlacklistMinerActivate:

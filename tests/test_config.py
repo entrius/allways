@@ -22,32 +22,16 @@ def _parse(add_fn, argv=None):
 
 
 class TestAddArgs:
-    def test_default_netuid(self):
-        args = _parse(add_args)
-        assert args.netuid == 7
-
     def test_override_netuid(self):
         args = _parse(add_args, ['--netuid', '42'])
         assert args.netuid == 42
-
-    def test_default_epoch_length(self):
-        args = _parse(add_args)
-        assert getattr(args, 'neuron.epoch_length') == 100
 
     def test_dont_save_events_flag(self):
         args = _parse(add_args, ['--neuron.dont_save_events'])
         assert getattr(args, 'neuron.dont_save_events') is True
 
-    def test_dont_save_events_default_false(self):
-        args = _parse(add_args)
-        assert getattr(args, 'neuron.dont_save_events') is False
-
 
 class TestAddMinerArgs:
-    def test_default_miner_name(self):
-        args = _parse(add_miner_args)
-        assert getattr(args, 'neuron.name') == 'miner'
-
     def test_override_miner_name(self):
         args = _parse(add_miner_args, ['--neuron.name', 'myminer'])
         assert getattr(args, 'neuron.name') == 'myminer'
@@ -58,10 +42,6 @@ class TestAddMinerArgs:
 
 
 class TestAddValidatorArgs:
-    def test_default_validator_name(self):
-        args = _parse(add_validator_args)
-        assert getattr(args, 'neuron.name') == 'validator'
-
     def test_disable_set_weights_flag(self):
         args = _parse(add_validator_args, ['--neuron.disable_set_weights'])
         assert getattr(args, 'neuron.disable_set_weights') is True

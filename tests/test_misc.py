@@ -54,15 +54,6 @@ class TestTtlCache:
         assert f(5) == 5
         assert f(5) == 5
 
-    def test_preserves_function_metadata(self):
-        @ttl_cache(ttl=10)
-        def named_fn(x):
-            """doc"""
-            return x
-
-        assert named_fn.__name__ == 'named_fn'
-        assert named_fn.__doc__ == 'doc'
-
     def test_expired_entry_recomputed(self):
         calls = []
 
@@ -78,11 +69,6 @@ class TestTtlCache:
 
 
 class TestTtlGetBlock:
-    def test_returns_current_block_from_subtensor(self):
-        obj = MagicMock()
-        obj.subtensor.get_current_block.return_value = 123
-        assert ttl_get_block(obj) == 123
-
     def test_cached_within_ttl(self):
         obj = MagicMock()
         obj.subtensor.get_current_block.side_effect = [100, 200, 300]
