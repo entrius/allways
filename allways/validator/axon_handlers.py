@@ -426,6 +426,9 @@ async def handle_swap_confirm(
         if not synapse.from_address or not synapse.from_tx_proof:
             reject_synapse(synapse, 'Missing source address or proof', ctx)
             return synapse
+        if not synapse.to_address:
+            reject_synapse(synapse, 'Missing destination address', ctx)
+            return synapse
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
@@ -461,6 +464,17 @@ async def handle_swap_confirm(
             provider = validator.axon_chain_providers.get(swap_from_chain)
             if provider is None:
                 reject_synapse(synapse, f'Unsupported chain: {swap_from_chain}', ctx)
+                return synapse
+
+            # Validate destination address format — prevents a user from locking a
+            # miner's reservation with an unfulfillable to_address that only fails
+            # once the miner attempts to send (or silently accepts garbage on-chain).
+            to_provider = validator.axon_chain_providers.get(swap_to_chain)
+            if to_provider is None:
+                reject_synapse(synapse, f'Unsupported destination chain: {swap_to_chain}', ctx)
+                return synapse
+            if not to_provider.is_valid_address(synapse.to_address):
+                reject_synapse(synapse, 'Invalid destination address format', ctx)
                 return synapse
 
             # Defend against user-snipes-miner by passing expected_sender: a user
