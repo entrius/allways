@@ -659,6 +659,13 @@ mod allways_swap_manager {
             {
                 return Err(Error::InvalidAmount);
             }
+            // Caller must be the address that actually reserved the miner.
+            // Without this check, a second user who sends the quoted amount to
+            // the miner can hijack an active reservation, consuming the slot
+            // intended for the original reserver.
+            if user_from_address != reservation.from_addr {
+                return Err(Error::NoReservation);
+            }
 
             self.consensus_vote(miner, REQ_INITIATE, request_hash, move |this| {
                 let miner_collateral = this.collateral.get(miner).unwrap_or(0);
