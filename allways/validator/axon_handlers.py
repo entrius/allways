@@ -466,6 +466,16 @@ async def handle_swap_confirm(
                 reject_synapse(synapse, f'Unsupported chain: {swap_from_chain}', ctx)
                 return synapse
 
+            # Prove the caller controls from_address by verifying a signature over
+            # the tx hash. Without this, anyone observing a user's on-chain source
+            # tx could submit a confirm with their own to_address and redirect the
+            # miner's fulfillment — the on-chain sender check alone doesn't bind
+            # the confirm caller to the source address.
+            proof_message = f'allways-swap:{synapse.from_tx_hash}'
+            if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_tx_proof):
+                reject_synapse(synapse, 'Invalid source tx proof', ctx)
+                return synapse
+
             # Validate destination address format — prevents a user from locking a
             # miner's reservation with an unfulfillable to_address that only fails
             # once the miner attempts to send (or silently accepts garbage on-chain).
