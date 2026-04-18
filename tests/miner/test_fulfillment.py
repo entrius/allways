@@ -11,9 +11,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from allways.classes import Swap, SwapStatus
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.miner.fulfillment import SwapFulfiller, load_timeout_cushion_blocks
+
+from tests.helpers import make_swap
 
 
 def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
@@ -31,25 +32,6 @@ def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
             metagraph=MagicMock(),
         )
 
-
-def make_swap(timeout_block: int = 500, rate: str = '345', miner_from: str = 'bc1q-miner') -> Swap:
-    return Swap(
-        id=1,
-        user_hotkey='user',
-        miner_hotkey='miner',
-        from_chain='btc',
-        to_chain='tao',
-        from_amount=1_000_000,
-        to_amount=345_000_000,
-        tao_amount=345_000_000,
-        user_from_address='bc1q-user',
-        user_to_address='5user',
-        miner_from_address=miner_from,
-        rate=rate,
-        status=SwapStatus.ACTIVE,
-        initiated_block=100,
-        timeout_block=timeout_block,
-    )
 
 
 class TestLoadTimeoutCushionBlocks:

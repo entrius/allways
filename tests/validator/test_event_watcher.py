@@ -23,7 +23,7 @@ from allways.validator.event_watcher import (
 )
 from allways.validator.state_store import ValidatorStateStore
 
-METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
+from tests.helpers import METADATA_PATH
 
 # Well-known test SS58 — Alice from the substrate dev keyring. Used as
 # contract_address in fixtures so the decoder's address comparison doesn't

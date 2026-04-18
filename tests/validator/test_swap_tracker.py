@@ -10,26 +10,10 @@ step.
 import asyncio
 from unittest.mock import MagicMock
 
-from allways.classes import Swap, SwapStatus
+from allways.classes import SwapStatus
 from allways.validator.swap_tracker import NULL_SWAP_RETRY_LIMIT, SwapTracker
 
-
-def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500) -> Swap:
-    return Swap(
-        id=swap_id,
-        user_hotkey='user',
-        miner_hotkey=miner_hotkey,
-        from_chain='btc',
-        to_chain='tao',
-        from_amount=100_000,
-        to_amount=500_000_000,
-        tao_amount=500_000_000,
-        user_from_address='bc1q-user',
-        user_to_address='5user',
-        status=SwapStatus.ACTIVE,
-        initiated_block=100,
-        timeout_block=timeout_block,
-    )
+from tests.helpers import make_swap
 
 
 def make_tracker() -> SwapTracker:

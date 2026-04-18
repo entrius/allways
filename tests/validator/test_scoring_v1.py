@@ -17,11 +17,11 @@ from allways.validator.scoring import (
 )
 from allways.validator.state_store import ValidatorStateStore
 
+from tests.helpers import METADATA_PATH
+
 POOL_TAO_BTC = 0.04
 POOL_BTC_TAO = 0.04
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
-
-METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
 
 
 def make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
