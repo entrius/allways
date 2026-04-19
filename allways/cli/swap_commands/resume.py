@@ -15,11 +15,11 @@ from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     clear_pending_swap,
     console,
+    from_smallest_unit,
     get_cli_context,
     load_pending_swap,
 )
 from allways.cli.swap_commands.swap import (
-    from_smallest_unit,
     poll_for_swap_with_progress,
     sign_and_broadcast_confirm,
 )

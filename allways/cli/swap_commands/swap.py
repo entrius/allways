@@ -21,34 +21,18 @@ from allways.cli.swap_commands.helpers import (
     console,
     find_matching_miners,
     from_rao,
+    from_smallest_unit,
     get_cli_context,
     is_local_network,
     load_pending_swap,
     save_pending_swap,
+    to_smallest_unit,
 )
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
-
-
-def to_smallest_unit(amount: float, chain_id: str) -> int:
-    """Convert a human-readable amount to the smallest unit for a chain.
-
-    Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
-    """
-    from decimal import Decimal
-
-    chain = get_chain(chain_id)
-    return int(Decimal(str(amount)) * (10**chain.decimals))
-
-
-def from_smallest_unit(amount: int, chain_id: str) -> float:
-    """Convert from smallest unit to human-readable amount."""
-    chain = get_chain(chain_id)
-    return amount / (10**chain.decimals)
-
 
 # =========================================================================
 # Shared functions (used by swap command, post_tx command)
