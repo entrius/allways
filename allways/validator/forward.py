@@ -17,6 +17,7 @@ from allways.constants import (
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
+from allways.utils.rate import tao_leg_address
 from allways.validator import voting
 from allways.validator.axon_handlers import (
     keccak256,
@@ -181,7 +182,9 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
             request_hash = keccak256(hash_input)
 
-            user_tao_address = item.to_address if item.to_chain == 'tao' else item.from_address
+            user_tao_address = tao_leg_address(
+                item.from_chain, item.to_chain, item.from_address, item.to_address
+            )
             self.contract_client.vote_initiate(
                 wallet=self.wallet,
                 request_hash=request_hash,

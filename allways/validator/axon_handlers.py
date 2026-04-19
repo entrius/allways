@@ -20,6 +20,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.rate import tao_leg_address
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -544,7 +545,9 @@ async def handle_swap_confirm(
             )
 
             # user_hotkey must be SS58 (TAO address): to_address for BTC→TAO, from_address for TAO→BTC
-            user_tao_address = synapse.to_address if swap_to_chain == 'tao' else synapse.from_address
+            user_tao_address = tao_leg_address(
+                swap_from_chain, swap_to_chain, synapse.from_address, synapse.to_address
+            )
             contract.vote_initiate(
                 wallet=validator.wallet,
                 request_hash=request_hash,

@@ -100,6 +100,11 @@ def derive_tao_leg(from_chain: str, from_amount: int, to_chain: str, to_amount: 
     return 0
 
 
+def tao_leg_address(from_chain: str, to_chain: str, from_address: str, to_address: str) -> str:
+    """Return the SS58 address on the TAO side of a swap — the user_hotkey for vote_initiate."""
+    return to_address if to_chain == 'tao' else from_address
+
+
 def check_swap_viability(
     tao_amount_rao: int,
     miner_collateral_rao: int,
