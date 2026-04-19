@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    loading,
     save_pending_swap,
 )
 from allways.commitments import read_miner_commitments
@@ -120,7 +121,7 @@ def sign_and_broadcast_confirm(
 
 def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
     """Poll contract until miner has an active swap. Returns swap_id or None."""
-    with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
+    with loading('Waiting for swap to appear on-chain...', color='dim'):
         errors = 0
         for i in range(60):
             time.sleep(3)
@@ -237,7 +238,7 @@ def broadcast_reserve_with_retry(
                 continue
             return None
 
-        with console.status(f'[dim]Waiting for quorum ({accepted} votes submitted)...[/dim]') as status:
+        with loading(f'Waiting for quorum ({accepted} votes submitted)...', color='dim') as status:
             quorum_errors = 0
             for _ in range(30):
                 time.sleep(2)
@@ -321,7 +322,7 @@ def display_receipt(swap):
 
 def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
     """Poll for swap creation with a live progress display."""
-    with console.status('') as status:
+    with loading('', color='dim') as status:
         errors = 0
         for i in range(max_polls):
             elapsed = i * 3
