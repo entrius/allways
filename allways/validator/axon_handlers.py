@@ -545,9 +545,7 @@ async def handle_swap_confirm(
             )
 
             # user_hotkey must be SS58 (TAO address): to_address for BTC→TAO, from_address for TAO→BTC
-            user_tao_address = tao_leg_address(
-                swap_from_chain, swap_to_chain, synapse.from_address, synapse.to_address
-            )
+            user_tao_address = tao_leg_address(swap_from_chain, swap_to_chain, synapse.from_address, synapse.to_address)
             contract.vote_initiate(
                 wallet=validator.wallet,
                 request_hash=request_hash,

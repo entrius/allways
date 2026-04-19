@@ -182,9 +182,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
             request_hash = keccak256(hash_input)
 
-            user_tao_address = tao_leg_address(
-                item.from_chain, item.to_chain, item.from_address, item.to_address
-            )
+            user_tao_address = tao_leg_address(item.from_chain, item.to_chain, item.from_address, item.to_address)
             self.contract_client.vote_initiate(
                 wallet=self.wallet,
                 request_hash=request_hash,
