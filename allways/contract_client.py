@@ -813,6 +813,12 @@ class AllwaysContractClient:
     # Transaction Functions (Write)
     # =========================================================================
 
+    def _exec_tx(self, wallet: bt.Wallet, method: str, log_msg: str, args: dict = None) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(method, args=args, keypair=wallet.hotkey)
+        bt.logging.info(f'{log_msg}: {tx_hash}')
+        return tx_hash
+
     def post_collateral(self, wallet: bt.Wallet, amount_rao: int) -> str:
         """Post collateral to the contract. Amount is sent as value with the extrinsic."""
         self.ensure_initialized()
@@ -821,10 +827,7 @@ class AllwaysContractClient:
         return tx_hash
 
     def withdraw_collateral(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('withdraw_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
-        bt.logging.info(f'Collateral withdrawn: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'withdraw_collateral', 'Collateral withdrawn', {'amount': amount_rao})
 
     def vote_reserve(
         self,
@@ -877,20 +880,10 @@ class AllwaysContractClient:
         return tx_hash
 
     def vote_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
-            'vote_extend_timeout',
-            args={'swap_id': swap_id},
-            keypair=wallet.hotkey,
-        )
-        bt.logging.info(f'Vote extend timeout for swap {swap_id}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'vote_extend_timeout', f'Vote extend timeout for swap {swap_id}', {'swap_id': swap_id})
 
     def cancel_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('cancel_reservation', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
-        bt.logging.info(f'Reservation cancelled for {miner_hotkey}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'cancel_reservation', f'Reservation cancelled for {miner_hotkey}', {'miner': miner_hotkey})
 
     def vote_initiate(
         self,
@@ -939,19 +932,13 @@ class AllwaysContractClient:
 
     def vote_activate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         """Vote to activate a miner. On quorum, miner becomes active."""
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('vote_activate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
-        bt.logging.info(f'Vote activate for miner {miner_hotkey}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'vote_activate', f'Vote activate for miner {miner_hotkey}', {'miner': miner_hotkey})
 
     def vote_deactivate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         """Vote to deactivate a miner. Validator-quorum only — the contract
         trusts the quorum and applies no collateral/status gate beyond the
         miner currently being active."""
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('vote_deactivate', args={'miner': miner_hotkey}, keypair=wallet.hotkey)
-        bt.logging.info(f'Vote deactivate for miner {miner_hotkey}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'vote_deactivate', f'Vote deactivate for miner {miner_hotkey}', {'miner': miner_hotkey})
 
     def mark_fulfilled(
         self,
@@ -976,108 +963,57 @@ class AllwaysContractClient:
         return tx_hash
 
     def confirm_swap(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('confirm_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
-        bt.logging.info(f'Swap {swap_id} confirmed: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'confirm_swap', f'Swap {swap_id} confirmed', {'swap_id': swap_id})
 
     def timeout_swap(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('timeout_swap', args={'swap_id': swap_id}, keypair=wallet.hotkey)
-        bt.logging.info(f'Swap {swap_id} timed out: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'timeout_swap', f'Swap {swap_id} timed out', {'swap_id': swap_id})
 
     def deactivate_miner(self, wallet: bt.Wallet, miner: str) -> str:
         """Deactivate a miner directly on contract (permissionless)."""
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('deactivate', args={'miner': miner}, keypair=wallet.hotkey)
-        bt.logging.info(f'Miner {miner} deactivated: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'deactivate', f'Miner {miner} deactivated', {'miner': miner})
 
     def claim_slash(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('claim_slash', args={'swap_id': swap_id}, keypair=wallet.hotkey)
-        bt.logging.info(f'Slash claimed for swap {swap_id}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'claim_slash', f'Slash claimed for swap {swap_id}', {'swap_id': swap_id})
 
     # =========================================================================
     # Admin Transaction Functions (Write — owner-only)
     # =========================================================================
 
     def set_fulfillment_timeout(self, wallet: bt.Wallet, blocks: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_fulfillment_timeout', args={'blocks': blocks}, keypair=wallet.hotkey)
-        bt.logging.info(f'Fulfillment timeout set to {blocks}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_fulfillment_timeout', f'Fulfillment timeout set to {blocks}', {'blocks': blocks})
 
     def set_min_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_min_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
-        bt.logging.info(f'Min collateral set to {amount_rao}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_min_collateral', f'Min collateral set to {amount_rao}', {'amount': amount_rao})
 
     def set_max_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_max_collateral', args={'amount': amount_rao}, keypair=wallet.hotkey)
-        bt.logging.info(f'Max collateral set to {amount_rao}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_max_collateral', f'Max collateral set to {amount_rao}', {'amount': amount_rao})
 
     def set_consensus_threshold(self, wallet: bt.Wallet, percent: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_consensus_threshold', args={'percent': percent}, keypair=wallet.hotkey)
-        bt.logging.info(f'Consensus threshold set to {percent}%: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_consensus_threshold', f'Consensus threshold set to {percent}%', {'percent': percent})
 
     def set_min_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_min_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
-        bt.logging.info(f'Min swap amount set to {amount_rao}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_min_swap_amount', f'Min swap amount set to {amount_rao}', {'amount': amount_rao})
 
     def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
-        bt.logging.info(f'Recycle address set to {address}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_recycle_address', f'Recycle address set to {address}', {'address': address})
 
     def set_reservation_ttl(self, wallet: bt.Wallet, blocks: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
-        bt.logging.info(f'Reservation TTL set to {blocks}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_reservation_ttl', f'Reservation TTL set to {blocks}', {'blocks': blocks})
 
     def set_halted(self, wallet: bt.Wallet, halted: bool) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_halted', args={'halted': halted}, keypair=wallet.hotkey)
-        bt.logging.info(f'System halted set to {halted}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_halted', f'System halted set to {halted}', {'halted': halted})
 
     def set_max_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_max_swap_amount', args={'amount': amount_rao}, keypair=wallet.hotkey)
-        bt.logging.info(f'Max swap amount set to {amount_rao}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'set_max_swap_amount', f'Max swap amount set to {amount_rao}', {'amount': amount_rao})
 
     def add_validator(self, wallet: bt.Wallet, validator: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('add_validator', args={'validator': validator}, keypair=wallet.hotkey)
-        bt.logging.info(f'Validator added {validator}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'add_validator', f'Validator added {validator}', {'validator': validator})
 
     def remove_validator(self, wallet: bt.Wallet, validator: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('remove_validator', args={'validator': validator}, keypair=wallet.hotkey)
-        bt.logging.info(f'Validator removed {validator}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'remove_validator', f'Validator removed {validator}', {'validator': validator})
 
     def recycle_fees(self, wallet: bt.Wallet) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('recycle_fees', keypair=wallet.hotkey)
-        bt.logging.info(f'Fees recycled: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'recycle_fees', 'Fees recycled')
 
     def transfer_ownership(self, wallet: bt.Wallet, new_owner: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('transfer_ownership', args={'new_owner': new_owner}, keypair=wallet.hotkey)
-        bt.logging.info(f'Ownership transferred to {new_owner}: {tx_hash}')
-        return tx_hash
+        return self._exec_tx(wallet, 'transfer_ownership', f'Ownership transferred to {new_owner}', {'new_owner': new_owner})
