@@ -15,7 +15,7 @@ from allways.constants import (
     PENDING_CONFIRM_NULL_RETRY_LIMIT,
     SCORING_WINDOW_BLOCKS,
 )
-from allways.contract_client import ContractError, is_contract_rejection
+from allways.contract_client import ContractError, is_already_voted, is_contract_rejection
 from allways.utils.logging import log_on_change
 from allways.validator import voting
 from allways.validator.axon_handlers import (
@@ -251,7 +251,7 @@ def try_extend_reservation(
             f'voted to extend reservation ({reserved_until - current_block} blocks remaining)'
         )
     except ContractError as e:
-        if 'AlreadyVoted' in str(e):
+        if is_already_voted(e):
             self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = (
                 self.contract_client.get_miner_reserved_until(item.miner_hotkey)
             )
@@ -392,7 +392,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
                 f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
             )
         except ContractError as e:
-            if 'AlreadyVoted' in str(e):
+            if is_already_voted(e):
                 tracker.mark_extend_timeout_voted(swap.id)
             elif not is_contract_rejection(e):
                 bt.logging.debug(f'{ctx}: extend timeout vote: {e}')
