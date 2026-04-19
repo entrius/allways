@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    require_confirmation,
     save_pending_swap,
 )
 from allways.commitments import read_miner_commitments
@@ -524,8 +525,7 @@ def swap_now_command(
                     '  [yellow]You will need to manually send BTC to the miner address'
                     ' and then run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
                 )
-                if not click.confirm('  Continue?', default=True):
-                    console.print('[yellow]Cancelled[/yellow]')
+                if not require_confirmation('  Continue?', default=True):
                     return
 
     # Step 2: Find available miners (bilateral matching)
@@ -694,8 +694,7 @@ def swap_now_command(
     )
     console.print()
 
-    if not skip_confirm and not click.confirm('Proceed?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not skip_confirm and not require_confirmation('Proceed?'):
         return
 
     # Unlock coldkey once (password prompt) — all subsequent signing uses the cached key

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
+import click
 from rich.console import Console
 
 from allways.classes import MinerPair, SwapStatus
@@ -49,6 +50,17 @@ def print_contract_error(action: str, e: BaseException) -> None:
     else:
         console.print(f'[red]{action}: {e}[/red]')
         console.print('[dim]This looks like an RPC or client failure — try again.[/dim]')
+
+
+def require_confirmation(prompt: str, default: bool = False) -> bool:
+    """Prompt for Y/N confirmation; print a cancel notice and return False on decline.
+
+    Returns True only when the user accepts. Callers should early-return on False.
+    """
+    if not click.confirm(prompt, default=default):
+        console.print('[yellow]Cancelled[/yellow]')
+        return False
+    return True
 
 
 def is_valid_ss58(address: str) -> bool:

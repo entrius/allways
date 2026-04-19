@@ -16,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     print_contract_error,
     read_miner_commitment,
+    require_confirmation,
 )
 from allways.contract_client import ContractError
 
@@ -289,8 +290,7 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, ye
     console.print(f'  Block:     {block}')
     console.print(f'  Hotkey:    {hotkey}\n')
 
-    if not yes and not click.confirm('Confirm marking swap as fulfilled?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm marking swap as fulfilled?'):
         return
 
     try:

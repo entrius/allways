@@ -11,6 +11,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     loading,
     print_contract_error,
+    require_confirmation,
     to_rao,
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
@@ -84,8 +85,7 @@ def collateral_deposit(amount: float | None, yes: bool):
     except Exception as e:
         console.print(f'[yellow]Warning: balance check failed ({e}), proceeding anyway[/yellow]')
 
-    if not yes and not click.confirm('Confirm depositing collateral?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm depositing collateral?'):
         return
 
     try:
@@ -170,8 +170,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
     except Exception as e:
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
 
-    if not yes and not click.confirm('Confirm withdrawing collateral?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm withdrawing collateral?'):
         return
 
     try:

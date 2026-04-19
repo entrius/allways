@@ -3,7 +3,14 @@
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, print_contract_error
+from allways.cli.swap_commands.helpers import (
+    console,
+    from_rao,
+    get_cli_context,
+    loading,
+    print_contract_error,
+    require_confirmation,
+)
 from allways.contract_client import ContractError
 
 
@@ -37,8 +44,7 @@ def claim_command(swap_id: int, yes: bool):
     console.print(f'  Amount:     [green]{from_rao(pending_rao):.4f} TAO[/green] ({pending_rao} rao)')
     console.print(f'  Claiming:   {wallet.hotkey.ss58_address}\n')
 
-    if not yes and not click.confirm('Confirm claiming slash?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm claiming slash?'):
         return
 
     try:
