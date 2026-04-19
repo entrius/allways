@@ -62,7 +62,7 @@ def discover_validators(
                 if not contract_client.is_validator(metagraph.hotkeys[uid]):
                     continue
             except Exception:
-                pass
+                continue
         axons.append(axon)
 
     return axons
