@@ -291,6 +291,40 @@ def set_threshold(percent: int):
         print_contract_error('Failed to set consensus threshold', e)
 
 
+def _manage_validator(hotkey: str, *, adding: bool) -> None:
+    _, wallet, _, client = get_cli_context()
+    try:
+        is_registered = client.is_validator(hotkey)
+    except ContractError as e:
+        print_contract_error('Failed to check validator status', e)
+        return
+
+    action = 'Add' if adding else 'Remove'
+    console.print(f'\n[bold]{action} Validator[/bold]\n')
+    console.print(f'  Hotkey: {hotkey}')
+
+    if adding and is_registered:
+        console.print('  [yellow]Warning: This hotkey is already a registered validator[/yellow]')
+    elif not adding and not is_registered:
+        console.print('  [yellow]Warning: This hotkey is not a registered validator[/yellow]')
+
+    console.print()
+
+    if not click.confirm(f'Confirm {"adding" if adding else "removing"} validator?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        with loading('Submitting transaction...'):
+            if adding:
+                client.add_validator(wallet=wallet, validator=hotkey)
+            else:
+                client.remove_validator(wallet=wallet, validator=hotkey)
+        console.print(f'[green]Validator {hotkey} {"added" if adding else "removed"}[/green]\n')
+    except ContractError as e:
+        print_contract_error(f'Failed to {"add" if adding else "remove"} validator', e)
+
+
 @admin_group.command('add-vali', show_disclaimer=True)
 @click.argument('hotkey', type=str)
 def add_vali(hotkey: str):
@@ -299,32 +333,7 @@ def add_vali(hotkey: str):
     [dim]Examples:
         $ alw admin add-vali 5Cxyz...[/dim]
     """
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        already_registered = client.is_validator(hotkey)
-    except ContractError as e:
-        print_contract_error('Failed to check validator status', e)
-        return
-
-    console.print('\n[bold]Add Validator[/bold]\n')
-    console.print(f'  Hotkey: {hotkey}')
-
-    if already_registered:
-        console.print('  [yellow]Warning: This hotkey is already a registered validator[/yellow]')
-
-    console.print()
-
-    if not click.confirm('Confirm adding validator?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.add_validator(wallet=wallet, validator=hotkey)
-        console.print(f'[green]Validator {hotkey} added[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to add validator', e)
+    _manage_validator(hotkey, adding=True)
 
 
 @admin_group.command('remove-vali', show_disclaimer=True)
@@ -335,32 +344,7 @@ def remove_vali(hotkey: str):
     [dim]Examples:
         $ alw admin remove-vali 5Cxyz...[/dim]
     """
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        is_registered = client.is_validator(hotkey)
-    except ContractError as e:
-        print_contract_error('Failed to check validator status', e)
-        return
-
-    console.print('\n[bold]Remove Validator[/bold]\n')
-    console.print(f'  Hotkey: {hotkey}')
-
-    if not is_registered:
-        console.print('  [yellow]Warning: This hotkey is not a registered validator[/yellow]')
-
-    console.print()
-
-    if not click.confirm('Confirm removing validator?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.remove_validator(wallet=wallet, validator=hotkey)
-        console.print(f'[green]Validator {hotkey} removed[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to remove validator', e)
+    _manage_validator(hotkey, adding=False)
 
 
 @admin_group.command('set-recycle-address', show_disclaimer=True)
