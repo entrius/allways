@@ -32,6 +32,16 @@ def keccak256(data: bytes) -> bytes:
     return keccak.new(data=data, digest_bits=256).digest()
 
 
+def miner_public_key_bytes(miner_hotkey: str) -> bytes:
+    """Decode an SS58 hotkey to its raw 32-byte public key.
+
+    Shared by reserve/initiate/extend hash-input construction on both the
+    axon handler and forward paths so the AccountId bytes used for keccak
+    always match what the contract computes.
+    """
+    return bytes.fromhex(Keypair(ss58_address=miner_hotkey).public_key.hex())
+
+
 def scale_encode_reserve_hash_input(
     miner_bytes: bytes,
     from_addr_bytes: bytes,
@@ -142,6 +152,26 @@ def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
     synapse.rejection_reason = reason
     if context:
         bt.logging.debug(f'{context}: {reason}')
+
+
+def reject_from_exception(
+    synapse: bt.Synapse,
+    e: BaseException,
+    ctx: str,
+    contract_rejection_reason: str,
+) -> None:
+    """Log an exception and reject the synapse, swapping in a short user-facing
+    message only when ``e`` is a genuine contract-side rejection.
+
+    Collapses the ContractError-vs-generic-Exception branching that each axon
+    handler otherwise repeats at its outer except block. Callers can use a
+    single ``except Exception`` since ContractError is handled internally.
+    """
+    bt.logging.error(f'{ctx} failed: {e}')
+    if isinstance(e, ContractError) and is_contract_rejection(e):
+        reject_synapse(synapse, contract_rejection_reason)
+    else:
+        reject_synapse(synapse, str(e))
 
 
 # =============================================================================
@@ -286,7 +316,7 @@ async def handle_swap_reserve(
 
         # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
         from_addr_bytes = synapse.from_address.encode('utf-8')
-        miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
+        miner_bytes = miner_public_key_bytes(miner)
         request_hash = keccak256(
             scale_encode_reserve_hash_input(
                 miner_bytes,
@@ -376,13 +406,8 @@ async def handle_swap_reserve(
             synapse.accepted = True
             bt.logging.info(f'Voted to reserve miner {miner}')
 
-    except ContractError as e:
-        bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the reservation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
     except Exception as e:
-        bt.logging.error(f'{ctx} failed: {e}')
-        reject_synapse(synapse, str(e))
+        reject_from_exception(synapse, e, ctx, 'Contract rejected the reservation')
 
     return synapse
 
@@ -527,7 +552,7 @@ async def handle_swap_confirm(
                 bt.logging.info(f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations')
                 return synapse
 
-            miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
+            miner_bytes = miner_public_key_bytes(miner)
             request_hash = keccak256(
                 scale_encode_initiate_hash_input(
                     miner_bytes,
@@ -566,12 +591,7 @@ async def handle_swap_confirm(
             synapse.accepted = True
             bt.logging.info(f'Voted to initiate swap for miner {miner}')
 
-    except ContractError as e:
-        bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the swap initiation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
     except Exception as e:
-        bt.logging.error(f'{ctx} failed: {e}')
-        reject_synapse(synapse, str(e))
+        reject_from_exception(synapse, e, ctx, 'Contract rejected the swap initiation')
 
     return synapse
