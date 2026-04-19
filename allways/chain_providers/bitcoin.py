@@ -308,10 +308,6 @@ class BitcoinProvider(ChainProvider):
             return 0
 
     def is_valid_address(self, address: str) -> bool:
-        """Validate a Bitcoin address locally (bech32/base58 decode)."""
-        return self.validate_address_local(address)
-
-    def validate_address_local(self, address: str) -> bool:
         """Validate BTC address format without RPC (bech32/base58 decode)."""
         if not address or not isinstance(address, str):
             return False
