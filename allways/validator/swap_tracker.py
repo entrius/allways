@@ -102,7 +102,7 @@ class SwapTracker:
             return False
         return True
 
-    async def poll(self, current_block: int = 0):
+    async def poll(self):
         """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
