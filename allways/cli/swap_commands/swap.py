@@ -160,34 +160,6 @@ def broadcast_reserve_with_retry(
 
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
-    current_block = subtensor.get_current_block()
-    reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
-    try:
-        from_address_proof = provider.sign_from_proof(
-            user_from_address,
-            reserve_proof_message,
-            from_key,
-        )
-    except Exception as e:
-        console.print(f'[red]Failed to sign source address proof ({type(e).__name__}): {e}[/red]')
-        return None
-
-    if not from_address_proof:
-        console.print('[red]Source address proof is empty — signing failed (check chain provider RPC connection)[/red]')
-        return None
-
-    synapse = SwapReserveSynapse(
-        miner_hotkey=selected_pair.hotkey,
-        tao_amount=tao_amount,
-        from_amount=from_amount,
-        to_amount=to_amount,
-        from_address=user_from_address,
-        from_address_proof=from_address_proof,
-        block_anchor=current_block,
-        from_chain=from_chain,
-        to_chain=to_chain,
-    )
-
     ephemeral_wallet = get_ephemeral_wallet()
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
@@ -197,29 +169,32 @@ def broadcast_reserve_with_retry(
     reserved = False
     reserved_until = 0
     for attempt in range(max_retries + 1):
-        if attempt > 0:
-            current_block = subtensor.get_current_block()
-            reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
-            try:
-                from_address_proof = provider.sign_from_proof(
-                    user_from_address,
-                    reserve_proof_message,
-                    from_key,
-                )
-            except Exception as e:
-                console.print(f'[red]Failed to sign source address proof: {e}[/red]')
-                return None
-            synapse = SwapReserveSynapse(
-                miner_hotkey=selected_pair.hotkey,
-                tao_amount=tao_amount,
-                from_amount=from_amount,
-                to_amount=to_amount,
-                from_address=user_from_address,
-                from_address_proof=from_address_proof,
-                block_anchor=current_block,
-                from_chain=from_chain,
-                to_chain=to_chain,
+        current_block = subtensor.get_current_block()
+        try:
+            from_address_proof = provider.sign_from_proof(
+                user_from_address,
+                reserve_proof_message(user_from_address, current_block),
+                from_key,
             )
+        except Exception as e:
+            console.print(f'[red]Failed to sign source address proof ({type(e).__name__}): {e}[/red]')
+            return None
+        if not from_address_proof:
+            console.print(
+                '[red]Source address proof is empty — signing failed (check chain provider RPC connection)[/red]'
+            )
+            return None
+        synapse = SwapReserveSynapse(
+            miner_hotkey=selected_pair.hotkey,
+            tao_amount=tao_amount,
+            from_amount=from_amount,
+            to_amount=to_amount,
+            from_address=user_from_address,
+            from_address_proof=from_address_proof,
+            block_anchor=current_block,
+            from_chain=from_chain,
+            to_chain=to_chain,
+        )
 
         console.print(f'  Broadcasting to {len(validator_axons)} validators...')
         responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=30.0)
