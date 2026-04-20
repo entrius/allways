@@ -130,8 +130,7 @@ class ValidatorStateStore:
         with self.lock:
             conn = self.require_connection()
             cursor = conn.execute(
-                'UPDATE pending_confirms SET reserved_until = ? '
-                'WHERE miner_hotkey = ? AND reserved_until < ?',
+                'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ? AND reserved_until < ?',
                 (reserved_until, miner_hotkey, reserved_until),
             )
             conn.commit()
