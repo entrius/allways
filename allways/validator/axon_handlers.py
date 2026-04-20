@@ -517,6 +517,7 @@ async def handle_swap_confirm(
                     miner_to_address=miner_fulfillment_address,
                     rate_str=selected_rate_str,
                     reserved_until=reserved_until,
+                    from_tx_block=tx_info.block_number,
                 )
                 validator.state_store.enqueue(pending)
                 synapse.accepted = True

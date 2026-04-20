@@ -34,6 +34,9 @@ class PendingConfirm:
     rate_str: str
     reserved_until: int
     queued_at: float = field(default_factory=time.time)
+    # Passed as ``block_hint`` on replay so a tx older than the provider's
+    # default scan window remains findable after a validator restart
+    from_tx_block: Optional[int] = None
 
 
 class ValidatorStateStore:
@@ -66,8 +69,8 @@ class ValidatorStateStore:
                     miner_hotkey, from_tx_hash, from_chain, to_chain,
                     from_address, to_address, tao_amount, from_amount,
                     to_amount, miner_from_address, miner_to_address,
-                    rate_str, reserved_until, queued_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rate_str, reserved_until, queued_at, from_tx_block
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.miner_hotkey,
@@ -84,6 +87,7 @@ class ValidatorStateStore:
                     item.rate_str,
                     item.reserved_until,
                     item.queued_at,
+                    item.from_tx_block,
                 ),
             )
             conn.commit()
@@ -152,6 +156,7 @@ class ValidatorStateStore:
             rate_str=row['rate_str'],
             reserved_until=row['reserved_until'],
             queued_at=row['queued_at'],
+            from_tx_block=row['from_tx_block'],
         )
 
     # ─── rate_events ────────────────────────────────────────────────────
@@ -331,7 +336,8 @@ class ValidatorStateStore:
                     miner_to_address    TEXT NOT NULL,
                     rate_str              TEXT NOT NULL,
                     reserved_until        INTEGER NOT NULL,
-                    queued_at             REAL NOT NULL
+                    queued_at             REAL NOT NULL,
+                    from_tx_block         INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -361,4 +367,9 @@ class ValidatorStateStore:
                     ON swap_outcomes(resolved_block);
                 """
             )
+            # Migrate pre-#108 DBs. SQLite has no ``ADD COLUMN IF NOT EXISTS``,
+            # so probe ``table_info`` first. Legacy rows get NULL (no hint).
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(pending_confirms)').fetchall()}
+            if 'from_tx_block' not in cols:
+                conn.execute('ALTER TABLE pending_confirms ADD COLUMN from_tx_block INTEGER')
             conn.commit()

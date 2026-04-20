@@ -122,6 +122,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                 tx_hash=item.from_tx_hash,
                 expected_recipient=item.miner_from_address,
                 expected_amount=item.from_amount,
+                block_hint=item.from_tx_block or 0,
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
