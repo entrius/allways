@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
 
@@ -102,7 +103,7 @@ def view_miners(full: bool):
         status_parts = []
         if has_swap:
             status_parts.append('[blue]in-swap[/blue]')
-        if reserved_until and current_block and reserved_until > current_block:
+        if reserved_until and current_block and is_reserved(reserved_until, current_block):
             try:
                 resv = client.get_reservation_data(pair.hotkey)
             except ContractError:
@@ -580,7 +581,7 @@ def view_reservation():
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
         return
 
-    is_active = reserved_until > current_block
+    is_active = is_reserved(reserved_until, current_block)
 
     console.print('\n[bold]Swap Reservation[/bold]\n')
 

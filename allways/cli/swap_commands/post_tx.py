@@ -16,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
@@ -49,7 +50,7 @@ def post_tx_command(tx_hash: str, netuid: int):
         print_contract_error('Failed to read reservation status', e)
         return
 
-    if reserved_until <= current_block:
+    if not is_reserved(reserved_until, current_block):
         clear_pending_swap()
         console.print('[red]Reservation has expired.[/red]')
         console.print('[dim]Run `alw swap now` to start a new swap.[/dim]')
