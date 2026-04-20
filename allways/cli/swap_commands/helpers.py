@@ -30,6 +30,12 @@ console = Console()
 
 SECONDS_PER_BLOCK = 12
 
+
+def blocks_to_minutes_str(blocks: int) -> str:
+    """Render a block count as an approximate minutes string like '~5 min'."""
+    return f'~{blocks * SECONDS_PER_BLOCK / 60:.0f} min'
+
+
 SWAP_STATUS_COLORS = {
     SwapStatus.ACTIVE: 'yellow',
     SwapStatus.FULFILLED: 'blue',
