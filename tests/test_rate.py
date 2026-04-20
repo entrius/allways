@@ -2,8 +2,15 @@
 
 from decimal import Decimal
 
+from allways.classes import Swap
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount
+from allways.utils.rate import (
+    apply_fee_deduction,
+    calculate_to_amount,
+    check_swap_viability,
+    derive_tao_leg,
+    expected_swap_amounts,
+)
 
 # Chain decimals
 TAO_DEC = 9
@@ -228,3 +235,136 @@ class TestFeeDeduction:
 
     def test_apply_fee_deduction_zero_amount(self):
         assert apply_fee_deduction(0, 100) == 0
+
+
+def _minimal_swap(**kwargs) -> Swap:
+    """Build a Swap with only the fields ``expected_swap_amounts`` reads."""
+    defaults = dict(
+        id=1,
+        user_hotkey='u',
+        miner_hotkey='m',
+        from_chain='btc',
+        to_chain='tao',
+        from_amount=0,
+        to_amount=0,
+        tao_amount=0,
+        user_from_address='',
+        user_to_address='',
+        rate='345',
+    )
+    defaults.update(kwargs)
+    return Swap(**defaults)
+
+
+class TestDeriveTaoLeg:
+    """TAO leg extraction for collateral / bounds checks (vote_initiate mirror)."""
+
+    def test_from_chain_is_tao(self):
+        assert derive_tao_leg('tao', 99, 'btc', 0) == 99
+
+    def test_to_chain_is_tao(self):
+        assert derive_tao_leg('btc', 0, 'tao', 42) == 42
+
+    def test_neither_side_tao_returns_zero(self):
+        assert derive_tao_leg('btc', 1_000_000, 'btc', 1_000_000) == 0
+
+
+class TestCheckSwapViability:
+    """Bounds + collateral checks mirrored from on-chain vote paths."""
+
+    def test_success_when_within_bounds_and_collateral(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=5 * TAO_TO_RAO,
+            miner_collateral_rao=10 * TAO_TO_RAO,
+            min_swap_rao=1 * TAO_TO_RAO,
+            max_swap_rao=100 * TAO_TO_RAO,
+        )
+        assert ok is True
+        assert reason == ''
+
+    def test_below_min_swap(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=5 * TAO_TO_RAO,
+            miner_collateral_rao=100 * TAO_TO_RAO,
+            min_swap_rao=10 * TAO_TO_RAO,
+            max_swap_rao=0,
+        )
+        assert ok is False
+        assert 'below min swap' in reason
+
+    def test_min_swap_zero_skips_lower_bound(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=1,
+            miner_collateral_rao=100 * TAO_TO_RAO,
+            min_swap_rao=0,
+            max_swap_rao=0,
+        )
+        assert ok is True
+        assert reason == ''
+
+    def test_above_max_swap(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=200 * TAO_TO_RAO,
+            miner_collateral_rao=500 * TAO_TO_RAO,
+            min_swap_rao=0,
+            max_swap_rao=100 * TAO_TO_RAO,
+        )
+        assert ok is False
+        assert 'above max swap' in reason
+
+    def test_max_swap_zero_skips_upper_bound(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=1_000 * TAO_TO_RAO,
+            miner_collateral_rao=2_000 * TAO_TO_RAO,
+            min_swap_rao=0,
+            max_swap_rao=0,
+        )
+        assert ok is True
+        assert reason == ''
+
+    def test_insufficient_collateral(self):
+        ok, reason = check_swap_viability(
+            tao_amount_rao=50 * TAO_TO_RAO,
+            miner_collateral_rao=40 * TAO_TO_RAO,
+            min_swap_rao=0,
+            max_swap_rao=0,
+        )
+        assert ok is False
+        assert 'insufficient collateral' in reason
+
+
+class TestExpectedSwapAmounts:
+    """End-to-end (to_amount, user_receives) used by miner + validator."""
+
+    FEE_DIV = 100
+
+    def test_btc_to_tao_matches_calculate_plus_fee(self):
+        from_sat = int(Decimal('0.01') * BTC_TO_SAT)
+        swap = _minimal_swap(from_amount=from_sat, rate='345')
+        raw_to, user = expected_swap_amounts(swap, self.FEE_DIV)
+        expected_raw = calculate_to_amount(from_sat, '345', False, 9, 8)
+        assert raw_to == expected_raw
+        assert user == apply_fee_deduction(expected_raw, self.FEE_DIV)
+
+    def test_tao_to_btc_reverse_direction(self):
+        from_rao = 345 * TAO_TO_RAO
+        swap = _minimal_swap(
+            from_chain='tao',
+            to_chain='btc',
+            from_amount=from_rao,
+            rate='345',
+        )
+        raw_to, user = expected_swap_amounts(swap, self.FEE_DIV)
+        assert raw_to == BTC_TO_SAT
+        assert user == apply_fee_deduction(BTC_TO_SAT, self.FEE_DIV)
+
+    def test_invalid_rate_returns_zeros(self):
+        swap = _minimal_swap(from_amount=1_000_000, rate='0')
+        assert expected_swap_amounts(swap, self.FEE_DIV) == (0, 0)
+
+    def test_user_receives_plus_fee_equals_raw_to_amount(self):
+        from_sat = BTC_TO_SAT
+        swap = _minimal_swap(from_amount=from_sat, rate='100')
+        raw_to, user = expected_swap_amounts(swap, self.FEE_DIV)
+        fee = raw_to // self.FEE_DIV
+        assert fee + user == raw_to
