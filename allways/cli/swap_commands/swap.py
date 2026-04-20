@@ -348,6 +348,29 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
     return None
 
 
+def wait_for_swap_initiation(client, miner_hotkey: str, from_chain: str, max_polls: int) -> Optional[int]:
+    """Poll for on-chain swap creation and clear pending state only on success.
+
+    Preserves pending_swap.json on Ctrl+C or polling timeout: validators may
+    still initiate the swap after the CLI stops watching, and the local state
+    is the only recovery context for `alw swap resume` / `alw view swap`.
+    """
+    try:
+        swap_id = poll_for_swap_with_progress(client, miner_hotkey, from_chain, max_polls)
+    except KeyboardInterrupt:
+        console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
+        console.print('[dim]Resume with: alw swap resume — or check: alw view swaps[/dim]\n')
+        return None
+
+    if swap_id is None:
+        console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
+        console.print('[dim]Resume with: alw swap resume — or check: alw view swaps[/dim]\n')
+        return None
+
+    clear_pending_swap()
+    return swap_id
+
+
 def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
     """Send BTC with fallback: embit lightweight -> RPC -> manual (with retry).
 
@@ -848,21 +871,10 @@ def swap_now_command(
 
     # Poll for swap creation (longer timeout when queued)
     max_polls = 600 if all_queued else 60
-    try:
-        swap_id = poll_for_swap_with_progress(client, selected_pair.hotkey, from_chain, max_polls)
-    except KeyboardInterrupt:
-        clear_pending_swap()
-        console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        console.print('[dim]Once initiated, watch with: alw view swap <id> --watch[/dim]\n')
-        return
-
+    swap_id = wait_for_swap_initiation(client, selected_pair.hotkey, from_chain, max_polls)
     if swap_id is None:
-        clear_pending_swap()
-        console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view swaps[/dim]\n')
         return
 
-    clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
 
     # In non-interactive mode, just print the ID and exit (let caller handle watching)

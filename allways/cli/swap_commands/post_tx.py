@@ -112,9 +112,9 @@ def post_tx_command(tx_hash: str, netuid: int):
         return
 
     if queued > 0 and queued == accepted:
-        clear_pending_swap()
         console.print('\n[green]Validators queued your transaction for auto-confirmation.[/green]')
         console.print('[dim]Swap will be initiated once confirmations are reached. Check: alw view swaps[/dim]\n')
+        console.print('[dim]Local state kept — resume later with: alw swap resume[/dim]\n')
         return
 
     # Poll for swap creation

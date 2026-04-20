@@ -20,8 +20,8 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
-    poll_for_swap_with_progress,
     sign_and_broadcast_confirm,
+    wait_for_swap_initiation,
 )
 from allways.contract_client import ContractError
 
@@ -186,21 +186,10 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         console.print('\n  [dim]You can safely exit (Ctrl+C) — validators will continue processing.[/dim]')
 
     max_polls = 600 if all_queued else 60
-    try:
-        swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
-    except KeyboardInterrupt:
-        clear_pending_swap()
-        console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        console.print('[dim]Once initiated, watch with: alw view swap <id> --watch[/dim]\n')
-        return
-
+    swap_id = wait_for_swap_initiation(client, state.miner_hotkey, state.from_chain, max_polls)
     if swap_id is None:
-        clear_pending_swap()
-        console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view swaps[/dim]\n')
         return
 
-    clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
 
     if skip_confirm:
