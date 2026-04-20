@@ -15,6 +15,7 @@ import bittensor as bt
 from Crypto.Hash import keccak
 from substrateinterface import Keypair
 
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
@@ -318,10 +319,17 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
 
-            balance = provider.get_balance(synapse.from_address)
-            if balance < synapse.from_amount:
-                reject_synapse(synapse, 'Insufficient source balance', ctx)
-                return synapse
+            # Balance check is a pre-flight optimization, not a security gate —
+            # SwapConfirm still requires a real on-chain source tx. On a
+            # backend outage, skip the gate rather than falsely reject the
+            # user as underfunded.
+            try:
+                balance = provider.get_balance(synapse.from_address)
+                if balance < synapse.from_amount:
+                    reject_synapse(synapse, 'Insufficient source balance', ctx)
+                    return synapse
+            except ProviderUnreachableError as e:
+                bt.logging.warning(f'{ctx}: balance backend unreachable, skipping pre-flight gate: {e}')
 
             if not contract.get_miner_active_flag(miner):
                 reject_synapse(synapse, 'Miner not active', ctx)

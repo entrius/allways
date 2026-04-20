@@ -258,13 +258,18 @@ class SubtensorProvider(ChainProvider):
         return dest, amount, sender
 
     def get_balance(self, address: str) -> int:
-        """Get balance for a TAO address in rao."""
+        """Get balance for a TAO address in rao.
+
+        Raises ``ProviderUnreachableError`` on any subtensor failure. A
+        non-existent address returns 0 cleanly from the RPC, so any raised
+        exception means the backend is unreachable rather than the address
+        holding zero balance.
+        """
         try:
             balance = self.subtensor.get_balance(address)
             return int(balance)
         except Exception as e:
-            bt.logging.error(f'TAO get_balance failed: {e}')
-            return 0
+            raise ProviderUnreachableError(f'Subtensor get_balance unreachable: {e}') from e
 
     def is_valid_address(self, address: str) -> bool:
         """Validate an SS58 address."""

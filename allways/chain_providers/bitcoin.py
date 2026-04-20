@@ -292,7 +292,11 @@ class BitcoinProvider(ChainProvider):
         return 'https://blockstream.info/api'
 
     def blockstream_get_balance(self, address: str) -> int:
-        """Get balance via Blockstream API. Returns satoshis."""
+        """Get balance via Blockstream API. Returns satoshis.
+
+        Raises ``ProviderUnreachableError`` on transient API failures so
+        callers don't mistake an outage for a zero-balance address.
+        """
         try:
             url = f'{self.blockstream_api_url()}/address/{address}'
             resp = requests.get(url, timeout=15)
@@ -303,9 +307,10 @@ class BitcoinProvider(ChainProvider):
             mempool_funded = data.get('mempool_stats', {}).get('funded_txo_sum', 0)
             mempool_spent = data.get('mempool_stats', {}).get('spent_txo_sum', 0)
             return (funded - spent) + (mempool_funded - mempool_spent)
-        except Exception as e:
-            bt.logging.error(f'Blockstream balance lookup failed for {address}: {e}')
-            return 0
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ProviderUnreachableError(f'Blockstream API unreachable: {e}') from e
+        except requests.HTTPError as e:
+            raise ProviderUnreachableError(f'Blockstream API error: {e}') from e
 
     def is_valid_address(self, address: str) -> bool:
         """Validate a Bitcoin address locally (bech32/base58 decode)."""

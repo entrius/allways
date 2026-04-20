@@ -111,7 +111,15 @@ class ChainProvider(ABC):
         return tx_info
 
     @abstractmethod
-    def get_balance(self, address: str) -> int: ...
+    def get_balance(self, address: str) -> int:
+        """Balance at address in smallest unit (satoshis / rao).
+
+        Raises ``ProviderUnreachableError`` on transient backend failures.
+        Callers must not conflate "balance zero" with "backend unreachable" —
+        the former is a legitimate state, the latter means the balance is
+        unknown.
+        """
+        ...
 
     @abstractmethod
     def is_valid_address(self, address: str) -> bool: ...
