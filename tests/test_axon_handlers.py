@@ -306,34 +306,23 @@ class TestSourceTxVerification:
         assert '2/6 confirmations' in result.rejection_reason
         validator.state_store.enqueue.assert_called_once()
 
-    def test_queued_entry_captures_tx_block_for_replay(self):
-        """from_tx_block is persisted so the forward replay can pass it as
-        a block_hint on restart — without it, txs older than the provider's
-        default scan window are dropped (issue #108)."""
-        validator = make_validator()
-        validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
-            confirmed=False,
-            confirmations=1,
-            block_number=987654,
-        )
-        run_handler(validator, make_synapse())
-        queued_item = validator.state_store.enqueue.call_args[0][0]
-        assert queued_item.from_tx_block == 987654
-
-    def test_queued_entry_uses_reservation_amounts(self):
-        """The contract-reserved amounts are authoritative. A queued entry
-        must persist those, not any user-supplied value, so the later
-        auto-initiate hashes match what the miner was reserved under."""
+    def test_queued_entry_captures_reservation_and_tx_block(self):
+        """Contract-reserved amounts and the observed tx block must both land
+        on the queued entry: amounts so the later auto-initiate hash matches
+        the reservation, tx block so replay can pass it as block_hint and
+        find txs older than the provider's default scan window (#108)."""
         validator = make_validator(reservation_data=(777_000_000, 55_000, 999_000_000))
         validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
             confirmed=False,
             confirmations=1,
+            block_number=987_654,
         )
         run_handler(validator, make_synapse())
         queued_item = validator.state_store.enqueue.call_args[0][0]
         assert queued_item.tao_amount == 777_000_000
         assert queued_item.from_amount == 55_000
         assert queued_item.to_amount == 999_000_000
+        assert queued_item.from_tx_block == 987_654
 
 
 # ---------------------------------------------------------------------------

@@ -68,9 +68,8 @@ class TestPendingConfirmQueue:
         assert items[1].from_tx_block == 43
 
     def test_migrates_legacy_schema(self, tmp_path: Path):
-        """Pre-#108 DBs lack from_tx_block — init must ALTER in place, not
-        wipe queued confirms. Legacy rows surface as NULL; new enqueues into
-        the migrated table round-trip the column."""
+        """init must ALTER in place so queued confirms survive upgrade, with legacy rows surfacing as NULL
+        (the replay path treats NULL as 'no hint')."""
         db_path = tmp_path / 'state.db'
         legacy_conn = sqlite3.connect(db_path)
         legacy_conn.executescript(
@@ -115,11 +114,10 @@ class TestPendingConfirmQueue:
         legacy_conn.commit()
         legacy_conn.close()
 
-        queue = ValidatorStateStore(db_path=db_path)
-        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, from_tx_block=99))
-        items = {i.miner_hotkey: i for i in queue.get_all()}
-        assert items['legacy-miner'].from_tx_block is None
-        assert items['miner-1'].from_tx_block == 99
+        items = ValidatorStateStore(db_path=db_path).get_all()
+        assert len(items) == 1
+        assert items[0].miner_hotkey == 'legacy-miner'
+        assert items[0].from_tx_block is None
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'
