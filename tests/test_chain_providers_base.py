@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 from allways.chain_providers.base import ChainProvider, TransactionInfo
 from allways.chains import ChainDefinition
 
-
 _TEST_CHAIN = ChainDefinition(
     id='btc',
     name='Bitcoin',

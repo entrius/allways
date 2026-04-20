@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 from allways.classes import Swap, SwapStatus
 from allways.miner.swap_poller import SwapPoller
 
-
 MINER_HK = 'miner-hk'
 OTHER_HK = 'other-hk'
 
