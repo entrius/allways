@@ -17,10 +17,7 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
-from allways.constants import (
-    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
-    FEE_DIVISOR,
-)
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
@@ -58,7 +55,6 @@ class Validator(BaseValidatorNeuron):
         self.contract_client = AllwaysContractClient(subtensor=self.subtensor)
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
-        timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
         # Single store owning every validator-local table. Must be created
@@ -94,12 +90,9 @@ class Validator(BaseValidatorNeuron):
             contract_client=self.contract_client,
         )
 
-        self.swap_tracker = SwapTracker(
-            client=self.contract_client,
-            fulfillment_timeout_blocks=timeout_blocks,
-        )
-        self.swap_tracker.initialize(self.block)
-        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
+        self.swap_tracker = SwapTracker(client=self.contract_client)
+        self.swap_tracker.initialize()
+        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         self.swap_verifier = SwapVerifier(
             chain_providers=self.chain_providers,

@@ -34,7 +34,8 @@ def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500
 
 def make_tracker() -> SwapTracker:
     client = MagicMock()
-    return SwapTracker(client=client, fulfillment_timeout_blocks=30)
+    client.get_active_swaps.return_value = []
+    return SwapTracker(client=client)
 
 
 class TestResolve:
@@ -68,58 +69,70 @@ class TestResolve:
 class TestInitialize:
     def test_initialize_empty_contract_sets_cursor_to_zero(self):
         tracker = make_tracker()
-        tracker.client.get_next_swap_id.return_value = 1  # next_id=1 means no swaps exist
+        tracker.client.get_next_swap_id.return_value = 1
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert tracker.last_scanned_id == 0
         assert tracker.active == {}
 
-    def test_initialize_picks_up_active_swaps_from_backward_scan(self):
+    def test_initialize_seeds_active_swaps_from_contract(self):
         tracker = make_tracker()
-        swap_active = make_swap(swap_id=10)
-        swap_active.initiated_block = 990
-        swap_fulfilled = make_swap(swap_id=11)
-        swap_fulfilled.status = SwapStatus.FULFILLED
-        swap_fulfilled.initiated_block = 995
+        swap_a = make_swap(swap_id=10)
+        swap_b = make_swap(swap_id=11)
+        swap_b.status = SwapStatus.FULFILLED
 
         tracker.client.get_next_swap_id.return_value = 12
-        tracker.client.get_swap.side_effect = lambda sid: {10: swap_active, 11: swap_fulfilled}.get(sid)
+        tracker.client.get_active_swaps.return_value = [swap_a, swap_b]
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
-        assert 10 in tracker.active
-        assert 11 in tracker.active
+        assert set(tracker.active) == {10, 11}
         assert tracker.last_scanned_id == 11
 
-    def test_initialize_stops_at_cutoff_block(self):
-        """Backward scan halts when it reaches a swap older than the cutoff."""
+    def test_initialize_keeps_swap_with_extended_timeout(self):
+        """A swap initiated well before one fulfillment-timeout window can
+        still be active after ``vote_extend_timeout`` and must survive
+        restart — the earlier initiated_block cutoff dropped these."""
         tracker = make_tracker()
-        stale = make_swap(swap_id=5)
-        stale.initiated_block = 900  # below 1000 - 30 = 970 cutoff
-        active = make_swap(swap_id=6)
-        active.initiated_block = 980
+        extended = make_swap(swap_id=3)
+        extended.status = SwapStatus.FULFILLED
+        extended.initiated_block = 100   # far in the past
+        extended.timeout_block = 1020    # extended into the future
 
-        tracker.client.get_next_swap_id.return_value = 7
-        tracker.client.get_swap.side_effect = lambda sid: {5: stale, 6: active}.get(sid)
+        tracker.client.get_next_swap_id.return_value = 4
+        tracker.client.get_active_swaps.return_value = [extended]
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
-        assert 5 not in tracker.active
-        assert 6 in tracker.active
+        assert 3 in tracker.active
+        assert tracker.last_scanned_id == 3
 
-    def test_initialize_skips_terminal_swaps(self):
+    def test_initialize_advances_cursor_past_terminal_latest(self):
+        """Latest swap is terminal (pruned from contract); cursor still
+        advances so the next poll doesn't rediscover it."""
         tracker = make_tracker()
-        completed = make_swap(swap_id=20)
-        completed.status = SwapStatus.COMPLETED
-        completed.initiated_block = 990
+        still_active = make_swap(swap_id=40)
+        still_active.status = SwapStatus.FULFILLED
 
-        tracker.client.get_next_swap_id.return_value = 21
-        tracker.client.get_swap.return_value = completed
+        tracker.client.get_next_swap_id.return_value = 42  # latest id = 41, terminal
+        tracker.client.get_active_swaps.return_value = [still_active]
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
-        assert 20 not in tracker.active
+        assert set(tracker.active) == {40}
+        assert tracker.last_scanned_id == 41
+
+    def test_initialize_requests_full_scan(self):
+        """An extended-timeout swap can sit behind any run of pruned
+        neighbors, so the scan must disable the gap heuristic entirely."""
+        tracker = make_tracker()
+        tracker.client.get_next_swap_id.return_value = 500
+
+        tracker.initialize()
+
+        (_args, kwargs) = tracker.client.get_active_swaps.call_args
+        assert kwargs['max_gap'] is None
 
 
 class TestNullSwapRetry:
