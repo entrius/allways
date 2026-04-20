@@ -880,10 +880,14 @@ class AllwaysContractClient:
         return tx_hash
 
     def vote_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
-        return self._exec_tx(wallet, 'vote_extend_timeout', f'Vote extend timeout for swap {swap_id}', {'swap_id': swap_id})
+        return self._exec_tx(
+            wallet, 'vote_extend_timeout', f'Vote extend timeout for swap {swap_id}', {'swap_id': swap_id}
+        )
 
     def cancel_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        return self._exec_tx(wallet, 'cancel_reservation', f'Reservation cancelled for {miner_hotkey}', {'miner': miner_hotkey})
+        return self._exec_tx(
+            wallet, 'cancel_reservation', f'Reservation cancelled for {miner_hotkey}', {'miner': miner_hotkey}
+        )
 
     def vote_initiate(
         self,
@@ -932,13 +936,17 @@ class AllwaysContractClient:
 
     def vote_activate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         """Vote to activate a miner. On quorum, miner becomes active."""
-        return self._exec_tx(wallet, 'vote_activate', f'Vote activate for miner {miner_hotkey}', {'miner': miner_hotkey})
+        return self._exec_tx(
+            wallet, 'vote_activate', f'Vote activate for miner {miner_hotkey}', {'miner': miner_hotkey}
+        )
 
     def vote_deactivate(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         """Vote to deactivate a miner. Validator-quorum only — the contract
         trusts the quorum and applies no collateral/status gate beyond the
         miner currently being active."""
-        return self._exec_tx(wallet, 'vote_deactivate', f'Vote deactivate for miner {miner_hotkey}', {'miner': miner_hotkey})
+        return self._exec_tx(
+            wallet, 'vote_deactivate', f'Vote deactivate for miner {miner_hotkey}', {'miner': miner_hotkey}
+        )
 
     def mark_fulfilled(
         self,
@@ -980,19 +988,29 @@ class AllwaysContractClient:
     # =========================================================================
 
     def set_fulfillment_timeout(self, wallet: bt.Wallet, blocks: int) -> str:
-        return self._exec_tx(wallet, 'set_fulfillment_timeout', f'Fulfillment timeout set to {blocks}', {'blocks': blocks})
+        return self._exec_tx(
+            wallet, 'set_fulfillment_timeout', f'Fulfillment timeout set to {blocks}', {'blocks': blocks}
+        )
 
     def set_min_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        return self._exec_tx(wallet, 'set_min_collateral', f'Min collateral set to {amount_rao}', {'amount': amount_rao})
+        return self._exec_tx(
+            wallet, 'set_min_collateral', f'Min collateral set to {amount_rao}', {'amount': amount_rao}
+        )
 
     def set_max_collateral_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        return self._exec_tx(wallet, 'set_max_collateral', f'Max collateral set to {amount_rao}', {'amount': amount_rao})
+        return self._exec_tx(
+            wallet, 'set_max_collateral', f'Max collateral set to {amount_rao}', {'amount': amount_rao}
+        )
 
     def set_consensus_threshold(self, wallet: bt.Wallet, percent: int) -> str:
-        return self._exec_tx(wallet, 'set_consensus_threshold', f'Consensus threshold set to {percent}%', {'percent': percent})
+        return self._exec_tx(
+            wallet, 'set_consensus_threshold', f'Consensus threshold set to {percent}%', {'percent': percent}
+        )
 
     def set_min_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        return self._exec_tx(wallet, 'set_min_swap_amount', f'Min swap amount set to {amount_rao}', {'amount': amount_rao})
+        return self._exec_tx(
+            wallet, 'set_min_swap_amount', f'Min swap amount set to {amount_rao}', {'amount': amount_rao}
+        )
 
     def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
         return self._exec_tx(wallet, 'set_recycle_address', f'Recycle address set to {address}', {'address': address})
@@ -1004,7 +1022,9 @@ class AllwaysContractClient:
         return self._exec_tx(wallet, 'set_halted', f'System halted set to {halted}', {'halted': halted})
 
     def set_max_swap_amount(self, wallet: bt.Wallet, amount_rao: int) -> str:
-        return self._exec_tx(wallet, 'set_max_swap_amount', f'Max swap amount set to {amount_rao}', {'amount': amount_rao})
+        return self._exec_tx(
+            wallet, 'set_max_swap_amount', f'Max swap amount set to {amount_rao}', {'amount': amount_rao}
+        )
 
     def add_validator(self, wallet: bt.Wallet, validator: str) -> str:
         return self._exec_tx(wallet, 'add_validator', f'Validator added {validator}', {'validator': validator})
@@ -1016,4 +1036,6 @@ class AllwaysContractClient:
         return self._exec_tx(wallet, 'recycle_fees', 'Fees recycled')
 
     def transfer_ownership(self, wallet: bt.Wallet, new_owner: str) -> str:
-        return self._exec_tx(wallet, 'transfer_ownership', f'Ownership transferred to {new_owner}', {'new_owner': new_owner})
+        return self._exec_tx(
+            wallet, 'transfer_ownership', f'Ownership transferred to {new_owner}', {'new_owner': new_owner}
+        )
