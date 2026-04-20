@@ -81,10 +81,11 @@ class SubtensorProvider(ChainProvider):
             if not (body[0] & 0x80):
                 return None
 
-            # Sender AccountId is at bytes 1..33
-            if len(body) < 33:
+            # Signed v4 extrinsic: [0x84][MultiAddress variant][32-byte AccountId]...
+            # Only MultiAddress::Id (0x00) is supported; reject Index/Raw/Address{20,32}.
+            if len(body) < 34 or body[1] != 0x00:
                 return None
-            sender_bytes = body[1:33]
+            sender_bytes = body[2:34]
             sender = ss58_encode(sender_bytes, ss58_format=42)
 
             # Find the transfer call: pallet_index=5, call_index in {0,3,7}

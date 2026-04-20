@@ -17,9 +17,14 @@ from substrateinterface import Keypair
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
-from allways.constants import RESERVATION_COOLDOWN_BLOCKS
+from allways.constants import RESERVATION_COOLDOWN_BLOCKS, RESERVE_PROOF_MAX_AGE_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
-from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.synapses import (
+    MinerActivateSynapse,
+    SwapConfirmSynapse,
+    SwapReserveSynapse,
+    build_reserve_proof_message,
+)
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -279,7 +284,21 @@ async def handle_swap_reserve(
         if provider is None:
             reject_synapse(synapse, f'Unsupported chain: {synapse.from_chain}', ctx)
             return synapse
-        proof_message = f'allways-reserve:{synapse.from_address}:{synapse.block_anchor}'
+
+        if abs(synapse.block_anchor - validator.block) > RESERVE_PROOF_MAX_AGE_BLOCKS:
+            reject_synapse(synapse, 'Reserve proof block_anchor out of range', ctx)
+            return synapse
+
+        proof_message = build_reserve_proof_message(
+            miner_hotkey=miner,
+            from_address=synapse.from_address,
+            from_chain=synapse.from_chain,
+            to_chain=synapse.to_chain,
+            tao_amount=synapse.tao_amount,
+            from_amount=synapse.from_amount,
+            to_amount=synapse.to_amount,
+            block_anchor=synapse.block_anchor,
+        )
         if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_address_proof):
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse

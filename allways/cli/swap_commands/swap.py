@@ -29,7 +29,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
-from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse, build_reserve_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
@@ -161,7 +161,16 @@ def broadcast_reserve_with_retry(
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
     current_block = subtensor.get_current_block()
-    reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
+    reserve_proof_message = build_reserve_proof_message(
+        miner_hotkey=selected_pair.hotkey,
+        from_address=user_from_address,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        tao_amount=tao_amount,
+        from_amount=from_amount,
+        to_amount=to_amount,
+        block_anchor=current_block,
+    )
     try:
         from_address_proof = provider.sign_from_proof(
             user_from_address,
@@ -199,7 +208,16 @@ def broadcast_reserve_with_retry(
     for attempt in range(max_retries + 1):
         if attempt > 0:
             current_block = subtensor.get_current_block()
-            reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
+            reserve_proof_message = build_reserve_proof_message(
+                miner_hotkey=selected_pair.hotkey,
+                from_address=user_from_address,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                tao_amount=tao_amount,
+                from_amount=from_amount,
+                to_amount=to_amount,
+                block_anchor=current_block,
+            )
             try:
                 from_address_proof = provider.sign_from_proof(
                     user_from_address,

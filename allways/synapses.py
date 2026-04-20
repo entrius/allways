@@ -11,6 +11,31 @@ from typing import Optional
 import bittensor as bt
 
 
+def build_reserve_proof_message(
+    miner_hotkey: str,
+    from_address: str,
+    from_chain: str,
+    to_chain: str,
+    tao_amount: int,
+    from_amount: int,
+    to_amount: int,
+    block_anchor: int,
+) -> str:
+    """Build the reserve-proof message that the user signs with from_address.
+
+    All fields that define the scope of the reservation are bound into the
+    signed message so a valid proof cannot be reused against a different
+    miner, direction, or amount. `block_anchor` bounds freshness.
+
+    The validator MUST rebuild the exact same string and reject on mismatch.
+    Version tag ("v2") distinguishes from the pre-binding format.
+    """
+    return (
+        f'allways-reserve:v2:{miner_hotkey}:{from_address}:'
+        f'{from_chain}:{to_chain}:{tao_amount}:{from_amount}:{to_amount}:{block_anchor}'
+    )
+
+
 class MinerActivateSynapse(bt.Synapse):
     """Miner broadcasts activation request to all validators.
 
