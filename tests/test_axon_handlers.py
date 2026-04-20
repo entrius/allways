@@ -307,10 +307,8 @@ class TestSourceTxVerification:
         validator.state_store.enqueue.assert_called_once()
 
     def test_queued_entry_captures_reservation_and_tx_block(self):
-        """Contract-reserved amounts and the observed tx block must both land
-        on the queued entry: amounts so the later auto-initiate hash matches
-        the reservation, tx block so replay can pass it as block_hint and
-        find txs older than the provider's default scan window (#108)."""
+        """Reserved amounts (for initiate-hash match) and tx block (for replay
+        block_hint) must persist on the queued entry."""
         validator = make_validator(reservation_data=(777_000_000, 55_000, 999_000_000))
         validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
             confirmed=False,

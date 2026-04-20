@@ -35,7 +35,7 @@ class PendingConfirm:
     reserved_until: int
     queued_at: float = field(default_factory=time.time)
     # Passed as ``block_hint`` on replay so a tx older than the provider's
-    # default scan window remains findable after a validator restart
+    # default scan window remains findable after a validator restart.
     from_tx_block: Optional[int] = None
 
 
@@ -367,8 +367,8 @@ class ValidatorStateStore:
                     ON swap_outcomes(resolved_block);
                 """
             )
-            # Migrate pre-#108 DBs. SQLite has no ``ADD COLUMN IF NOT EXISTS``,
-            # so probe ``table_info`` first. Legacy rows get NULL (no hint).
+            # SQLite has no ``ADD COLUMN IF NOT EXISTS``, so probe
+            # ``table_info`` before altering. Existing rows get NULL.
             cols = {r[1] for r in conn.execute('PRAGMA table_info(pending_confirms)').fetchall()}
             if 'from_tx_block' not in cols:
                 conn.execute('ALTER TABLE pending_confirms ADD COLUMN from_tx_block INTEGER')

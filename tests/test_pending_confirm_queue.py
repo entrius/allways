@@ -68,8 +68,7 @@ class TestPendingConfirmQueue:
         assert items[1].from_tx_block == 43
 
     def test_migrates_legacy_schema(self, tmp_path: Path):
-        """init must ALTER in place so queued confirms survive upgrade, with legacy rows surfacing as NULL
-        (the replay path treats NULL as 'no hint')."""
+        """Legacy DBs are altered in place; pre-migration rows surface as NULL."""
         db_path = tmp_path / 'state.db'
         legacy_conn = sqlite3.connect(db_path)
         legacy_conn.executescript(
