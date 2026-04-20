@@ -4,7 +4,7 @@ import click
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -42,12 +42,9 @@ def set_timeout(blocks: int):
         print_contract_error('Failed to read fulfillment timeout', e)
         return
 
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
-
     console.print('\n[bold]Set Fulfillment Timeout[/bold]\n')
-    console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')
-    console.print(f'  New:     {blocks} blocks (~{new_minutes:.0f} min)\n')
+    console.print(f'  Current: {current} blocks ({blocks_to_minutes_str(current)})')
+    console.print(f'  New:     {blocks} blocks ({blocks_to_minutes_str(blocks)})\n')
 
     if not click.confirm('Confirm updating timeout?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -81,12 +78,9 @@ def set_reservation_ttl(blocks: int):
         print_contract_error('Failed to read reservation TTL', e)
         return
 
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
-
     console.print('\n[bold]Set Reservation TTL[/bold]\n')
-    console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')
-    console.print(f'  New:     {blocks} blocks (~{new_minutes:.0f} min)\n')
+    console.print(f'  Current: {current} blocks ({blocks_to_minutes_str(current)})')
+    console.print(f'  New:     {blocks} blocks ({blocks_to_minutes_str(blocks)})\n')
 
     if not click.confirm('Confirm updating reservation TTL?'):
         console.print('[yellow]Cancelled[/yellow]')
