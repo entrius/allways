@@ -617,45 +617,28 @@ class AllwaysContractClient:
     # Read helpers (typed wrappers over _raw_contract_read)
     # =========================================================================
 
-    def read_u32(self, method: str, args: dict = None) -> int:
+    def _read_typed(self, method: str, extractor, default, args: dict = None):
         self.ensure_initialized()
         data = self.raw_contract_read(method, args)
         if data is None:
             raise ContractError(f'{method}: no response')
-        v = self.extract_u32(data)
-        return v if v is not None else 0
+        v = extractor(data)
+        return v if v is not None else default
+
+    def read_u32(self, method: str, args: dict = None) -> int:
+        return self._read_typed(method, self.extract_u32, 0, args)
 
     def read_u64(self, method: str, args: dict = None) -> int:
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args)
-        if data is None:
-            raise ContractError(f'{method}: no response')
-        v = self.extract_u64(data)
-        return v if v is not None else 0
+        return self._read_typed(method, self.extract_u64, 0, args)
 
     def read_u128(self, method: str, args: dict = None) -> int:
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args)
-        if data is None:
-            raise ContractError(f'{method}: no response')
-        v = self.extract_u128(data)
-        return v if v is not None else 0
+        return self._read_typed(method, self.extract_u128, 0, args)
 
     def read_bool(self, method: str, args: dict = None) -> bool:
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args)
-        if data is None:
-            raise ContractError(f'{method}: no response')
-        v = self.extract_bool(data)
-        return v if v is not None else False
+        return self._read_typed(method, self.extract_bool, False, args)
 
     def read_account_id(self, method: str, args: dict = None) -> str:
-        self.ensure_initialized()
-        data = self.raw_contract_read(method, args)
-        if data is None:
-            raise ContractError(f'{method}: no response')
-        v = self.extract_account_id(data)
-        return v if v is not None else ''
+        return self._read_typed(method, self.extract_account_id, '', args)
 
     def read_option_swap(self, method: str, args: dict = None, caller=None) -> Optional[Swap]:
         """Read a method that returns Option<SwapData>."""
