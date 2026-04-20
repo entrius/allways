@@ -385,6 +385,13 @@ class ContractEventWatcher:
                 return
             active = bool(values.get('active'))
             self.record_active_transition(block_num, hotkey, active)
+        elif name == 'ReservationExtended':
+            # Keep queued PendingConfirm.reserved_until in sync with the
+            # contract; otherwise the next purge drops a still-valid entry.
+            miner = values.get('miner', '')
+            reserved_until = values.get('reserved_until')
+            if miner and isinstance(reserved_until, int):
+                self.state_store.update_reserved_until(miner, reserved_until)
         elif name == 'SwapInitiated':
             miner = values.get('miner', '')
             if miner:
