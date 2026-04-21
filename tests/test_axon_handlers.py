@@ -115,7 +115,7 @@ class TestScaleEncodeExtendHashInput:
         miner_bytes = b'\x02' * 32
         encoded = scale_encode_extend_hash_input(miner_bytes, 'deadbeef')
         assert encoded[:32] == miner_bytes
-        assert encoded[-len(b'deadbeef'):] == b'deadbeef'
+        assert encoded[-len(b'deadbeef') :] == b'deadbeef'
 
     def test_empty_tx_hash(self):
         encoded = scale_encode_extend_hash_input(b'\x00' * 32, '')

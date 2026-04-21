@@ -79,8 +79,7 @@ class TestCheckConfig:
     def test_dont_save_events_skips_logger(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_config(tmp, dont_save_events=True)
-            with patch('bittensor.logging.check_config'), \
-                 patch('allways.utils.config.setup_events_logger') as setup:
+            with patch('bittensor.logging.check_config'), patch('allways.utils.config.setup_events_logger') as setup:
                 check_config(None, cfg)
             setup.assert_not_called()
 
@@ -89,9 +88,11 @@ class TestCheckConfig:
             cfg = self._make_config(tmp, dont_save_events=False)
             logger = MagicMock()
             logger.name = 'events'
-            with patch('bittensor.logging.check_config'), \
-                 patch('allways.utils.config.setup_events_logger', return_value=logger), \
-                 patch('bittensor.logging.register_primary_logger') as reg:
+            with (
+                patch('bittensor.logging.check_config'),
+                patch('allways.utils.config.setup_events_logger', return_value=logger),
+                patch('bittensor.logging.register_primary_logger') as reg,
+            ):
                 check_config(None, cfg)
             reg.assert_called_once_with('events')
 
@@ -99,11 +100,13 @@ class TestCheckConfig:
 class TestConfig:
     def test_builds_config_with_cls_add_args(self):
         cls = MagicMock()
-        with patch('bittensor.Wallet.add_args'), \
-             patch('bittensor.Subtensor.add_args'), \
-             patch('bittensor.logging.add_args'), \
-             patch('bittensor.Axon.add_args'), \
-             patch('bittensor.Config', return_value='cfg') as bt_config:
+        with (
+            patch('bittensor.Wallet.add_args'),
+            patch('bittensor.Subtensor.add_args'),
+            patch('bittensor.logging.add_args'),
+            patch('bittensor.Axon.add_args'),
+            patch('bittensor.Config', return_value='cfg') as bt_config,
+        ):
             result = config(cls)
         assert result == 'cfg'
         cls.add_args.assert_called_once()

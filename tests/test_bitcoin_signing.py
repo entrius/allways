@@ -234,6 +234,7 @@ class TestToMainnetWif:
 
     def test_testnet_wif_converted(self):
         import base58
+
         decoded = base58.b58decode_check(TEST_WIF)
         testnet_wif = base58.b58encode_check(bytes([0xEF]) + decoded[1:]).decode()
         assert to_mainnet_wif(testnet_wif) == TEST_WIF
@@ -255,6 +256,7 @@ class TestToMainnetAddress:
 class TestBitcoinProviderInit:
     def test_rejects_invalid_mode(self):
         import pytest
+
         with patch.dict(os.environ, {'BTC_MODE': 'bogus'}, clear=False):
             with pytest.raises(ValueError, match='BTC_MODE'):
                 BitcoinProvider()

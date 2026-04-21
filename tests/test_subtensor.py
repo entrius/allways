@@ -10,6 +10,7 @@ from allways.chain_providers.subtensor import SubtensorProvider
 class TestProviderBasics:
     def test_get_chain_returns_tao(self):
         from allways.chains import CHAIN_TAO
+
         assert SubtensorProvider(MagicMock()).get_chain() is CHAIN_TAO
 
     def test_check_connection_success(self):
