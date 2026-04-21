@@ -681,6 +681,17 @@ def swap_now_command(
         )
         user_from_address = click.prompt(f'Your {from_chain.upper()} source address')
 
+    # Validate source address for non-TAO chains
+    if from_chain != 'tao':
+        src_provider = chain_providers.get(from_chain)
+        if (
+            src_provider
+            and hasattr(src_provider, 'is_valid_address')
+            and not src_provider.is_valid_address(user_from_address)
+        ):
+            console.print(f'[red]Invalid source address for {from_chain.upper()}. Please check and try again.[/red]')
+            return
+
     # Step 6b: Verify sender has enough funds
     if from_chain == 'tao':
         tao_balance = subtensor.get_balance(wallet.coldkeypub.ss58_address)
