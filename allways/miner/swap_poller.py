@@ -4,7 +4,7 @@ from typing import Dict, List, Set, Tuple
 
 import bittensor as bt
 
-from allways.classes import Swap, SwapStatus
+from allways.classes import Swap
 from allways.contract_client import AllwaysContractClient
 
 RESCAN_WINDOW = 16
@@ -45,7 +45,7 @@ class SwapPoller:
         for swap_id in range(start, next_id):
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
-                if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+                if swap.is_pending():
                     if swap.id not in self.active:
                         bt.logging.info(
                             f'Discovered swap {swap.id}: {swap.from_chain} -> {swap.to_chain}, '
@@ -62,7 +62,7 @@ class SwapPoller:
             if swap_id in fresh:
                 continue
             swap = self.client.get_swap(swap_id)
-            if swap is None or swap.status not in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+            if swap is None or not swap.is_pending():
                 terminal = swap.status.name if swap is not None else 'GONE'
                 resolved.append((swap_id, terminal))
             else:
@@ -72,6 +72,6 @@ class SwapPoller:
             bt.logging.debug(f'Swap {sid}: dropped from active (status={terminal})')
 
         # 3. Return categorized by contract status
-        active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]
-        fulfilled = [s for s in self.active.values() if s.status == SwapStatus.FULFILLED]
+        active_swaps = [s for s in self.active.values() if s.is_active()]
+        fulfilled = [s for s in self.active.values() if s.is_fulfilled()]
         return active_swaps, fulfilled

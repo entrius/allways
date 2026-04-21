@@ -89,6 +89,15 @@ class Swap:
     fulfilled_block: int = 0
     completed_block: int = 0
 
+    def is_pending(self) -> bool:
+        return self.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
+
+    def is_active(self) -> bool:
+        return self.status == SwapStatus.ACTIVE
+
+    def is_fulfilled(self) -> bool:
+        return self.status == SwapStatus.FULFILLED
+
 
 @dataclass
 class PendingExtension:
