@@ -16,6 +16,27 @@ from allways.cli.swap_commands.helpers import (
 from allways.contract_client import ContractError
 
 
+def _run_setter(title, getter, setter, noun, format_current, new_display, success_msg):
+    _, wallet, _, client = get_cli_context()
+    try:
+        current = getter(client)
+    except ContractError as e:
+        print_contract_error(f'Failed to read {noun}', e)
+        return
+    console.print(f'\n[bold]{title}[/bold]\n')
+    console.print(f'  Current: {format_current(current)}')
+    console.print(f'  New:     {new_display}\n')
+    if not click.confirm(f'Confirm updating {noun}?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+    try:
+        with loading('Submitting transaction...'):
+            setter(client, wallet)
+        console.print(f'[green]{success_msg}[/green]\n')
+    except ContractError as e:
+        print_contract_error(f'Failed to set {noun}', e)
+
+
 @click.group('admin', cls=StyledGroup, show_disclaimer=True)
 def admin_group():
     """Contract administration commands (owner-only)."""
@@ -33,32 +54,15 @@ def set_timeout(blocks: int):
     if blocks < 10:
         console.print('[red]Blocks must be >= 10 (contract minimum)[/red]')
         return
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current = client.get_fulfillment_timeout()
-    except ContractError as e:
-        print_contract_error('Failed to read fulfillment timeout', e)
-        return
-
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
-
-    console.print('\n[bold]Set Fulfillment Timeout[/bold]\n')
-    console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')
-    console.print(f'  New:     {blocks} blocks (~{new_minutes:.0f} min)\n')
-
-    if not click.confirm('Confirm updating timeout?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_fulfillment_timeout(wallet=wallet, blocks=blocks)
-        console.print(f'[green]Fulfillment timeout set to {blocks} blocks[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set fulfillment timeout', e)
+    _run_setter(
+        title='Set Fulfillment Timeout',
+        getter=lambda c: c.get_fulfillment_timeout(),
+        setter=lambda c, w: c.set_fulfillment_timeout(wallet=w, blocks=blocks),
+        noun='fulfillment timeout',
+        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
+        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        success_msg=f'Fulfillment timeout set to {blocks} blocks',
+    )
 
 
 @admin_group.command('set-reservation-ttl', show_disclaimer=True)
@@ -72,32 +76,38 @@ def set_reservation_ttl(blocks: int):
     if blocks <= 0:
         console.print('[red]Blocks must be positive[/red]')
         return
+    _run_setter(
+        title='Set Reservation TTL',
+        getter=lambda c: c.get_reservation_ttl(),
+        setter=lambda c, w: c.set_reservation_ttl(wallet=w, blocks=blocks),
+        noun='reservation TTL',
+        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
+        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        success_msg=f'Reservation TTL set to {blocks} blocks',
+    )
 
-    _, wallet, _, client = get_cli_context()
 
-    try:
-        current = client.get_reservation_ttl()
-    except ContractError as e:
-        print_contract_error('Failed to read reservation TTL', e)
+@admin_group.command('set-fee-divisor', show_disclaimer=True)
+@click.argument('divisor', type=int)
+def set_fee_divisor(divisor: int):
+    """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 20 = 5% fee max).
+
+    [dim]Examples:
+        $ alw admin set-fee-divisor 100[/dim]
+    """
+    if divisor < 20:
+        console.print('[red]Divisor must be at least 20 (max 5% fee)[/red]')
         return
-
-    current_minutes = current * SECONDS_PER_BLOCK / 60
-    new_minutes = blocks * SECONDS_PER_BLOCK / 60
-
-    console.print('\n[bold]Set Reservation TTL[/bold]\n')
-    console.print(f'  Current: {current} blocks (~{current_minutes:.0f} min)')
-    console.print(f'  New:     {blocks} blocks (~{new_minutes:.0f} min)\n')
-
-    if not click.confirm('Confirm updating reservation TTL?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_reservation_ttl(wallet=wallet, blocks=blocks)
-        console.print(f'[green]Reservation TTL set to {blocks} blocks[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set reservation TTL', e)
+    new_pct = 100 / divisor
+    _run_setter(
+        title='Set Fee Divisor',
+        getter=lambda c: c.get_fee_divisor(),
+        setter=lambda c, w: c.set_fee_divisor(wallet=w, divisor=divisor),
+        noun='fee divisor',
+        format_current=lambda v: f'{v} ({100 / v:g}% fee)' if v > 0 else f'{v} (0% fee)',
+        new_display=f'{divisor} ({new_pct:g}% fee)',
+        success_msg=f'Fee divisor set to {divisor} ({new_pct:g}% fee)',
+    )
 
 
 @admin_group.command('set-min-collateral', show_disclaimer=True)
@@ -111,40 +121,16 @@ def set_min_collateral(amount_tao: float):
     if amount_tao <= 0:
         console.print('[red]Amount must be positive[/red]')
         return
-
     amount_rao = to_rao(amount_tao)
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current_rao = client.get_min_collateral()
-        current_max_rao = client.get_max_collateral()
-    except ContractError as e:
-        print_contract_error('Failed to read collateral bounds', e)
-        return
-
-    # Max of 0 means "unlimited" — no upper bound to violate.
-    if current_max_rao > 0 and amount_rao > current_max_rao:
-        console.print(
-            f'[red]New min collateral ({amount_tao:.4f} TAO) exceeds current max collateral '
-            f'({from_rao(current_max_rao):.4f} TAO). Raise max first or pick a smaller min.[/red]'
-        )
-        return
-
-    console.print('\n[bold]Set Minimum Collateral[/bold]\n')
-    console.print(f'  Current: {from_rao(current_rao):.4f} TAO')
-    console.print(f'  New:     {amount_tao:.4f} TAO\n')
-
-    if not click.confirm('Confirm updating minimum collateral?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_min_collateral_amount(wallet=wallet, amount_rao=amount_rao)
-        console.print(f'[green]Minimum collateral set to {amount_tao:.4f} TAO[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set minimum collateral', e)
+    _run_setter(
+        title='Set Minimum Collateral',
+        getter=lambda c: c.get_min_collateral(),
+        setter=lambda c, w: c.set_min_collateral_amount(wallet=w, amount_rao=amount_rao),
+        noun='minimum collateral',
+        format_current=lambda v: f'{from_rao(v):.4f} TAO',
+        new_display=f'{amount_tao:.4f} TAO',
+        success_msg=f'Minimum collateral set to {amount_tao:.4f} TAO',
+    )
 
 
 @admin_group.command('set-max-collateral', show_disclaimer=True)
@@ -159,40 +145,16 @@ def set_max_collateral(amount_tao: float):
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
         return
-
     amount_rao = to_rao(amount_tao)
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current_rao = client.get_max_collateral()
-        current_min_rao = client.get_min_collateral()
-    except ContractError as e:
-        print_contract_error('Failed to read collateral bounds', e)
-        return
-
-    # amount_rao == 0 means "unlimited" — no upper bound to check.
-    if amount_rao > 0 and current_min_rao > 0 and amount_rao < current_min_rao:
-        console.print(
-            f'[red]New max collateral ({amount_tao:.4f} TAO) is below current min collateral '
-            f'({from_rao(current_min_rao):.4f} TAO). Lower min first or pick a larger max.[/red]'
-        )
-        return
-
-    console.print('\n[bold]Set Maximum Collateral[/bold]\n')
-    console.print(f'  Current: {from_rao(current_rao):.4f} TAO{" (unlimited)" if current_rao == 0 else ""}')
-    console.print(f'  New:     {amount_tao:.4f} TAO{" (unlimited)" if amount_rao == 0 else ""}\n')
-
-    if not click.confirm('Confirm updating maximum collateral?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_max_collateral_amount(wallet=wallet, amount_rao=amount_rao)
-        console.print(f'[green]Maximum collateral set to {amount_tao:.4f} TAO[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set maximum collateral', e)
+    _run_setter(
+        title='Set Maximum Collateral',
+        getter=lambda c: c.get_max_collateral(),
+        setter=lambda c, w: c.set_max_collateral_amount(wallet=w, amount_rao=amount_rao),
+        noun='maximum collateral',
+        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (unlimited)" if v == 0 else ""}',
+        new_display=f'{amount_tao:.4f} TAO{" (unlimited)" if amount_rao == 0 else ""}',
+        success_msg=f'Maximum collateral set to {amount_tao:.4f} TAO',
+    )
 
 
 @admin_group.command('set-min-swap', show_disclaimer=True)
@@ -207,40 +169,16 @@ def set_min_swap(amount_tao: float):
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
         return
-
     amount_rao = to_rao(amount_tao)
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current_rao = client.get_min_swap_amount()
-        current_max_rao = client.get_max_swap_amount()
-    except ContractError as e:
-        print_contract_error('Failed to read swap bounds', e)
-        return
-
-    # Max of 0 means "unlimited" — no upper bound to violate.
-    if current_max_rao > 0 and amount_rao > current_max_rao:
-        console.print(
-            f'[red]New min swap ({amount_tao:.4f} TAO) exceeds current max swap '
-            f'({from_rao(current_max_rao):.4f} TAO). Raise max first or pick a smaller min.[/red]'
-        )
-        return
-
-    console.print('\n[bold]Set Minimum Swap Amount[/bold]\n')
-    console.print(f'  Current: {from_rao(current_rao):.4f} TAO{" (no minimum)" if current_rao == 0 else ""}')
-    console.print(f'  New:     {amount_tao:.4f} TAO{" (no minimum)" if amount_rao == 0 else ""}\n')
-
-    if not click.confirm('Confirm updating minimum swap amount?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_min_swap_amount(wallet=wallet, amount_rao=amount_rao)
-        console.print(f'[green]Minimum swap amount set to {amount_tao:.4f} TAO[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set minimum swap amount', e)
+    _run_setter(
+        title='Set Minimum Swap Amount',
+        getter=lambda c: c.get_min_swap_amount(),
+        setter=lambda c, w: c.set_min_swap_amount(wallet=w, amount_rao=amount_rao),
+        noun='minimum swap amount',
+        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (no minimum)" if v == 0 else ""}',
+        new_display=f'{amount_tao:.4f} TAO{" (no minimum)" if amount_rao == 0 else ""}',
+        success_msg=f'Minimum swap amount set to {amount_tao:.4f} TAO',
+    )
 
 
 @admin_group.command('set-max-swap', show_disclaimer=True)
@@ -255,40 +193,16 @@ def set_max_swap(amount_tao: float):
     if amount_tao < 0:
         console.print('[red]Amount must be non-negative[/red]')
         return
-
     amount_rao = to_rao(amount_tao)
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current_rao = client.get_max_swap_amount()
-        current_min_rao = client.get_min_swap_amount()
-    except ContractError as e:
-        print_contract_error('Failed to read swap bounds', e)
-        return
-
-    # amount_rao == 0 means "unlimited" — no upper bound to check.
-    if amount_rao > 0 and current_min_rao > 0 and amount_rao < current_min_rao:
-        console.print(
-            f'[red]New max swap ({amount_tao:.4f} TAO) is below current min swap '
-            f'({from_rao(current_min_rao):.4f} TAO). Lower min first or pick a larger max.[/red]'
-        )
-        return
-
-    console.print('\n[bold]Set Maximum Swap Amount[/bold]\n')
-    console.print(f'  Current: {from_rao(current_rao):.4f} TAO{" (no maximum)" if current_rao == 0 else ""}')
-    console.print(f'  New:     {amount_tao:.4f} TAO{" (no maximum)" if amount_rao == 0 else ""}\n')
-
-    if not click.confirm('Confirm updating maximum swap amount?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_max_swap_amount(wallet=wallet, amount_rao=amount_rao)
-        console.print(f'[green]Maximum swap amount set to {amount_tao:.4f} TAO[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set maximum swap amount', e)
+    _run_setter(
+        title='Set Maximum Swap Amount',
+        getter=lambda c: c.get_max_swap_amount(),
+        setter=lambda c, w: c.set_max_swap_amount(wallet=w, amount_rao=amount_rao),
+        noun='maximum swap amount',
+        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (no maximum)" if v == 0 else ""}',
+        new_display=f'{amount_tao:.4f} TAO{" (no maximum)" if amount_rao == 0 else ""}',
+        success_msg=f'Maximum swap amount set to {amount_tao:.4f} TAO',
+    )
 
 
 @admin_group.command('set-threshold', show_disclaimer=True)
@@ -302,29 +216,15 @@ def set_threshold(percent: int):
     if percent <= 0 or percent > 100:
         console.print('[red]Threshold must be 1-100[/red]')
         return
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current = client.get_consensus_threshold()
-    except ContractError as e:
-        print_contract_error('Failed to read threshold', e)
-        return
-
-    console.print('\n[bold]Set Consensus Threshold[/bold]\n')
-    console.print(f'  Current: {current}%')
-    console.print(f'  New:     {percent}%\n')
-
-    if not click.confirm('Confirm updating consensus threshold?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_consensus_threshold(wallet=wallet, percent=percent)
-        console.print(f'[green]Consensus threshold set to {percent}%[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set consensus threshold', e)
+    _run_setter(
+        title='Set Consensus Threshold',
+        getter=lambda c: c.get_consensus_threshold(),
+        setter=lambda c, w: c.set_consensus_threshold(wallet=w, percent=percent),
+        noun='consensus threshold',
+        format_current=lambda v: f'{v}%',
+        new_display=f'{percent}%',
+        success_msg=f'Consensus threshold set to {percent}%',
+    )
 
 
 @admin_group.command('add-vali', show_disclaimer=True)
