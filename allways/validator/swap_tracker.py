@@ -102,14 +102,8 @@ class SwapTracker:
             return False
         return True
 
-    async def poll(self, current_block: int = 0):
-        """Incremental refresh — called every forward step.
-
-        ``ContractError`` is treated as transient: ``_read_typed`` raises it
-        when ``raw_contract_read`` returns None on an RPC blip, and this
-        path is read-only (no business-logic rejections surface here).
-        Truly unexpected errors still escalate.
-        """
+    async def poll(self):
+        """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
         except (ConnectionError, TimeoutError, asyncio.TimeoutError, ContractError) as e:

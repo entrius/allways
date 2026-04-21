@@ -79,14 +79,14 @@ def make_validator(
     *,
     block: int = 1000,
     reserved_until: int = 2000,
-    reservation_data: tuple | None = (0, 345_000_000, 100_000, 345_000_000),
+    reservation_data: tuple | None = (345_000_000, 100_000, 345_000_000),
     providers: dict | None = None,
 ) -> MagicMock:
     """Build a Validator mock with default-happy contract/chain state.
 
     Individual tests override specific attributes to simulate each branch.
     reservation_data tuple mirrors the on-chain layout used by
-    handle_swap_confirm: (_, tao_amount, source_amount, dest_amount).
+    handle_swap_confirm: (tao_amount, source_amount, dest_amount).
     """
     validator = MagicMock()
     validator.block = block
@@ -310,7 +310,7 @@ class TestSourceTxVerification:
         """The contract-reserved amounts are authoritative. A queued entry
         must persist those, not any user-supplied value, so the later
         auto-initiate hashes match what the miner was reserved under."""
-        validator = make_validator(reservation_data=(0, 777_000_000, 55_000, 999_000_000))
+        validator = make_validator(reservation_data=(777_000_000, 55_000, 999_000_000))
         validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
             confirmed=False,
             confirmations=1,
