@@ -4,6 +4,7 @@ import os
 import time
 from dataclasses import replace
 
+import bittensor as bt
 import click
 from rich.live import Live
 from rich.table import Table
@@ -833,20 +834,23 @@ def view_contract():
 
 
 @view_group.command('validators')
-@click.option('--full', is_flag=True, help='Show untruncated hotkeys')
-def view_validators(full: bool):
+def view_validators():
     """View whitelisted validators on the contract.
 
     [dim]Reads the validator allowlist the owner has registered via
     `alw admin add-vali` / `alw admin remove-vali`. Each listed validator
     is one of the keys that can sign vote_* messages (reserve, initiate,
-    confirm, timeout, activate, etc.).[/dim]
+    confirm, timeout, activate, etc.).
+
+    The Identity column shows the on-chain IdentitiesV2 display name
+    registered against the validator's coldkey, when one exists. Owner-
+    tagged rows match the contract owner.[/dim]
 
     [dim]Examples:
-        $ alw view validators
-        $ alw view validators --full[/dim]
+        $ alw view validators[/dim]
     """
-    _, _, _, client = get_cli_context(need_wallet=False)
+    config, _, subtensor, client = get_cli_context(need_wallet=False)
+    netuid = config['netuid']
 
     console.print('\n[bold]Whitelisted Validators[/bold]\n')
 
@@ -863,30 +867,48 @@ def view_validators(full: bool):
         console.print('[yellow]No validators whitelisted.[/yellow]\n')
         return
 
-    def _trunc(s: str) -> str:
-        if full or not s:
-            return s
-        return s[:16] + '...' if len(s) > 16 else s
+    # On-chain identities are keyed by coldkey in the SubtensorModule.
+    # IdentitiesV2 map. Resolve each validator hotkey → coldkey through the
+    # subnet metagraph; skip silently when a hotkey isn't registered on this
+    # netuid (possible if the whitelist includes off-subnet validators) or
+    # the RPC fails — the column just renders as a dim dash.
+    hotkey_to_identity: dict[str, str] = {}
+    try:
+        with loading('Reading on-chain identities...'):
+            metagraph = subtensor.metagraph(netuid)
+            hotkey_to_coldkey = {metagraph.hotkeys[i]: metagraph.coldkeys[i] for i in range(metagraph.n.item())}
+            for hk in validators:
+                ck = hotkey_to_coldkey.get(hk)
+                if not ck:
+                    continue
+                try:
+                    identity = subtensor.query_identity(ck)
+                except Exception:
+                    identity = None
+                if identity and getattr(identity, 'name', ''):
+                    hotkey_to_identity[hk] = identity.name
+    except Exception as e:
+        bt.logging.debug(f'Identity lookup failed: {e}')
 
     required = max(1, (len(validators) * consensus_threshold + 99) // 100)
 
     table = Table(show_header=True)
     table.add_column('#', style='dim')
     table.add_column('Hotkey', style='cyan')
-    table.add_column('Role', style='green')
+    table.add_column('Identity', style='green')
 
     for idx, hotkey in enumerate(validators, 1):
-        role = '[yellow]owner[/yellow]' if hotkey == owner else ''
-        table.add_row(str(idx), _trunc(hotkey), role)
+        hotkey_display = hotkey
+        if hotkey == owner:
+            hotkey_display = f'{hotkey} [yellow](owner)[/yellow]'
+        identity_display = hotkey_to_identity.get(hotkey, '[dim]—[/dim]')
+        table.add_row(str(idx), hotkey_display, identity_display)
 
     console.print(table)
     console.print(
         f'\n[dim]Total: {len(validators)} validators · '
-        f'consensus {consensus_threshold}% → {required} votes needed for quorum.[/dim]'
+        f'consensus {consensus_threshold}% → {required} votes needed for quorum.[/dim]\n'
     )
-    if not full:
-        console.print('[dim]Use --full to show untruncated hotkeys.[/dim]')
-    console.print()
 
 
 @view_group.command('reservation')
