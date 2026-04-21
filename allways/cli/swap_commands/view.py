@@ -806,7 +806,13 @@ def view_contract():
     table.add_row('Reservation TTL', f'{reservation_ttl_blocks} blocks (~{reservation_ttl_minutes:.0f} min)')
     fee_pct = 100 / FEE_DIVISOR
     table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
-    table.add_row('Consensus Threshold', f'{consensus_threshold}%')
+    # Collapsed: the threshold is the knob, required_votes is what it resolves
+    # to at current validator_count — showing both on separate rows read as
+    # redundant (especially on small validator sets where they coincide).
+    table.add_row(
+        'Consensus',
+        f'{consensus_threshold}% → {required_votes} of {validator_count} validators needed',
+    )
     table.add_row('Min Collateral', f'{from_rao(min_collateral_rao):.4f} TAO')
     if max_collateral_rao > 0:
         table.add_row('Max Collateral', f'{from_rao(max_collateral_rao):.4f} TAO')
@@ -814,7 +820,6 @@ def view_contract():
         table.add_row('Max Collateral', 'Unlimited')
     table.add_row('Min Swap Amount', f'{from_rao(min_swap_rao):.4f} TAO')
     table.add_row('Max Swap Amount', f'{from_rao(max_swap_rao):.4f} TAO')
-    table.add_row('Required Validator Votes', f'{required_votes} (of {validator_count} validators)')
     table.add_row('Next Swap ID', str(next_swap_id))
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
