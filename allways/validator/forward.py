@@ -252,9 +252,19 @@ def try_extend_reservation(
         )
     except ContractError as e:
         if 'AlreadyVoted' in str(e):
-            self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = (
-                self.contract_client.get_miner_reserved_until(item.miner_hotkey)
-            )
+            # Refresh the cache so the next round can vote again once the
+            # contract extends. Guard with an inner try/except because this
+            # read can itself raise ContractError on a subtensor blip, and
+            # Python would propagate that new exception out of the handler —
+            # bypassing the outer ``except Exception`` defensive guard below.
+            try:
+                reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
+                self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = reserved_until
+            except Exception as inner:
+                bt.logging.debug(
+                    f'PendingConfirm [{swap_label} {miner_short}]: '
+                    f'failed to refresh extend-vote cache: {inner}'
+                )
         else:
             bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
     except Exception as e:
