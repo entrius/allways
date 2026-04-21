@@ -814,13 +814,26 @@ def view_contract():
         'Consensus',
         f'{consensus_threshold}% → {required_votes} of {validator_count} validators needed',
     )
-    table.add_row('Min Collateral', f'{from_rao(min_collateral_rao):.4f} TAO')
-    if max_collateral_rao > 0:
-        table.add_row('Max Collateral', f'{from_rao(max_collateral_rao):.4f} TAO')
-    else:
-        table.add_row('Max Collateral', 'Unlimited')
-    table.add_row('Min Swap Amount', f'{from_rao(min_swap_rao):.4f} TAO')
-    table.add_row('Max Swap Amount', f'{from_rao(max_swap_rao):.4f} TAO')
+    # Contract treats 0 as "bound disabled" (see lib.rs::vote_reserve — the
+    # `if self.min_swap_amount > 0 &&` guard skips the check at 0). Render
+    # the sentinel explicitly instead of a bare `0.0000 TAO` that reads
+    # like a real threshold.
+    table.add_row(
+        'Min Collateral',
+        f'{from_rao(min_collateral_rao):.4f} TAO' if min_collateral_rao > 0 else 'No minimum',
+    )
+    table.add_row(
+        'Max Collateral',
+        f'{from_rao(max_collateral_rao):.4f} TAO' if max_collateral_rao > 0 else 'Unlimited',
+    )
+    table.add_row(
+        'Min Swap Amount',
+        f'{from_rao(min_swap_rao):.4f} TAO' if min_swap_rao > 0 else 'No minimum',
+    )
+    table.add_row(
+        'Max Swap Amount',
+        f'{from_rao(max_swap_rao):.4f} TAO' if max_swap_rao > 0 else 'Unlimited',
+    )
     table.add_row('Next Swap ID', str(next_swap_id))
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
