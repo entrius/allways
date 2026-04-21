@@ -18,8 +18,7 @@ from allways.contract_client import ContractError
 
 
 @click.command('status', cls=StyledCommand)
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
-def status_command(netuid: int):
+def status_command():
     """Show a quick dashboard of your current state.
 
     [dim]Displays network info, wallet balance, active swaps,
@@ -29,8 +28,10 @@ def status_command(netuid: int):
         $ alw status[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', NETUID_FINNEY))
+    # --netuid is handled as a global flag in main.py (apply_global_flags);
+    # by the time we get here, config['netuid'] already reflects CLI override
+    # → config file → NETUID_FINNEY fallback. No need for a per-command opt.
+    netuid = int(config.get('netuid', NETUID_FINNEY))
 
     network = config.get('network', 'finney')
     hotkey = wallet.hotkey.ss58_address

@@ -29,8 +29,7 @@ from allways.contract_client import ContractError
 @click.command('resume')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
-def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: int):
+def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
     """Resume an interrupted swap from where it left off.
 
     \b
@@ -53,8 +52,11 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         return
 
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', state.netuid))
+    # --netuid handled globally in main.py. Fall back to the saved
+    # reservation's netuid when neither CLI flag nor config override it,
+    # so a resume stays pinned to the subnet the original reservation
+    # was opened on.
+    netuid = int(config.get('netuid', state.netuid))
 
     # Check if system is halted
     try:

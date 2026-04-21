@@ -20,8 +20,7 @@ from allways.contract_client import ContractError
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
 @click.argument('tx_hash', required=False, default=None, type=str)
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
-def post_tx_command(tx_hash: str, netuid: int):
+def post_tx_command(tx_hash: str):
     """Submit your source transaction hash for a pending swap reservation.
 
     [dim]Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).[/dim]
@@ -31,8 +30,8 @@ def post_tx_command(tx_hash: str, netuid: int):
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', NETUID_FINNEY))
+    # --netuid handled globally in main.py; config['netuid'] already resolved.
+    netuid = int(config.get('netuid', NETUID_FINNEY))
 
     # Load pending swap state
     state = load_pending_swap()

@@ -403,7 +403,6 @@ def swap_group():
 
 
 @swap_group.command('now', show_disclaimer=True)
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
 @click.option('--from', 'from_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--to', 'to_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
 @click.option('--amount', 'amount_opt', default=None, type=float, help='Amount to send in source chain units')
@@ -413,7 +412,6 @@ def swap_group():
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 def swap_now_command(
-    netuid: int,
     from_chain_opt: Optional[str],
     to_chain_opt: Optional[str],
     amount_opt: Optional[float],
@@ -440,8 +438,8 @@ def swap_now_command(
         $ alw swap now[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', NETUID_FINNEY))
+    # --netuid handled globally in main.py; config['netuid'] already resolved.
+    netuid = int(config.get('netuid', NETUID_FINNEY))
 
     try:
         if client.get_halted():
