@@ -4,7 +4,7 @@ from typing import Dict, List, Set, Tuple
 
 import bittensor as bt
 
-from allways.classes import Swap, SwapStatus
+from allways.classes import Swap
 from allways.contract_client import AllwaysContractClient
 
 
@@ -42,7 +42,7 @@ class SwapPoller:
         for swap_id in range(self.last_scanned_id + 1, next_id):
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
-                if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+                if swap.is_pending():
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
         if next_id > 1:
@@ -54,7 +54,7 @@ class SwapPoller:
             if swap_id in fresh:
                 continue
             swap = self.client.get_swap(swap_id)
-            if swap is None or swap.status not in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+            if swap is None or not swap.is_pending():
                 resolved.append(swap_id)
             else:
                 self.active[swap_id] = swap
@@ -62,6 +62,6 @@ class SwapPoller:
             self.active.pop(sid, None)
 
         # 3. Return categorized by contract status
-        active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]
-        fulfilled = [s for s in self.active.values() if s.status == SwapStatus.FULFILLED]
+        active_swaps = [s for s in self.active.values() if s.is_active()]
+        fulfilled = [s for s in self.active.values() if s.is_fulfilled()]
         return active_swaps, fulfilled

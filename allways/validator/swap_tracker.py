@@ -11,8 +11,6 @@ from allways.classes import Swap, SwapStatus
 from allways.constants import EXTEND_THRESHOLD_BLOCKS
 from allways.contract_client import AllwaysContractClient
 
-ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
-
 # Consecutive None polls tolerated before treating a swap as resolved. Smooths
 # RPC flakes without the fragile timeout-block inference the V1 tracker used.
 NULL_SWAP_RETRY_LIMIT = 3
@@ -66,7 +64,7 @@ class SwapTracker:
                     break
                 continue
             consecutive_none = 0
-            if swap.status in ACTIVE_STATUSES:
+            if swap.is_pending():
                 self.active[swap.id] = swap
 
         self.last_scanned_id = next_id - 1
@@ -136,7 +134,7 @@ class SwapTracker:
                 swap = result
                 if swap is None:
                     continue
-                if swap.status in ACTIVE_STATUSES:
+                if swap.is_pending():
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
 
@@ -169,7 +167,7 @@ class SwapTracker:
             if result is None:
                 if self.bump_null_retry(sid):
                     resolved_ids.append(sid)
-            elif result.status in ACTIVE_STATUSES:
+            elif result.is_pending():
                 self.active[sid] = result
                 self.null_retry_count.pop(sid, None)
             else:
@@ -209,7 +207,7 @@ class SwapTracker:
         return [
             s
             for s in self.active.values()
-            if s.status == SwapStatus.FULFILLED and (s.timeout_block == 0 or current_block <= s.timeout_block)
+            if s.is_fulfilled() and (s.timeout_block == 0 or current_block <= s.timeout_block)
         ]
 
     def get_near_timeout_fulfilled(self, current_block: int) -> List[Swap]:
@@ -217,9 +215,7 @@ class SwapTracker:
         return [
             s
             for s in self.active.values()
-            if s.status == SwapStatus.FULFILLED
-            and s.timeout_block > 0
-            and current_block >= s.timeout_block - EXTEND_THRESHOLD_BLOCKS
+            if s.is_fulfilled() and s.timeout_block > 0 and current_block >= s.timeout_block - EXTEND_THRESHOLD_BLOCKS
         ]
 
     def get_timed_out(self, current_block: int) -> List[Swap]:
@@ -227,7 +223,5 @@ class SwapTracker:
         return [
             s
             for s in self.active.values()
-            if s.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
-            and s.timeout_block > 0
-            and current_block > s.timeout_block
+            if s.is_pending() and s.timeout_block > 0 and current_block > s.timeout_block
         ]
