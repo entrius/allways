@@ -118,8 +118,17 @@ def set_min_collateral(amount_tao: float):
 
     try:
         current_rao = client.get_min_collateral()
+        current_max_rao = client.get_max_collateral()
     except ContractError as e:
-        print_contract_error('Failed to read min collateral', e)
+        print_contract_error('Failed to read collateral bounds', e)
+        return
+
+    # Max of 0 means "unlimited" — no upper bound to violate.
+    if current_max_rao > 0 and amount_rao > current_max_rao:
+        console.print(
+            f'[red]New min collateral ({amount_tao:.4f} TAO) exceeds current max collateral '
+            f'({from_rao(current_max_rao):.4f} TAO). Raise max first or pick a smaller min.[/red]'
+        )
         return
 
     console.print('\n[bold]Set Minimum Collateral[/bold]\n')
@@ -157,8 +166,17 @@ def set_max_collateral(amount_tao: float):
 
     try:
         current_rao = client.get_max_collateral()
+        current_min_rao = client.get_min_collateral()
     except ContractError as e:
-        print_contract_error('Failed to read max collateral', e)
+        print_contract_error('Failed to read collateral bounds', e)
+        return
+
+    # amount_rao == 0 means "unlimited" — no upper bound to check.
+    if amount_rao > 0 and current_min_rao > 0 and amount_rao < current_min_rao:
+        console.print(
+            f'[red]New max collateral ({amount_tao:.4f} TAO) is below current min collateral '
+            f'({from_rao(current_min_rao):.4f} TAO). Lower min first or pick a larger max.[/red]'
+        )
         return
 
     console.print('\n[bold]Set Maximum Collateral[/bold]\n')
@@ -196,8 +214,17 @@ def set_min_swap(amount_tao: float):
 
     try:
         current_rao = client.get_min_swap_amount()
+        current_max_rao = client.get_max_swap_amount()
     except ContractError as e:
-        print_contract_error('Failed to read min swap amount', e)
+        print_contract_error('Failed to read swap bounds', e)
+        return
+
+    # Max of 0 means "unlimited" — no upper bound to violate.
+    if current_max_rao > 0 and amount_rao > current_max_rao:
+        console.print(
+            f'[red]New min swap ({amount_tao:.4f} TAO) exceeds current max swap '
+            f'({from_rao(current_max_rao):.4f} TAO). Raise max first or pick a smaller min.[/red]'
+        )
         return
 
     console.print('\n[bold]Set Minimum Swap Amount[/bold]\n')
@@ -235,8 +262,17 @@ def set_max_swap(amount_tao: float):
 
     try:
         current_rao = client.get_max_swap_amount()
+        current_min_rao = client.get_min_swap_amount()
     except ContractError as e:
-        print_contract_error('Failed to read max swap amount', e)
+        print_contract_error('Failed to read swap bounds', e)
+        return
+
+    # amount_rao == 0 means "unlimited" — no upper bound to check.
+    if amount_rao > 0 and current_min_rao > 0 and amount_rao < current_min_rao:
+        console.print(
+            f'[red]New max swap ({amount_tao:.4f} TAO) is below current min swap '
+            f'({from_rao(current_min_rao):.4f} TAO). Lower min first or pick a larger max.[/red]'
+        )
         return
 
     console.print('\n[bold]Set Maximum Swap Amount[/bold]\n')
