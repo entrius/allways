@@ -13,7 +13,7 @@ def ttl_cache(maxsize: int = 128, typed: bool = False, ttl: int = -1):
     """
     if ttl <= 0:
         ttl = 65536
-    hash_gen = _ttl_hash_gen(ttl)
+    hash_gen = ttl_hash_gen(ttl)
 
     def wrapper(func: Callable) -> Callable:
         @lru_cache(maxsize, typed)
@@ -29,7 +29,7 @@ def ttl_cache(maxsize: int = 128, typed: bool = False, ttl: int = -1):
     return wrapper
 
 
-def _ttl_hash_gen(seconds: int):
+def ttl_hash_gen(seconds: int):
     """Generate a new hash value at regular time intervals for the ttl_cache decorator."""
     start_time = time.time()
     while True:

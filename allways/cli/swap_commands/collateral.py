@@ -1,38 +1,39 @@
 """alw collateral - Manage miner collateral on the smart contract."""
 
-import rich_click as click
+import click
 from rich.table import Table
 
-from allways.cli.swap_commands.helpers import SECONDS_PER_BLOCK, console, from_rao, get_cli_context, loading, to_rao
+from allways.cli.help import StyledGroup
+from allways.cli.swap_commands.helpers import (
+    SECONDS_PER_BLOCK,
+    console,
+    from_rao,
+    get_cli_context,
+    loading,
+    print_contract_error,
+    to_rao,
+)
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
-from allways.contract_client import ContractError
+from allways.contract_client import ContractError, is_contract_rejection
 
 
-@click.group('collateral')
+@click.group('collateral', cls=StyledGroup, show_disclaimer=True)
 def collateral_group():
-    """Manage miner collateral.
-
-    \b
-    Subcommands:
-        deposit             Deposit collateral (in TAO)
-        withdraw            Withdraw collateral (in TAO)
-        view                View current collateral
-    """
+    """Manage miner collateral."""
     pass
 
 
-@collateral_group.command('deposit')
+@collateral_group.command('deposit', show_disclaimer=True)
 @click.option('--amount', default=None, type=float, help='Amount in TAO')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_deposit(amount: float | None, yes: bool):
     """Deposit collateral to the swap contract.
 
-    \b
-    Amount is in TAO. Minimum collateral to be active: see MIN_COLLATERAL_TAO.
+    [dim]Amount is in TAO. Minimum collateral to be active: see MIN_COLLATERAL_TAO.[/dim]
 
-    Examples:
-        alw collateral deposit --amount 5.0
-        alw collateral deposit                  (prompts interactively)
+    [dim]Examples:
+        $ alw collateral deposit --amount 5.0
+        $ alw collateral deposit  (prompts interactively)[/dim]
     """
     if amount is None:
         amount = click.prompt('Amount to deposit (TAO)', type=float)
@@ -73,6 +74,12 @@ def collateral_deposit(amount: float | None, yes: bool):
             )
             return
     except ContractError as e:
+        # Contract rejection on a read means the contract told us this
+        # deposit is invalid (e.g. ExceedsMaxCollateral) — abort. A plain
+        # RPC failure is transient, so we warn and continue.
+        if is_contract_rejection(e):
+            print_contract_error('Pre-flight check rejected deposit', e)
+            return
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
         console.print(f'[yellow]Warning: balance check failed ({e}), proceeding anyway[/yellow]')
@@ -86,21 +93,20 @@ def collateral_deposit(amount: float | None, yes: bool):
             client.post_collateral(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Successfully deposited {amount} TAO collateral![/green]')
     except ContractError as e:
-        console.print(f'[red]Failed to deposit collateral: {e}[/red]')
+        print_contract_error('Failed to deposit collateral', e)
 
 
-@collateral_group.command('withdraw')
+@collateral_group.command('withdraw', show_disclaimer=True)
 @click.option('--amount', default=None, type=float, help='Amount in TAO')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_withdraw(amount: float | None, yes: bool):
     """Withdraw collateral from the swap contract.
 
-    \b
-    Amount is in TAO. Cannot withdraw if you have active swaps.
+    [dim]Amount is in TAO. Cannot withdraw if you have active swaps.[/dim]
 
-    Examples:
-        alw collateral withdraw --amount 2.0
-        alw collateral withdraw                 (prompts interactively)
+    [dim]Examples:
+        $ alw collateral withdraw --amount 2.0
+        $ alw collateral withdraw  (prompts interactively)[/dim]
     """
     if amount is None:
         amount = click.prompt('Amount to withdraw (TAO)', type=float)
@@ -122,12 +128,15 @@ def collateral_withdraw(amount: float | None, yes: bool):
         hotkey = wallet.hotkey.ss58_address
         current_block = subtensor.get_current_block()
 
-        is_active = client.get_miner_active_flag(hotkey)
+        # Single composite read instead of five separate RPCs.
+        current_collateral_rao, is_active, has_active_swap, reserved_until, deactivation_block = (
+            client.get_miner_snapshot(hotkey)
+        )
+
         if is_active:
             console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
             return
 
-        deactivation_block = client.get_miner_deactivation_block(hotkey)
         if deactivation_block > 0:
             timeout_blocks = client.get_fulfillment_timeout()
             cooldown_end = deactivation_block + (timeout_blocks * 2)
@@ -139,17 +148,14 @@ def collateral_withdraw(amount: float | None, yes: bool):
                 )
                 return
 
-        reserved_until = client.get_miner_reserved_until(hotkey)
         if reserved_until >= current_block:
             console.print('[red]Cannot withdraw while miner is reserved for a swap.[/red]')
             return
 
-        has_active_swap = client.get_miner_has_active_swap(hotkey)
         if has_active_swap:
             console.print('[red]Cannot withdraw while miner has an active swap.[/red]')
             return
 
-        current_collateral_rao = client.get_miner_collateral(hotkey)
         if amount_rao > current_collateral_rao:
             console.print(
                 f'[red]Insufficient collateral. Current: {from_rao(current_collateral_rao):.4f} TAO, '
@@ -157,6 +163,9 @@ def collateral_withdraw(amount: float | None, yes: bool):
             )
             return
     except ContractError as e:
+        if is_contract_rejection(e):
+            print_contract_error('Pre-flight check rejected withdrawal', e)
+            return
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
@@ -170,7 +179,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
             client.withdraw_collateral(wallet=wallet, amount_rao=amount_rao)
         console.print(f'[green]Successfully withdrew {amount} TAO collateral![/green]')
     except ContractError as e:
-        console.print(f'[red]Failed to withdraw collateral: {e}[/red]')
+        print_contract_error('Failed to withdraw collateral', e)
 
 
 @collateral_group.command('view')
@@ -178,9 +187,9 @@ def collateral_withdraw(amount: float | None, yes: bool):
 def collateral_view(hotkey: str):
     """View collateral balance.
 
-    Example:
-        alw collateral view
-        alw collateral view --hotkey 5Cxyz...
+    [dim]Examples:
+        $ alw collateral view
+        $ alw collateral view --hotkey 5Cxyz...[/dim]
     """
     _, wallet, _, client = get_cli_context()
 
@@ -192,7 +201,7 @@ def collateral_view(hotkey: str):
             collateral_rao = client.get_miner_collateral(hotkey)
             is_active = client.get_miner_active_flag(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to read collateral: {e}[/red]')
+        print_contract_error('Failed to read collateral', e)
         return
 
     console.print('\n[bold]Collateral Status[/bold]\n')

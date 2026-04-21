@@ -3,33 +3,26 @@
 import asyncio
 import time
 
-import rich_click as click
+import click
 from rich.table import Table
 
 from allways.cli.dendrite_lite import discover_validators
+from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
     console,
     from_rao,
     get_cli_context,
     loading,
+    print_contract_error,
     read_miner_commitment,
 )
 from allways.contract_client import ContractError
 
 
-@click.group('miner')
+@click.group('miner', cls=StyledGroup)
 def miner_group():
-    """Miner dashboard commands.
-
-    \b
-    Subcommands:
-        post            Post a trading pair commitment
-        status          View miner collateral, pair, and active swaps
-        activate        Activate miner via validator API
-        deactivate      Deactivate miner via validator API
-        mark-fulfilled  Manually mark a swap as fulfilled
-    """
+    """Miner dashboard commands."""
     pass
 
 
@@ -38,9 +31,9 @@ def miner_group():
 def miner_status(hotkey: str):
     """View miner status: collateral, committed pair, and active swaps.
 
-    Example:
-        alw miner status
-        alw miner status --hotkey 5Cxyz...
+    [dim]Examples:
+        $ alw miner status
+        $ alw miner status --hotkey 5Cxyz...[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     netuid = config['netuid']
@@ -58,7 +51,7 @@ def miner_status(hotkey: str):
             is_active = client.get_miner_active_flag(hotkey)
             has_active_swap = client.get_miner_has_active_swap(hotkey)
     except ContractError as e:
-        console.print(f'[red]Failed to read miner data: {e}[/red]')
+        print_contract_error('Failed to read miner data', e)
         return
 
     table = Table(title='Collateral & Status', show_header=True)
@@ -80,9 +73,25 @@ def miner_status(hotkey: str):
 
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
-        console.print(f'  {pair.source_chain.upper()}/{pair.dest_chain.upper()} @ [green]{pair.rate:g}[/green]')
-        console.print(f'  Source address: [dim]{pair.source_address}[/dim]')
-        console.print(f'  Dest address:   [dim]{pair.dest_address}[/dim]')
+        src_up, dst_up = pair.from_chain.upper(), pair.to_chain.upper()
+        fwd_disabled = pair.rate == 0
+        ctr_disabled = pair.counter_rate == 0
+        if fwd_disabled or ctr_disabled or pair.rate_str != pair.counter_rate_str:
+            console.print(f'  {src_up} ↔ {dst_up}')
+            if fwd_disabled:
+                console.print(f'    {src_up} → {dst_up}: [yellow]not supported[/yellow]')
+            else:
+                console.print(f'    {src_up} → {dst_up}: [green]send 1 {src_up}, get {pair.rate:g} {dst_up}[/green]')
+            if ctr_disabled:
+                console.print(f'    {dst_up} → {src_up}: [yellow]not supported[/yellow]')
+            else:
+                console.print(
+                    f'    {dst_up} → {src_up}: [green]send {pair.counter_rate:g} {dst_up}, get 1 {src_up}[/green]'
+                )
+        else:
+            console.print(f'  {src_up} ↔ {dst_up} @ [green]{pair.rate:g}[/green]')
+        console.print(f'  Source address: [dim]{pair.from_address}[/dim]')
+        console.print(f'  Dest address:   [dim]{pair.to_address}[/dim]')
     else:
         console.print('[yellow]No committed pair found[/yellow]')
 
@@ -107,14 +116,14 @@ def miner_status(hotkey: str):
     swap_table.add_column('Block', style='dim')
 
     for swap in swaps:
-        pair_str = f'{swap.source_chain.upper()}/{swap.dest_chain.upper()}'
+        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
         color = SWAP_STATUS_COLORS.get(swap.status, 'white')
         status_display = f'[{color}]{swap.status.name}[/{color}]'
 
         swap_table.add_row(
             str(swap.id),
             pair_str,
-            str(swap.source_amount),
+            str(swap.from_amount),
             status_display,
             str(swap.initiated_block),
         )
@@ -123,7 +132,7 @@ def miner_status(hotkey: str):
     console.print(f'\n[dim]Total: {len(swaps)} active swaps[/dim]\n')
 
 
-def _friendly_rejection(reason: str) -> str:
+def friendly_rejection(reason: str) -> str:
     """Convert raw validator rejection reasons into human-readable messages."""
     if not reason:
         return ''
@@ -145,12 +154,12 @@ def _friendly_rejection(reason: str) -> str:
 def miner_activate():
     """Activate miner via dendrite broadcast to all validators.
 
-    Broadcasts a MinerActivateSynapse to all validators. Each validator
+    [dim]Broadcasts a MinerActivateSynapse to all validators. Each validator
     independently verifies commitment and collateral, then votes on contract.
-    Activation requires quorum.
+    Activation requires quorum.[/dim]
 
-    Example:
-        alw miner activate
+    [dim]Examples:
+        $ alw miner activate[/dim]
     """
     import bittensor as bt
 
@@ -200,7 +209,7 @@ def miner_activate():
             accepted += 1
         else:
             raw_reason = getattr(resp, 'rejection_reason', '') or ''
-            friendly = _friendly_rejection(raw_reason)
+            friendly = friendly_rejection(raw_reason)
             console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly}')
 
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')
@@ -232,11 +241,11 @@ def miner_activate():
 def miner_deactivate():
     """Deactivate miner directly on contract (permissionless).
 
-    Calls deactivate() on the contract directly. No validator needed.
-    After deactivation, must wait 2 * timeout_blocks before withdrawing collateral.
+    [dim]Calls deactivate() on the contract directly. No validator needed.
+    After deactivation, must wait 2 * timeout_blocks before withdrawing collateral.[/dim]
 
-    Example:
-        alw miner deactivate
+    [dim]Examples:
+        $ alw miner deactivate[/dim]
     """
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
@@ -252,7 +261,7 @@ def miner_deactivate():
             f'[dim]Collateral withdrawal available after {timeout * 2} blocks (~{timeout * 2 * 12 // 60} min)[/dim]\n'
         )
     except ContractError as e:
-        console.print(f'[red]Failed to deactivate: {e}[/red]\n')
+        print_contract_error('Failed to deactivate', e)
 
 
 @miner_group.command('mark-fulfilled')
@@ -264,12 +273,11 @@ def miner_deactivate():
 def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, yes: bool):
     """Manually mark a swap as fulfilled on the contract.
 
-    \b
-    Use this when you've sent destination funds manually (e.g. via external
-    wallet) and need to notify the contract.
+    [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
+    and need to notify the contract.[/dim]
 
-    Examples:
-        alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000
+    [dim]Examples:
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000[/dim]
     """
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
@@ -290,10 +298,10 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, ye
             result = client.mark_fulfilled(
                 wallet=wallet,
                 swap_id=swap_id,
-                dest_tx_hash=tx_hash,
-                dest_amount=amount,
-                dest_tx_block=block,
+                to_tx_hash=tx_hash,
+                to_amount=amount,
+                to_tx_block=block,
             )
         console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
     except ContractError as e:
-        console.print(f'[red]Failed to mark fulfilled: {e}[/red]\n')
+        print_contract_error('Failed to mark fulfilled', e)

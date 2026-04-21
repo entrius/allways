@@ -11,12 +11,16 @@ Usage:
 import threading
 import time
 from functools import partial
+from pathlib import Path
 
 import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
-from allways.constants import DEFAULT_FEE_DIVISOR, DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS, SCORING_WINDOW_BLOCKS
+from allways.constants import (
+    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    FEE_DIVISOR,
+)
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
@@ -30,10 +34,10 @@ from allways.validator.axon_handlers import (
     priority_swap_reserve,
 )
 from allways.validator.chain_verification import SwapVerifier
+from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
-from allways.validator.pending_confirms import PendingConfirmQueue
+from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
-from allways.validator.voting import SwapVoter
 from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
@@ -55,34 +59,52 @@ class Validator(BaseValidatorNeuron):
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
         timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
-        try:
-            self.fee_divisor = self.contract_client.get_fee_divisor() or DEFAULT_FEE_DIVISOR
-        except Exception as e:
-            bt.logging.warning(f'Failed to read fee_divisor, using default {DEFAULT_FEE_DIVISOR}: {e}')
-            self.fee_divisor = DEFAULT_FEE_DIVISOR
+        self.fee_divisor = FEE_DIVISOR
+
+        # Single store owning every validator-local table. Must be created
+        # before SwapTracker so the tracker can persist swap outcomes into
+        # the credibility ledger, and before the axon handler wiring so the
+        # handler thread can enqueue pending confirms. Exposes current block
+        # so pending_confirms can purge expired reservations lazily on read.
+        self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
+        self.last_known_rates: dict[tuple[str, str, str], float] = {}
+        # (miner_hotkey, from_tx_hash) → reserved_until at vote time. Skips
+        # redundant vote_extend_reservation extrinsics — auto-clears once the
+        # contract bumps reserved_until past the voted value, so the next
+        # extension round is open.
+        self.extend_reservation_voted_at: dict[tuple[str, str], int] = {}
+        # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
+        # Used to absorb mempool propagation lag before dropping a pending entry.
+        self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
+
+        # Event-sourced miner state. ``sync_to(current_block)`` runs each
+        # forward step; scoring reads the active set from the watcher's
+        # in-memory dicts and trusts the contract's active flag for all
+        # collateral-floor invariants.
+        metadata_path = Path(__file__).resolve().parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
+        self.event_watcher = ContractEventWatcher(
+            substrate=self.subtensor.substrate,
+            contract_address=self.contract_client.contract_address,
+            metadata_path=metadata_path,
+            state_store=self.state_store,
+        )
+        self.event_watcher.initialize(
+            current_block=self.block,
+            metagraph_hotkeys=list(self.metagraph.hotkeys),
+            contract_client=self.contract_client,
+        )
+
         self.swap_tracker = SwapTracker(
             client=self.contract_client,
             fulfillment_timeout_blocks=timeout_blocks,
-            window_blocks=SCORING_WINDOW_BLOCKS,
         )
         self.swap_tracker.initialize(self.block)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
 
         self.swap_verifier = SwapVerifier(
             chain_providers=self.chain_providers,
-            subtensor=self.subtensor,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             fee_divisor=self.fee_divisor,
         )
-
-        self.swap_voter = SwapVoter(
-            contract_client=self.contract_client,
-            wallet=self.wallet,
-        )
-
-        # Pending confirmation queue (axon handler thread → forward loop thread)
-        self.pending_confirms = PendingConfirmQueue()
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises substrate websocket calls across handler threads
@@ -93,11 +115,11 @@ class Validator(BaseValidatorNeuron):
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
 
         # Attach synapse handlers to axon
-        self._attach_axon_handlers()
+        self.attach_axon_handlers()
 
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
 
-    def _attach_axon_handlers(self):
+    def attach_axon_handlers(self):
         """Attach all synapse handlers to the axon."""
         self.axon.attach(
             forward_fn=partial(handle_miner_activate, self),
@@ -117,6 +139,12 @@ class Validator(BaseValidatorNeuron):
     async def forward(self):
         """Validator forward pass - delegates to allways.validator.forward."""
         return await forward(self)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.state_store.close()
 
 
 # Main entry point

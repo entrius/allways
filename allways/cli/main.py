@@ -10,6 +10,8 @@ Usage:
     alw view                - View swaps, miners, rates
 """
 
+import os  # noqa: E402
+
 # Prevent bittensor from hijacking --help via its argparse config.
 # Must happen before any bittensor import.
 import sys as _sys
@@ -17,54 +19,57 @@ import sys as _sys
 _saved_argv = _sys.argv[:]
 _sys.argv = [_sys.argv[0]]
 
+# Stub heavy imports during shell completion
+if os.environ.get('_ALW_COMPLETE'):
+    from unittest.mock import MagicMock as _MagicMock
+
+    _mock = _MagicMock()
+    for _pkg in ['bittensor', 'substrateinterface']:
+        for _suffix in [
+            '',
+            '.core',
+            '.core.subtensor',
+            '.core.synapse',
+            '.utils',
+            '.utils.balance',
+            '.utils.ss58',
+            '.exceptions',
+        ]:
+            _sys.modules[_pkg + _suffix] = _mock
+
 import json  # noqa: E402
 
-import rich_click as click  # noqa: E402
+import click  # noqa: E402
+from click.shell_completion import get_completion_class  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-click.rich_click.USE_RICH_MARKUP = True
-click.rich_click.SHOW_ARGUMENTS = True
-click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
-click.rich_click.STYLE_EPILOG = 'dim'
-click.rich_click.FOOTER_TEXT = '\u2764 Ventura Labs'
-
 load_dotenv()
 
-from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, console, parse_global_flags  # noqa: E402
+from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
+from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
 
 # Strip global flags (--wallet, --hotkey, --network, --netuid) from argv
 # before Click processes commands. Must happen after argv is restored above.
-parse_global_flags()
+apply_global_flags()
 
 
-DISCLAIMER = (
-    'Allways is permissionless, open-source, beta software. The protocol facilitates trustless'
-    ' peer-to-peer transactions — the creators and contributors do not custody, control, or'
-    ' intermediate any funds. Use at your own risk. No warranty. Not financial advice.'
-)
-
-
-@click.group(epilog=DISCLAIMER)
+@click.group(cls=StyledAliasGroup, show_disclaimer=True)
 @click.version_option(version=__import__('allways').__version__, prog_name='allways')
 def cli():
     """Universal Transaction Layer"""
     pass
 
 
-@click.group(name='config', invoke_without_command=True)
+@click.group(name='config', invoke_without_command=True, cls=StyledGroup)
 @click.pass_context
 def config_group(ctx):
     """CLI configuration management.
 
-    Show current configuration (default) or set config values.
-
-    \b
-    Subcommands:
-        set <key> <value>    Set a config value
+    [dim]Show current configuration (default) or set config values.[/dim]
     """
     if ctx.invoked_subcommand is None:
         show_config()
@@ -114,27 +119,24 @@ KNOWN_NETWORKS = {
 def config_set(key: str, value: str):
     """Set a configuration value.
 
-    \b
-    Common keys:
+    [dim]Common keys:
         wallet              Wallet name
         hotkey              Hotkey name
         contract-address    Contract address
         network             Network name or endpoint URL
-        netuid              Subnet UID
+        netuid              Subnet UID[/dim]
 
-    \b
-    Networks:
+    [dim]Networks:
         finney              Production  (wss://entrypoint-finney.opentensor.ai:443)
         test                Test        (wss://test.finney.opentensor.ai:443)
         local               Local dev   (ws://127.0.0.1:9944)
-        ws://...            Custom endpoint
+        ws://...            Custom endpoint[/dim]
 
-    \b
-    Examples:
-        alw config set wallet alice
-        alw config set contract-address 5Cxxx...
-        alw config set network finney
-        alw config set network local
+    [dim]Examples:
+        $ alw config set wallet alice
+        $ alw config set contract-address 5Cxxx...
+        $ alw config set network finney
+        $ alw config set network local[/dim]
     """
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -165,6 +167,38 @@ def config_set(key: str, value: str):
         console.print(f'[green]Updated {key}:[/green] {old_value} -> {display}')
     else:
         console.print(f'[green]Set {key}:[/green] {display}')
+
+
+def _detect_shell():
+    """Detect the current shell from the SHELL environment variable"""
+    shell_path = os.environ.get('SHELL', '')
+    shell_name = os.path.basename(shell_path)
+    if shell_name in ('bash', 'zsh', 'fish'):
+        return shell_name
+    return None
+
+
+@cli.command('completion')
+@click.argument('shell', type=click.Choice(['bash', 'zsh', 'fish']), default=None, required=False)
+def completion(shell):
+    """Generate shell completion script
+
+    Install completions:
+        bash:  eval "$(alw completion bash)"
+        zsh:   eval "$(alw completion zsh)"
+        fish:  alw completion fish | source
+
+    If shell is omitted, auto-detects from the SHELL environment variable.
+    """
+    if shell is None:
+        shell = _detect_shell()
+        if shell is None:
+            raise click.UsageError('Cannot detect shell. Please specify one of: bash, zsh, fish')
+    cls = get_completion_class(shell)
+    if cls is None:
+        raise click.UsageError(f'Unsupported shell: {shell}')
+    comp = cls(cli, ctx_args={}, prog_name='alw', complete_var='_ALW_COMPLETE')
+    click.echo(comp.source())
 
 
 # Register config group

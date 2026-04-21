@@ -1,8 +1,9 @@
 """alw status - Quick dashboard showing network, wallet, and swap state."""
 
-import rich_click as click
+import click
 from rich.table import Table
 
+from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     console,
@@ -16,17 +17,16 @@ from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
 
-@click.command('status')
+@click.command('status', cls=StyledCommand)
 @click.option('--netuid', default=None, type=int, help='Subnet UID')
 def status_command(netuid: int):
     """Show a quick dashboard of your current state.
 
-    \b
-    Displays network info, wallet balance, active swaps,
-    pending reservations, and miner status (if applicable).
+    [dim]Displays network info, wallet balance, active swaps,
+    pending reservations, and miner status (if applicable).[/dim]
 
-    Example:
-        alw status
+    [dim]Examples:
+        $ alw status[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
     if netuid is None:
@@ -66,7 +66,7 @@ def status_command(netuid: int):
             if my_swaps:
                 table.add_row('Your Active Swaps', str(len(my_swaps)))
                 for s in my_swaps:
-                    table.add_row('', f'  #{s.id} {s.source_chain.upper()}->{s.dest_chain.upper()} [{s.status.name}]')
+                    table.add_row('', f'  #{s.id} {s.from_chain.upper()}->{s.to_chain.upper()} [{s.status.name}]')
             else:
                 table.add_row('Your Active Swaps', 'None')
         except ContractError:
@@ -82,7 +82,7 @@ def status_command(netuid: int):
                     remaining_min = remaining * SECONDS_PER_BLOCK / 60
                     table.add_row(
                         'Pending Reservation',
-                        f'{pending.source_chain.upper()}->{pending.dest_chain.upper()} (~{remaining_min:.0f} min left)',
+                        f'{pending.from_chain.upper()}->{pending.to_chain.upper()} (~{remaining_min:.0f} min left)',
                     )
                 else:
                     table.add_row('Pending Reservation', '[dim]Expired[/dim]')
@@ -93,10 +93,8 @@ def status_command(netuid: int):
 
         # Miner status
         try:
-            collateral = client.get_miner_collateral(hotkey)
+            collateral, is_active, has_swap, _, _ = client.get_miner_snapshot(hotkey)
             if collateral > 0:
-                is_active = client.get_miner_active_flag(hotkey)
-                has_swap = client.get_miner_has_active_swap(hotkey)
                 status_str = '[green]Active[/green]' if is_active else '[red]Inactive[/red]'
                 if has_swap:
                     status_str += ' (has active swap)'
@@ -107,7 +105,20 @@ def status_command(netuid: int):
                 my_pairs = [p for p in pairs if p.hotkey == hotkey]
                 if my_pairs:
                     for p in my_pairs:
-                        table.add_row('Miner Pair', f'{p.source_chain.upper()}/{p.dest_chain.upper()} @ {p.rate:g}')
+                        src_up, dst_up = p.from_chain.upper(), p.to_chain.upper()
+                        if p.rate > 0 and p.counter_rate > 0:
+                            glyph = '↔'
+                            if p.rate_str != p.counter_rate_str:
+                                rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                            else:
+                                rate_display = f'{p.rate:g}'
+                        elif p.rate > 0:
+                            glyph = '→'
+                            rate_display = f'{p.rate:g}'
+                        else:
+                            glyph = '←'
+                            rate_display = f'{p.counter_rate:g}'
+                        table.add_row('Miner Pair', f'{src_up} {glyph} {dst_up} @ {rate_display}')
         except ContractError:
             table.add_row('Miner Status', '[dim]unable to read[/dim]')
 

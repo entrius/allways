@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
+import click
 from rich.console import Console
 
-from allways.classes import SwapStatus
+from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
-from allways.contract_client import AllwaysContractClient
+from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -34,6 +35,98 @@ SWAP_STATUS_COLORS = {
 def loading(message: str, spinner: str = 'dots', color: str = 'cyan'):
     """Return a Rich spinner context manager for long-running operations."""
     return console.status(f'[{color}]{message}[/{color}]', spinner=spinner, spinner_style=color)
+
+
+def print_contract_error(action: str, e: BaseException) -> None:
+    """Print a contract error with contract-rejection vs RPC-failure distinction.
+
+    Contract rejections (NotOwner, NotValidator, InvalidStatus, etc.) are the
+    user's expected failure mode for bad state and we surface the variant
+    name plainly. RPC or client-side failures get a retryable framing so the
+    user knows to check connectivity rather than their input.
+    """
+    if isinstance(e, ContractError) and is_contract_rejection(e):
+        console.print(f'[red]{action}: contract rejected — {e}[/red]')
+    else:
+        console.print(f'[red]{action}: {e}[/red]')
+        console.print('[dim]This looks like an RPC or client failure — try again.[/dim]')
+
+
+def sign_or_prompt_external(
+    provider,
+    address: str,
+    message: str,
+    key=None,
+    chain: str = '',
+    skip_confirm: bool = False,
+) -> str:
+    """Sign a proof-of-ownership message, falling back to externally-pasted signature.
+
+    Tries internal signing first (env var WIF, wallet coldkey, Bitcoin Core RPC).
+    On failure for BTC source swaps in interactive mode, prompts the user to
+    sign the exact message in an external wallet (Electrum, Sparrow, Trezor,
+    Bitcoin Core) and paste the base64 BIP-137 signature. Verifies the pasted
+    signature before returning it so a typo fails here rather than at the
+    validator.
+
+    Returns an empty string when no valid signature is obtained.
+    """
+    try:
+        signature = provider.sign_from_proof(address, message, key)
+    except Exception as e:
+        bt.logging.warning(f'Internal signing failed ({type(e).__name__}): {e}')
+        signature = ''
+
+    if signature:
+        return signature
+
+    if skip_confirm or chain != 'btc':
+        return ''
+
+    console.print('\n  [bold yellow]External signature required[/bold yellow]')
+    console.print(
+        '  [dim]No BTC signing key loaded. Sign the message below in your wallet\n'
+        '  (Electrum: Tools -> Sign/verify message; Sparrow, Trezor, Bitcoin Core\n'
+        '  all support this) and paste the base64 signature back.[/dim]'
+    )
+    console.print(f'\n  Address: [cyan]{address}[/cyan]')
+    console.print(f'  Message: [yellow]{message}[/yellow]\n')
+
+    pasted = click.prompt('  Paste signature (blank to cancel)', default='', show_default=False).strip()
+    if not pasted:
+        return ''
+
+    try:
+        verified = provider.verify_from_proof(address, message, pasted)
+    except Exception as e:
+        console.print(f'[red]Signature verification errored: {e}[/red]')
+        return ''
+
+    if not verified:
+        console.print(
+            '[red]Signature did not verify for this address/message. Make sure you signed the exact\n'
+            'message shown above with the private key for that address.[/red]'
+        )
+        return ''
+
+    console.print('[green]  Signature verified.[/green]')
+    return pasted
+
+
+def is_valid_ss58(address: str) -> bool:
+    """Check if a string is a syntactically valid SS58 address.
+
+    Does not verify the account exists on-chain — only that the encoding is
+    well-formed. Useful as a pre-flight guard before submitting an admin
+    extrinsic whose typo would silently fail.
+    """
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+
+        ss58_decode(address)
+        return True
+    except Exception:
+        return False
 
 
 # Global flags that can appear anywhere in the command line.
@@ -76,7 +169,7 @@ def load_cli_config() -> dict:
         return {}
 
 
-def _parse_global_flags() -> dict:
+def parse_global_flags() -> dict:
     """Extract global flags (--network, --wallet, etc.) from sys.argv.
 
     Strips matched flags and their values from sys.argv so Click
@@ -109,13 +202,13 @@ def _parse_global_flags() -> dict:
 _CLI_OVERRIDES: dict = {}
 
 
-def parse_global_flags():
+def apply_global_flags():
     """Parse and strip global flags from sys.argv. Must be called after argv is restored."""
     global _CLI_OVERRIDES
-    _CLI_OVERRIDES = _parse_global_flags()
+    _CLI_OVERRIDES = parse_global_flags()
 
 
-def _get_effective_config() -> dict:
+def get_effective_config() -> dict:
     """Merge file config with CLI global overrides (CLI flags win)."""
     config = load_cli_config()
     config.update(_CLI_OVERRIDES)
@@ -130,7 +223,7 @@ def get_cli_context(
 
     CLI flags (--network, --wallet, --hotkey, --netuid) override config file values.
     """
-    config = _get_effective_config()
+    config = get_effective_config()
     network = config.get('network', 'finney')
     with console.status(
         f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'
@@ -161,15 +254,15 @@ def get_cli_context(
 class PendingSwapState:
     miner_hotkey: str
     miner_uid: int
-    source_chain: str
-    dest_chain: str
-    source_amount: int
-    dest_amount: int
+    from_chain: str
+    to_chain: str
+    from_amount: int
+    to_amount: int
     tao_amount: int
     user_receives: int
     rate_str: str
-    miner_source_address: str
-    user_source_address: str
+    miner_from_address: str
+    user_from_address: str
     receive_address: str
     reserved_until_block: int
     netuid: int
@@ -207,3 +300,37 @@ def load_pending_swap() -> Optional[PendingSwapState]:
 def clear_pending_swap() -> None:
     """Remove the pending swap state file."""
     PENDING_SWAP_FILE.unlink(missing_ok=True)
+
+
+def find_matching_miners(all_pairs, from_chain: str, to_chain: str):
+    """Filter and normalize miner pairs for a given swap direction (bilateral matching).
+
+    Handles both direct matches and reverse-direction pairs (using counter_rate for the
+    reverse direction). Returns list of MinerPair with source/dest matching the requested
+    direction. For reverse-direction matches, the returned MinerPair carries the full
+    bidirectional view: `rate` is the selected-direction rate, `counter_rate` preserves
+    the original canonical rate so `get_rate_for_direction` still works on the result.
+    """
+    matching = []
+    for p in all_pairs:
+        if p.from_chain == from_chain and p.to_chain == to_chain:
+            if p.rate > 0:
+                matching.append(p)
+        elif p.from_chain == to_chain and p.to_chain == from_chain:
+            rev_rate, rev_rate_str = p.get_rate_for_direction(from_chain)
+            if rev_rate > 0:
+                matching.append(
+                    MinerPair(
+                        uid=p.uid,
+                        hotkey=p.hotkey,
+                        from_chain=p.to_chain,
+                        from_address=p.to_address,
+                        to_chain=p.from_chain,
+                        to_address=p.from_address,
+                        rate=rev_rate,
+                        rate_str=rev_rate_str,
+                        counter_rate=p.rate,
+                        counter_rate_str=p.rate_str,
+                    )
+                )
+    return matching

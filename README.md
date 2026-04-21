@@ -52,6 +52,50 @@ alw --help
 - **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
 - **CLI**: User interface for posting pairs, managing collateral, and executing swaps
 
+## Validator Storage Layout
+
+Validator state lives in `~/.allways/validator/state.db` (SQLite, WAL mode).
+Tables: `pending_confirms`, `rate_events`, `swap_outcomes`. Collateral /
+active / min_collateral state is held in memory and rebuilt from contract
+events each startup; only `swap_outcomes` (the all-time credibility ledger)
+needs to persist across restarts.
+
+## Miner Environment Variables
+
+- `MINER_TIMEOUT_CUSHION_BLOCKS` — defaults to 5. Miner skips fulfilling a
+  swap when fewer than this many blocks remain before its timeout, trading
+  a skipped swap for avoided slashes on slow dest-chain inclusion.
+- `BTC_MODE`, `BTC_PRIVATE_KEY`, `BTC_RPC_URL`, etc. — see `.env.example`.
+
+## Running a Local Subtensor Lite Node (Validators)
+
+Validators read miner rate commitments every ~3 minutes AND stream contract
+events every block via the same connection. Pointing at the public `finney`
+entrypoint works but adds latency and RPC pressure — every validator on the
+network should run its own lite node for this.
+
+```bash
+# Minimal lite-node command (adjust --base-path for storage volume)
+subtensor \
+  --chain finney \
+  --base-path /var/lib/subtensor \
+  --rpc-external \
+  --ws-external \
+  --port 30333 \
+  --rpc-port 9933 \
+  --ws-port 9944 \
+  --pruning 1000
+```
+
+Then point the validator at it via `.env`:
+
+```env
+SUBTENSOR_NETWORK=ws://127.0.0.1:9944
+```
+
+The dev environment in `alw-utils/dev-environment` provisions a local chain
+automatically — no manual lite-node step is required there.
+
 ## License
 
 MIT License

@@ -2,7 +2,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+import bittensor as bt
+
 from allways.chains import ChainDefinition
+
+
+class ProviderUnreachableError(Exception):
+    """Raised when a chain provider cannot reach its backend during verification."""
 
 
 @dataclass
@@ -38,15 +44,71 @@ class ChainProvider(ABC):
         ...
 
     @abstractmethod
-    def verify_transaction(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a transaction. Uses >= for amount (overpayment is acceptable on-chain).
+        """Chain-specific fetch — return TransactionInfo if the tx exists and matches
+        recipient + amount, otherwise None. Raises ProviderUnreachableError on
+        transient backend failures.
 
-        block_hint: If > 0, the block number where the tx is expected to be found.
-        Providers can use this for O(1) lookup instead of scanning.
+        Uses >= for amount (overpayment is acceptable on-chain).
+        block_hint: If > 0, providers can use this for O(1) lookup instead of scanning.
+
+        Not called directly by application code — use ``verify_transaction``,
+        which wraps this with the common confirmed/sender post-checks.
         """
         ...
+
+    def verify_transaction(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        expected_sender: Optional[str] = None,
+        require_confirmed: bool = False,
+    ) -> Optional[TransactionInfo]:
+        """Verify a transaction against the shared post-fetch checklist.
+
+        Dispatches to the provider's ``fetch_matching_tx`` for the chain-specific
+        scan, then applies the common checks every caller cares about:
+
+        - ``require_confirmed`` — if True, reject txs that don't have enough
+          confirmations for the chain. Default False, because axon/pending-confirm
+          flows want the partial TransactionInfo so they can queue and retry.
+        - ``expected_sender`` — if provided, reject txs whose sender doesn't
+          match. Strict: an empty/unparseable sender from the provider also
+          fails the check, since we can't prove the tx came from the reserved
+          address. Closing this gap prevents a "malformed-input evades the
+          defense" class of attack.
+
+        Rejections are logged once in the base so observability for the defense
+        is in one place instead of duplicated at every call site.
+        """
+        tx_info = self.fetch_matching_tx(
+            tx_hash=tx_hash,
+            expected_recipient=expected_recipient,
+            expected_amount=expected_amount,
+            block_hint=block_hint,
+        )
+        if tx_info is None:
+            return None
+
+        if require_confirmed and not tx_info.confirmed:
+            bt.logging.debug(
+                f'verify_transaction: tx {tx_hash[:16]}... not yet confirmed '
+                f'({tx_info.confirmations}/{self.get_chain().min_confirmations})'
+            )
+            return None
+
+        if expected_sender and tx_info.sender != expected_sender:
+            bt.logging.warning(
+                f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
+                f'(expected {expected_sender}, got {tx_info.sender!r})'
+            )
+            return None
+
+        return tx_info
 
     @abstractmethod
     def get_balance(self, address: str) -> int: ...
@@ -55,23 +117,27 @@ class ChainProvider(ABC):
     def is_valid_address(self, address: str) -> bool: ...
 
     @abstractmethod
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a source proof message with the given key. Returns hex signature."""
         ...
 
     @abstractmethod
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify a source proof signature from the given address."""
         ...
 
     @abstractmethod
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
         """Send funds to an address. Returns (tx_hash, block_number) or None.
 
+        Providers own their own signing credentials — TAO uses the ``bt.Wallet``
+        passed at construction, BTC reads ``BTC_PRIVATE_KEY`` / RPC wallet from
+        env. Callers do not pass key material.
+
         amount: in smallest unit (satoshis / rao)
-        key: chain-specific signing key (e.g., bt.Wallet for TAO, None for BTC if using RPC wallet)
-        from_address: hint for sender's address type (used by BTC lightweight to derive correct type from WIF)
+        from_address: hint for sender's address type (used by BTC lightweight to
+                      derive correct type from WIF)
         """
         ...

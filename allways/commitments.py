@@ -3,22 +3,25 @@
 from typing import List, Optional
 
 import bittensor as bt
+from substrateinterface.utils.ss58 import ss58_encode
 
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
 from allways.constants import COMMITMENT_VERSION
+
+SS58_PREFIX = 42
 
 
 def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[MinerPair]:
     """Parse a commitment string into a MinerPair.
 
-    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}
-    Rate is TAO per 1 non-TAO asset (e.g. 345 means 1 BTC = 345 TAO).
-    Example: v2:btc:bc1q...:tao:5C...:345
+    Format: v{VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate}:{counter_rate}
+    Both rates are 'canonical_dest per 1 canonical_source'. rate is for source→dest, counter_rate for dest→source.
+    Example: v1:btc:bc1q...:tao:5C...:340:350
     """
     try:
         parts = raw.split(':')
-        if len(parts) != 6:
+        if len(parts) != 7:
             return None
 
         version_str = parts[0]
@@ -35,6 +38,8 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         dst_addr = parts[4]
         rate_str = parts[5]
         rate = float(rate_str)
+        counter_rate_str = parts[6]
+        counter_rate = float(counter_rate_str)
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
@@ -42,22 +47,26 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         if src_chain == dst_chain:
             return None
 
-        # Normalize to canonical direction: non-TAO → TAO.
-        # Rate is always "TAO per 1 non-TAO asset" regardless of posted direction,
-        # so swapping source/dest doesn't change rate interpretation.
-        if src_chain == 'tao' and dst_chain != 'tao':
+        # Normalize to canonical direction (alphabetical ordering).
+        # When swapping direction, swap rates too: the posted "forward" rate becomes "reverse".
+        canon_from, _ = canonical_pair(src_chain, dst_chain)
+        if src_chain != canon_from:
             src_chain, dst_chain = dst_chain, src_chain
             src_addr, dst_addr = dst_addr, src_addr
+            rate, counter_rate = counter_rate, rate
+            rate_str, counter_rate_str = counter_rate_str, rate_str
 
         return MinerPair(
             uid=uid,
             hotkey=hotkey,
-            source_chain=src_chain,
-            source_address=src_addr,
-            dest_chain=dst_chain,
-            dest_address=dst_addr,
+            from_chain=src_chain,
+            from_address=src_addr,
+            to_chain=dst_chain,
+            to_address=dst_addr,
             rate=rate,
             rate_str=rate_str,
+            counter_rate=counter_rate,
+            counter_rate_str=counter_rate_str,
         )
     except (ValueError, IndexError):
         return None
@@ -122,17 +131,44 @@ def read_miner_commitment(
 
 
 def read_miner_commitments(subtensor: bt.Subtensor, netuid: int) -> List[MinerPair]:
-    """Read all miner commitments from chain, parse into MinerPair list."""
-    pairs = []
+    """Read all miner commitments for the netuid in a single RPC call.
+
+    Uses substrate-interface's ``query_map`` over the ``CommitmentOf`` double map
+    keyed by ``(netuid, hotkey)``. One RPC round-trip returns every committed
+    hotkey on the subnet — cheaper than the old N-RPC for-loop, matters most
+    on full validator polling cadence.
+    """
+    pairs: List[MinerPair] = []
     try:
         metagraph = subtensor.metagraph(netuid)
-        for uid in range(metagraph.n.item()):
-            hotkey = metagraph.hotkeys[uid]
-            commitment = get_commitment(subtensor, netuid, hotkey)
-            if commitment:
-                pair = parse_commitment_data(commitment, uid=uid, hotkey=hotkey)
-                if pair:
-                    pairs.append(pair)
+        hotkey_to_uid = {metagraph.hotkeys[uid]: uid for uid in range(metagraph.n.item())}
+        result = subtensor.substrate.query_map(
+            module='Commitments',
+            storage_function='CommitmentOf',
+            params=[netuid],
+        )
+        for key, metadata in result:
+            # query_map returns the second-map key (hotkey AccountId) as raw
+            # bytes inside a single-element tuple, not an SS58 string. Encode
+            # it so we can look the miner up in the metagraph's hotkey index.
+            raw = key.value if hasattr(key, 'value') else key
+            if isinstance(raw, tuple) and len(raw) == 1:
+                raw = raw[0]
+            if isinstance(raw, (tuple, list)):
+                raw = bytes(raw)
+            if isinstance(raw, (bytes, bytearray)) and len(raw) == 32:
+                hotkey = ss58_encode(bytes(raw), SS58_PREFIX)
+            else:
+                hotkey = str(raw)
+            uid = hotkey_to_uid.get(hotkey)
+            if uid is None:
+                continue  # miner dereg'd but commitment still in storage
+            commitment = decode_commitment_field(metadata)
+            if not commitment:
+                continue
+            pair = parse_commitment_data(commitment, uid=uid, hotkey=hotkey)
+            if pair:
+                pairs.append(pair)
     except (ConnectionError, TimeoutError) as e:
         bt.logging.warning(f'Transient error reading commitments: {e}')
     except Exception as e:

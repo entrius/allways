@@ -7,7 +7,7 @@ import bittensor as bt
 import requests
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
-from allways.chain_providers.base import ChainProvider, TransactionInfo
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_BTC, ChainDefinition
 from allways.constants import BTC_TO_SAT
 
@@ -32,12 +32,14 @@ def detect_address_type(address: str) -> str:
         return ADDR_TYPE_P2WPKH
     if address.startswith('bcrt1p') or address.startswith('tb1p'):
         return ADDR_TYPE_P2TR
-    if address.startswith('2') or address.startswith('m') or address.startswith('n'):
+    if address.startswith('2'):
+        return ADDR_TYPE_P2SH_P2WPKH
+    if address.startswith('m') or address.startswith('n'):
         return ADDR_TYPE_P2PKH
     return 'unknown'
 
 
-def _to_mainnet_wif(wif: str) -> str:
+def to_mainnet_wif(wif: str) -> str:
     """Convert a testnet/regtest WIF (0xef) to mainnet (0x80) for signing libraries."""
     decoded = base58.b58decode_check(wif)
     if decoded[0] == 0xEF:
@@ -45,7 +47,7 @@ def _to_mainnet_wif(wif: str) -> str:
     return wif
 
 
-def _to_mainnet_address(address: str) -> str:
+def to_mainnet_address(address: str) -> str:
     """Convert a testnet/regtest address to mainnet equivalent for verification."""
     if address.startswith('bcrt1') or address.startswith('tb1'):
         hrp, data = bech32.bech32_decode(address)
@@ -106,7 +108,7 @@ class BitcoinProvider(ChainProvider):
             except ImportError as e:
                 raise ConnectionError('BTC_MODE=lightweight requires embit (pip install embit)') from e
             try:
-                resp = requests.get(f'{self._blockstream_api_url()}/blocks/tip/height', timeout=10)
+                resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
                 resp.raise_for_status()
                 tip = int(resp.text.strip())
                 bt.logging.success(f'BTC lightweight mode: network={self.network}, Blockstream tip={tip}')
@@ -114,12 +116,12 @@ class BitcoinProvider(ChainProvider):
                 raise ConnectionError(f'Cannot reach Blockstream API: {e}') from e
             return
 
-        result = self._rpc_call('getblockchaininfo', [])
+        result = self.rpc_call('getblockchaininfo', [])
         if result is None:
             raise ConnectionError(f'Cannot reach Bitcoin RPC at {self.rpc_url}')
         bt.logging.success(f'BTC RPC connected: chain={result.get("chain")}, blocks={result.get("blocks")}')
 
-    def _rpc_call(self, method: str, params: Optional[list] = None) -> Optional[dict]:
+    def rpc_call(self, method: str, params: Optional[list] = None) -> Optional[dict]:
         """Generic JSON-RPC helper for BTC Core."""
         if self.mode == 'lightweight':
             return None
@@ -142,20 +144,20 @@ class BitcoinProvider(ChainProvider):
             bt.logging.error(f'BTC RPC call failed ({method}): {e}')
             return None
 
-    def verify_transaction(
+    def fetch_matching_tx(
         self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
     ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction via RPC with Blockstream fallback."""
-        result = self._rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        """Look up a Bitcoin tx via RPC with Blockstream fallback."""
+        result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
         if result is not None:
             return result
-        return self._blockstream_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        return self.blockstream_verify_transaction(tx_hash, expected_recipient, expected_amount)
 
-    def _rpc_verify_transaction(
+    def rpc_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
         """Verify a Bitcoin transaction using getrawtransaction RPC."""
-        raw_tx = self._rpc_call('getrawtransaction', [tx_hash, True])
+        raw_tx = self.rpc_call('getrawtransaction', [tx_hash, True])
         if not raw_tx:
             return None
 
@@ -164,14 +166,12 @@ class BitcoinProvider(ChainProvider):
         block_number = None
 
         if confirmed and 'blockhash' in raw_tx:
-            block_info = self._rpc_call('getblock', [raw_tx['blockhash']])
+            block_info = self.rpc_call('getblock', [raw_tx['blockhash']])
             if block_info:
                 block_number = block_info.get('height')
 
-        # Parse vout for matching output
         for vout in raw_tx.get('vout', []):
             addresses = vout.get('scriptPubKey', {}).get('addresses', [])
-            # Also check 'address' field (newer Bitcoin Core versions)
             if not addresses:
                 addr = vout.get('scriptPubKey', {}).get('address')
                 if addr:
@@ -180,23 +180,7 @@ class BitcoinProvider(ChainProvider):
             amount_sat = int(round(vout.get('value', 0) * BTC_TO_SAT))
 
             if expected_recipient in addresses and amount_sat >= expected_amount:
-                # Get sender from first vin
-                sender = ''
-                if raw_tx.get('vin'):
-                    vin = raw_tx['vin'][0]
-                    if 'txid' in vin:
-                        prev_tx = self._rpc_call('getrawtransaction', [vin['txid'], True])
-                        vout_idx = vin.get('vout', 0)
-                        if prev_tx and prev_tx.get('vout') and vout_idx < len(prev_tx['vout']):
-                            prev_vout = prev_tx['vout'][vout_idx]
-                            prev_addrs = prev_vout.get('scriptPubKey', {}).get('addresses', [])
-                            if not prev_addrs:
-                                prev_addr = prev_vout.get('scriptPubKey', {}).get('address')
-                                if prev_addr:
-                                    prev_addrs = [prev_addr]
-                            if prev_addrs:
-                                sender = prev_addrs[0]
-
+                sender = self.rpc_resolve_sender(raw_tx)
                 return TransactionInfo(
                     tx_hash=tx_hash,
                     confirmed=confirmed,
@@ -209,16 +193,50 @@ class BitcoinProvider(ChainProvider):
 
         return None
 
+    def rpc_resolve_sender(self, raw_tx: dict) -> str:
+        """Extract sender address from the first vin of a raw transaction."""
+        if not raw_tx.get('vin'):
+            return ''
+        vin = raw_tx['vin'][0]
+        if 'txid' not in vin:
+            return ''
+        prev_tx = self.rpc_call('getrawtransaction', [vin['txid'], True])
+        if not prev_tx or not prev_tx.get('vout'):
+            return ''
+        vout_idx = vin.get('vout', 0)
+        if vout_idx >= len(prev_tx['vout']):
+            return ''
+        prev_vout = prev_tx['vout'][vout_idx]
+        prev_addrs = prev_vout.get('scriptPubKey', {}).get('addresses', [])
+        if not prev_addrs:
+            prev_addr = prev_vout.get('scriptPubKey', {}).get('address')
+            if prev_addr:
+                prev_addrs = [prev_addr]
+        return prev_addrs[0] if prev_addrs else ''
+
     # --- Blockstream API methods ---
     # Used as primary data source in lightweight mode, and as fallback in node mode.
 
-    def _blockstream_verify_transaction(
+    def blockstream_calc_confirmations(self, block_number: int) -> int:
+        """Fetch the chain tip from Blockstream and calculate confirmations for a block."""
+        try:
+            tip_resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+            if tip_resp.ok:
+                tip_height = int(tip_resp.text.strip())
+                return tip_height - block_number + 1
+        except Exception:
+            pass
+        return 0
+
+    def blockstream_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction using Blockstream API."""
+        """Verify via Blockstream API; raises ProviderUnreachableError if unreachable."""
         try:
-            url = f'{self._blockstream_api_url()}/tx/{tx_hash}'
+            url = f'{self.blockstream_api_url()}/tx/{tx_hash}'
             resp = requests.get(url, timeout=15)
+            if resp.status_code == 404:
+                return None
             resp.raise_for_status()
             data = resp.json()
 
@@ -227,11 +245,7 @@ class BitcoinProvider(ChainProvider):
             confirmations = 0
 
             if confirmed and block_number:
-                # Get current tip to calculate confirmations
-                tip_resp = requests.get(f'{self._blockstream_api_url()}/blocks/tip/height', timeout=10)
-                if tip_resp.ok:
-                    tip_height = int(tip_resp.text.strip())
-                    confirmations = tip_height - block_number + 1
+                confirmations = self.blockstream_calc_confirmations(block_number)
 
             min_confs = self.get_chain().min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
@@ -256,27 +270,31 @@ class BitcoinProvider(ChainProvider):
                     )
 
             return None
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ProviderUnreachableError(f'Blockstream API unreachable: {e}') from e
+        except requests.HTTPError as e:
+            raise ProviderUnreachableError(f'Blockstream API error: {e}') from e
         except Exception as e:
             bt.logging.error(f'Blockstream tx lookup failed for {tx_hash}: {e}')
             return None
 
     def get_balance(self, address: str) -> int:
         """Get balance for a Bitcoin address in satoshis via RPC with Blockstream fallback."""
-        result = self._rpc_call('getreceivedbyaddress', [address, 0])
+        result = self.rpc_call('getreceivedbyaddress', [address, 0])
         if result is not None:
             return int(round(result * BTC_TO_SAT))
-        return self._blockstream_get_balance(address)
+        return self.blockstream_get_balance(address)
 
-    def _blockstream_api_url(self) -> str:
+    def blockstream_api_url(self) -> str:
         """Return the appropriate Blockstream API base URL based on network."""
         if self.network == 'testnet':
             return 'https://blockstream.info/testnet/api'
         return 'https://blockstream.info/api'
 
-    def _blockstream_get_balance(self, address: str) -> int:
+    def blockstream_get_balance(self, address: str) -> int:
         """Get balance via Blockstream API. Returns satoshis."""
         try:
-            url = f'{self._blockstream_api_url()}/address/{address}'
+            url = f'{self.blockstream_api_url()}/address/{address}'
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json()
@@ -291,9 +309,9 @@ class BitcoinProvider(ChainProvider):
 
     def is_valid_address(self, address: str) -> bool:
         """Validate a Bitcoin address locally (bech32/base58 decode)."""
-        return self._validate_address_local(address)
+        return self.validate_address_local(address)
 
-    def _validate_address_local(self, address: str) -> bool:
+    def validate_address_local(self, address: str) -> bool:
         """Validate BTC address format without RPC (bech32/base58 decode)."""
         if not address or not isinstance(address, str):
             return False
@@ -310,14 +328,20 @@ class BitcoinProvider(ChainProvider):
         """Get WIF private key from env var or Bitcoin Core wallet."""
         wif = os.environ.get('BTC_PRIVATE_KEY')
         if wif:
+            if wif[0] not in '5KLc9':
+                bt.logging.error(
+                    f'BTC_PRIVATE_KEY is not a valid WIF (prefix {wif[:4]!r}); '
+                    'expected 5/K/L (mainnet) or 9/c (test/regtest)'
+                )
+                return None
             return wif
         if self.mode == 'lightweight':
             bt.logging.error('BTC_MODE=lightweight requires BTC_PRIVATE_KEY env var for key operations')
             return None
-        result = self._rpc_call('dumpprivkey', [address])
+        result = self.rpc_call('dumpprivkey', [address])
         return result if isinstance(result, str) else None
 
-    def sign_source_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message proving ownership of a Bitcoin address.
 
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
@@ -339,13 +363,13 @@ class BitcoinProvider(ChainProvider):
             return ''
 
         try:
-            _, _, signature = sign_message(_to_mainnet_wif(wif), addr_type, message, deterministic=True)
+            _, _, signature = sign_message(to_mainnet_wif(wif), addr_type, message, deterministic=True)
             return signature
         except Exception as e:
-            bt.logging.error(f'BTC sign_source_proof failed: {e}')
+            bt.logging.error(f'BTC sign_from_proof failed: {e}')
             return ''
 
-    def verify_source_proof(self, address: str, message: str, signature: str) -> bool:
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
         """Verify a signed message from a Bitcoin address.
 
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
@@ -360,10 +384,10 @@ class BitcoinProvider(ChainProvider):
             return False
 
         try:
-            valid, _, _ = verify_message(_to_mainnet_address(address), message, signature)
+            valid, _, _ = verify_message(to_mainnet_address(address), message, signature)
             return valid
         except Exception as e:
-            bt.logging.error(f'BTC verify_source_proof failed: {e}')
+            bt.logging.error(f'BTC verify_from_proof failed: {e}')
             return False
 
     def send_amount_lightweight(
@@ -401,83 +425,24 @@ class BitcoinProvider(ChainProvider):
             pubkey = privkey.get_public_key()
             segwit_script = p2wpkh(pubkey)
 
-            # Derive address type: if from_address is known, match it directly.
-            # Otherwise probe all types to find where UTXOs exist.
             type_to_script = {
                 ADDR_TYPE_P2WPKH: ('p2wpkh', segwit_script, segwit_script.address(network)),
                 ADDR_TYPE_P2SH_P2WPKH: ('p2sh-p2wpkh', p2sh(segwit_script), p2sh(segwit_script).address(network)),
                 ADDR_TYPE_P2PKH: ('p2pkh', p2pkh(pubkey), p2pkh(pubkey).address(network)),
             }
 
-            if from_address:
-                detected = detect_address_type(from_address)
-                if detected in type_to_script:
-                    atype, script, addr = type_to_script[detected]
-                    if addr != from_address:
-                        bt.logging.error(
-                            f'WIF key derives {addr} but committed address is {from_address} — key mismatch'
-                        )
-                        return None
-                    utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
-                    resp = requests.get(utxo_url, timeout=15)
-                    resp.raise_for_status()
-                    utxos = resp.json()
-                    my_script, my_address, addr_type = script, addr, atype
-                else:
-                    bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
-                    return None
-            else:
-                # Probe all address types
-                candidates = [type_to_script[t] for t in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2SH_P2WPKH, ADDR_TYPE_P2PKH)]
-                my_script = None
-                my_address = None
-                utxos = None
-                addr_type = None
-                import time as _time
-
-                for idx, (atype, script, addr) in enumerate(candidates):
-                    try:
-                        if idx > 0:
-                            _time.sleep(1)  # avoid Blockstream rate limiting
-                        utxo_url = f'{self._blockstream_api_url()}/address/{addr}/utxo'
-                        resp = requests.get(utxo_url, timeout=15)
-                        resp.raise_for_status()
-                        candidate_utxos = resp.json()
-                        if candidate_utxos:
-                            my_script, my_address, utxos, addr_type = script, addr, candidate_utxos, atype
-                            bt.logging.debug(f'Found UTXOs on {atype} address: {addr}')
-                            break
-                    except Exception:
-                        continue
-
-            if not utxos:
-                bt.logging.error(f'No UTXOs found for {from_address or "any address type"}')
+            result = self.resolve_sender_utxos(from_address, type_to_script)
+            if result is None:
                 return None
+            my_script, my_address, utxos, addr_type = result
 
             is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            # Select UTXOs (simple greedy: accumulate until we cover amount + fee estimate)
-            fee_rate = self._estimate_fee_rate()
-            # vsize per input: ~68 for segwit, ~148 for legacy
-            input_vsize = 68 if is_segwit else 148
-            selected = []
-            total_in = 0
-            for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
-                selected.append(utxo)
-                total_in += utxo['value']
-                est_vsize = 11 + len(selected) * input_vsize + 2 * 31
-                fee = est_vsize * fee_rate
-                if total_in >= amount + fee:
-                    break
-
-            # Final fee calculation
-            est_vsize = 11 + len(selected) * input_vsize + 2 * 31
-            fee = est_vsize * fee_rate
-            if total_in < amount + fee:
-                bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            coin_selection = self.select_utxos(utxos, amount, is_segwit)
+            if coin_selection is None:
                 return None
-
+            selected, total_in, fee = coin_selection
             change = total_in - amount - fee
 
             # Build transaction
@@ -501,7 +466,7 @@ class BitcoinProvider(ChainProvider):
             else:
                 # Legacy P2PKH: need full previous transaction for signing
                 for i, utxo in enumerate(selected):
-                    tx_url = f'{self._blockstream_api_url()}/tx/{utxo["txid"]}/hex'
+                    tx_url = f'{self.blockstream_api_url()}/tx/{utxo["txid"]}/hex'
                     tx_resp = requests.get(tx_url, timeout=15)
                     tx_resp.raise_for_status()
                     prev_tx = Transaction.from_string(tx_resp.text.strip())
@@ -530,14 +495,10 @@ class BitcoinProvider(ChainProvider):
                             bytes([len(sig_bytes)]) + sig_bytes + bytes([len(pub_bytes)]) + pub_bytes
                         )
 
-            # Broadcast
             raw_tx = final_tx.serialize().hex()
-            broadcast_url = f'{self._blockstream_api_url()}/tx'
-            broadcast_resp = requests.post(broadcast_url, data=raw_tx, timeout=15)
-            if broadcast_resp.status_code != 200:
-                bt.logging.error(f'Broadcast rejected ({broadcast_resp.status_code}): {broadcast_resp.text.strip()}')
+            tx_hash = self.broadcast_tx(raw_tx)
+            if tx_hash is None:
                 return None
-            tx_hash = broadcast_resp.text.strip()
 
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
             return (tx_hash, 0)
@@ -545,7 +506,76 @@ class BitcoinProvider(ChainProvider):
             bt.logging.error(f'embit send failed: {e}')
             return None
 
-    def _estimate_fee_rate(self) -> int:
+    def resolve_sender_utxos(self, from_address, type_to_script):
+        """Match from_address to address type and fetch UTXOs, or probe all types."""
+        if from_address:
+            detected = detect_address_type(from_address)
+            if detected not in type_to_script:
+                bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
+                return None
+            atype, script, addr = type_to_script[detected]
+            if addr != from_address:
+                bt.logging.error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
+                return None
+            utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
+            resp = requests.get(utxo_url, timeout=15)
+            resp.raise_for_status()
+            utxos = resp.json()
+            if not utxos:
+                bt.logging.error(f'No UTXOs found for {from_address}')
+                return None
+            return script, addr, utxos, atype
+
+        import time as _time
+
+        for idx, (atype, script, addr) in enumerate(type_to_script.values()):
+            try:
+                if idx > 0:
+                    _time.sleep(1)
+                utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
+                resp = requests.get(utxo_url, timeout=15)
+                resp.raise_for_status()
+                candidate_utxos = resp.json()
+                if candidate_utxos:
+                    bt.logging.debug(f'Found UTXOs on {atype} address: {addr}')
+                    return script, addr, candidate_utxos, atype
+            except Exception:
+                continue
+
+        bt.logging.error('No UTXOs found for any address type')
+        return None
+
+    def select_utxos(self, utxos, amount: int, is_segwit: bool):
+        """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
+        fee_rate = self.estimate_fee_rate()
+        input_vsize = 68 if is_segwit else 148
+        selected = []
+        total_in = 0
+        for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
+            selected.append(utxo)
+            total_in += utxo['value']
+            est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+            fee = est_vsize * fee_rate
+            if total_in >= amount + fee:
+                break
+
+        est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+        fee = est_vsize * fee_rate
+        if total_in < amount + fee:
+            bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            return None
+        return selected, total_in, fee
+
+    def broadcast_tx(self, raw_hex: str) -> Optional[str]:
+        """Broadcast a raw transaction via Blockstream. Returns tx_hash or None."""
+        url = f'{self.blockstream_api_url()}/tx'
+        resp = requests.post(url, data=raw_hex, timeout=15)
+        if resp.status_code != 200:
+            bt.logging.error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
+            return None
+        return resp.text.strip()
+
+    def estimate_fee_rate(self) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream/mempool. Falls back to 5 sat/vb.
 
         Targets 2-3 block confirmation (~20-30 min) with a floor of 2 sat/vB
@@ -555,7 +585,7 @@ class BitcoinProvider(ChainProvider):
 
         min_fee_rate = BTC_MIN_FEE_RATE
         try:
-            url = f'{self._blockstream_api_url()}/fee-estimates'
+            url = f'{self.blockstream_api_url()}/fee-estimates'
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
@@ -568,19 +598,23 @@ class BitcoinProvider(ChainProvider):
             return max(min_fee_rate, 5)
 
     def send_amount(
-        self, to_address: str, amount: int, key: Optional[Any] = None, from_address: Optional[str] = None
+        self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
-        """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None."""
+        """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None.
+
+        Signing credentials come from ``BTC_PRIVATE_KEY`` / ``bitcoind`` wallet,
+        not from the caller.
+        """
         if self.mode == 'lightweight':
             return self.send_amount_lightweight(to_address, amount, from_address=from_address)
 
         btc_amount = amount / BTC_TO_SAT
-        tx_hash = self._rpc_call('sendtoaddress', [to_address, btc_amount])
+        tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
         if not tx_hash or not isinstance(tx_hash, str):
             bt.logging.error(f'BTC sendtoaddress failed for {amount} sat to {to_address}')
             return None
 
-        block_count = self._rpc_call('getblockcount', [])
+        block_count = self.rpc_call('getblockcount', [])
         block_number = (block_count + 1) if isinstance(block_count, int) else 0
         bt.logging.info(f'Sent {amount} sat ({btc_amount} BTC) to {to_address} (tx: {tx_hash})')
         return (tx_hash, block_number)
