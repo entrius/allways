@@ -832,6 +832,63 @@ def view_contract():
     console.print()
 
 
+@view_group.command('validators')
+@click.option('--full', is_flag=True, help='Show untruncated hotkeys')
+def view_validators(full: bool):
+    """View whitelisted validators on the contract.
+
+    [dim]Reads the validator allowlist the owner has registered via
+    `alw admin add-vali` / `alw admin remove-vali`. Each listed validator
+    is one of the keys that can sign vote_* messages (reserve, initiate,
+    confirm, timeout, activate, etc.).[/dim]
+
+    [dim]Examples:
+        $ alw view validators
+        $ alw view validators --full[/dim]
+    """
+    _, _, _, client = get_cli_context(need_wallet=False)
+
+    console.print('\n[bold]Whitelisted Validators[/bold]\n')
+
+    try:
+        with loading('Reading validator set...'):
+            validators = client.get_validators()
+            consensus_threshold = client.get_consensus_threshold()
+            owner = client.get_owner()
+    except ContractError as e:
+        console.print(f'[red]Failed to read validators: {e}[/red]')
+        return
+
+    if not validators:
+        console.print('[yellow]No validators whitelisted.[/yellow]\n')
+        return
+
+    def _trunc(s: str) -> str:
+        if full or not s:
+            return s
+        return s[:16] + '...' if len(s) > 16 else s
+
+    required = max(1, (len(validators) * consensus_threshold + 99) // 100)
+
+    table = Table(show_header=True)
+    table.add_column('#', style='dim')
+    table.add_column('Hotkey', style='cyan')
+    table.add_column('Role', style='green')
+
+    for idx, hotkey in enumerate(validators, 1):
+        role = '[yellow]owner[/yellow]' if hotkey == owner else ''
+        table.add_row(str(idx), _trunc(hotkey), role)
+
+    console.print(table)
+    console.print(
+        f'\n[dim]Total: {len(validators)} validators · '
+        f'consensus {consensus_threshold}% → {required} votes needed for quorum.[/dim]'
+    )
+    if not full:
+        console.print('[dim]Use --full to show untruncated hotkeys.[/dim]')
+    console.print()
+
+
 @view_group.command('reservation')
 def view_reservation():
     """View your active swap reservation.
