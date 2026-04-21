@@ -2,6 +2,7 @@
 
 import click
 
+from allways.chain_providers import create_chain_providers
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
@@ -149,6 +150,13 @@ def post_pair(
 
     config, wallet, subtensor, _ = get_cli_context(need_client=False)
     netuid = config['netuid']
+
+    providers = create_chain_providers(check=False, subtensor=subtensor, wallet=wallet)
+    for chain, addr in ((src_chain, src_addr), (dst_chain, dst_addr)):
+        p = providers.get(chain)
+        if p and not p.is_valid_address(addr):
+            console.print(f'[red]Invalid {SUPPORTED_CHAINS[chain].name} address: {addr}[/red]')
+            return
 
     rate_str = f'{rate:g}'
     counter_rate_str = f'{counter_rate:g}'
