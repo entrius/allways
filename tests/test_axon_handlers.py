@@ -522,6 +522,17 @@ class TestChainProviderValidation:
         assert result.accepted is False
         assert 'Unsupported chain: btc' in result.rejection_reason
 
+    def test_rejects_invalid_from_tx_proof(self):
+        """Without a valid signature over the tx hash from from_address, a caller
+        could hijack someone else's on-chain source tx and redirect fulfillment
+        to an attacker-controlled to_address."""
+        validator = make_validator(reservation_data=(345_000_000, 100_000, 345_000_000))
+        validator.axon_chain_providers['btc'].verify_from_proof.return_value = False
+        result = run_handler(validator, make_synapse())
+        assert result.accepted is False
+        assert 'Invalid source tx proof' in result.rejection_reason
+        validator.axon_chain_providers['btc'].verify_transaction.assert_not_called()
+
     def test_rejects_unsupported_to_chain(self):
         """Need the source provider present (to reach the dest check), but
         strip the dest provider — validator must not continue without a way
