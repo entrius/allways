@@ -144,7 +144,13 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         )
         return
 
-    console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')
+    src_up = from_chain.upper()
+    dst_up = to_chain.upper()
+    console.print(f'\n[bold]Quote: send {amount} {src_up} → receive {dst_up}[/bold]')
+    console.print(
+        f'[dim]Rate shown as destination per source unit (e.g. for BTC→TAO, 345 = 1 BTC gets 345 TAO). '
+        f'"You Receive" is net of the {fee_pct:g}% protocol fee.[/dim]\n'
+    )
 
     table = Table(show_header=True)
     table.add_column('#', style='dim')
@@ -172,13 +178,33 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
             str(idx),
             str(pair.uid),
             f'{pair.rate:g}',
-            f'{human_receives:.8f} {to_chain.upper()}',
+            f'{human_receives:.8f} {dst_up}',
             f'{from_rao(collateral):.4f} TAO',
             status,
         )
 
     console.print(table)
-    console.print(f'  [dim](after {fee_pct:g}% fee)[/dim]')
+    console.print(f'  [dim](receive amount is after {fee_pct:g}% protocol fee)[/dim]')
+
+    # Show the implied max-send amount at the best available rate so a user
+    # who hit "insufficient collateral" knows the ceiling to retry under.
+    if available and max_swap_rao > 0:
+        best_pair, best_collateral = available[0]
+        # The TAO leg is capped by min(collateral, max_swap_rao).
+        effective_tao_cap_rao = min(best_collateral, max_swap_rao)
+        if from_chain == 'tao':
+            max_send_human = from_rao(effective_tao_cap_rao)
+        else:
+            # Source is non-TAO — derive max send in source units from the
+            # TAO cap divided by the miner's forward rate (dest-per-source =
+            # TAO-per-source when dst=tao).
+            max_send_human = _max_source_from_tao_cap(best_pair, effective_tao_cap_rao, from_chain, to_chain)
+        if max_send_human is not None:
+            console.print(
+                f'  [dim]Best miner (UID {best_pair.uid}) can currently fulfill up to '
+                f'~{max_send_human:g} {src_up} at rate {best_pair.rate:g}.[/dim]'
+            )
+
     if viable_count == 0:
         console.print(
             '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
@@ -186,3 +212,23 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         )
     else:
         console.print()
+
+
+def _max_source_from_tao_cap(pair, tao_cap_rao: int, from_chain: str, to_chain: str) -> float | None:
+    """Derive the max source-chain amount (human units) a miner can fulfill,
+    given a TAO-side cap. Returns None if the direction has no TAO leg.
+
+    Bridging through TAO: tao_cap_rao is a cap on the TAO side of the swap,
+    so the max source amount is `tao_cap_rao / rate` scaled back to human
+    units. Only meaningful when one side is TAO (true for every pair today).
+    """
+    if from_chain == 'tao' or to_chain != 'tao':
+        # from_chain == 'tao' is the caller's fast path; the 'neither is TAO'
+        # case currently can't occur (every chain bridges through TAO) but we
+        # don't lie about it.
+        return None
+    if pair.rate <= 0:
+        return None
+    # tao_cap_rao (9-decimal) / rate → source amount in source-decimal units.
+    tao_human = tao_cap_rao / 1_000_000_000
+    return tao_human / pair.rate

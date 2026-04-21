@@ -587,9 +587,16 @@ def swap_now_command(
     # Step 3: Select miner (default to best rate)
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     best_pair = available_miners[0][0]
-    console.print(
-        f'\n  Best rate: send 1 {from_chain.upper()}, get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
-    )
+    canon_is_reverse = from_chain != canon_from
+    if canon_is_reverse:
+        best_rate_line = (
+            f'send {best_pair.rate:g} {from_chain.upper()} to get 1 {to_chain.upper()} (Miner UID {best_pair.uid})'
+        )
+    else:
+        best_rate_line = (
+            f'send 1 {from_chain.upper()} to get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
+        )
+    console.print(f'\n  Best rate: {best_rate_line}')
 
     if auto_select or len(available_miners) == 1:
         selected_pair, selected_collateral = available_miners[0]
@@ -692,20 +699,39 @@ def swap_now_command(
 
     # Step 7: Confirm summary
     fee_in_dest = to_amount - user_receives
+    src_up = from_chain.upper()
+    dst_up = to_chain.upper()
 
+    # Use the forward rate for display — matches the miner's posted forward
+    # quote regardless of swap direction (calculate_to_amount just toggles
+    # is_reverse). For reverse swaps this reads as "send N dst to get 1 src".
+    if is_reverse:
+        rate_line = f'send {selected_pair.rate:g} {dst_up} to get 1 {src_up}'
+    else:
+        rate_line = f'send 1 {src_up} to get {selected_pair.rate:g} {dst_up}'
+
+    # Split send/receive into two rows each — amount on one line, address
+    # on the next — so there is no "amount → address" arrow that can be
+    # misread as "send the funds TO that address." The From address is
+    # where the user's source tx must originate; the To address is where
+    # the miner will deliver the destination funds.
+    receive_human = from_smallest_unit(user_receives, to_chain)
+    fee_human = from_smallest_unit(fee_in_dest, to_chain)
     summary = (
-        f'  Send:    [red]{amount} {from_chain.upper()}[/red]\n'
-        f'  From:    [yellow]{user_from_address}[/yellow]\n'
-        f'  Receive: [green]{from_smallest_unit(user_receives, to_chain):.8f} {to_chain.upper()}[/green]\n'
-        f'  Fee:     {fee_percent:g}% ({from_smallest_unit(fee_in_dest, to_chain):.8f} {to_chain.upper()})\n'
-        f'  Rate:    send 1 {from_chain.upper()}, get {selected_pair.rate:g} {to_chain.upper()}\n'
-        f'  Miner:   UID {selected_pair.uid}\n'
-        f'  To:      {receive_address}'
+        f'  You Send:     [red]{amount} {src_up}[/red]\n'
+        f'    From:       [yellow]{user_from_address}[/yellow]  [dim](your {src_up} address)[/dim]\n'
+        f'\n'
+        f'  You Receive:  [green]{receive_human:.8f} {dst_up}[/green]\n'
+        f'    To:         [yellow]{receive_address}[/yellow]  [dim](your {dst_up} address)[/dim]\n'
+        f'\n'
+        f'  Protocol Fee: {fee_percent:g}% ({fee_human:.8f} {dst_up})\n'
+        f'  Rate:         {rate_line}\n'
+        f'  Miner:        UID {selected_pair.uid}'
     )
     console.print()
     console.print(Panel(summary, title='[bold]Swap Summary[/bold]', expand=False))
     console.print(
-        '  [yellow]⚠  You must send the source funds from the "From" address above.[/yellow]\n'
+        f'  [yellow]⚠  You must send the source funds from the "From" {src_up} address above.[/yellow]\n'
         '  [dim]Validators reject swaps where the source tx sender does not match the reserved address.[/dim]'
     )
     console.print()

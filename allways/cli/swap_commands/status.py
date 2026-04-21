@@ -66,7 +66,10 @@ def status_command(netuid: int):
             if my_swaps:
                 table.add_row('Your Active Swaps', str(len(my_swaps)))
                 for s in my_swaps:
-                    table.add_row('', f'  #{s.id} {s.from_chain.upper()}->{s.to_chain.upper()} [{s.status.name}]')
+                    table.add_row(
+                        '',
+                        f'  #{s.id} send {s.from_chain.upper()} → receive {s.to_chain.upper()} [{s.status.name}]',
+                    )
             else:
                 table.add_row('Your Active Swaps', 'None')
         except ContractError:
@@ -82,7 +85,8 @@ def status_command(netuid: int):
                     remaining_min = remaining * SECONDS_PER_BLOCK / 60
                     table.add_row(
                         'Pending Reservation',
-                        f'{pending.from_chain.upper()}->{pending.to_chain.upper()} (~{remaining_min:.0f} min left)',
+                        f'send {pending.from_chain.upper()} → receive {pending.to_chain.upper()} '
+                        f'(~{remaining_min:.0f} min left)',
                     )
                 else:
                     table.add_row('Pending Reservation', '[dim]Expired[/dim]')
@@ -106,19 +110,22 @@ def status_command(netuid: int):
                 if my_pairs:
                     for p in my_pairs:
                         src_up, dst_up = p.from_chain.upper(), p.to_chain.upper()
+                        # Direction line uses the same "send N X to get 1 Y" phrasing
+                        # as `alw miner post` and `alw swap now` so all three reports
+                        # read consistently. counter_rate=N for rev direction means
+                        # "send N dst to get 1 src" (see miner_commands.py:89).
                         if p.rate > 0 and p.counter_rate > 0:
-                            glyph = '↔'
                             if p.rate_str != p.counter_rate_str:
-                                rate_display = f'{src_up}→{dst_up}: {p.rate:g} | {dst_up}→{src_up}: {p.counter_rate:g}'
+                                rate_display = (
+                                    f'1 {src_up} → {p.rate:g} {dst_up}  |  {p.counter_rate:g} {dst_up} → 1 {src_up}'
+                                )
                             else:
-                                rate_display = f'{p.rate:g}'
+                                rate_display = f'1 {src_up} ↔ {p.rate:g} {dst_up}'
                         elif p.rate > 0:
-                            glyph = '→'
-                            rate_display = f'{p.rate:g}'
+                            rate_display = f'1 {src_up} → {p.rate:g} {dst_up}'
                         else:
-                            glyph = '←'
-                            rate_display = f'{p.counter_rate:g}'
-                        table.add_row('Miner Pair', f'{src_up} {glyph} {dst_up} @ {rate_display}')
+                            rate_display = f'{p.counter_rate:g} {dst_up} → 1 {src_up}'
+                        table.add_row('Miner Pair', rate_display)
         except ContractError:
             table.add_row('Miner Status', '[dim]unable to read[/dim]')
 

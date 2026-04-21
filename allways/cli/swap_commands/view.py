@@ -35,18 +35,63 @@ def view_group():
     pass
 
 
+MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
+MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
+
+
 @view_group.command('miners')
 @click.option('--full', is_flag=True, help='Show untruncated addresses and hotkeys')
-def view_miners(full: bool):
-    """View active miners and their trading pairs.
+@click.option(
+    '--sort',
+    'sort_by',
+    type=click.Choice(MINER_SORT_FIELDS, case_sensitive=False),
+    default='uid',
+    show_default=True,
+    help='Sort field. uid ascends; rate/capacity descend; status groups available→reserved→in-swap→cooldown→offline.',
+)
+@click.option(
+    '--status',
+    'status_filter',
+    type=click.Choice(MINER_STATUS_CHOICES, case_sensitive=False),
+    default=None,
+    help='Only show miners in a given runtime state.',
+)
+@click.option(
+    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+)
+@click.option(
+    '--search',
+    default=None,
+    type=str,
+    help='Case-insensitive substring match against UID, addresses, and hotkey.',
+)
+def view_miners(
+    full: bool,
+    sort_by: str,
+    status_filter: str | None,
+    min_capacity: float | None,
+    search: str | None,
+):
+    """View every miner on-subnet — operator view.
 
-    [dim]Status column shows live runtime state per miner: reserved (with
-    locked TAO amount), has-swap, or cooldown (withdrawal cooldown blocks
-    remaining after deactivation).[/dim]
+    [dim]Shows all miners (including offline, in-swap, or cooldown) with
+    collateral, runtime status, posted addresses, and hotkey. For a
+    user-shopping view of swappable miners only, use `alw view rates`.
+
+    Status column shows live runtime state: available, reserved (with
+    locked TAO amount), in-swap, offline, or cooldown (withdrawal cooldown
+    blocks remaining after deactivation).
+
+    Rate columns read as direct exchange ratios:
+      BTC→TAO N  reads  1 BTC → N TAO
+      TAO→BTC N  reads  N TAO → 1 BTC[/dim]
 
     [dim]Examples:
         $ alw view miners
-        $ alw view miners --full[/dim]
+        $ alw view miners --full
+        $ alw view miners --sort capacity --status available
+        $ alw view miners --search 5FxbWw
+        $ alw view miners --min-capacity 10[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -62,6 +107,11 @@ def view_miners(full: bool):
     src_up = pairs[0].from_chain.upper()
     dst_up = pairs[0].to_chain.upper()
 
+    console.print(
+        f'[dim]{src_up}→{dst_up} N  reads  1 {src_up} → N {dst_up}   |   '
+        f'{dst_up}→{src_up} N  reads  N {dst_up} → 1 {src_up}[/dim]\n'
+    )
+
     # Withdrawal cooldown = 2 * fulfillment_timeout_blocks after deactivation.
     try:
         fulfillment_timeout = client.get_fulfillment_timeout()
@@ -70,21 +120,25 @@ def view_miners(full: bool):
         fulfillment_timeout = 0
         current_block = 0
 
-    table = Table(show_header=True)
-    table.add_column('UID', style='cyan')
-    table.add_column(f'{src_up}→{dst_up}', style='green')
-    table.add_column(f'{dst_up}→{src_up}', style='green')
-    table.add_column('Collateral (TAO)', style='magenta')
-    table.add_column('Active', style='bold')
-    table.add_column('Status', style='yellow')
-    table.add_column(f'{src_up} Addr', style='dim')
-    table.add_column(f'{dst_up} Addr', style='dim')
-
     def _trunc(s: str) -> str:
         if full or not s:
             return s
         return s[:16] + '...' if len(s) > 16 else s
 
+    # Build a row-data list first so we can sort/filter before printing.
+    # Each row carries: original MinerPair, derived numeric fields
+    # (collateral_rao, sort-status rank), and the already-formatted strings
+    # used for rendering.
+    status_ranks = {
+        'available': 0,
+        'reserved': 1,
+        'in-swap': 2,
+        'cooldown': 3,
+        'offline': 4,
+        'unknown': 5,
+    }
+
+    rows = []
     for pair in pairs:
         try:
             collateral_rao, is_active, has_swap, reserved_until, deactivation_block = client.get_miner_snapshot(
@@ -92,16 +146,22 @@ def view_miners(full: bool):
             )
             collateral_str = f'{from_rao(collateral_rao):.4f}'
             active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
+            snapshot_ok = True
         except ContractError:
-            collateral_str = '[dim]—[/dim]'
-            active_str = '[dim]—[/dim]'
+            collateral_rao = 0
+            is_active = False
+            has_swap = False
             reserved_until = 0
             deactivation_block = 0
-            has_swap = False
+            collateral_str = '[dim]—[/dim]'
+            active_str = '[dim]—[/dim]'
+            snapshot_ok = False
 
         status_parts = []
+        status_tokens = set()
         if has_swap:
             status_parts.append('[blue]in-swap[/blue]')
+            status_tokens.add('in-swap')
         if reserved_until and current_block and reserved_until > current_block:
             try:
                 resv = client.get_reservation_data(pair.hotkey)
@@ -112,18 +172,34 @@ def view_miners(full: bool):
                 status_parts.append(f'[yellow]reserved {from_rao(tao_amount):.4f} TAO[/yellow]')
             else:
                 status_parts.append('[yellow]reserved[/yellow]')
+            status_tokens.add('reserved')
         if deactivation_block and fulfillment_timeout and current_block:
             cooldown_end = deactivation_block + 2 * fulfillment_timeout
             remaining = cooldown_end - current_block
             if remaining > 0:
                 status_parts.append(f'[red]cooldown {remaining}b[/red]')
+                status_tokens.add('cooldown')
 
         if status_parts:
             status_str = ' · '.join(status_parts)
+            # Sort-key bucket: pick the most specific active state.
+            if 'reserved' in status_tokens:
+                status_sort_token = 'reserved'
+            elif 'in-swap' in status_tokens:
+                status_sort_token = 'in-swap'
+            elif 'cooldown' in status_tokens:
+                status_sort_token = 'cooldown'
+            else:
+                status_sort_token = next(iter(status_tokens))
+        elif not snapshot_ok:
+            status_str = '[dim]—[/dim]'
+            status_sort_token = 'unknown'
         elif is_active:
             status_str = '[green]available[/green]'
+            status_sort_token = 'available'
         else:
             status_str = '[dim]offline[/dim]'
+            status_sort_token = 'offline'
 
         fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
         if pair.counter_rate > 0:
@@ -133,31 +209,143 @@ def view_miners(full: bool):
         else:
             ctr_display = f'{pair.rate:g}'
 
+        rows.append(
+            {
+                'pair': pair,
+                'collateral_rao': collateral_rao,
+                'status_token': status_sort_token,
+                'fwd_display': fwd_display,
+                'ctr_display': ctr_display,
+                'collateral_str': collateral_str,
+                'active_str': active_str,
+                'status_str': status_str,
+            }
+        )
+
+    total_before_filter = len(rows)
+
+    # Apply filters
+    if status_filter:
+        target = status_filter.lower()
+        rows = [r for r in rows if r['status_token'] == target]
+    if min_capacity is not None:
+        threshold_rao = int(min_capacity * 1_000_000_000)
+        rows = [r for r in rows if r['collateral_rao'] >= threshold_rao]
+    if search:
+        needle = search.lower()
+        rows = [
+            r
+            for r in rows
+            if needle in str(r['pair'].uid).lower()
+            or needle in r['pair'].hotkey.lower()
+            or needle in (r['pair'].from_address or '').lower()
+            or needle in (r['pair'].to_address or '').lower()
+        ]
+
+    # Apply sort
+    sort_by = sort_by.lower()
+    if sort_by == 'uid':
+        rows.sort(key=lambda r: r['pair'].uid)
+    elif sort_by == 'rate':
+        # Sort by strongest of the two quoted rates, desc. Reverse-only miners
+        # with rate=0 still get ranked by their counter_rate.
+        rows.sort(key=lambda r: max(r['pair'].rate, r['pair'].counter_rate), reverse=True)
+    elif sort_by == 'capacity':
+        rows.sort(key=lambda r: r['collateral_rao'], reverse=True)
+    elif sort_by == 'status':
+        rows.sort(key=lambda r: (status_ranks.get(r['status_token'], 99), r['pair'].uid))
+
+    if not rows:
+        console.print('[yellow]No miners match the given filters.[/yellow]\n')
+        return
+
+    table = Table(show_header=True)
+    table.add_column('UID', style='cyan')
+    table.add_column(f'{src_up}→{dst_up}', style='green')
+    table.add_column(f'{dst_up}→{src_up}', style='green')
+    table.add_column('Collateral (TAO)', style='magenta')
+    table.add_column('Active', style='bold')
+    table.add_column('Status', style='yellow')
+    table.add_column(f'{src_up} Addr', style='dim')
+    table.add_column(f'{dst_up} Addr', style='dim')
+    table.add_column('Hotkey', style='dim')
+
+    for r in rows:
+        pair = r['pair']
         table.add_row(
             str(pair.uid),
-            fwd_display,
-            ctr_display,
-            collateral_str,
-            active_str,
-            status_str,
+            r['fwd_display'],
+            r['ctr_display'],
+            r['collateral_str'],
+            r['active_str'],
+            r['status_str'],
             _trunc(pair.from_address),
             _trunc(pair.to_address),
+            _trunc(pair.hotkey),
         )
 
     console.print(table)
-    console.print(f'\n[dim]Total miners: {len(pairs)}[/dim]\n')
+    shown = len(rows)
+    if shown == total_before_filter:
+        console.print(f'\n[dim]Total miners: {shown}[/dim]')
+    else:
+        console.print(f'\n[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
+    console.print(f'[dim]Sorted by: {sort_by}[/dim]')
     if not full:
-        console.print('[dim]Use --full to show untruncated addresses.[/dim]\n')
+        console.print('[dim]Use --full to show untruncated addresses and hotkeys.[/dim]')
+    console.print()
+
+
+RATES_SORT_FIELDS = ['uid', 'rate', 'fwd', 'rev', 'capacity']
 
 
 @view_group.command('rates')
 @click.option('--pair', default=None, type=str, help='Filter by pair (e.g. btc-tao)')
-def view_rates(pair: str):
-    """View current exchange rates.
+@click.option('--full', is_flag=True, help='Show untruncated addresses')
+@click.option(
+    '--sort',
+    'sort_by',
+    type=click.Choice(RATES_SORT_FIELDS, case_sensitive=False),
+    default='rate',
+    show_default=True,
+    help='Sort field. rate = best of fwd/rev (desc); fwd/rev = that direction only (desc); uid asc; capacity desc.',
+)
+@click.option(
+    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+)
+@click.option(
+    '--search',
+    default=None,
+    type=str,
+    help='Case-insensitive substring match against UID and posted addresses.',
+)
+def view_rates(
+    pair: str,
+    full: bool,
+    sort_by: str,
+    min_capacity: float | None,
+    search: str | None,
+):
+    """View current exchange rates — user-shopping view.
+
+    [dim]Only shows active miners with collateral (i.e. swappable). Each
+    row is a miner's bilateral quote with posted addresses and
+    TAO-denominated capacity.
+
+    Rate columns read as direct exchange ratios:
+      BTC→TAO N  reads:  1 BTC → N TAO
+      TAO→BTC N  reads:  N TAO → 1 BTC
+
+    Capacity (TAO) is the miner's posted collateral — the hard cap on the
+    TAO leg of any single swap.[/dim]
 
     [dim]Examples:
         $ alw view rates
-        $ alw view rates --pair btc-tao[/dim]
+        $ alw view rates --pair btc-tao
+        $ alw view rates --sort capacity
+        $ alw view rates --min-capacity 5
+        $ alw view rates --search bc1q
+        $ alw view rates --full[/dim]
     """
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
@@ -167,16 +355,24 @@ def view_rates(pair: str):
     with loading('Reading rates...'):
         all_pairs = read_miner_commitments(subtensor, netuid)
 
-        # Only show miners that are active and have collateral (i.e. swappable)
-        pairs = []
+        # Only show miners that are active and have collateral (i.e. swappable).
+        # Keep the collateral value so we can display capacity without a second fetch.
+        pairs_with_collateral: list[tuple] = []
         for p in all_pairs:
             try:
                 is_active = client.get_miner_active_flag(p.hotkey)
                 collateral = client.get_miner_collateral(p.hotkey)
                 if is_active and collateral > 0:
-                    pairs.append(p)
+                    pairs_with_collateral.append((p, collateral))
             except ContractError:
                 continue
+
+        try:
+            min_swap_rao = client.get_min_swap_amount()
+            max_swap_rao = client.get_max_swap_amount()
+        except ContractError:
+            min_swap_rao = 0
+            max_swap_rao = 0
 
     if pair:
         parts = pair.lower().split('-')
@@ -184,35 +380,81 @@ def view_rates(pair: str):
             console.print('[red]Invalid pair format. Use: chain-chain (e.g. btc-tao)[/red]')
             return
         src, dst = parts
-        pairs = [p for p in pairs if p.from_chain == src and p.to_chain == dst]
+        pairs_with_collateral = [
+            (p, c) for (p, c) in pairs_with_collateral if p.from_chain == src and p.to_chain == dst
+        ]
 
-    if not pairs:
-        console.print('[yellow]No rates found[/yellow]\n')
+    total_before_filter = len(pairs_with_collateral)
+
+    # Apply row-level filters before grouping so the per-group stats
+    # reflect only the rows that actually render.
+    if min_capacity is not None:
+        threshold_rao = int(min_capacity * 1_000_000_000)
+        pairs_with_collateral = [(p, c) for (p, c) in pairs_with_collateral if c >= threshold_rao]
+    if search:
+        needle = search.lower()
+        pairs_with_collateral = [
+            (p, c)
+            for (p, c) in pairs_with_collateral
+            if needle in str(p.uid).lower()
+            or needle in (p.from_address or '').lower()
+            or needle in (p.to_address or '').lower()
+        ]
+
+    if not pairs_with_collateral:
+        if total_before_filter > 0:
+            console.print('[yellow]No rates match the given filters.[/yellow]\n')
+        else:
+            console.print('[yellow]No rates found[/yellow]\n')
         return
 
+    def _trunc(s: str) -> str:
+        if full or not s:
+            return s
+        return s[:16] + '...' if len(s) > 16 else s
+
     # Group by pair direction
-    grouped = {}
-    for p in pairs:
+    grouped: dict[str, list[tuple]] = {}
+    for p, c in pairs_with_collateral:
         key = f'{p.from_chain}-{p.to_chain}'
-        grouped.setdefault(key, []).append(p)
+        grouped.setdefault(key, []).append((p, c))
+
+    sort_by = sort_by.lower()
 
     for pair_key, pair_list in grouped.items():
         src, dst = pair_key.split('-')
         src_name = SUPPORTED_CHAINS.get(src, src).name if src in SUPPORTED_CHAINS else src
         dst_name = SUPPORTED_CHAINS.get(dst, dst).name if dst in SUPPORTED_CHAINS else dst
+        src_up = src.upper()
+        dst_up = dst.upper()
 
         console.print(f'[bold]{src_name} ↔ {dst_name}[/bold]')
+        console.print(
+            f'[dim]{src_up}→{dst_up} N  reads  1 {src_up} → N {dst_up}   |   '
+            f'{dst_up}→{src_up} N  reads  N {dst_up} → 1 {src_up}[/dim]'
+        )
 
         table = Table(show_header=True)
         table.add_column('UID', style='cyan')
-        table.add_column(f'{src.upper()}→{dst.upper()}', style='green')
-        table.add_column(f'{dst.upper()}→{src.upper()}', style='green')
-        table.add_column('Hotkey', style='dim')
+        table.add_column(f'{src_up}→{dst_up}', style='green')
+        table.add_column(f'{dst_up}→{src_up}', style='green')
+        table.add_column('Capacity (TAO)', style='yellow')
+        table.add_column(f'{src_up} Addr', style='dim')
+        table.add_column(f'{dst_up} Addr', style='dim')
 
-        # Sort by the stronger of the two rates so reverse-only miners aren't
-        # buried at the bottom with rate=0.
-        pair_list.sort(key=lambda x: max(x.rate, x.counter_rate), reverse=True)
-        for p in pair_list:
+        # Sort rows within this pair group. Default 'rate' = strongest quoted
+        # direction (so reverse-only miners aren't buried at rate=0).
+        if sort_by == 'uid':
+            pair_list.sort(key=lambda x: x[0].uid)
+        elif sort_by == 'fwd':
+            pair_list.sort(key=lambda x: x[0].rate, reverse=True)
+        elif sort_by == 'rev':
+            pair_list.sort(key=lambda x: x[0].counter_rate, reverse=True)
+        elif sort_by == 'capacity':
+            pair_list.sort(key=lambda x: x[1], reverse=True)
+        else:  # 'rate'
+            pair_list.sort(key=lambda x: max(x[0].rate, x[0].counter_rate), reverse=True)
+        for p, collateral in pair_list:
             fwd = f'{p.rate:g}' if p.rate > 0 else '—'
             if p.counter_rate > 0:
                 rev = f'{p.counter_rate:g}'
@@ -220,29 +462,66 @@ def view_rates(pair: str):
                 rev = '—'
             else:
                 rev = fwd
-            table.add_row(str(p.uid), fwd, rev, p.hotkey[:16] + '...')
+            table.add_row(
+                str(p.uid),
+                fwd,
+                rev,
+                f'{from_rao(collateral):.4f}',
+                _trunc(p.from_address),
+                _trunc(p.to_address),
+            )
 
         console.print(table)
 
         # Per-direction stats — excluding miners that don't quote that direction,
         # so a single reverse-only miner doesn't drag the forward average to zero.
-        fwd_rates = [p.rate for p in pair_list if p.rate > 0]
-        rev_rates = [p.counter_rate for p in pair_list if p.counter_rate > 0]
+        fwd_rates = [p.rate for (p, _) in pair_list if p.rate > 0]
+        rev_rates = [p.counter_rate for (p, _) in pair_list if p.counter_rate > 0]
         stat_lines = []
         if len(fwd_rates) > 1:
             stat_lines.append(
-                f'{src.upper()}→{dst.upper()}: best {max(fwd_rates):g} | worst {min(fwd_rates):g} | '
+                f'{src_up}→{dst_up}: best {max(fwd_rates):g} | worst {min(fwd_rates):g} | '
                 f'avg {sum(fwd_rates) / len(fwd_rates):.4f}'
             )
         if len(rev_rates) > 1:
             stat_lines.append(
-                f'{dst.upper()}→{src.upper()}: best {max(rev_rates):g} | worst {min(rev_rates):g} | '
+                f'{dst_up}→{src_up}: best {max(rev_rates):g} | worst {min(rev_rates):g} | '
                 f'avg {sum(rev_rates) / len(rev_rates):.4f}'
             )
         for line in stat_lines:
             console.print(f'  [dim]{line}[/dim]')
 
         console.print()
+
+    # Do-not-just-send disclaimer. The posted addresses are shown so users
+    # know a miner is reachable — not as a shortcut. Direct transfers
+    # bypass the reservation/validator-consensus flow and will not be
+    # matched to a swap: funds can be lost.
+    console.print(
+        '[yellow]⚠  Do not send funds directly to these addresses.[/yellow] '
+        '[dim]Use [cyan]alw swap quote[/cyan] to preview a rate, then '
+        '[cyan]alw swap now[/cyan] to reserve a miner and complete the swap.[/dim]'
+    )
+
+    # Contract bounds footer — applies to the TAO leg of every swap,
+    # regardless of direction. Helps users understand why tiny or huge
+    # requested amounts get rejected by `alw swap quote`.
+    if min_swap_rao > 0 and max_swap_rao > 0:
+        console.print(
+            f'[dim]Contract swap bounds (TAO leg): {from_rao(min_swap_rao):.4f}–{from_rao(max_swap_rao):.4f} TAO.[/dim]'
+        )
+    elif min_swap_rao > 0:
+        console.print(f'[dim]Contract min swap (TAO leg): {from_rao(min_swap_rao):.4f} TAO.[/dim]')
+    elif max_swap_rao > 0:
+        console.print(f'[dim]Contract max swap (TAO leg): {from_rao(max_swap_rao):.4f} TAO.[/dim]')
+
+    shown = len(pairs_with_collateral)
+    if shown != total_before_filter:
+        console.print(f'[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
+    console.print(f'[dim]Sorted by: {sort_by}[/dim]')
+    if not full:
+        console.print('[dim]Use --full to show untruncated addresses.[/dim]')
+    console.print()
 
 
 @view_group.command('swaps')
@@ -324,7 +603,10 @@ def build_swap_text(swap, chain_info=True):
     dst_chain_def = get_chain(swap.to_chain)
     src_human = swap.from_amount / (10**src_chain_def.decimals)
     dst_human = swap.to_amount / (10**dst_chain_def.decimals)
-    parts.append(f'  {src} -> {dst} | {src_human:g} {src} -> {dst_human:.8f} {dst} | Rate: {swap.rate}')
+    parts.append(
+        f'  Send [red]{src_human:g} {src}[/red] → Receive [green]{dst_human:.8f} {dst}[/green]  '
+        f'[dim](rate {swap.rate})[/dim]'
+    )
 
     timed_out = swap.status == SwapStatus.TIMED_OUT
 
@@ -355,8 +637,12 @@ def build_swap_text(swap, chain_info=True):
         parts.append('')
         parts.append(f'  User:      {swap.user_hotkey}')
         parts.append(f'  Miner:     {swap.miner_hotkey}')
-        parts.append(f'  Send to:   {swap.user_from_address}')
-        parts.append(f'  Receive:   {swap.user_to_address}')
+        # user_from_address = user's own source-chain address (funds
+        # originated here). user_to_address = user's dest-chain address
+        # (funds land here). The old "Send to" label read like
+        # user_from_address was a destination — misleading.
+        parts.append(f'  From addr: {swap.user_from_address}')
+        parts.append(f'  To addr:   {swap.user_to_address}')
 
     parts.append('')
     return '\n'.join(parts)
@@ -593,11 +879,14 @@ def view_reservation():
     to_chain_def = get_chain(state.to_chain)
     human_receive = state.user_receives / (10**to_chain_def.decimals)
 
-    table.add_row('Pair', f'{state.from_chain.upper()} -> {state.to_chain.upper()}')
-    table.add_row('Send', f'{human_send} {state.from_chain.upper()}')
-    table.add_row('To Address', state.miner_from_address)
-    table.add_row('Receive', f'{human_receive:.8f} {state.to_chain.upper()}')
-    table.add_row('Receive Address', state.receive_address)
+    src_up = state.from_chain.upper()
+    dst_up = state.to_chain.upper()
+    table.add_row('Direction', f'Send {src_up} → Receive {dst_up}')
+    table.add_row(f'Send {src_up}', f'{human_send} {src_up}')
+    table.add_row(f'  from (your {src_up})', state.user_from_address)
+    table.add_row(f'  to (miner {src_up})', state.miner_from_address)
+    table.add_row(f'Receive {dst_up}', f'{human_receive:.8f} {dst_up}')
+    table.add_row(f'  to (your {dst_up})', state.receive_address)
     table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
 
     if on_chain_reservation:
@@ -624,7 +913,8 @@ def view_reservation():
 
     if is_active:
         console.print(
-            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} to the address above, then run:'
+            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
+            f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
         )
         console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
     elif consumed_swap is not None:
