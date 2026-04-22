@@ -27,8 +27,6 @@ def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
             chain_providers={},
             wallet=MagicMock(),
             subtensor=MagicMock(),
-            netuid=2,
-            metagraph=MagicMock(),
         )
 
 

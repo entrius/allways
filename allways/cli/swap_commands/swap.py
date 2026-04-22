@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
     is_local_network,
     load_pending_swap,
     save_pending_swap,
+    sign_or_prompt_external,
 )
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
@@ -67,6 +68,7 @@ def sign_and_broadcast_confirm(
     ephemeral_wallet,
     from_chain: str = '',
     to_chain: str = '',
+    skip_confirm: bool = False,
 ) -> tuple:
     """Sign source tx proof and broadcast SwapConfirmSynapse to validators.
 
@@ -74,18 +76,16 @@ def sign_and_broadcast_confirm(
     but is waiting for source tx confirmations before voting to initiate.
     """
     console.print('[dim]Submitting swap to validators...[/dim]')
-    try:
-        from_proof = provider.sign_from_proof(
-            user_from_address,
-            swap_proof_message(from_tx_hash),
-            from_key,
-        )
-    except Exception as e:
-        console.print(f'[red]Failed to sign source proof ({type(e).__name__}): {e}[/red]')
-        return 0, 0
-
+    from_proof = sign_or_prompt_external(
+        provider,
+        user_from_address,
+        swap_proof_message(from_tx_hash),
+        key=from_key,
+        chain=from_chain,
+        skip_confirm=skip_confirm,
+    )
     if not from_proof:
-        console.print('[red]Source proof is empty — signing failed (check chain provider RPC connection)[/red]')
+        console.print('[red]Could not obtain source tx proof signature — cannot confirm swap.[/red]')
         return 0, 0
 
     confirm_synapse = SwapConfirmSynapse(
@@ -161,18 +161,16 @@ def broadcast_reserve_with_retry(
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
     current_block = subtensor.get_current_block()
-    try:
-        from_address_proof = provider.sign_from_proof(
-            user_from_address,
-            reserve_proof_message(user_from_address, current_block),
-            from_key,
-        )
-    except Exception as e:
-        console.print(f'[red]Failed to sign source address proof ({type(e).__name__}): {e}[/red]')
-        return None
-
+    from_address_proof = sign_or_prompt_external(
+        provider,
+        user_from_address,
+        reserve_proof_message(user_from_address, current_block),
+        key=from_key,
+        chain=from_chain,
+        skip_confirm=skip_confirm,
+    )
     if not from_address_proof:
-        console.print('[red]Source address proof is empty — signing failed (check chain provider RPC connection)[/red]')
+        console.print('[red]Could not obtain reserve signature — cannot reserve miner.[/red]')
         return None
 
     synapse = SwapReserveSynapse(
@@ -198,14 +196,16 @@ def broadcast_reserve_with_retry(
     for attempt in range(max_retries + 1):
         if attempt > 0:
             current_block = subtensor.get_current_block()
-            try:
-                from_address_proof = provider.sign_from_proof(
-                    user_from_address,
-                    reserve_proof_message(user_from_address, current_block),
-                    from_key,
-                )
-            except Exception as e:
-                console.print(f'[red]Failed to sign source address proof: {e}[/red]')
+            from_address_proof = sign_or_prompt_external(
+                provider,
+                user_from_address,
+                reserve_proof_message(user_from_address, current_block),
+                key=from_key,
+                chain=from_chain,
+                skip_confirm=skip_confirm,
+            )
+            if not from_address_proof:
+                console.print('[red]Could not obtain reserve signature on retry.[/red]')
                 return None
             synapse = SwapReserveSynapse(
                 miner_hotkey=selected_pair.hotkey,
@@ -511,13 +511,29 @@ def swap_now_command(
         if from_chain == 'tao':
             console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
         else:
-            is_local = is_local_network(config.get('network', 'finney'))
             has_private_key = bool(os.environ.get('BTC_PRIVATE_KEY'))
+            btc_mode = os.environ.get('BTC_MODE', 'lightweight')
+            is_local = is_local_network(config.get('network', 'finney'))
 
-            if not is_local and has_private_key:
-                console.print('\n  [green]BTC_PRIVATE_KEY set — will attempt BTC sends locally.[/green]')
+            if has_private_key and not is_local:
+                console.print('\n  [green]BTC_PRIVATE_KEY set — will sign and attempt BTC sends locally.[/green]')
+            elif btc_mode == 'lightweight' and not has_private_key:
+                # No internal signing key — fall through to BYO-sig at reserve/confirm.
+                console.print('\n  [yellow]No BTC_PRIVATE_KEY set — external signing required.[/yellow]')
+                console.print(
+                    '  [dim]At reserve and confirm time the CLI will show a short message;\n'
+                    '  sign it in your wallet (Electrum, Sparrow, Trezor, Bitcoin Core) and\n'
+                    '  paste the base64 signature back. Taproot (bc1p...) is not supported.[/dim]'
+                )
+                console.print(
+                    '  [yellow]Automatic BTC send is also unavailable — you will send BTC manually and\n'
+                    '  run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
+                )
+                if not click.confirm('  Continue?', default=True):
+                    console.print('[yellow]Cancelled[/yellow]')
+                    return
             else:
-                console.print('\n  [yellow]No BTC_PRIVATE_KEY found.[/yellow]')
+                console.print('\n  [yellow]Automatic BTC send unavailable in this environment.[/yellow]')
                 console.print(
                     '  [yellow]You will need to manually send BTC to the miner address'
                     ' and then run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
