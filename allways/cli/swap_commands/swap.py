@@ -517,9 +517,7 @@ def swap_now_command(
     matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
 
     if not matching_pairs:
-        console.print(
-            f'[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]'
-        )
+        console.print(f'[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]')
         console.print('[dim]Run [cyan]alw view rates[/cyan] to see active pairs, or try again later.[/dim]\n')
         return
 
