@@ -247,10 +247,36 @@ def miner_deactivate():
     [dim]Examples:
         $ alw miner deactivate[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    _, wallet, subtensor, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
 
     console.print(f'\n[bold]Miner Deactivate: {hotkey[:16]}...[/bold]\n')
+
+    # Pre-flight: the contract rejects deactivate() with MinerHasActiveSwap or
+    # MinerReserved (lib.rs:935-940). ink! returns those as a raw ContractReverted
+    # with no variant name, so detect them here to show why instead of a module
+    # error dump.
+    try:
+        if client.get_miner_has_active_swap(hotkey):
+            console.print(
+                '[red]Cannot deactivate: you have an active swap.[/red]\n'
+                '[dim]Wait for it to complete or time out, then try again. '
+                'Check with: alw view active-swaps[/dim]\n'
+            )
+            return
+        reserved_until = client.get_miner_reserved_until(hotkey)
+        current_block = subtensor.get_current_block()
+        if reserved_until > current_block:
+            remaining = reserved_until - current_block
+            console.print(
+                f'[red]Cannot deactivate: you have an active reservation '
+                f'(~{remaining} blocks, ~{remaining * 12 // 60} min left).[/red]\n'
+                '[dim]Wait for it to expire or get consumed, then try again.[/dim]\n'
+            )
+            return
+    except ContractError as e:
+        print_contract_error('Failed to read miner state', e)
+        return
 
     try:
         with loading('Submitting transaction...'):
