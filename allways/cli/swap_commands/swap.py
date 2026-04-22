@@ -127,7 +127,7 @@ def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
             try:
                 if client.get_miner_has_active_swap(miner_hotkey):
                     next_id = client.get_next_swap_id()
-                    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
+                    for check_id in range(next_id - 1, max(next_id - 6, 0), -1):
                         swap = client.get_swap(check_id)
                         if swap and swap.miner_hotkey == miner_hotkey:
                             return check_id
@@ -335,7 +335,7 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
             try:
                 if client.get_miner_has_active_swap(miner_hotkey):
                     next_id = client.get_next_swap_id()
-                    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
+                    for check_id in range(next_id - 1, max(next_id - 6, 0), -1):
                         swap = client.get_swap(check_id)
                         if swap and swap.miner_hotkey == miner_hotkey:
                             return check_id
