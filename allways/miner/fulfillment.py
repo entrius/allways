@@ -63,8 +63,6 @@ class SwapFulfiller:
         chain_providers: Dict[str, ChainProvider],
         wallet: bt.Wallet,
         subtensor: bt.Subtensor,
-        netuid: int,
-        metagraph: Optional['bt.Metagraph'] = None,
         fee_divisor: int = 100,
         sent_cache_path: Optional[Path] = None,
         my_addresses: Optional[Dict[str, str]] = None,
@@ -73,8 +71,6 @@ class SwapFulfiller:
         self.providers = chain_providers
         self.wallet = wallet
         self.subtensor = subtensor
-        self.netuid = netuid
-        self.metagraph = metagraph
         self.fee_divisor = fee_divisor
         self.timeout_cushion_blocks = load_timeout_cushion_blocks()
         # Chain → miner's own deposit/fulfillment address, populated at
