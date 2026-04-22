@@ -107,7 +107,7 @@ def sign_and_broadcast_confirm(
     accepted = 0
     queued = 0
     for i, resp in enumerate(confirm_responses):
-        reason = getattr(resp, 'rejection_reason', '') or ''
+        reason = (getattr(resp, 'rejection_reason', '') or '').strip()
         if getattr(resp, 'accepted', None):
             accepted += 1
             if 'Queued' in reason:
@@ -116,7 +116,10 @@ def sign_and_broadcast_confirm(
             else:
                 console.print(f'    V{i + 1}: [green]ok[/green]')
         else:
-            console.print(f'    V{i + 1}: [red]no[/red] {reason}')
+            # Blank = validator didn't respond; be explicit so the user can
+            # distinguish "rejected with reason" from "silently unreachable".
+            display = reason or '(no response — timeout or validator down)'
+            console.print(f'    V{i + 1}: [red]no[/red] {display}')
 
     return accepted, queued
 
@@ -230,17 +233,24 @@ def broadcast_reserve_with_retry(
         accepted = sum(1 for r in responses if getattr(r, 'accepted', None))
         for i, resp in enumerate(responses):
             status = '[green]ok[/green]' if getattr(resp, 'accepted', None) else '[red]no[/red]'
-            reason = getattr(resp, 'rejection_reason', '') or ''
+            # Blank reason = validator didn't respond (network/timeout) rather
+            # than an explicit rejection; surface that instead of an empty line.
+            reason = (getattr(resp, 'rejection_reason', '') or '').strip() or '(no response — timeout or validator down)'
             console.print(f'    V{i + 1}: {status} {reason}')
 
         if accepted == 0:
             console.print('[red]No validators accepted the reservation.[/red]')
-            if attempt < max_retries and not skip_confirm and click.confirm('Retry?'):
+            if attempt < max_retries and not skip_confirm and click.confirm('Retry?', default=True):
                 console.print('[dim]Retrying reservation...[/dim]')
                 continue
             return None
 
-        with console.status(f'[dim]Waiting for quorum ({accepted} votes submitted)...[/dim]') as status:
+        # Countdown the quorum wait so users see progress, not just a spinner.
+        quorum_total_s = 60
+        quorum_started = time.time()
+        with console.status(
+            f'[dim]Waiting for on-chain quorum — 0/{accepted} broadcast votes confirmed (~{quorum_total_s}s)...[/dim]'
+        ) as status:
             quorum_errors = 0
             for _ in range(30):
                 time.sleep(2)
@@ -250,9 +260,11 @@ def broadcast_reserve_with_retry(
                         reserved = True
                         break
                     vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
+                    elapsed = int(time.time() - quorum_started)
+                    remaining = max(0, quorum_total_s - elapsed)
                     status.update(
-                        f'[dim]Waiting for quorum — {vote_count} on-chain vote(s) so far '
-                        f'({accepted} broadcast)...[/dim]'
+                        f'[dim]Waiting for on-chain quorum — {vote_count}/{accepted} votes confirmed, '
+                        f'{elapsed}s elapsed (~{remaining}s remaining)...[/dim]'
                     )
                     quorum_errors = 0
                 except ContractError:
@@ -268,8 +280,13 @@ def broadcast_reserve_with_retry(
             break
 
         if attempt < max_retries:
-            console.print('[yellow]Reservation quorum not reached.[/yellow]')
-            if not skip_confirm and click.confirm('Retry?'):
+            console.print(
+                f'[yellow]Reservation quorum not reached ({accepted} broadcast votes didn\'t make it on-chain within '
+                f'{quorum_total_s}s).[/yellow]'
+            )
+            # Default yes since we had >=1 accept — usually a transient chain
+            # delay and a second attempt works without changing anything.
+            if not skip_confirm and click.confirm('Retry?', default=True):
                 console.print('[dim]Retrying reservation...[/dim]')
             else:
                 return None
