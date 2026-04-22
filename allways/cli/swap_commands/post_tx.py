@@ -28,7 +28,7 @@ from allways.contract_client import ContractError
     default=0,
     help=(
         'Override the source-tx block number. Usually unnecessary — the CLI '
-        "looks it up automatically across the whole reservation window. Use "
+        'looks it up automatically across the whole reservation window. Use '
         "this only when automatic lookup fails (e.g. you're running against a "
         'node that has pruned block bodies or the tx landed on a different node).'
     ),

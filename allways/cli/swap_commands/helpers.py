@@ -353,9 +353,7 @@ def resolve_source_tx_block(
         console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
         return int(tx_info.block_number)
 
-    console.print(
-        f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]'
-    )
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
     console.print(
         '[dim]  Validators will scan too; if they reject, retry with: '
         '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
