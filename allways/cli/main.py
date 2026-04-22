@@ -109,14 +109,16 @@ KNOWN_NETWORKS = {
     'local': 'ws://127.0.0.1:9944',
 }
 
+VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address')
+
 
 @config_group.command('set')
-@click.argument('key', type=str)
+@click.argument('key', type=click.Choice(VALID_CONFIG_KEYS, case_sensitive=False))
 @click.argument('value', type=str)
 def config_set(key: str, value: str):
     """Set a configuration value.
 
-    [dim]Common keys:
+    [dim]Valid keys:
         wallet              Wallet name
         hotkey              Hotkey name
         contract-address    Contract address
