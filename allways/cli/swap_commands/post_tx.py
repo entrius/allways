@@ -113,7 +113,7 @@ def post_tx_command(tx_hash: str):
     if queued > 0 and queued == accepted:
         clear_pending_swap()
         console.print('\n[green]Validators queued your transaction for auto-confirmation.[/green]')
-        console.print('[dim]Swap will be initiated once confirmations are reached. Check: alw view swaps[/dim]\n')
+        console.print('[dim]Swap will be initiated once confirmations are reached. Check: alw view active-swaps[/dim]\n')
         return
 
     # Poll for swap creation
@@ -123,5 +123,5 @@ def post_tx_command(tx_hash: str):
         console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
         console.print(f'[dim]Track with: alw view swap {swap_id}[/dim]\n')
     else:
-        console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view swaps[/yellow]')
+        console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view active-swaps[/yellow]')
         console.print('[dim]State file kept — you can retry this command.[/dim]\n')

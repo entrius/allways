@@ -525,19 +525,19 @@ def view_rates(
     console.print()
 
 
-@view_group.command('swaps')
+@view_group.command('active-swaps')
 @click.option(
     '--status',
     default=None,
     type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
     help='Filter by status (active, fulfilled, completed, timed_out)',
 )
-def view_swaps(status: str):
+def view_active_swaps(status: str):
     """View active swaps on the contract.
 
     [dim]Examples:
-        $ alw view swaps
-        $ alw view swaps --status active[/dim]
+        $ alw view active-swaps
+        $ alw view active-swaps --status active[/dim]
     """
     _, _, _, client = get_cli_context(need_wallet=False)
 
@@ -1025,7 +1025,7 @@ def view_reservation():
         console.print(
             '\n[yellow]Reservation is no longer active on-chain.[/yellow]\n'
             '[dim]Either the reservation expired before you sent funds, or your swap already '
-            'initiated and has since completed. Check: alw view swaps[/dim]'
+            'initiated and has since completed. Check: alw view active-swaps[/dim]'
         )
         clear_pending_swap()
         console.print('[dim]Local reservation state cleared.[/dim]\n')

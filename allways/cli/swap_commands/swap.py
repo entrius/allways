@@ -899,7 +899,7 @@ def swap_now_command(
     if swap_id is None:
         clear_pending_swap()
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view swaps[/dim]\n')
+        console.print('[dim]Check back with: alw view active-swaps[/dim]\n')
         return
 
     clear_pending_swap()

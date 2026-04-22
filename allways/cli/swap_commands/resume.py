@@ -122,7 +122,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
         console.print('\n[yellow]Reservation is no longer active.[/yellow]')
         console.print(
             '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
-            'or completed. Check with: alw view swaps[/dim]\n'
+            'or completed. Check with: alw view active-swaps[/dim]\n'
         )
         console.print('[dim]Start a new swap with: alw swap now[/dim]')
         return
@@ -199,7 +199,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
     if swap_id is None:
         clear_pending_swap()
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view swaps[/dim]\n')
+        console.print('[dim]Check back with: alw view active-swaps[/dim]\n')
         return
 
     clear_pending_swap()
