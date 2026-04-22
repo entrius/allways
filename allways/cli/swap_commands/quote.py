@@ -153,8 +153,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     dst_up = to_chain.upper()
     console.print(f'\n[bold]Quote: send {amount} {src_up} → receive {dst_up}[/bold]')
     console.print(
-        f'[dim]Rate shown as destination per source unit (e.g. for BTC→TAO, 345 = 1 BTC gets 345 TAO). '
-        f'"You Receive" is net of the {fee_pct:g}% protocol fee.[/dim]\n'
+        '[dim]Rate shown as destination per source unit (e.g. for BTC→TAO, 345 = 1 BTC gets 345 TAO).[/dim]\n'
     )
 
     table = Table(show_header=True)
@@ -166,6 +165,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     table.add_column('Status', style='bold')
 
     viable_count = 0
+    busy_but_fits_count = 0
     for idx, (pair, collateral, has_swap) in enumerate(available, 1):
         to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
@@ -178,6 +178,8 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         # resolves. Shown yellow rather than red to signal "temporary".
         if has_swap:
             status = '[yellow]in swap[/yellow]'
+            if viable:
+                busy_but_fits_count += 1
         elif viable:
             status = '[green]available[/green]'
             viable_count += 1
@@ -220,10 +222,15 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
             )
 
     if viable_count == 0:
-        console.print(
-            '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
-            'or wait for more collateral to be posted.[/yellow]\n'
-        )
+        if busy_but_fits_count > 0:
+            console.print(
+                '  [yellow]All miners that can fulfill this amount are currently in a swap — retry shortly.[/yellow]\n'
+            )
+        else:
+            console.print(
+                '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
+                'or wait for more collateral to be posted.[/yellow]\n'
+            )
     else:
         console.print()
 
