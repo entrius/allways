@@ -12,6 +12,7 @@ import click
 from rich.console import Console
 
 from allways.chains import get_chain
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
@@ -317,6 +318,70 @@ def load_pending_swap() -> Optional[PendingSwapState]:
 def clear_pending_swap() -> None:
     """Remove the pending swap state file."""
     PENDING_SWAP_FILE.unlink(missing_ok=True)
+
+
+# Fallback when the contract's reservation TTL can't be read. Mirrors the
+# contract default (see ``reservation_ttl`` init in
+# allways/smart-contracts/ink/lib.rs); update both together.
+_DEFAULT_RESERVATION_TTL_BLOCKS = 4032
+
+
+def resolve_source_tx_block(
+    provider,
+    tx_hash: str,
+    expected_recipient: str,
+    expected_amount: int,
+    subtensor,
+    client,
+    reserved_until_block: int,
+) -> int:
+    """Find the source tx's block so SwapConfirmSynapse can ±3-hint validators.
+
+    Scans far enough back to cover the entire reservation lifetime — a tx can't
+    validly pre-date reservation creation, so that window is the true upper
+    bound. Prints a short status line either way so users aren't left guessing
+    whether the CLI found the tx. Returns the block number or 0 on miss; the
+    caller falls back to the flag-supplied override or a validator-side scan.
+    """
+    try:
+        current_block = subtensor.get_current_block()
+    except Exception as e:
+        # If we can't reach subtensor the lookup can't proceed anyway — bail
+        # honestly rather than fake a current-block guess and crash on the
+        # first verify_transaction RPC.
+        console.print(f'[yellow]Skipping client-side tx lookup — subtensor unreachable ({type(e).__name__}).[/yellow]')
+        return 0
+    try:
+        reservation_ttl = int(client.get_reservation_ttl())
+    except ContractError:
+        reservation_ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
+    # Reservation lifetime so far, plus a few blocks of slack around start.
+    initiated_block = max(0, reserved_until_block - reservation_ttl)
+    max_scan_blocks = max(150, current_block - initiated_block + 10)
+
+    console.print('[dim]Looking up source tx on chain...[/dim]')
+    try:
+        with loading('Scanning...'):
+            tx_info = provider.verify_transaction(
+                tx_hash=tx_hash,
+                expected_recipient=expected_recipient,
+                expected_amount=expected_amount,
+                max_scan_blocks=max_scan_blocks,
+            )
+    except ProviderUnreachableError as e:
+        console.print(f'[yellow]  Provider unreachable ({e}). Validators will scan on their end.[/yellow]')
+        return 0
+
+    if tx_info and tx_info.block_number:
+        console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
+        return int(tx_info.block_number)
+
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
+    console.print(
+        '[dim]  Validators will scan too; if they reject, retry with: '
+        '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
+    )
+    return 0
 
 
 def find_matching_miners(all_pairs, from_chain: str, to_chain: str):

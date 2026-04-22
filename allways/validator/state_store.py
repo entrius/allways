@@ -33,6 +33,10 @@ class PendingConfirm:
     miner_to_address: str
     rate_str: str
     reserved_until: int
+    # Block the source tx was included in (0 = unknown). Used as a block
+    # hint when draining the queue — keeps verification O(1) even if the
+    # fixed 150-block fallback scan would have missed the tx.
+    from_tx_block: int = 0
     queued_at: float = field(default_factory=time.time)
 
 
@@ -66,8 +70,8 @@ class ValidatorStateStore:
                     miner_hotkey, from_tx_hash, from_chain, to_chain,
                     from_address, to_address, tao_amount, from_amount,
                     to_amount, miner_from_address, miner_to_address,
-                    rate_str, reserved_until, queued_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rate_str, reserved_until, from_tx_block, queued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.miner_hotkey,
@@ -83,6 +87,7 @@ class ValidatorStateStore:
                     item.miner_to_address,
                     item.rate_str,
                     item.reserved_until,
+                    item.from_tx_block,
                     item.queued_at,
                 ),
             )
@@ -137,6 +142,12 @@ class ValidatorStateStore:
 
     @staticmethod
     def row_to_pending(row: sqlite3.Row) -> PendingConfirm:
+        # ``from_tx_block`` is a newer column — rows persisted by older code
+        # won't have it, so fall back to 0 when the column is missing.
+        try:
+            from_tx_block = row['from_tx_block']
+        except (KeyError, IndexError):
+            from_tx_block = 0
         return PendingConfirm(
             miner_hotkey=row['miner_hotkey'],
             from_tx_hash=row['from_tx_hash'],
@@ -151,6 +162,7 @@ class ValidatorStateStore:
             miner_to_address=row['miner_to_address'],
             rate_str=row['rate_str'],
             reserved_until=row['reserved_until'],
+            from_tx_block=int(from_tx_block or 0),
             queued_at=row['queued_at'],
         )
 
@@ -331,6 +343,7 @@ class ValidatorStateStore:
                     miner_to_address    TEXT NOT NULL,
                     rate_str              TEXT NOT NULL,
                     reserved_until        INTEGER NOT NULL,
+                    from_tx_block         INTEGER NOT NULL DEFAULT 0,
                     queued_at             REAL NOT NULL
                 );
 
@@ -361,4 +374,14 @@ class ValidatorStateStore:
                     ON swap_outcomes(resolved_block);
                 """
             )
+            # Ensure newer columns exist on DBs created by older validator
+            # versions. SQLite has no ``ADD COLUMN IF NOT EXISTS`` (<3.35), and
+            # the PRAGMA-then-ALTER pattern races when two validators share the
+            # same DB file: both read "column missing" and both try to add it.
+            # Catching the duplicate-column error is the simplest correct form.
+            try:
+                conn.execute('ALTER TABLE pending_confirms ADD COLUMN from_tx_block INTEGER NOT NULL DEFAULT 0')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    raise
             conn.commit()
