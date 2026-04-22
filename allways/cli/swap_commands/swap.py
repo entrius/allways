@@ -952,12 +952,11 @@ def swap_now_command(
 
         console.print(
             f'\n  Waiting for [bold]{chain_def.min_confirmations} {from_chain.upper()}[/bold]'
-            f' confirmation(s) (~{est_min:.0f} min)...'
+            f' confirmation(s) (~{est_min:.0f} min). '
+            "We'll drop into live status the moment the swap is initiated on-chain."
         )
-
         console.print(
-            '\n  [dim]You can safely exit (Ctrl+C) — validators will continue processing.[/dim]'
-            f'\n  [dim]Pick up the swap any time with: alw view active-swaps  (your miner: UID {selected_pair.uid})[/dim]'
+            '\n  [dim]If you need to step away: Ctrl+C detaches, resume anytime with `alw view reservation`.[/dim]'
         )
 
     # Poll for swap creation (longer timeout when queued)
@@ -978,16 +977,13 @@ def swap_now_command(
             console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
             console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
         else:
-            console.print(
-                f'[dim]Miner UID {selected_pair.uid} — once the swap initiates it will show in: '
-                f'alw view active-swaps[/dim]\n'
-            )
+            console.print(f'[dim]Miner UID {selected_pair.uid} — check progress with: alw view reservation[/dim]\n')
         return
 
     if swap_id is None:
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
         console.print(
-            f'[dim]Miner UID {selected_pair.uid} — check: alw view active-swaps '
+            f'[dim]Miner UID {selected_pair.uid} — check: alw view reservation '
             '(pending_swap.json kept for retry with `alw swap resume`)[/dim]\n'
         )
         return
