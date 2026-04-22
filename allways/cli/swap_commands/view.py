@@ -16,6 +16,7 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
+    append_swap_history,
     clear_pending_swap,
     console,
     from_rao,
@@ -782,11 +783,13 @@ def watch_swap(client, swap_id: int, swap=None):
                             completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
                         )
                     live.update(render(final, chain_info=False, watching=False))
+                    append_swap_history(final)
                     return final
                 last_swap = swap
                 live.update(render(swap, current_block=current_block_or_zero()))
                 if swap.status in terminal:
                     live.update(render(swap, watching=False, current_block=current_block_or_zero()))
+                    append_swap_history(swap)
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
