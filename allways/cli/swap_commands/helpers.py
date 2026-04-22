@@ -10,6 +10,7 @@ import bittensor as bt
 import click
 from rich.console import Console
 
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
@@ -61,6 +62,65 @@ def require_confirmation(prompt: str, default: bool = False) -> bool:
         console.print('[yellow]Cancelled[/yellow]')
         return False
     return True
+def sign_or_prompt_external(
+    provider,
+    address: str,
+    message: str,
+    key=None,
+    chain: str = '',
+    skip_confirm: bool = False,
+) -> str:
+    """Sign a proof-of-ownership message, falling back to externally-pasted signature.
+
+    Tries internal signing first (env var WIF, wallet coldkey, Bitcoin Core RPC).
+    On failure for BTC source swaps in interactive mode, prompts the user to
+    sign the exact message in an external wallet (Electrum, Sparrow, Trezor,
+    Bitcoin Core) and paste the base64 BIP-137 signature. Verifies the pasted
+    signature before returning it so a typo fails here rather than at the
+    validator.
+
+    Returns an empty string when no valid signature is obtained.
+    """
+    try:
+        signature = provider.sign_from_proof(address, message, key)
+    except Exception as e:
+        bt.logging.warning(f'Internal signing failed ({type(e).__name__}): {e}')
+        signature = ''
+
+    if signature:
+        return signature
+
+    if skip_confirm or chain != 'btc':
+        return ''
+
+    console.print('\n  [bold yellow]External signature required[/bold yellow]')
+    console.print(
+        '  [dim]No BTC signing key loaded. Sign the message below in your wallet\n'
+        '  (Electrum: Tools -> Sign/verify message; Sparrow, Trezor, Bitcoin Core\n'
+        '  all support this) and paste the base64 signature back.[/dim]'
+    )
+    console.print(f'\n  Address: [cyan]{address}[/cyan]')
+    console.print(f'  Message: [yellow]{message}[/yellow]\n')
+
+    pasted = click.prompt('  Paste signature (blank to cancel)', default='', show_default=False).strip()
+    if not pasted:
+        return ''
+
+    try:
+        verified = provider.verify_from_proof(address, message, pasted)
+    except Exception as e:
+        console.print(f'[red]Signature verification errored: {e}[/red]')
+        return ''
+
+    if not verified:
+        console.print(
+            '[red]Signature did not verify for this address/message. Make sure you signed the exact\n'
+            'message shown above with the private key for that address.[/red]'
+        )
+        return ''
+
+    console.print('[green]  Signature verified.[/green]')
+    return pasted
 
 
 def is_valid_ss58(address: str) -> bool:
@@ -250,6 +310,70 @@ def load_pending_swap() -> Optional[PendingSwapState]:
 def clear_pending_swap() -> None:
     """Remove the pending swap state file."""
     PENDING_SWAP_FILE.unlink(missing_ok=True)
+
+
+# Fallback when the contract's reservation TTL can't be read. Mirrors the
+# contract default (see ``reservation_ttl`` init in
+# allways/smart-contracts/ink/lib.rs); update both together.
+_DEFAULT_RESERVATION_TTL_BLOCKS = 4032
+
+
+def resolve_source_tx_block(
+    provider,
+    tx_hash: str,
+    expected_recipient: str,
+    expected_amount: int,
+    subtensor,
+    client,
+    reserved_until_block: int,
+) -> int:
+    """Find the source tx's block so SwapConfirmSynapse can ±3-hint validators.
+
+    Scans far enough back to cover the entire reservation lifetime — a tx can't
+    validly pre-date reservation creation, so that window is the true upper
+    bound. Prints a short status line either way so users aren't left guessing
+    whether the CLI found the tx. Returns the block number or 0 on miss; the
+    caller falls back to the flag-supplied override or a validator-side scan.
+    """
+    try:
+        current_block = subtensor.get_current_block()
+    except Exception as e:
+        # If we can't reach subtensor the lookup can't proceed anyway — bail
+        # honestly rather than fake a current-block guess and crash on the
+        # first verify_transaction RPC.
+        console.print(f'[yellow]Skipping client-side tx lookup — subtensor unreachable ({type(e).__name__}).[/yellow]')
+        return 0
+    try:
+        reservation_ttl = int(client.get_reservation_ttl())
+    except ContractError:
+        reservation_ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
+    # Reservation lifetime so far, plus a few blocks of slack around start.
+    initiated_block = max(0, reserved_until_block - reservation_ttl)
+    max_scan_blocks = max(150, current_block - initiated_block + 10)
+
+    console.print('[dim]Looking up source tx on chain...[/dim]')
+    try:
+        with loading('Scanning...'):
+            tx_info = provider.verify_transaction(
+                tx_hash=tx_hash,
+                expected_recipient=expected_recipient,
+                expected_amount=expected_amount,
+                max_scan_blocks=max_scan_blocks,
+            )
+    except ProviderUnreachableError as e:
+        console.print(f'[yellow]  Provider unreachable ({e}). Validators will scan on their end.[/yellow]')
+        return 0
+
+    if tx_info and tx_info.block_number:
+        console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
+        return int(tx_info.block_number)
+
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
+    console.print(
+        '[dim]  Validators will scan too; if they reject, retry with: '
+        '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
+    )
+    return 0
 
 
 def find_matching_miners(all_pairs, from_chain: str, to_chain: str):
