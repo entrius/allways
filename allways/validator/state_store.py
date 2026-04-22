@@ -375,9 +375,13 @@ class ValidatorStateStore:
                 """
             )
             # Ensure newer columns exist on DBs created by older validator
-            # versions. SQLite has no ``ADD COLUMN IF NOT EXISTS``, so we
-            # inspect the schema first and add only when missing.
-            cols = {row['name'] for row in conn.execute('PRAGMA table_info(pending_confirms)')}
-            if 'from_tx_block' not in cols:
+            # versions. SQLite has no ``ADD COLUMN IF NOT EXISTS`` (<3.35), and
+            # the PRAGMA-then-ALTER pattern races when two validators share the
+            # same DB file: both read "column missing" and both try to add it.
+            # Catching the duplicate-column error is the simplest correct form.
+            try:
                 conn.execute('ALTER TABLE pending_confirms ADD COLUMN from_tx_block INTEGER NOT NULL DEFAULT 0')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    raise
             conn.commit()
