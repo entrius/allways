@@ -92,10 +92,7 @@ def show_config():
         table.add_column('Value', style='green')
 
         for key, value in config.items():
-            str_val = str(value)
-            if len(str_val) > 25:
-                str_val = str_val[:12] + '...' + str_val[-10:]
-            table.add_row(key, str_val)
+            table.add_row(key, str(value))
 
         console.print(table)
         console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]\n')
