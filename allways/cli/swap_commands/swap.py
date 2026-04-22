@@ -300,8 +300,7 @@ def broadcast_reserve_with_retry(
             # instead of a raw traceback when the user bails during the wait.
             console.print('\n[yellow]Aborted — reservation may still confirm on-chain.[/yellow]')
             console.print(
-                f'[dim]Check with: alw view miners (miner UID {selected_pair.uid}) or '
-                'alw view reservation[/dim]'
+                f'[dim]Check with: alw view miners (miner UID {selected_pair.uid}) or alw view reservation[/dim]'
             )
             return None
         if reserved:
