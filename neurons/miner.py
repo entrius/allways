@@ -54,8 +54,6 @@ class Miner(BaseMinerNeuron):
             chain_providers=self.chain_providers,
             wallet=self.wallet,
             subtensor=self.subtensor,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             fee_divisor=FEE_DIVISOR,
             sent_cache_path=sent_cache_path,
             my_addresses=self.my_addresses,
