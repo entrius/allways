@@ -20,13 +20,21 @@ from allways.contract_client import ContractError
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
 @click.argument('tx_hash', required=False, default=None, type=str)
-def post_tx_command(tx_hash: str):
+@click.option(
+    '--block',
+    'tx_block',
+    type=int,
+    default=0,
+    help='Block number the source tx landed in (skips lookup; helpful if the tx is older than ~30 min)',
+)
+def post_tx_command(tx_hash: str, tx_block: int):
     """Submit your source transaction hash for a pending swap reservation.
 
     [dim]Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).[/dim]
 
     [dim]Examples:
         $ alw swap post-tx abc123def...
+        $ alw swap post-tx abc123def... --block 12345
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
@@ -84,6 +92,22 @@ def post_tx_command(tx_hash: str):
 
     from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
+    # Resolve the tx's block so validators can ±3-hint rather than scan the
+    # sliding 150-block window. --block wins; otherwise best-effort lookup
+    # through the provider (returns 0 on miss, which falls back to the scan).
+    from_tx_block = tx_block
+    if from_tx_block <= 0:
+        try:
+            looked_up = provider.verify_transaction(
+                tx_hash=tx_hash,
+                expected_recipient=state.miner_from_address,
+                expected_amount=state.from_amount,
+            )
+            if looked_up and looked_up.block_number:
+                from_tx_block = int(looked_up.block_number)
+        except Exception:
+            pass
+
     # Discover validators
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
@@ -104,6 +128,7 @@ def post_tx_command(tx_hash: str):
         ephemeral_wallet,
         from_chain=state.from_chain,
         to_chain=state.to_chain,
+        from_tx_block=from_tx_block,
     )
 
     if accepted == 0:

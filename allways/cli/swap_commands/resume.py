@@ -159,6 +159,20 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
 
     from_tx_hash = from_tx_hash_opt.strip()
 
+    # Best-effort block lookup so resume of an older tx still ±3-hints on
+    # the validator. 0 = unknown, which triggers the scan fallback.
+    from_tx_block = 0
+    try:
+        looked_up = provider.verify_transaction(
+            tx_hash=from_tx_hash,
+            expected_recipient=state.miner_from_address,
+            expected_amount=state.from_amount,
+        )
+        if looked_up and looked_up.block_number:
+            from_tx_block = int(looked_up.block_number)
+    except Exception:
+        pass
+
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued = sign_and_broadcast_confirm(
         provider,
@@ -171,6 +185,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
         ephemeral_wallet,
         from_chain=state.from_chain,
         to_chain=state.to_chain,
+        from_tx_block=from_tx_block,
     )
 
     if accepted == 0:

@@ -68,6 +68,7 @@ def sign_and_broadcast_confirm(
     from_chain: str = '',
     to_chain: str = '',
     skip_confirm: bool = False,
+    from_tx_block: int = 0,
 ) -> tuple:
     """Sign source tx proof and broadcast SwapConfirmSynapse to validators.
 
@@ -93,6 +94,7 @@ def sign_and_broadcast_confirm(
         from_tx_hash=from_tx_hash,
         from_tx_proof=from_proof,
         from_address=user_from_address,
+        from_tx_block=from_tx_block,
         to_address=receive_address,
         from_chain=from_chain,
         to_chain=to_chain,
@@ -802,10 +804,23 @@ def swap_now_command(
     save_pending_swap(state)
 
     # Step 9: Send funds (or use pre-provided tx hash)
+    from_tx_block = 0  # Set below so confirm synapse can give validators a ±3 hint.
     if from_tx_hash_opt:
         # Funds already sent externally — use provided tx hash
         from_tx_hash = from_tx_hash_opt
         console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
+        # Best-effort block lookup so late post-tx's still verify on the
+        # validator. Safe to skip on failure (validator falls back to scan).
+        try:
+            looked_up = provider.verify_transaction(
+                tx_hash=from_tx_hash,
+                expected_recipient=selected_pair.from_address,
+                expected_amount=from_amount,
+            )
+            if looked_up and looked_up.block_number:
+                from_tx_block = looked_up.block_number
+        except Exception:
+            pass
     else:
         human_send = from_smallest_unit(from_amount, from_chain)
         console.print(
@@ -834,6 +849,8 @@ def swap_now_command(
                 try:
                     receipt = response.extrinsic_receipt
                     from_tx_hash = receipt.extrinsic_hash
+                    if getattr(receipt, 'block_hash', None):
+                        from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
                 except Exception:
                     from_tx_hash = (
                         getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
@@ -854,6 +871,11 @@ def swap_now_command(
             if send_result is None:
                 return
             from_tx_hash = send_result[0]
+            # send_btc returns (tx_hash, block_number). 0 means unknown
+            # (e.g. lightweight broadcaster); that's fine — validator falls
+            # back to the scan path.
+            if len(send_result) > 1 and send_result[1]:
+                from_tx_block = int(send_result[1])
 
     # Step 10: Post tx hash to validators
     console.print('\n[dim]Step 3/3: Confirming with validators...[/dim]')
@@ -869,6 +891,7 @@ def swap_now_command(
         ephemeral_wallet,
         from_chain=from_chain,
         to_chain=to_chain,
+        from_tx_block=from_tx_block,
     )
 
     if accepted == 0:
