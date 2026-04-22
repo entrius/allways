@@ -66,7 +66,13 @@ class Validator(BaseValidatorNeuron):
         # the credibility ledger, and before the axon handler wiring so the
         # handler thread can enqueue pending confirms. Exposes current block
         # so pending_confirms can purge expired reservations lazily on read.
-        self.state_store = ValidatorStateStore(current_block_fn=lambda: self.block)
+        # db path is overridable so a multi-validator dev env can give each
+        # process its own file — shared DBs race on pending_confirms delete.
+        state_db_path = getattr(getattr(self.config, 'validator', None), 'state_db_path', None)
+        self.state_store = ValidatorStateStore(
+            db_path=state_db_path,
+            current_block_fn=lambda: self.block,
+        )
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
         # (miner_hotkey, from_tx_hash) → reserved_until at vote time. Skips
         # redundant vote_extend_reservation extrinsics — auto-clears once the
