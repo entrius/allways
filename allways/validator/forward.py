@@ -53,7 +53,7 @@ async def forward(self: Validator) -> None:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
     # Pull newly-initiated and resolved swaps off the contract.
-    await tracker.poll(self.block)
+    await tracker.poll()
 
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
     # set is swap IDs where the provider was unreachable this cycle, so the

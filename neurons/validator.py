@@ -103,9 +103,6 @@ class Validator(BaseValidatorNeuron):
 
         self.swap_verifier = SwapVerifier(
             chain_providers=self.chain_providers,
-            subtensor=self.subtensor,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             fee_divisor=self.fee_divisor,
         )
 

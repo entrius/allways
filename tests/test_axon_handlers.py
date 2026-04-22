@@ -86,7 +86,7 @@ def make_validator(
 
     Individual tests override specific attributes to simulate each branch.
     reservation_data tuple mirrors the on-chain layout used by
-    handle_swap_confirm: (_,tao_amount, source_amount, dest_amount).
+    handle_swap_confirm: (tao_amount, source_amount, dest_amount).
     """
     validator = MagicMock()
     validator.block = block

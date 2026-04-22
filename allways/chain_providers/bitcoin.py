@@ -328,6 +328,12 @@ class BitcoinProvider(ChainProvider):
         """Get WIF private key from env var or Bitcoin Core wallet."""
         wif = os.environ.get('BTC_PRIVATE_KEY')
         if wif:
+            if wif[0] not in '5KLc9':
+                bt.logging.error(
+                    f'BTC_PRIVATE_KEY is not a valid WIF (prefix {wif[:4]!r}); '
+                    'expected 5/K/L (mainnet) or 9/c (test/regtest)'
+                )
+                return None
             return wif
         if self.mode == 'lightweight':
             bt.logging.error('BTC_MODE=lightweight requires BTC_PRIVATE_KEY env var for key operations')
