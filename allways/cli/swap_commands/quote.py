@@ -36,31 +36,32 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         alw swap quote --from btc --to tao --amount 0.1
         alw swap quote --from tao --to btc --amount 50
     """
-    supported = sorted(SUPPORTED_CHAINS.keys())
-    chain_choices = click.Choice(supported, case_sensitive=False)
+    if from_chain and to_chain:
+        from_chain = from_chain.lower()
+        to_chain = to_chain.lower()
+        if from_chain not in SUPPORTED_CHAINS:
+            console.print(f'[red]Unknown source chain: {from_chain}[/red]')
+            return
+        if to_chain not in SUPPORTED_CHAINS:
+            console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
+            return
+        if from_chain == to_chain:
+            console.print('[red]Source and destination chains must be different[/red]')
+            return
+    else:
+        chain_ids = list(SUPPORTED_CHAINS.keys())
+        directions = [(s, d) for s in chain_ids for d in chain_ids if s != d]
 
-    if not from_chain:
-        from_chain = click.prompt(f'Source chain ({"/".join(supported)})', type=chain_choices)
-    from_chain = from_chain.lower()
-    if from_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {from_chain}[/red]')
-        return
+        console.print('\n[bold]Allways Swap Quote[/bold]\n')
+        console.print('[bold]What would you like to swap?[/bold]\n')
+        for idx, (src, dst) in enumerate(directions, 1):
+            console.print(f'  {idx}. {SUPPORTED_CHAINS[src].name} -> {SUPPORTED_CHAINS[dst].name}')
 
-    if not to_chain:
-        remaining = [c for c in supported if c != from_chain]
-        default_to = remaining[0] if remaining else None
-        to_chain = click.prompt(
-            f'Destination chain ({"/".join(remaining) if remaining else ""})',
-            type=click.Choice(remaining, case_sensitive=False) if remaining else chain_choices,
-            default=default_to,
-        )
-    to_chain = to_chain.lower()
-    if to_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
-        return
-    if from_chain == to_chain:
-        console.print('[red]Source and destination chains must be different[/red]')
-        return
+        choice = click.prompt('\nSelect', type=int, default=1)
+        if choice < 1 or choice > len(directions):
+            console.print('[red]Invalid selection[/red]')
+            return
+        from_chain, to_chain = directions[choice - 1]
 
     if amount is None:
         amount = click.prompt(f'Amount to send ({from_chain.upper()})', type=float)
@@ -148,7 +149,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     table = Table(show_header=True)
     table.add_column('#', style='dim')
     table.add_column('UID', style='cyan')
-    table.add_column(f'Rate ({to_chain.upper()}/{from_chain.upper()})', style='green')
+    table.add_column('Rate', style='green')
     table.add_column('You Receive', style='bold green')
     table.add_column('Collateral', style='yellow')
     table.add_column('Status', style='bold')

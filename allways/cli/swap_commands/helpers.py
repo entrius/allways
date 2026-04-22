@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
+import click
 from rich.console import Console
 
 from allways.classes import MinerPair, SwapStatus
@@ -55,6 +56,67 @@ def print_contract_error(action: str, e: BaseException) -> None:
     else:
         console.print(f'[red]{action}: {e}[/red]')
         console.print('[dim]This looks like an RPC or client failure — try again.[/dim]')
+
+
+def sign_or_prompt_external(
+    provider,
+    address: str,
+    message: str,
+    key=None,
+    chain: str = '',
+    skip_confirm: bool = False,
+) -> str:
+    """Sign a proof-of-ownership message, falling back to externally-pasted signature.
+
+    Tries internal signing first (env var WIF, wallet coldkey, Bitcoin Core RPC).
+    On failure for BTC source swaps in interactive mode, prompts the user to
+    sign the exact message in an external wallet (Electrum, Sparrow, Trezor,
+    Bitcoin Core) and paste the base64 BIP-137 signature. Verifies the pasted
+    signature before returning it so a typo fails here rather than at the
+    validator.
+
+    Returns an empty string when no valid signature is obtained.
+    """
+    try:
+        signature = provider.sign_from_proof(address, message, key)
+    except Exception as e:
+        bt.logging.warning(f'Internal signing failed ({type(e).__name__}): {e}')
+        signature = ''
+
+    if signature:
+        return signature
+
+    if skip_confirm or chain != 'btc':
+        return ''
+
+    console.print('\n  [bold yellow]External signature required[/bold yellow]')
+    console.print(
+        '  [dim]No BTC signing key loaded. Sign the message below in your wallet\n'
+        '  (Electrum: Tools -> Sign/verify message; Sparrow, Trezor, Bitcoin Core\n'
+        '  all support this) and paste the base64 signature back.[/dim]'
+    )
+    console.print(f'\n  Address: [cyan]{address}[/cyan]')
+    console.print(f'  Message: [yellow]{message}[/yellow]\n')
+
+    pasted = click.prompt('  Paste signature (blank to cancel)', default='', show_default=False).strip()
+    if not pasted:
+        return ''
+
+    try:
+        verified = provider.verify_from_proof(address, message, pasted)
+    except Exception as e:
+        console.print(f'[red]Signature verification errored: {e}[/red]')
+        return ''
+
+    if not verified:
+        console.print(
+            '[red]Signature did not verify for this address/message. Make sure you signed the exact\n'
+            'message shown above with the private key for that address.[/red]'
+        )
+        return ''
+
+    console.print('[green]  Signature verified.[/green]')
+    return pasted
 
 
 def is_valid_ss58(address: str) -> bool:
