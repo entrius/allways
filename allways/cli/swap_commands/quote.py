@@ -84,19 +84,24 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         all_pairs = read_miner_commitments(subtensor, netuid)
         matching = find_matching_miners(all_pairs, from_chain, to_chain)
 
+        # Hide truly inactive miners — they've taken themselves off the subnet
+        # and we can't know when they'll be back, so showing their rate would
+        # pollute the quote. Miners that are active but momentarily in a swap
+        # stay in the list with a status label so users can still price-shop.
         available = []
         for pair in matching:
             try:
                 is_active = client.get_miner_active_flag(pair.hotkey)
-                has_swap = client.get_miner_has_active_swap(pair.hotkey)
                 collateral = client.get_miner_collateral(pair.hotkey)
-                if is_active and not has_swap and collateral > 0:
-                    available.append((pair, collateral))
+                if not is_active or collateral <= 0:
+                    continue
+                has_swap = client.get_miner_has_active_swap(pair.hotkey)
+                available.append((pair, collateral, has_swap))
             except ContractError:
                 continue
 
     if not available:
-        console.print('[yellow]No active miners available for this pair[/yellow]\n')
+        console.print('[yellow]No active miners with collateral for this pair[/yellow]\n')
         return
 
     available.sort(key=lambda x: x[0].rate, reverse=True)
@@ -161,14 +166,19 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     table.add_column('Status', style='bold')
 
     viable_count = 0
-    for idx, (pair, collateral) in enumerate(available, 1):
+    for idx, (pair, collateral, has_swap) in enumerate(available, 1):
         to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
         human_receives = user_receives / (10**dst_chain_def.decimals)
 
         tao_amount_rao = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
         viable, reason = check_swap_viability(tao_amount_rao, collateral, min_swap_rao, max_swap_rao)
-        if viable:
+        # "in swap" takes precedence over amount-viability: even if the amount
+        # fits, the miner can't accept a new reservation until the current one
+        # resolves. Shown yellow rather than red to signal "temporary".
+        if has_swap:
+            status = '[yellow]in swap[/yellow]'
+        elif viable:
             status = '[green]available[/green]'
             viable_count += 1
         else:
@@ -188,8 +198,11 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
 
     # Show the implied max-send amount at the best available rate so a user
     # who hit "insufficient collateral" knows the ceiling to retry under.
-    if available and max_swap_rao > 0:
-        best_pair, best_collateral = available[0]
+    # Prefer a miner that's not in-swap so the hint is actionable now; fall
+    # back to the top-rate row so the user still sees a ceiling figure.
+    reservable = [row for row in available if not row[2]]
+    if (reservable or available) and max_swap_rao > 0:
+        best_pair, best_collateral, best_has_swap = reservable[0] if reservable else available[0]
         # The TAO leg is capped by min(collateral, max_swap_rao).
         effective_tao_cap_rao = min(best_collateral, max_swap_rao)
         if from_chain == 'tao':
@@ -200,9 +213,10 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
             # TAO-per-source when dst=tao).
             max_send_human = _max_source_from_tao_cap(best_pair, effective_tao_cap_rao, from_chain, to_chain)
         if max_send_human is not None:
+            busy_note = ' (currently in a swap — available once that clears)' if best_has_swap else ''
             console.print(
-                f'  [dim]Best miner (UID {best_pair.uid}) can currently fulfill up to '
-                f'~{max_send_human:g} {src_up} at rate {best_pair.rate:g}.[/dim]'
+                f'  [dim]Best miner (UID {best_pair.uid}) can fulfill up to '
+                f'~{max_send_human:g} {src_up} at rate {best_pair.rate:g}{busy_note}.[/dim]'
             )
 
     if viable_count == 0:
