@@ -984,7 +984,7 @@ def swap_now_command(
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
         console.print(
             f'[dim]Miner UID {selected_pair.uid} — check: alw view reservation '
-            '(pending_swap.json kept for retry with `alw swap resume`)[/dim]\n'
+            '(pending_swap.json kept for retry with `alw swap resume-reservation`)[/dim]\n'
         )
         return
 
