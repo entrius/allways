@@ -717,7 +717,7 @@ def swap_now_command(
     # quote regardless of swap direction (calculate_to_amount just toggles
     # is_reverse). For reverse swaps this reads as "send N dst to get 1 src".
     if is_reverse:
-        rate_line = f'send {selected_pair.rate:g} {dst_up} to get 1 {src_up}'
+        rate_line = f'send {selected_pair.rate:g} {src_up} to get 1 {dst_up}'
     else:
         rate_line = f'send 1 {src_up} to get {selected_pair.rate:g} {dst_up}'
 
