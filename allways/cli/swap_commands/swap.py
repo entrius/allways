@@ -506,7 +506,46 @@ def swap_now_command(
             return
         from_chain, to_chain = directions[choice - 1]
 
-    # Show send capability for the source chain (skip in non-interactive mode)
+    # Step 2: Find available miners (bilateral matching).
+    # Done BEFORE any confirm prompts — if no miner can fill this swap, bail
+    # out before the user wastes time answering BTC-signing questions.
+    console.print('\n[dim]Reading miner commitments...[/dim]')
+    all_pairs = read_miner_commitments(subtensor, netuid)
+
+    matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
+
+    if not matching_pairs:
+        console.print(
+            f'[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]'
+        )
+        console.print('[dim]Run [cyan]alw view rates[/cyan] to see active pairs, or try again later.[/dim]\n')
+        return
+
+    available_miners = []
+    try:
+        for pair in matching_pairs:
+            is_active = client.get_miner_active_flag(pair.hotkey)
+            has_swap = client.get_miner_has_active_swap(pair.hotkey)
+            collateral = client.get_miner_collateral(pair.hotkey)
+            if is_active and not has_swap and collateral > 0:
+                available_miners.append((pair, collateral))
+    except ContractError as e:
+        console.print(f'[red]Failed to read miner data: {e}[/red]')
+        return
+
+    if not available_miners:
+        console.print(
+            f'[yellow]Miners post rates for {from_chain.upper()}/{to_chain.upper()}, '
+            f'but none are currently eligible.[/yellow]'
+        )
+        console.print(
+            '[dim]They may be inactive, already fulfilling another swap, or without collateral.\n'
+            'Run [cyan]alw view miners[/cyan] to inspect status and try again in a few blocks.[/dim]\n'
+        )
+        return
+
+    # Show send capability for the source chain (skip in non-interactive mode).
+    # Only asked once we know a miner can actually fill this swap.
     if not skip_confirm:
         if from_chain == 'tao':
             console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
@@ -541,32 +580,6 @@ def swap_now_command(
                 if not click.confirm('  Continue?', default=True):
                     console.print('[yellow]Cancelled[/yellow]')
                     return
-
-    # Step 2: Find available miners (bilateral matching)
-    console.print('\n[dim]Reading miner commitments...[/dim]')
-    all_pairs = read_miner_commitments(subtensor, netuid)
-
-    matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
-
-    if not matching_pairs:
-        console.print('[yellow]No miners found for this pair[/yellow]\n')
-        return
-
-    available_miners = []
-    try:
-        for pair in matching_pairs:
-            is_active = client.get_miner_active_flag(pair.hotkey)
-            has_swap = client.get_miner_has_active_swap(pair.hotkey)
-            collateral = client.get_miner_collateral(pair.hotkey)
-            if is_active and not has_swap and collateral > 0:
-                available_miners.append((pair, collateral))
-    except ContractError as e:
-        console.print(f'[red]Failed to read miner data: {e}[/red]')
-        return
-
-    if not available_miners:
-        console.print('[yellow]No active miners available[/yellow]\n')
-        return
 
     available_miners.sort(key=lambda x: x[0].rate, reverse=True)
 
