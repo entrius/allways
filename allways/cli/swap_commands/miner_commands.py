@@ -293,25 +293,48 @@ def miner_deactivate():
 @miner_group.command('mark-fulfilled')
 @click.option('--swap-id', required=True, type=int, help='Swap ID to mark as fulfilled')
 @click.option('--tx-hash', required=True, type=str, help='Destination chain transaction hash')
-@click.option('--amount', required=True, type=int, help='Amount sent (in smallest unit, e.g. rao or satoshi)')
+@click.option(
+    '--amount',
+    required=True,
+    type=float,
+    help='Amount sent, in human units of the destination chain (e.g. 0.1 TAO, 0.00027500 BTC)',
+)
 @click.option('--block', default=0, type=int, help='Destination chain block number (default: 0)')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, yes: bool):
+def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: float, block: int, yes: bool):
     """Manually mark a swap as fulfilled on the contract.
 
     [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
     and need to notify the contract.[/dim]
 
     [dim]Examples:
-        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000[/dim]
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 0.1[/dim]
     """
+    from allways.cli.swap_commands.swap import to_smallest_unit
+
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
+
+    # Look up the swap to know which chain's decimals to use for conversion.
+    # The contract takes to_amount in the destination chain's smallest unit
+    # (rao for TAO, satoshi for BTC), but we accept human units at the CLI
+    # so the operator doesn't have to multiply by 10^9 or 10^8 in their head.
+    try:
+        swap = client.get_swap(swap_id)
+    except ContractError as e:
+        print_contract_error('Failed to read swap', e)
+        return
+    if swap is None:
+        console.print(f'[red]Swap #{swap_id} not found on-chain.[/red]')
+        return
+
+    to_chain = swap.to_chain
+    to_amount_smallest = to_smallest_unit(amount, to_chain)
 
     console.print(f'\n[bold]Mark Fulfilled — Swap #{swap_id}[/bold]\n')
     console.print(f'  Swap ID:   {swap_id}')
     console.print(f'  Tx Hash:   {tx_hash}')
-    console.print(f'  Amount:    {amount}')
+    console.print(f'  Amount:    {amount} {to_chain.upper()}  ({to_amount_smallest} {to_chain} smallest unit)')
     console.print(f'  Block:     {block}')
     console.print(f'  Hotkey:    {hotkey}\n')
 
@@ -325,7 +348,7 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, ye
                 wallet=wallet,
                 swap_id=swap_id,
                 to_tx_hash=tx_hash,
-                to_amount=amount,
+                to_amount=to_amount_smallest,
                 to_tx_block=block,
             )
         console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
