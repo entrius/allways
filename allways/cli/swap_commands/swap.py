@@ -235,7 +235,9 @@ def broadcast_reserve_with_retry(
             status = '[green]ok[/green]' if getattr(resp, 'accepted', None) else '[red]no[/red]'
             # Blank reason = validator didn't respond (network/timeout) rather
             # than an explicit rejection; surface that instead of an empty line.
-            reason = (getattr(resp, 'rejection_reason', '') or '').strip() or '(no response — timeout or validator down)'
+            reason = (
+                getattr(resp, 'rejection_reason', '') or ''
+            ).strip() or '(no response — timeout or validator down)'
             console.print(f'    V{i + 1}: {status} {reason}')
 
         if accepted == 0:
@@ -281,7 +283,7 @@ def broadcast_reserve_with_retry(
 
         if attempt < max_retries:
             console.print(
-                f'[yellow]Reservation quorum not reached ({accepted} broadcast votes didn\'t make it on-chain within '
+                f"[yellow]Reservation quorum not reached ({accepted} broadcast votes didn't make it on-chain within "
                 f'{quorum_total_s}s).[/yellow]'
             )
             # Default yes since we had >=1 accept — usually a transient chain
