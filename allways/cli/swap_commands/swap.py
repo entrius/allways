@@ -556,26 +556,16 @@ def swap_now_command(
 
             if has_private_key and not is_local:
                 console.print('\n  [green]BTC_PRIVATE_KEY set — will sign and attempt BTC sends locally.[/green]')
-            elif btc_mode == 'lightweight' and not has_private_key:
-                # No internal signing key — fall through to BYO-sig at reserve/confirm.
-                console.print('\n  [yellow]No BTC_PRIVATE_KEY set — external signing required.[/yellow]')
-                console.print(
-                    '  [dim]At reserve and confirm time the CLI will show a short message;\n'
-                    '  sign it in your wallet (Electrum, Sparrow, Trezor, Bitcoin Core) and\n'
-                    '  paste the base64 signature back. Taproot (bc1p...) is not supported.[/dim]'
-                )
-                console.print(
-                    '  [yellow]Automatic BTC send is also unavailable — you will send BTC manually and\n'
-                    '  run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
-                )
-                if not click.confirm('  Continue?', default=True):
-                    console.print('[yellow]Cancelled[/yellow]')
-                    return
             else:
-                console.print('\n  [yellow]Automatic BTC send unavailable in this environment.[/yellow]')
+                # External signing path — covers both the lightweight/no-key
+                # case and any other environment without automatic BTC sending.
+                # Taproot caveat only applies to the BYO-sig flow.
+                taproot_note = (
+                    ' Taproot (bc1p…) unsupported.' if btc_mode == 'lightweight' and not has_private_key else ''
+                )
                 console.print(
-                    '  [yellow]You will need to manually send BTC to the miner address'
-                    ' and then run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
+                    f'\n  [yellow]BTC signing & sending are external — you will sign at reserve/confirm'
+                    f' and run [cyan]alw swap post-tx <tx_hash>[/cyan] after broadcasting.{taproot_note}[/yellow]'
                 )
                 if not click.confirm('  Continue?', default=True):
                     console.print('[yellow]Cancelled[/yellow]')
@@ -607,7 +597,10 @@ def swap_now_command(
         best_rate_line = (
             f'send 1 {from_chain.upper()} to get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
         )
-    console.print(f'\n  Best rate: {best_rate_line}')
+    # Skip the "Best rate:" hint when there is only one miner — the table and
+    # the upcoming summary already show the rate, so it'd be a third echo.
+    if len(available_miners) > 1:
+        console.print(f'\n  Best rate: {best_rate_line}')
 
     if auto_select or len(available_miners) == 1:
         selected_pair, selected_collateral = available_miners[0]
@@ -691,8 +684,9 @@ def swap_now_command(
     if from_address_opt:
         user_from_address = from_address_opt
     elif from_chain == 'tao':
+        # Sourced from the wallet coldkey; the Summary panel renders it as
+        # the "From:" row right below, so no need for a standalone line here.
         user_from_address = wallet.coldkeypub.ss58_address
-        console.print(f'  Source: [dim]{user_from_address}[/dim] (from wallet)')
     else:
         console.print(
             f'  [dim]Enter only your PUBLIC {from_chain.upper()} address. Never paste a private key or WIF here.[/dim]'
