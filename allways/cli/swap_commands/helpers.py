@@ -10,6 +10,7 @@ import bittensor as bt
 import click
 from rich.console import Console
 
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
@@ -302,8 +303,9 @@ def clear_pending_swap() -> None:
     PENDING_SWAP_FILE.unlink(missing_ok=True)
 
 
-# Fallback when the contract's reservation TTL can't be read. Matches the
-# contract default; only used if get_reservation_ttl() raises.
+# Fallback when the contract's reservation TTL can't be read. Mirrors the
+# contract default (see ``reservation_ttl`` init in
+# allways/smart-contracts/ink/lib.rs); update both together.
 _DEFAULT_RESERVATION_TTL_BLOCKS = 4032
 
 
@@ -326,11 +328,17 @@ def resolve_source_tx_block(
     """
     try:
         current_block = subtensor.get_current_block()
-    except Exception:
-        current_block = reserved_until_block
+    except Exception as e:
+        # If we can't reach subtensor the lookup can't proceed anyway — bail
+        # honestly rather than fake a current-block guess and crash on the
+        # first verify_transaction RPC.
+        console.print(
+            f'[yellow]Skipping client-side tx lookup — subtensor unreachable ({type(e).__name__}).[/yellow]'
+        )
+        return 0
     try:
         reservation_ttl = int(client.get_reservation_ttl())
-    except Exception:
+    except ContractError:
         reservation_ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
     # Reservation lifetime so far, plus a few blocks of slack around start.
     initiated_block = max(0, reserved_until_block - reservation_ttl)
@@ -345,8 +353,8 @@ def resolve_source_tx_block(
                 expected_amount=expected_amount,
                 max_scan_blocks=max_scan_blocks,
             )
-    except Exception as e:
-        console.print(f'[yellow]  Lookup error ({type(e).__name__}): {e}. Validators will scan on their end.[/yellow]')
+    except ProviderUnreachableError as e:
+        console.print(f'[yellow]  Provider unreachable ({e}). Validators will scan on their end.[/yellow]')
         return 0
 
     if tx_info and tx_info.block_number:

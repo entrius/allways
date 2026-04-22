@@ -107,40 +107,39 @@ def sign_and_broadcast_confirm(
     accepted = 0
     queued = 0
     for i, resp in enumerate(confirm_responses):
-        reason = (getattr(resp, 'rejection_reason', '') or '').strip()
+        raw_reason = (getattr(resp, 'rejection_reason', '') or '').strip()
         if getattr(resp, 'accepted', None):
             accepted += 1
-            if 'Queued' in reason:
+            if 'Queued' in raw_reason:
                 queued += 1
-                console.print(f'    V{i + 1}: [yellow]queued[/yellow] {reason}')
+                console.print(f'    V{i + 1}: [yellow]queued[/yellow] {raw_reason}')
             else:
                 console.print(f'    V{i + 1}: [green]ok[/green]')
         else:
             # Blank = validator didn't respond; be explicit so the user can
             # distinguish "rejected with reason" from "silently unreachable".
-            display = reason or '(no response — timeout or validator down)'
-            console.print(f'    V{i + 1}: [red]no[/red] {display}')
+            reason = raw_reason or '(no response — timeout or validator down)'
+            console.print(f'    V{i + 1}: [red]no[/red] {reason}')
 
     return accepted, queued
 
 
-def _resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
-    """Single-shot lookup for a miner's most recent swap id.
+def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
+    """Return the miner's most recent swap id, or None if they have none.
 
-    Used on Ctrl+C / early-exit paths where we don't have time to poll but
-    still want to surface the ID if the swap already landed on-chain.
-    Returns None on any error so the caller can fall through gracefully.
+    Walks back 4 IDs from ``next_id - 1`` as a defensive buffer against
+    concurrent swap creation. Raises ``ContractError`` on RPC failure so
+    callers can distinguish "RPC broken" from "no swap yet" — the
+    Ctrl+C-exit path suppresses; ``poll_for_swap_creation`` counts for
+    its retry warning.
     """
-    try:
-        if not client.get_miner_has_active_swap(miner_hotkey):
-            return None
-        next_id = client.get_next_swap_id()
-        for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
-            swap = client.get_swap(check_id)
-            if swap and swap.miner_hotkey == miner_hotkey:
-                return check_id
-    except ContractError:
+    if not client.get_miner_has_active_swap(miner_hotkey):
         return None
+    next_id = client.get_next_swap_id()
+    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
+        swap = client.get_swap(check_id)
+        if swap and swap.miner_hotkey == miner_hotkey:
+            return check_id
     return None
 
 
@@ -148,15 +147,12 @@ def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
     """Poll contract until miner has an active swap. Returns swap_id or None."""
     with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
         errors = 0
-        for i in range(60):
+        for _ in range(60):
             time.sleep(3)
             try:
-                if client.get_miner_has_active_swap(miner_hotkey):
-                    next_id = client.get_next_swap_id()
-                    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
-                        swap = client.get_swap(check_id)
-                        if swap and swap.miner_hotkey == miner_hotkey:
-                            return check_id
+                swap_id = resolve_recent_swap_id(client, miner_hotkey)
+                if swap_id is not None:
+                    return swap_id
                 errors = 0
             except ContractError:
                 errors += 1
@@ -273,30 +269,41 @@ def broadcast_reserve_with_retry(
         # Countdown the quorum wait so users see progress, not just a spinner.
         quorum_total_s = 60
         quorum_started = time.time()
-        with console.status(
-            f'[dim]Waiting for on-chain quorum — 0/{accepted} broadcast votes confirmed (~{quorum_total_s}s)...[/dim]'
-        ) as status:
-            quorum_errors = 0
-            for _ in range(30):
-                time.sleep(2)
-                try:
-                    reserved_until = client.get_miner_reserved_until(selected_pair.hotkey)
-                    if reserved_until > current_block:
-                        reserved = True
-                        break
-                    vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
-                    elapsed = int(time.time() - quorum_started)
-                    remaining = max(0, quorum_total_s - elapsed)
-                    status.update(
-                        f'[dim]Waiting for on-chain quorum — {vote_count}/{accepted} votes confirmed, '
-                        f'{elapsed}s elapsed (~{remaining}s remaining)...[/dim]'
-                    )
-                    quorum_errors = 0
-                except ContractError:
-                    quorum_errors += 1
-                    if quorum_errors >= 5:
-                        console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
+        try:
+            with console.status(
+                f'[dim]Waiting for on-chain quorum — 0/{accepted} broadcast votes confirmed '
+                f'(~{quorum_total_s}s)...[/dim]'
+            ) as status:
+                quorum_errors = 0
+                for _ in range(30):
+                    time.sleep(2)
+                    try:
+                        reserved_until = client.get_miner_reserved_until(selected_pair.hotkey)
+                        if reserved_until > current_block:
+                            reserved = True
+                            break
+                        vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
+                        elapsed = int(time.time() - quorum_started)
+                        remaining = max(0, quorum_total_s - elapsed)
+                        status.update(
+                            f'[dim]Waiting for on-chain quorum — {vote_count}/{accepted} votes confirmed, '
+                            f'{elapsed}s elapsed (~{remaining}s remaining)...[/dim]'
+                        )
                         quorum_errors = 0
+                    except ContractError:
+                        quorum_errors += 1
+                        if quorum_errors >= 5:
+                            console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
+                            quorum_errors = 0
+        except KeyboardInterrupt:
+            # Mirror the confirm-path behaviour: give a clean exit banner
+            # instead of a raw traceback when the user bails during the wait.
+            console.print('\n[yellow]Aborted — reservation may still confirm on-chain.[/yellow]')
+            console.print(
+                f'[dim]Check with: alw view miners (miner UID {selected_pair.uid}) or '
+                'alw view reservation[/dim]'
+            )
+            return None
         if reserved:
             ttl_remaining = reserved_until - subtensor.get_current_block()
             console.print(f'[green]Miner reserved! ~{ttl_remaining * 12 // 60} min to send funds.[/green]')
@@ -962,7 +969,10 @@ def swap_now_command(
         # One last best-effort resolve before handing back — the swap may
         # have just been initiated while we were printing, and a concrete
         # ID in the exit banner beats telling the user to grep.
-        swap_id = _resolve_recent_swap_id(client, selected_pair.hotkey)
+        try:
+            swap_id = resolve_recent_swap_id(client, selected_pair.hotkey)
+        except ContractError:
+            swap_id = None
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
         if swap_id is not None:
             clear_pending_swap()

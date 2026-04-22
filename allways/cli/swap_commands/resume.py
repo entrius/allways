@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
+    resolve_recent_swap_id,
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
@@ -205,9 +206,10 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
     try:
         swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
     except KeyboardInterrupt:
-        from allways.cli.swap_commands.swap import _resolve_recent_swap_id
-
-        swap_id = _resolve_recent_swap_id(client, state.miner_hotkey)
+        try:
+            swap_id = resolve_recent_swap_id(client, state.miner_hotkey)
+        except ContractError:
+            swap_id = None
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
         if swap_id is not None:
             clear_pending_swap()
