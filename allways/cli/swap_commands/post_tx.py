@@ -12,6 +12,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     load_pending_swap,
     print_contract_error,
+    resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
@@ -25,7 +26,12 @@ from allways.contract_client import ContractError
     'tx_block',
     type=int,
     default=0,
-    help='Block number the source tx landed in (skips lookup; helpful if the tx is older than ~30 min)',
+    help=(
+        'Override the source-tx block number. Usually unnecessary — the CLI '
+        "looks it up automatically across the whole reservation window. Use "
+        "this only when automatic lookup fails (e.g. you're running against a "
+        'node that has pruned block bodies or the tx landed on a different node).'
+    ),
 )
 def post_tx_command(tx_hash: str, tx_block: int):
     """Submit your source transaction hash for a pending swap reservation.
@@ -34,7 +40,7 @@ def post_tx_command(tx_hash: str, tx_block: int):
 
     [dim]Examples:
         $ alw swap post-tx abc123def...
-        $ alw swap post-tx abc123def... --block 12345
+        $ alw swap post-tx abc123def... --block 12345   (escape hatch)
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
@@ -92,21 +98,21 @@ def post_tx_command(tx_hash: str, tx_block: int):
 
     from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
-    # Resolve the tx's block so validators can ±3-hint rather than scan the
-    # sliding 150-block window. --block wins; otherwise best-effort lookup
-    # through the provider (returns 0 on miss, which falls back to the scan).
+    # Resolve the tx's block so validators can ±3-hint rather than scan.
+    # --block wins; otherwise a reservation-wide scan via the shared helper.
     from_tx_block = tx_block
-    if from_tx_block <= 0:
-        try:
-            looked_up = provider.verify_transaction(
-                tx_hash=tx_hash,
-                expected_recipient=state.miner_from_address,
-                expected_amount=state.from_amount,
-            )
-            if looked_up and looked_up.block_number:
-                from_tx_block = int(looked_up.block_number)
-        except Exception:
-            pass
+    if from_tx_block > 0:
+        console.print(f'[dim]Using --block {from_tx_block} (skipping lookup).[/dim]')
+    else:
+        from_tx_block = resolve_source_tx_block(
+            provider=provider,
+            tx_hash=tx_hash,
+            expected_recipient=state.miner_from_address,
+            expected_amount=state.from_amount,
+            subtensor=subtensor,
+            client=client,
+            reserved_until_block=reserved_until,
+        )
 
     # Discover validators
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)

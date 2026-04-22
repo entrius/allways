@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
 )
@@ -807,18 +808,15 @@ def swap_now_command(
         # Funds already sent externally — use provided tx hash
         from_tx_hash = from_tx_hash_opt
         console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
-        # Best-effort block lookup so late post-tx's still verify on the
-        # validator. Safe to skip on failure (validator falls back to scan).
-        try:
-            looked_up = provider.verify_transaction(
-                tx_hash=from_tx_hash,
-                expected_recipient=selected_pair.from_address,
-                expected_amount=from_amount,
-            )
-            if looked_up and looked_up.block_number:
-                from_tx_block = looked_up.block_number
-        except Exception:
-            pass
+        from_tx_block = resolve_source_tx_block(
+            provider=provider,
+            tx_hash=from_tx_hash,
+            expected_recipient=selected_pair.from_address,
+            expected_amount=from_amount,
+            subtensor=subtensor,
+            client=client,
+            reserved_until_block=reserved_until,
+        )
     else:
         human_send = from_smallest_unit(from_amount, from_chain)
         console.print(

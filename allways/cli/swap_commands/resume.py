@@ -17,6 +17,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     get_cli_context,
     load_pending_swap,
+    resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
@@ -159,19 +160,17 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
 
     from_tx_hash = from_tx_hash_opt.strip()
 
-    # Best-effort block lookup so resume of an older tx still ±3-hints on
-    # the validator. 0 = unknown, which triggers the scan fallback.
-    from_tx_block = 0
-    try:
-        looked_up = provider.verify_transaction(
-            tx_hash=from_tx_hash,
-            expected_recipient=state.miner_from_address,
-            expected_amount=state.from_amount,
-        )
-        if looked_up and looked_up.block_number:
-            from_tx_block = int(looked_up.block_number)
-    except Exception:
-        pass
+    # Reservation-wide block lookup so a resumed tx still ±3-hints the
+    # validator. 0 = miss (falls back to validator-side scan).
+    from_tx_block = resolve_source_tx_block(
+        provider=provider,
+        tx_hash=from_tx_hash,
+        expected_recipient=state.miner_from_address,
+        expected_amount=state.from_amount,
+        subtensor=subtensor,
+        client=client,
+        reserved_until_block=reserved_until,
+    )
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued = sign_and_broadcast_confirm(
