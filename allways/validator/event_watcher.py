@@ -389,25 +389,14 @@ class ContractEventWatcher:
             miner = values.get('miner', '')
             if miner:
                 self.apply_busy_delta(block_num, miner, +1)
-        elif name == 'SwapCompleted':
+        elif name in ('SwapCompleted', 'SwapTimedOut'):
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
-                    completed=True,
-                    resolved_block=block_num,
-                )
-                self.apply_busy_delta(block_num, miner, -1)
-        elif name == 'SwapTimedOut':
-            swap_id = values.get('swap_id')
-            miner = values.get('miner', '')
-            if isinstance(swap_id, int) and miner:
-                self.state_store.insert_swap_outcome(
-                    swap_id=swap_id,
-                    miner_hotkey=miner,
-                    completed=False,
+                    completed=(name == 'SwapCompleted'),
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
