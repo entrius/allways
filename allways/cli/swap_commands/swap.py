@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    require_confirmation,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
@@ -584,6 +585,26 @@ def swap_now_command(
             return
         from_chain, to_chain = directions[choice - 1]
 
+    # Show send capability for the source chain (skip in non-interactive mode)
+    if not skip_confirm:
+        if from_chain == 'tao':
+            console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
+        else:
+            is_local = is_local_network(config.get('network', 'finney'))
+            has_private_key = bool(os.environ.get('BTC_PRIVATE_KEY'))
+
+            if not is_local and has_private_key:
+                console.print('\n  [green]BTC_PRIVATE_KEY set — will attempt BTC sends locally.[/green]')
+            else:
+                console.print('\n  [yellow]No BTC_PRIVATE_KEY found.[/yellow]')
+                console.print(
+                    '  [yellow]You will need to manually send BTC to the miner address'
+                    ' and then run [cyan]alw swap post-tx <tx_hash>[/cyan] with the transaction hash.[/yellow]'
+                )
+                if not require_confirmation('  Continue?', default=True):
+                    return
+
+    # Step 2: Find available miners (bilateral matching)
     # Step 2: Find available miners (bilateral matching).
     # Done BEFORE any confirm prompts — if no miner can fill this swap, bail
     # out before the user wastes time answering BTC-signing questions.
@@ -817,8 +838,7 @@ def swap_now_command(
     )
     console.print()
 
-    if not skip_confirm and not click.confirm('Proceed?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not skip_confirm and not require_confirmation('Proceed?'):
         return
 
     # Unlock coldkey once (password prompt) — all subsequent signing uses the cached key

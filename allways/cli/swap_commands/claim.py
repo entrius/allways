@@ -6,7 +6,14 @@ import click
 
 from allways.classes import SwapStatus
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, print_contract_error
+from allways.cli.swap_commands.helpers import (
+    console,
+    from_rao,
+    get_cli_context,
+    loading,
+    print_contract_error,
+    require_confirmation,
+)
 from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL
 from allways.contract_client import ContractError
 
@@ -61,8 +68,7 @@ def claim_command(swap_id: int, yes: bool):
     console.print(f'  Claiming:   {wallet.hotkey.ss58_address}')
     console.print('[dim]  Only the original swap user can claim; others will be rejected on-chain.[/dim]\n')
 
-    if not yes and not click.confirm('Confirm claiming slash?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm claiming slash?'):
         return
 
     try:

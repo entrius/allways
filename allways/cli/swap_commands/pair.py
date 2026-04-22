@@ -4,7 +4,7 @@ import click
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, get_cli_context, loading
+from allways.cli.swap_commands.helpers import console, get_cli_context, loading, require_confirmation
 from allways.constants import COMMITMENT_VERSION
 
 
@@ -184,8 +184,7 @@ def post_pair(
     console.print(f'  Netuid:     {netuid}')
     console.print(f'  Data:       [dim]{commitment_data}[/dim]\n')
 
-    if not yes and not click.confirm('Confirm posting this pair?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not yes and not require_confirmation('Confirm posting this pair?'):
         return
 
     try:
