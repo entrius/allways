@@ -12,7 +12,6 @@ from rich.console import Console
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, SwapStatus
-from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
