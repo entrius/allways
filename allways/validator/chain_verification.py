@@ -1,7 +1,7 @@
 """Verifies both sides of a swap using chain providers and on-chain swap data."""
 
 import asyncio
-from typing import Dict, Optional
+from typing import Dict
 
 import bittensor as bt
 
@@ -20,15 +20,9 @@ class SwapVerifier:
     def __init__(
         self,
         chain_providers: Dict[str, ChainProvider],
-        subtensor: bt.Subtensor,
-        netuid: int,
-        metagraph: Optional['bt.Metagraph'] = None,
         fee_divisor: int = 100,
     ):
         self.providers = chain_providers
-        self.subtensor = subtensor
-        self.netuid = netuid
-        self.metagraph = metagraph
         self.fee_divisor = fee_divisor
         self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
 

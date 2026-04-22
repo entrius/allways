@@ -1,4 +1,4 @@
-"""alw swap resume - Recover an interrupted swap flow."""
+"""alw swap resume-reservation - Recover an interrupted pre-initiate reservation flow."""
 
 import os
 import time
@@ -17,34 +17,41 @@ from allways.cli.swap_commands.helpers import (
     console,
     get_cli_context,
     load_pending_swap,
+    resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
+    resolve_recent_swap_id,
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
 
 
-@click.command('resume')
+@click.command('resume-reservation')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
-def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: int):
-    """Resume an interrupted swap from where it left off.
+def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
+    """Resume an interrupted pre-initiate reservation.
 
     \b
-    Picks up a pending swap that has an active reservation — submits the
-    source transaction hash and confirms with validators. If the reservation
-    has expired, guides the user to start fresh with `alw swap now`.
+    Picks up a reservation that was opened by `alw swap now` but never made
+    it to vote_initiate — submits the source transaction hash and confirms
+    with validators. If the reservation has expired, guides the user to
+    start fresh with `alw swap now`.
+
+    \b
+    This only covers the pre-initiate window. Once a swap reaches
+    vote_initiate quorum it's in-flight on-chain, the local pending file
+    is cleared, and the right follow-up is `alw view swap <id> --watch`.
 
     \b
     Interactive mode:
-        alw swap resume
+        alw swap resume-reservation
 
     \b
     Non-interactive mode (for scripting/agents):
-        alw swap resume --from-tx-hash abc123... --yes
+        alw swap resume-reservation --from-tx-hash abc123... --yes
     """
     state = load_pending_swap()
     if not state:
@@ -53,8 +60,11 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         return
 
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', state.netuid))
+    # --netuid handled globally in main.py. Fall back to the saved
+    # reservation's netuid when neither CLI flag nor config override it,
+    # so a resume stays pinned to the subnet the original reservation
+    # was opened on.
+    netuid = int(config.get('netuid', state.netuid))
 
     # Check if system is halted
     try:
@@ -120,7 +130,7 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         console.print('\n[yellow]Reservation is no longer active.[/yellow]')
         console.print(
             '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
-            'or completed. Check with: alw view swaps[/dim]\n'
+            'or completed. Check with: alw view active-swaps[/dim]\n'
         )
         console.print('[dim]Start a new swap with: alw swap now[/dim]')
         return
@@ -152,10 +162,22 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
         from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
         if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
-            console.print('[yellow]Swap paused. Resume later with: alw swap resume[/yellow]')
+            console.print('[yellow]Swap paused. Resume later with: alw swap resume-reservation[/yellow]')
             return
 
     from_tx_hash = from_tx_hash_opt.strip()
+
+    # Reservation-wide block lookup so a resumed tx still ±3-hints the
+    # validator. 0 = miss (falls back to validator-side scan).
+    from_tx_block = resolve_source_tx_block(
+        provider=provider,
+        tx_hash=from_tx_hash,
+        expected_recipient=state.miner_from_address,
+        expected_amount=state.from_amount,
+        subtensor=subtensor,
+        client=client,
+        reserved_until_block=reserved_until,
+    )
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued = sign_and_broadcast_confirm(
@@ -169,10 +191,11 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         ephemeral_wallet,
         from_chain=state.from_chain,
         to_chain=state.to_chain,
+        from_tx_block=from_tx_block,
     )
 
     if accepted == 0:
-        console.print('[yellow]No validators accepted. You can retry: alw swap resume[/yellow]')
+        console.print('[yellow]No validators accepted. You can retry: alw swap resume-reservation[/yellow]')
         return
 
     all_queued = queued > 0 and queued == accepted
@@ -181,23 +204,36 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool, netuid: 
         est_min = chain_def.min_confirmations * chain_def.seconds_per_block / 60
         console.print(
             f'\n  Waiting for [bold]{chain_def.min_confirmations} {state.from_chain.upper()}[/bold]'
-            f' confirmation(s) (~{est_min:.0f} min)...'
+            f' confirmation(s) (~{est_min:.0f} min). '
+            "We'll drop into live status the moment the swap is initiated on-chain."
         )
-        console.print('\n  [dim]You can safely exit (Ctrl+C) — validators will continue processing.[/dim]')
+        console.print(
+            '\n  [dim]If you need to step away: Ctrl+C detaches, resume anytime with `alw view reservation`.[/dim]'
+        )
 
     max_polls = 600 if all_queued else 60
     try:
         swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
     except KeyboardInterrupt:
-        clear_pending_swap()
+        try:
+            swap_id = resolve_recent_swap_id(client, state.miner_hotkey)
+        except ContractError:
+            swap_id = None
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        console.print('[dim]Once initiated, watch with: alw view swap <id> --watch[/dim]\n')
+        if swap_id is not None:
+            clear_pending_swap()
+            console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
+            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
+        else:
+            console.print(f'[dim]Miner UID {state.miner_uid} — check progress with: alw view reservation[/dim]\n')
         return
 
     if swap_id is None:
-        clear_pending_swap()
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view swaps[/dim]\n')
+        console.print(
+            f'[dim]Miner UID {state.miner_uid} — check: alw view reservation '
+            '(pending_swap.json kept for retry with `alw swap resume-reservation`)[/dim]\n'
+        )
         return
 
     clear_pending_swap()

@@ -53,7 +53,7 @@ async def forward(self: Validator) -> None:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
     # Pull newly-initiated and resolved swaps off the contract.
-    await tracker.poll(self.block)
+    await tracker.poll()
 
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
     # set is swap IDs where the provider was unreachable this cycle, so the
@@ -122,6 +122,8 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                 tx_hash=item.from_tx_hash,
                 expected_recipient=item.miner_from_address,
                 expected_amount=item.from_amount,
+                block_hint=item.from_tx_block,
+                expected_sender=item.from_address,
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
