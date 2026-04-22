@@ -2,10 +2,13 @@
 
 import asyncio
 import time
+from typing import Optional
 
 import click
 from rich.table import Table
 
+from allways.chains import get_chain
+from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
@@ -17,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     read_miner_commitment,
 )
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 
 
@@ -295,30 +299,39 @@ def miner_deactivate():
 @click.option('--tx-hash', required=True, type=str, help='Destination chain transaction hash')
 @click.option(
     '--amount',
-    required=True,
-    type=float,
-    help='Amount sent, in human units of the destination chain (e.g. 0.1 TAO, 0.00027500 BTC)',
+    default=None,
+    type=int,
+    help=(
+        "Amount sent, in the dest chain's smallest unit (rao for TAO, satoshi for BTC). "
+        'Optional — if omitted, the CLI computes the expected amount from the swap struct '
+        '(rate × from_amount − fee).'
+    ),
 )
-@click.option('--block', default=0, type=int, help='Destination chain block number (default: 0)')
+@click.option(
+    '--block',
+    default=0,
+    type=int,
+    help='Destination chain block number (default: 0, which tells validators to scan)',
+)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: float, block: int, yes: bool):
+def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: Optional[int], block: int, yes: bool):
     """Manually mark a swap as fulfilled on the contract.
 
     [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
     and need to notify the contract.[/dim]
 
     [dim]Examples:
-        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 0.1[/dim]
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123...           (amount inferred)
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 27500   (override)[/dim]
     """
-    from allways.cli.swap_commands.swap import to_smallest_unit
+    from allways.utils.rate import expected_swap_amounts
 
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
 
-    # Look up the swap to know which chain's decimals to use for conversion.
-    # The contract takes to_amount in the destination chain's smallest unit
-    # (rao for TAO, satoshi for BTC), but we accept human units at the CLI
-    # so the operator doesn't have to multiply by 10^9 or 10^8 in their head.
+    # Preflight: the contract rejects mark_fulfilled with InvalidStatus when
+    # status != Active, and we can't give back any of that detail once ink!
+    # raises ContractReverted. Look up the swap ourselves so we can show why.
     try:
         swap = client.get_swap(swap_id)
     except ContractError as e:
@@ -328,14 +341,50 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: float, block: int, 
         console.print(f'[red]Swap #{swap_id} not found on-chain.[/red]')
         return
 
+    if swap.miner_hotkey != hotkey:
+        console.print(
+            f'[red]Swap #{swap_id} is assigned to a different miner ({swap.miner_hotkey[:16]}...), not you.[/red]\n'
+        )
+        return
+
+    if swap.status != SwapStatus.ACTIVE:
+        console.print(
+            f'[yellow]Swap #{swap_id} is not Active — current status: '
+            f'[bold]{swap.status.name}[/bold].[/yellow]\n'
+            '[dim]mark_fulfilled is only accepted once, while the swap is Active. '
+            'The contract will reject a re-call.[/dim]'
+        )
+        if swap.to_tx_hash:
+            console.print(f'[dim]  Already recorded: tx={swap.to_tx_hash[:20]}..., to_amount={swap.to_amount}[/dim]\n')
+        return
+
+    # Infer the expected dest amount from the swap struct if caller didn't pass one.
+    # Same formula the validator uses (rate × from_amount − fee), so the consensus
+    # path stays aligned regardless of whether the operator guessed a raw number.
+    if amount is None:
+        _, inferred = expected_swap_amounts(swap, FEE_DIVISOR)
+        if inferred == 0:
+            console.print(
+                '[red]Could not infer amount from swap struct (rate produced 0).[/red]\n'
+                '[dim]Pass --amount explicitly (smallest unit of the dest chain).[/dim]'
+            )
+            return
+        amount = inferred
+        amount_source = 'inferred from swap struct'
+    else:
+        amount_source = 'operator-provided'
+
     to_chain = swap.to_chain
-    to_amount_smallest = to_smallest_unit(amount, to_chain)
+    to_chain_def = get_chain(to_chain)
+    human_amount = amount / (10**to_chain_def.decimals)
 
     console.print(f'\n[bold]Mark Fulfilled — Swap #{swap_id}[/bold]\n')
     console.print(f'  Swap ID:   {swap_id}')
     console.print(f'  Tx Hash:   {tx_hash}')
-    console.print(f'  Amount:    {amount} {to_chain.upper()}  ({to_amount_smallest} {to_chain} smallest unit)')
-    console.print(f'  Block:     {block}')
+    console.print(
+        f'  Amount:    {amount} {to_chain_def.native_unit}  (~{human_amount:.8f} {to_chain.upper()}, {amount_source})'
+    )
+    console.print(f'  Block:     {block if block else "(validators will scan)"}')
     console.print(f'  Hotkey:    {hotkey}\n')
 
     if not yes and not click.confirm('Confirm marking swap as fulfilled?'):
@@ -348,7 +397,7 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: float, block: int, 
                 wallet=wallet,
                 swap_id=swap_id,
                 to_tx_hash=tx_hash,
-                to_amount=to_amount_smallest,
+                to_amount=amount,
                 to_tx_block=block,
             )
         console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
