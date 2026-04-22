@@ -16,12 +16,19 @@ from allways.validator.state_store import PendingConfirm
 )
 def test_replay_passes_stored_block_as_hint(stored_block, expected_hint):
     pending = PendingConfirm(
-        miner_hotkey='miner-1', from_tx_hash='tx-abc',
-        from_chain='tao', to_chain='btc',
-        from_address='5user', to_address='bc1-user',
-        tao_amount=1, from_amount=2, to_amount=3,
-        miner_from_address='5miner', miner_to_address='bc1-miner',
-        rate_str='350', reserved_until=10_000,
+        miner_hotkey='miner-1',
+        from_tx_hash='tx-abc',
+        from_chain='tao',
+        to_chain='btc',
+        from_address='5user',
+        to_address='bc1-user',
+        tao_amount=1,
+        from_amount=2,
+        to_amount=3,
+        miner_from_address='5miner',
+        miner_to_address='bc1-miner',
+        rate_str='350',
+        reserved_until=10_000,
         from_tx_block=stored_block,
     )
     validator = MagicMock()
@@ -35,7 +42,11 @@ def test_replay_passes_stored_block_as_hint(stored_block, expected_hint):
 
     provider = MagicMock()
     provider.verify_transaction.return_value = TransactionInfo(
-        tx_hash='', confirmed=False, sender='', recipient='', amount=0,
+        tx_hash='',
+        confirmed=False,
+        sender='',
+        recipient='',
+        amount=0,
     )
     validator.chain_providers = {'tao': provider}
 
