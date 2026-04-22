@@ -593,8 +593,14 @@ def view_active_swaps(status: str):
     console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def build_swap_text(swap, chain_info=True):
-    """Build swap display as a Rich markup string."""
+def build_swap_text(swap, chain_info=True, current_block: int = 0):
+    """Build swap display as a Rich markup string.
+
+    ``current_block`` — when > 0 and the swap is still in-flight, a "Now"
+    row is added to the timeline showing how many blocks remain until
+    timeout. Gives the reader a frame of reference without having to
+    cross-check against ``alw status``.
+    """
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
     parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
 
@@ -630,6 +636,18 @@ def build_swap_text(swap, chain_info=True):
     else:
         parts.append(f'    [dim]⏱ Timeout       Block {swap.timeout_block}[/dim]')
 
+    in_flight = swap.status not in (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
+    if current_block > 0 and in_flight:
+        blocks_left = swap.timeout_block - current_block
+        if blocks_left > 0:
+            minutes_left = blocks_left * SECONDS_PER_BLOCK // 60
+            parts.append(
+                f'    [cyan]⏲ Now            Block {current_block}[/cyan]  '
+                f'[dim](~{blocks_left} blocks / ~{minutes_left} min until timeout)[/dim]'
+            )
+        else:
+            parts.append(f'    [cyan]⏲ Now            Block {current_block}[/cyan]  [red](past timeout)[/red]')
+
     parts.append('')
     parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
     parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
@@ -649,9 +667,9 @@ def build_swap_text(swap, chain_info=True):
     return '\n'.join(parts)
 
 
-def display_swap(swap, chain_info=True):
+def display_swap(swap, chain_info=True, current_block: int = 0):
     """Render a single swap with timeline view."""
-    console.print(build_swap_text(swap, chain_info=chain_info))
+    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block))
 
 
 @view_group.command('swap')
@@ -696,7 +714,11 @@ def view_swap(swap_id: int, watch: bool):
         return
 
     if not watch:
-        display_swap(swap)
+        try:
+            current_block = subtensor.get_current_block()
+        except Exception:
+            current_block = 0
+        display_swap(swap, current_block=current_block)
         return
 
     watch_swap(client, swap_id, swap)
@@ -723,15 +745,21 @@ def watch_swap(client, swap_id: int, swap=None):
         display_swap(swap)
         return swap
 
-    def render(s, chain_info=True, watching=True):
-        markup = build_swap_text(s, chain_info=chain_info)
+    def current_block_or_zero():
+        try:
+            return client.subtensor.get_current_block()
+        except Exception:
+            return 0
+
+    def render(s, chain_info=True, watching=True, current_block=0):
+        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
         return Text.from_markup(markup)
 
     last_swap = swap
     try:
-        with Live(render(swap), console=console, refresh_per_second=1) as live:
+        with Live(render(swap, current_block=current_block_or_zero()), console=console, refresh_per_second=1) as live:
             while True:
                 time.sleep(SECONDS_PER_BLOCK)
                 try:
@@ -756,9 +784,9 @@ def watch_swap(client, swap_id: int, swap=None):
                     live.update(render(final, chain_info=False, watching=False))
                     return final
                 last_swap = swap
-                live.update(render(swap))
+                live.update(render(swap, current_block=current_block_or_zero()))
                 if swap.status in terminal:
-                    live.update(render(swap, watching=False))
+                    live.update(render(swap, watching=False, current_block=current_block_or_zero()))
                     return swap
     except KeyboardInterrupt:
         console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
