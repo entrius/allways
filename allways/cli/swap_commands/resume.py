@@ -205,15 +205,27 @@ def resume_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
     try:
         swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
     except KeyboardInterrupt:
-        clear_pending_swap()
+        from allways.cli.swap_commands.swap import _resolve_recent_swap_id
+
+        swap_id = _resolve_recent_swap_id(client, state.miner_hotkey)
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        console.print('[dim]Once initiated, watch with: alw view swap <id> --watch[/dim]\n')
+        if swap_id is not None:
+            clear_pending_swap()
+            console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
+            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
+        else:
+            console.print(
+                f'[dim]Miner UID {state.miner_uid} — once the swap initiates it will show in: '
+                f'alw view active-swaps[/dim]\n'
+            )
         return
 
     if swap_id is None:
-        clear_pending_swap()
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view active-swaps[/dim]\n')
+        console.print(
+            f'[dim]Miner UID {state.miner_uid} — check: alw view active-swaps '
+            '(pending_swap.json kept for retry with `alw swap resume`)[/dim]\n'
+        )
         return
 
     clear_pending_swap()

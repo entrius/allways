@@ -124,6 +124,26 @@ def sign_and_broadcast_confirm(
     return accepted, queued
 
 
+def _resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
+    """Single-shot lookup for a miner's most recent swap id.
+
+    Used on Ctrl+C / early-exit paths where we don't have time to poll but
+    still want to surface the ID if the swap already landed on-chain.
+    Returns None on any error so the caller can fall through gracefully.
+    """
+    try:
+        if not client.get_miner_has_active_swap(miner_hotkey):
+            return None
+        next_id = client.get_next_swap_id()
+        for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
+            swap = client.get_swap(check_id)
+            if swap and swap.miner_hotkey == miner_hotkey:
+                return check_id
+    except ContractError:
+        return None
+    return None
+
+
 def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
     """Poll contract until miner has an active swap. Returns swap_id or None."""
     with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
@@ -232,13 +252,16 @@ def broadcast_reserve_with_retry(
 
         accepted = sum(1 for r in responses if getattr(r, 'accepted', None))
         for i, resp in enumerate(responses):
-            status = '[green]ok[/green]' if getattr(resp, 'accepted', None) else '[red]no[/red]'
-            # Blank reason = validator didn't respond (network/timeout) rather
-            # than an explicit rejection; surface that instead of an empty line.
-            reason = (
-                getattr(resp, 'rejection_reason', '') or ''
-            ).strip() or '(no response — timeout or validator down)'
-            console.print(f'    V{i + 1}: {status} {reason}')
+            was_accepted = bool(getattr(resp, 'accepted', None))
+            raw_reason = (getattr(resp, 'rejection_reason', '') or '').strip()
+            if was_accepted:
+                # Accepted means the validator responded. Blank reason is
+                # normal here — don't render the 'no response' fallback.
+                suffix = f' {raw_reason}' if raw_reason else ''
+                console.print(f'    V{i + 1}: [green]ok[/green]{suffix}')
+            else:
+                reason = raw_reason or '(no response — timeout or validator down)'
+                console.print(f'    V{i + 1}: [red]no[/red] {reason}')
 
         if accepted == 0:
             console.print('[red]No validators accepted the reservation.[/red]')
@@ -928,7 +951,7 @@ def swap_now_command(
 
         console.print(
             '\n  [dim]You can safely exit (Ctrl+C) — validators will continue processing.[/dim]'
-            '\n  [dim]Resume watching later with: alw view swap <id> --watch[/dim]'
+            f'\n  [dim]Pick up the swap any time with: alw view active-swaps  (your miner: UID {selected_pair.uid})[/dim]'
         )
 
     # Poll for swap creation (longer timeout when queued)
@@ -936,15 +959,28 @@ def swap_now_command(
     try:
         swap_id = poll_for_swap_with_progress(client, selected_pair.hotkey, from_chain, max_polls)
     except KeyboardInterrupt:
-        clear_pending_swap()
+        # One last best-effort resolve before handing back — the swap may
+        # have just been initiated while we were printing, and a concrete
+        # ID in the exit banner beats telling the user to grep.
+        swap_id = _resolve_recent_swap_id(client, selected_pair.hotkey)
         console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        console.print('[dim]Once initiated, watch with: alw view swap <id> --watch[/dim]\n')
+        if swap_id is not None:
+            clear_pending_swap()
+            console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
+            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
+        else:
+            console.print(
+                f'[dim]Miner UID {selected_pair.uid} — once the swap initiates it will show in: '
+                f'alw view active-swaps[/dim]\n'
+            )
         return
 
     if swap_id is None:
-        clear_pending_swap()
         console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print('[dim]Check back with: alw view active-swaps[/dim]\n')
+        console.print(
+            f'[dim]Miner UID {selected_pair.uid} — check: alw view active-swaps '
+            '(pending_swap.json kept for retry with `alw swap resume`)[/dim]\n'
+        )
         return
 
     clear_pending_swap()
