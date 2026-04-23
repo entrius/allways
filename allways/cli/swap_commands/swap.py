@@ -138,7 +138,8 @@ def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
     if not client.get_miner_has_active_swap(miner_hotkey):
         return None
     active = client.get_miner_active_swaps(miner_hotkey)
-    return active[-1].id if active else None
+    # One active swap per miner, so [0] is guaranteed to be it.
+    return active[0].id if active else None
 
 
 def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
