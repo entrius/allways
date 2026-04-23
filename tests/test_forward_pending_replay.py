@@ -10,11 +10,11 @@ from allways.validator.state_store import PendingConfirm
 
 
 @pytest.mark.parametrize(
-    'stored_block,expected_hint',
-    [(500, 500), (None, 0)],
-    ids=['hinted', 'null_fallback'],
+    'stored_block',
+    [500, 0],
+    ids=['hinted', 'unknown'],
 )
-def test_replay_passes_stored_block_as_hint(stored_block, expected_hint):
+def test_replay_passes_stored_block_as_hint(stored_block):
     pending = PendingConfirm(
         miner_hotkey='miner-1',
         from_tx_hash='tx-abc',
@@ -52,4 +52,4 @@ def test_replay_passes_stored_block_as_hint(stored_block, expected_hint):
 
     initialize_pending_user_reservations(validator)
 
-    assert provider.verify_transaction.call_args.kwargs['block_hint'] == expected_hint
+    assert provider.verify_transaction.call_args.kwargs['block_hint'] == stored_block

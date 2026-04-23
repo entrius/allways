@@ -116,7 +116,7 @@ class TestPendingConfirmQueue:
         items = ValidatorStateStore(db_path=db_path).get_all()
         assert len(items) == 1
         assert items[0].miner_hotkey == 'legacy-miner'
-        assert items[0].from_tx_block is None
+        assert items[0].from_tx_block == 0
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'
