@@ -12,6 +12,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     load_pending_swap,
     print_contract_error,
+    resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
@@ -20,19 +21,31 @@ from allways.contract_client import ContractError
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
 @click.argument('tx_hash', required=False, default=None, type=str)
-@click.option('--netuid', default=None, type=int, help='Subnet UID')
-def post_tx_command(tx_hash: str, netuid: int):
+@click.option(
+    '--block',
+    'tx_block',
+    type=int,
+    default=0,
+    help=(
+        'Override the source-tx block number. Usually unnecessary — the CLI '
+        'looks it up automatically across the whole reservation window. Use '
+        'this only when automatic lookup fails (e.g. running against a node '
+        'that has pruned block bodies, or the tx landed on a different node).'
+    ),
+)
+def post_tx_command(tx_hash: str, tx_block: int):
     """Submit your source transaction hash for a pending swap reservation.
 
     [dim]Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).[/dim]
 
     [dim]Examples:
         $ alw swap post-tx abc123def...
+        $ alw swap post-tx abc123def... --block 12345   (escape hatch)
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
     config, wallet, subtensor, client = get_cli_context()
-    if netuid is None:
-        netuid = int(config.get('netuid', NETUID_FINNEY))
+    # --netuid handled globally in main.py; config['netuid'] already resolved.
+    netuid = int(config.get('netuid', NETUID_FINNEY))
 
     # Load pending swap state
     state = load_pending_swap()
@@ -84,6 +97,22 @@ def post_tx_command(tx_hash: str, netuid: int):
 
     from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
+    # Resolve the tx's block so validators can ±3-hint rather than scan.
+    # --block wins; otherwise a reservation-wide scan via the shared helper.
+    from_tx_block = tx_block
+    if from_tx_block > 0:
+        console.print(f'[dim]Using --block {from_tx_block} (skipping lookup).[/dim]')
+    else:
+        from_tx_block = resolve_source_tx_block(
+            provider=provider,
+            tx_hash=tx_hash,
+            expected_recipient=state.miner_from_address,
+            expected_amount=state.from_amount,
+            subtensor=subtensor,
+            client=client,
+            reserved_until_block=reserved_until,
+        )
+
     # Discover validators
     validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
@@ -104,6 +133,7 @@ def post_tx_command(tx_hash: str, netuid: int):
         ephemeral_wallet,
         from_chain=state.from_chain,
         to_chain=state.to_chain,
+        from_tx_block=from_tx_block,
     )
 
     if accepted == 0:
@@ -111,9 +141,10 @@ def post_tx_command(tx_hash: str, netuid: int):
         return
 
     if queued > 0 and queued == accepted:
-        clear_pending_swap()
         console.print('\n[green]Validators queued your transaction for auto-confirmation.[/green]')
-        console.print('[dim]Swap will be initiated once confirmations are reached. Check: alw view swaps[/dim]\n')
+        console.print(
+            '[dim]Swap will be initiated once confirmations are reached. Check progress: alw view reservation[/dim]\n'
+        )
         return
 
     # Poll for swap creation
@@ -121,7 +152,7 @@ def post_tx_command(tx_hash: str, netuid: int):
     if swap_id is not None:
         clear_pending_swap()
         console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
-        console.print(f'[dim]Track with: alw view swap {swap_id}[/dim]\n')
+        console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
     else:
-        console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view swaps[/yellow]')
+        console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view reservation[/yellow]')
         console.print('[dim]State file kept — you can retry this command.[/dim]\n')

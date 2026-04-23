@@ -2,10 +2,13 @@
 
 import asyncio
 import time
+from typing import Optional
 
 import click
 from rich.table import Table
 
+from allways.chains import get_chain
+from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
@@ -18,6 +21,7 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     read_miner_commitment,
 )
+from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 
 
@@ -248,10 +252,36 @@ def miner_deactivate():
     [dim]Examples:
         $ alw miner deactivate[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    _, wallet, subtensor, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
 
     console.print(f'\n[bold]Miner Deactivate: {hotkey[:16]}...[/bold]\n')
+
+    # Pre-flight: the contract rejects deactivate() with MinerHasActiveSwap or
+    # MinerReserved (lib.rs:935-940). ink! returns those as a raw ContractReverted
+    # with no variant name, so detect them here to show why instead of a module
+    # error dump.
+    try:
+        if client.get_miner_has_active_swap(hotkey):
+            console.print(
+                '[red]Cannot deactivate: you have an active swap.[/red]\n'
+                '[dim]Wait for it to complete or time out, then try again. '
+                'Check with: alw view active-swaps[/dim]\n'
+            )
+            return
+        reserved_until = client.get_miner_reserved_until(hotkey)
+        current_block = subtensor.get_current_block()
+        if reserved_until > current_block:
+            remaining = reserved_until - current_block
+            console.print(
+                f'[red]Cannot deactivate: you have an active reservation '
+                f'(~{remaining} blocks, ~{remaining * 12 // 60} min left).[/red]\n'
+                '[dim]Wait for it to expire or get consumed, then try again.[/dim]\n'
+            )
+            return
+    except ContractError as e:
+        print_contract_error('Failed to read miner state', e)
+        return
 
     try:
         with loading('Submitting transaction...'):
@@ -268,26 +298,94 @@ def miner_deactivate():
 @miner_group.command('mark-fulfilled')
 @click.option('--swap-id', required=True, type=int, help='Swap ID to mark as fulfilled')
 @click.option('--tx-hash', required=True, type=str, help='Destination chain transaction hash')
-@click.option('--amount', required=True, type=int, help='Amount sent (in smallest unit, e.g. rao or satoshi)')
-@click.option('--block', default=0, type=int, help='Destination chain block number (default: 0)')
+@click.option(
+    '--amount',
+    default=None,
+    type=int,
+    help=(
+        "Amount sent, in the dest chain's smallest unit (rao for TAO, satoshi for BTC). "
+        'Optional — if omitted, the CLI computes the expected amount from the swap struct '
+        '(rate × from_amount − fee).'
+    ),
+)
+@click.option(
+    '--block',
+    default=0,
+    type=int,
+    help='Destination chain block number (default: 0, which tells validators to scan)',
+)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: int, block: int, yes: bool):
+def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: Optional[int], block: int, yes: bool):
     """Manually mark a swap as fulfilled on the contract.
 
     [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
     and need to notify the contract.[/dim]
 
     [dim]Examples:
-        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 500000000[/dim]
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123...           (amount inferred)
+        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 27500   (override)[/dim]
     """
+    from allways.utils.rate import expected_swap_amounts
+
     _, wallet, _, client = get_cli_context()
     hotkey = wallet.hotkey.ss58_address
+
+    # Preflight: the contract rejects mark_fulfilled with InvalidStatus when
+    # status != Active, and we can't give back any of that detail once ink!
+    # raises ContractReverted. Look up the swap ourselves so we can show why.
+    try:
+        swap = client.get_swap(swap_id)
+    except ContractError as e:
+        print_contract_error('Failed to read swap', e)
+        return
+    if swap is None:
+        console.print(f'[red]Swap #{swap_id} not found on-chain.[/red]')
+        return
+
+    if swap.miner_hotkey != hotkey:
+        console.print(
+            f'[red]Swap #{swap_id} is assigned to a different miner ({swap.miner_hotkey[:16]}...), not you.[/red]\n'
+        )
+        return
+
+    if swap.status != SwapStatus.ACTIVE:
+        console.print(
+            f'[yellow]Swap #{swap_id} is not Active — current status: '
+            f'[bold]{swap.status.name}[/bold].[/yellow]\n'
+            '[dim]mark_fulfilled is only accepted once, while the swap is Active. '
+            'The contract will reject a re-call.[/dim]'
+        )
+        if swap.to_tx_hash:
+            console.print(f'[dim]  Already recorded: tx={swap.to_tx_hash[:20]}..., to_amount={swap.to_amount}[/dim]\n')
+        return
+
+    # Infer the expected dest amount from the swap struct if caller didn't pass one.
+    # Same formula the validator uses (rate × from_amount − fee), so the consensus
+    # path stays aligned regardless of whether the operator guessed a raw number.
+    if amount is None:
+        _, inferred = expected_swap_amounts(swap, FEE_DIVISOR)
+        if inferred == 0:
+            console.print(
+                '[red]Could not infer amount from swap struct (rate produced 0).[/red]\n'
+                '[dim]Pass --amount explicitly (smallest unit of the dest chain).[/dim]'
+            )
+            return
+        amount = inferred
+        amount_source = 'inferred from swap struct'
+    else:
+        amount_source = 'operator-provided'
+
+    to_chain = swap.to_chain
+    to_chain_def = get_chain(to_chain)
+    human_amount = amount / (10**to_chain_def.decimals)
 
     console.print(f'\n[bold]Mark Fulfilled — Swap #{swap_id}[/bold]\n')
     console.print(f'  Swap ID:   {swap_id}')
     console.print(f'  Tx Hash:   {tx_hash}')
-    console.print(f'  Amount:    {amount}')
-    console.print(f'  Block:     {block}')
+    console.print(
+        f'  Amount:    {amount} {to_chain_def.native_unit}  (~{human_amount:.8f} {to_chain.upper()}, {amount_source})'
+    )
+    console.print(f'  Block:     {block if block else "(validators will scan)"}')
     console.print(f'  Hotkey:    {hotkey}\n')
 
     if not yes and not click.confirm('Confirm marking swap as fulfilled?'):
