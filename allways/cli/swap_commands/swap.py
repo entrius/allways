@@ -133,12 +133,9 @@ def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
     """
     if not client.get_miner_has_active_swap(miner_hotkey):
         return None
-    next_id = client.get_next_swap_id()
-    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
-        swap = client.get_swap(check_id)
-        if swap and swap.miner_hotkey == miner_hotkey:
-            return check_id
-    return None
+    active = client.get_miner_active_swaps(miner_hotkey)
+    # One active swap per miner, so [0] is guaranteed to be it.
+    return active[0].id if active else None
 
 
 
@@ -311,6 +308,33 @@ def broadcast_reserve_with_retry(
 # =========================================================================
 # Swap-specific helpers
 # =========================================================================
+
+
+def display_timeout_notice(swap, dashboard_url: str):
+    """Explain a TIMED_OUT result to the user after `alw swap now` watches through termination.
+
+    The timeout path looks silent from the CLI's perspective — the contract
+    refunds directly and removes the swap from storage — so surface what
+    actually happened: the miner failed to fulfill, they're slashed, and the
+    user is made whole in TAO from the slashed collateral.
+    """
+    tao_human = swap.tao_amount / (10**9) if swap.tao_amount else 0.0
+    amount_line = f'[bold]{tao_human:g} TAO[/bold]' if tao_human else 'TAO equivalent to your swap'
+
+    notice = (
+        '[bold]Miner failed to fulfill within the timeout window.[/bold]\n'
+        '\n'
+        f"  You're made whole: {amount_line} is slashed from the miner's\n"
+        '  collateral and sent directly to your TAO wallet.\n'
+        '\n'
+        '  If the on-chain transfer could not settle, the slash is held\n'
+        f'  pending — claim it with: [cyan]alw claim {swap.id}[/cyan]\n'
+        '\n'
+        f'  Details: [cyan]{dashboard_url}/swap/{swap.id}[/cyan]'
+    )
+    console.print()
+    console.print(Panel(notice, title='[bold red]Swap Timed Out[/bold red]', expand=False))
+    console.print()
 
 
 def display_receipt(swap):
@@ -977,10 +1001,13 @@ def swap_now_command(
         return
 
     # Watch swap through lifecycle
-    from allways.cli.swap_commands.view import watch_swap
+    from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL, watch_swap
 
     final_swap = watch_swap(client, swap_id)
 
-    # Show completion receipt
+    # Show completion receipt / timeout notice
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
         display_receipt(final_swap)
+    elif final_swap and final_swap.status == SwapStatus.TIMED_OUT:
+        dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+        display_timeout_notice(final_swap, dashboard_url)
