@@ -125,22 +125,20 @@ def sign_and_broadcast_confirm(
 
 
 def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
-    """Return the miner's most recent swap id, or None if they have none.
+    """Return the miner's active swap id, or None if they have none.
 
-    Walks back 4 IDs from ``next_id - 1`` as a defensive buffer against
-    concurrent swap creation. Raises ``ContractError`` on RPC failure so
-    callers can distinguish "RPC broken" from "no swap yet" — the
-    Ctrl+C-exit path suppresses; ``poll_for_swap_creation`` counts for
-    its retry warning.
+    Delegates to ``get_miner_active_swaps``, which scans backward from
+    ``next_id - 1`` stopping on consecutive pruned/resolved gaps — so
+    correctness does not depend on a guessed window size. The contract
+    guarantees at most one active swap per miner. Raises ``ContractError``
+    on RPC failure so callers can distinguish "RPC broken" from "no swap
+    yet" — the Ctrl+C-exit path suppresses; ``poll_for_swap_creation``
+    counts for its retry warning.
     """
     if not client.get_miner_has_active_swap(miner_hotkey):
         return None
-    next_id = client.get_next_swap_id()
-    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
-        swap = client.get_swap(check_id)
-        if swap and swap.miner_hotkey == miner_hotkey:
-            return check_id
-    return None
+    active = client.get_miner_active_swaps(miner_hotkey)
+    return active[-1].id if active else None
 
 
 def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
@@ -411,12 +409,9 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
 
             time.sleep(3)
             try:
-                if client.get_miner_has_active_swap(miner_hotkey):
-                    next_id = client.get_next_swap_id()
-                    for check_id in range(next_id - 1, max(next_id - 5, 0), -1):
-                        swap = client.get_swap(check_id)
-                        if swap and swap.miner_hotkey == miner_hotkey:
-                            return check_id
+                swap_id = resolve_recent_swap_id(client, miner_hotkey)
+                if swap_id is not None:
+                    return swap_id
                 errors = 0
             except ContractError:
                 errors += 1
