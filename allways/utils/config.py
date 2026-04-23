@@ -113,6 +113,18 @@ def add_validator_args(cls, parser):
         default=VALIDATOR_POLL_INTERVAL_SECONDS,
     )
 
+    parser.add_argument(
+        '--validator.state_db_path',
+        type=str,
+        help=(
+            'Override path to the validator state SQLite DB. Defaults to ~/.allways/validator/state.db. '
+            'Set this per-validator when multiple validators share a filesystem (dev env) — a shared DB '
+            'lets the first validator to process a pending_confirm remove the row, so the others never '
+            'vote and quorum is never reached.'
+        ),
+        default=None,
+    )
+
 
 def config(cls):
     """Returns the configuration object specific to this miner or validator after adding relevant arguments."""

@@ -21,7 +21,6 @@ from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.misc import is_reserved
-from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -497,11 +496,17 @@ async def handle_swap_confirm(
                 tx_hash=synapse.from_tx_hash,
                 expected_recipient=miner_from_address,
                 expected_amount=res_source_amount,
+                block_hint=synapse.from_tx_block,
                 expected_sender=synapse.from_address,
             )
             if tx_info is None:
                 reject_synapse(synapse, 'Source transaction not found, amount or sender mismatch', ctx)
                 return synapse
+
+            # Persist the discovered block even if the user didn't supply
+            # one — the queue drain can then re-verify with O(1) lookup
+            # instead of re-scanning the sliding window.
+            found_tx_block = tx_info.block_number or synapse.from_tx_block
 
             if not tx_info.confirmed:
                 chain_def = provider.get_chain()
@@ -519,6 +524,7 @@ async def handle_swap_confirm(
                     miner_to_address=miner_fulfillment_address,
                     rate_str=selected_rate_str,
                     reserved_until=reserved_until,
+                    from_tx_block=found_tx_block,
                 )
                 validator.state_store.enqueue(pending)
                 synapse.accepted = True

@@ -135,7 +135,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         )
 
         if is_active:
-            console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
+            console.print('[red]Cannot withdraw while miner is active. Run `alw miner deactivate` first.[/red]')
             return
 
         if deactivation_block > 0:
