@@ -211,6 +211,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
                 return
 
     from_tx_hash = from_tx_hash_opt.strip()
+    if not from_tx_hash:
+        console.print('[red]Error: transaction hash cannot be empty or whitespace.[/red]')
+        return
     mark_pending_swap_tx_sent(from_tx_hash)
 
     # Saved/auto-sent hash is fresh — still in mempool, lookup would just print noise.
