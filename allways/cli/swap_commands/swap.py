@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    loading,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
@@ -144,7 +145,7 @@ def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
 
 def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
     """Poll contract until miner has an active swap. Returns swap_id or None."""
-    with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
+    with loading('Waiting for swap to appear on-chain...', color='dim'):
         errors = 0
         for _ in range(60):
             time.sleep(3)
@@ -265,6 +266,25 @@ def broadcast_reserve_with_retry(
                 continue
             return None
 
+        with loading(f'Waiting for quorum ({accepted} votes submitted)...', color='dim') as status:
+            quorum_errors = 0
+            for _ in range(30):
+                time.sleep(2)
+                try:
+                    reserved_until = client.get_miner_reserved_until(selected_pair.hotkey)
+                    if reserved_until > current_block:
+                        reserved = True
+                        break
+                    vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
+                    status.update(
+                        f'[dim]Waiting for quorum — {vote_count} on-chain vote(s) so far '
+                        f'({accepted} broadcast)...[/dim]'
+                    )
+                    quorum_errors = 0
+                except ContractError:
+                    quorum_errors += 1
+                    if quorum_errors >= 5:
+                        console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
         # Countdown the quorum wait so users see progress, not just a spinner.
         quorum_total_s = 60
         quorum_started = time.time()
@@ -398,7 +418,7 @@ def display_receipt(swap):
 
 def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
     """Poll for swap creation with a live progress display."""
-    with console.status('') as status:
+    with loading('', color='dim') as status:
         errors = 0
         for i in range(max_polls):
             elapsed = i * 3
