@@ -124,6 +124,7 @@ CONTRACT_SELECTORS = {
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
+    'get_validators': bytes.fromhex('a28acf8e'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
@@ -197,6 +198,7 @@ CONTRACT_ARG_TYPES = {
     'get_miner_deactivation_block': [('miner', 'AccountId')],
     'get_consensus_threshold': [],
     'get_validator_count': [],
+    'get_validators': [],
     'get_reservation_data': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'vote_extend_reservation': [
@@ -781,6 +783,44 @@ class AllwaysContractClient:
 
     def is_validator(self, account: str) -> bool:
         return self.read_bool('is_validator', {'account': account})
+
+    def get_validators(self) -> List[str]:
+        """Return all whitelisted validator SS58 addresses.
+
+        Payload is a SCALE Vec<AccountId>: compact-encoded length followed
+        by N * 32 bytes. Returns [] on any read/decode failure so callers
+        can treat it like an empty set without special-casing.
+        """
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_validators')
+        if not data:
+            return []
+        try:
+            first = data[0]
+            mode = first & 0x03
+            if mode == 0:
+                count = first >> 2
+                offset = 1
+            elif mode == 1:
+                if len(data) < 2:
+                    return []
+                count = (first | (data[1] << 8)) >> 2
+                offset = 2
+            else:
+                if len(data) < 4:
+                    return []
+                count = (first | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)) >> 2
+                offset = 4
+            validators: List[str] = []
+            for _ in range(count):
+                if offset + ACCOUNT_ID_BYTES > len(data):
+                    break
+                addr, offset = decode_account_id(data, offset)
+                validators.append(addr)
+            return validators
+        except Exception as e:
+            bt.logging.debug(f'get_validators decode failed: {e}')
+            return []
 
     def get_miner_reserved_until(self, miner_hotkey: str) -> int:
         return self.read_u32('get_miner_reserved_until', {'miner': miner_hotkey})
