@@ -306,20 +306,21 @@ class TestSourceTxVerification:
         assert '2/6 confirmations' in result.rejection_reason
         validator.state_store.enqueue.assert_called_once()
 
-    def test_queued_entry_uses_reservation_amounts(self):
-        """The contract-reserved amounts are authoritative. A queued entry
-        must persist those, not any user-supplied value, so the later
-        auto-initiate hashes match what the miner was reserved under."""
+    def test_queued_entry_captures_reservation_and_tx_block(self):
+        """Reserved amounts (for initiate-hash match) and tx block (for replay
+        block_hint) must persist on the queued entry."""
         validator = make_validator(reservation_data=(777_000_000, 55_000, 999_000_000))
         validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
             confirmed=False,
             confirmations=1,
+            block_number=987_654,
         )
         run_handler(validator, make_synapse())
         queued_item = validator.state_store.enqueue.call_args[0][0]
         assert queued_item.tao_amount == 777_000_000
         assert queued_item.from_amount == 55_000
         assert queued_item.to_amount == 999_000_000
+        assert queued_item.from_tx_block == 987_654
 
 
 # ---------------------------------------------------------------------------
