@@ -9,7 +9,7 @@ from rich.table import Table
 
 from allways.chains import get_chain
 from allways.classes import SwapStatus
-from allways.cli.dendrite_lite import discover_validators
+from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
@@ -202,9 +202,10 @@ def miner_activate():
         return
 
     # Broadcast
+    timeout = resolve_dendrite_timeout(30.0)
     with loading(f'Broadcasting to {len(validator_axons)} validators...'):
         responses = asyncio.get_event_loop().run_until_complete(
-            dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=30.0)
+            dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
         )
 
     # Show per-validator results
