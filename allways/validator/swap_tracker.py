@@ -9,7 +9,7 @@ import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import EXTEND_THRESHOLD_BLOCKS
-from allways.contract_client import AllwaysContractClient
+from allways.contract_client import AllwaysContractClient, ContractError
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -106,7 +106,7 @@ class SwapTracker:
         """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
-        except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
+        except (ConnectionError, TimeoutError, asyncio.TimeoutError, ContractError) as e:
             bt.logging.warning(f'SwapTracker poll transient error: {e}')
         except Exception as e:
             bt.logging.error(f'SwapTracker poll error: {e}')
