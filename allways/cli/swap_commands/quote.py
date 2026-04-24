@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-import rich_click as click
+import click
 from rich.table import Table
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
