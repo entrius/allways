@@ -243,7 +243,7 @@ def broadcast_reserve_with_retry(
             )
 
         console.print(f'  Broadcasting to {len(validator_axons)} validators...')
-        responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=30.0)
+        responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=60.0)
 
         accepted = sum(1 for r in responses if getattr(r, 'accepted', None))
         for i, resp in enumerate(responses):

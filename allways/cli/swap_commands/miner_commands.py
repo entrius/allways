@@ -202,7 +202,7 @@ def miner_activate():
         return
 
     # Broadcast
-    timeout = resolve_dendrite_timeout(30.0)
+    timeout = resolve_dendrite_timeout(60.0)
     with loading(f'Broadcasting to {len(validator_axons)} validators...'):
         responses = asyncio.get_event_loop().run_until_complete(
             dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
