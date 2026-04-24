@@ -166,6 +166,10 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
             return
 
     from_tx_hash = from_tx_hash_opt.strip()
+    
+    if not from_tx_hash:
+        console.print('[red]Error: Transaction hash cannot be empty or just whitespace.[/red]')
+        return
 
     # Reservation-wide block lookup so a resumed tx still ±3-hints the
     # validator. 0 = miss (falls back to validator-side scan).
