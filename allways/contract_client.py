@@ -663,10 +663,13 @@ class AllwaysContractClient:
         """Get an active/fulfilled swap by ID. Returns None if not found or already resolved."""
         return self.read_option_swap('get_swap', {'swap_id': swap_id})
 
-    def get_active_swaps(self, max_gap: int = 50) -> List[Swap]:
+    def get_active_swaps(self, max_gap: Optional[int] = 50) -> List[Swap]:
         """Scan backward from latest swap ID, returning all ACTIVE/FULFILLED swaps.
 
-        Stops after max_gap consecutive None results (pruned/resolved gaps).
+        Stops after ``max_gap`` consecutive None results (pruned/resolved
+        gaps). Pass ``max_gap=None`` for a full scan — needed when
+        callers can't tolerate missing an old swap behind a long run of
+        pruned neighbors.
         """
         self.ensure_initialized()
         next_id = self.get_next_swap_id()
@@ -680,7 +683,7 @@ class AllwaysContractClient:
             swap = self.get_swap(swap_id)
             if swap is None:
                 consecutive_none += 1
-                if consecutive_none >= max_gap:
+                if max_gap is not None and consecutive_none >= max_gap:
                     break
             else:
                 consecutive_none = 0
@@ -690,7 +693,7 @@ class AllwaysContractClient:
         swaps.reverse()
         return swaps
 
-    def get_miner_active_swaps(self, hotkey: str, max_gap: int = 50) -> List[Swap]:
+    def get_miner_active_swaps(self, hotkey: str, max_gap: Optional[int] = 50) -> List[Swap]:
         return [s for s in self.get_active_swaps(max_gap) if s.miner_hotkey == hotkey]
 
     def get_miner_collateral(self, hotkey: str) -> int:

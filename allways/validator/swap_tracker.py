@@ -22,11 +22,7 @@ class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
 
-    def __init__(
-        self,
-        client: AllwaysContractClient,
-        fulfillment_timeout_blocks: int,
-    ):
+    def __init__(self, client: AllwaysContractClient):
         self.client = client
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
@@ -36,37 +32,23 @@ class SwapTracker:
         # the voted value so the next extension round can vote again.
         self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
-        self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
-    def initialize(self, current_block: int):
-        """Cold start: scan backward from latest swap to seed active set."""
+    def initialize(self):
+        """Cold start: seed the active set from the contract's live swaps.
+
+        A full scan (``max_gap=None``) is required: an extended-timeout
+        swap can sit behind an arbitrary run of younger pruned neighbors,
+        and the default gap heuristic would silently drop it.
+        """
+        # Snapshot the cursor before scanning so a swap created mid-init is
+        # picked up by the next poll rather than silently skipped.
         next_id = self.client.get_next_swap_id()
-        if next_id <= 1:
-            self.last_scanned_id = 0
-            bt.logging.info('SwapTracker initialized: no swaps exist')
-            return
-
-        cutoff_block = current_block - self.fulfillment_timeout_blocks
-        latest_id = next_id - 1
-
-        for swap_id in reversed(range(1, next_id)):
-            swap = self.client.get_swap(swap_id)
-            if swap is None:
-                continue
-
-            if swap.initiated_block < cutoff_block:
-                bt.logging.debug(
-                    f'SwapTracker init: stopping at swap {swap_id} '
-                    f'(initiated_block={swap.initiated_block} < cutoff={cutoff_block})'
-                )
-                break
-
-            if swap.status in ACTIVE_STATUSES:
-                self.active[swap.id] = swap
-
-        self.last_scanned_id = latest_id
-
-        bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
+        for swap in self.client.get_active_swaps(max_gap=None):
+            self.active[swap.id] = swap
+        self.last_scanned_id = max(next_id - 1, 0)
+        bt.logging.info(
+            f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}'
+        )
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
         """Drop a swap from tracking after our vote reached quorum."""
