@@ -73,7 +73,8 @@ def miner_status(hotkey: str):
     console.print()
 
     # Section 2: Committed Pair
-    pair = read_miner_commitment(subtensor, netuid, hotkey)
+    with loading('Reading committed pair...'):
+        pair = read_miner_commitment(subtensor, netuid, hotkey)
 
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
@@ -103,7 +104,8 @@ def miner_status(hotkey: str):
 
     # Section 3: Active Swaps
     try:
-        swaps = client.get_miner_active_swaps(hotkey)
+        with loading('Reading active swaps...'):
+            swaps = client.get_miner_active_swaps(hotkey)
     except ContractError as e:
         console.print(f'[yellow]Could not read active swaps: {e}[/yellow]')
         swaps = []
