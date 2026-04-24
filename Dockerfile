@@ -23,4 +23,4 @@ RUN uv venv --python python3 $VENV_DIR && uv sync
 
 # Copy application code and install
 COPY . .
-RUN uv pip install -e .
+RUN uv pip install --no-deps -e .
