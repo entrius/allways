@@ -158,16 +158,20 @@ mod allways_swap_manager {
             id
         }
 
-        /// Record a vote on a request. Returns the new vote count.
+        /// Record a vote on a request. Returns the effective vote count —
+        /// votes from accounts no longer in the validator set are retained in
+        /// storage (for AlreadyVoted idempotency) but excluded from the tally,
+        /// so a removed validator's stale vote can't coast a round to quorum
+        /// under the post-removal (smaller) threshold.
         fn record_vote(&mut self, request_id: u64, caller: AccountId) -> Result<u32, Error> {
             let mut voters = self.request_voters.get(request_id).unwrap_or_default();
             if voters.contains(&caller) {
                 return Err(Error::AlreadyVoted);
             }
             voters.push(caller);
-            let count = u32::try_from(voters.len()).unwrap_or(u32::MAX);
             self.request_voters.insert(request_id, &voters);
-            Ok(count)
+            let effective = voters.iter().filter(|v| self.validators.contains(v)).count();
+            Ok(u32::try_from(effective).unwrap_or(u32::MAX))
         }
 
         /// Return the active request ID for (miner, req_type), or clear it and
