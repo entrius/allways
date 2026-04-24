@@ -145,7 +145,12 @@ class BitcoinProvider(ChainProvider):
             return None
 
     def fetch_matching_tx(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,  # unused — BTC backends index by tx hash
     ) -> Optional[TransactionInfo]:
         """Look up a Bitcoin tx via RPC with Blockstream fallback."""
         result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
@@ -602,6 +607,12 @@ class BitcoinProvider(ChainProvider):
     ) -> Optional[Tuple[str, int]]:
         """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None.
 
+        When ``from_address`` is given in node mode, inputs are pinned to UTXOs
+        at that address. Plain ``sendtoaddress`` lets Core pick UTXOs from any
+        address in the wallet — including auto-generated change addresses left
+        over from prior sends — so the tx's first-input sender drifts off the
+        miner's committed address and validators reject the fulfillment.
+
         Signing credentials come from ``BTC_PRIVATE_KEY`` / ``bitcoind`` wallet,
         not from the caller.
         """
@@ -609,12 +620,49 @@ class BitcoinProvider(ChainProvider):
             return self.send_amount_lightweight(to_address, amount, from_address=from_address)
 
         btc_amount = amount / BTC_TO_SAT
-        tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
+        if from_address:
+            tx_hash = self.rpc_send_from_address(from_address, to_address, btc_amount)
+        else:
+            tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
         if not tx_hash or not isinstance(tx_hash, str):
-            bt.logging.error(f'BTC sendtoaddress failed for {amount} sat to {to_address}')
+            bt.logging.error(f'BTC send failed for {amount} sat to {to_address}')
             return None
 
         block_count = self.rpc_call('getblockcount', [])
         block_number = (block_count + 1) if isinstance(block_count, int) else 0
         bt.logging.info(f'Sent {amount} sat ({btc_amount} BTC) to {to_address} (tx: {tx_hash})')
         return (tx_hash, block_number)
+
+    def rpc_send_from_address(self, from_address: str, to_address: str, btc_amount: float) -> Optional[str]:
+        """Send ``btc_amount`` to ``to_address`` using only UTXOs owned by ``from_address``.
+
+        Required so the resulting tx's first-input sender equals the miner's
+        committed address — validators enforce this and Core's default UTXO
+        selection does not (it freely spends change addresses from prior sends).
+
+        Flow: listunspent → createrawtransaction → fundrawtransaction with
+        ``add_inputs=False`` so Core can't top up from other addresses, with
+        ``changeAddress=from_address`` so change returns to the committed
+        address rather than a fresh one.
+        """
+        utxos = self.rpc_call('listunspent', [1, 9999999, [from_address]]) or []
+        if not utxos:
+            bt.logging.error(f'BTC send: no spendable UTXOs at {from_address}')
+            return None
+        inputs = [{'txid': u['txid'], 'vout': u['vout']} for u in utxos]
+        raw = self.rpc_call('createrawtransaction', [inputs, {to_address: btc_amount}])
+        if not raw or not isinstance(raw, str):
+            bt.logging.error(f'BTC createrawtransaction failed for {from_address} -> {to_address}')
+            return None
+        funded = self.rpc_call(
+            'fundrawtransaction',
+            [raw, {'changeAddress': from_address, 'add_inputs': False}],
+        )
+        if not funded or not funded.get('hex'):
+            bt.logging.error(f'BTC fundrawtransaction failed for {from_address} -> {to_address}')
+            return None
+        signed = self.rpc_call('signrawtransactionwithwallet', [funded['hex']])
+        if not signed or not signed.get('complete'):
+            bt.logging.error(f'BTC signrawtransactionwithwallet incomplete: {signed}')
+            return None
+        return self.rpc_call('sendrawtransaction', [signed['hex']])

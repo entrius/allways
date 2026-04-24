@@ -45,7 +45,12 @@ class ChainProvider(ABC):
 
     @abstractmethod
     def fetch_matching_tx(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
         """Chain-specific fetch — return TransactionInfo if the tx exists and matches
         recipient + amount, otherwise None. Raises ProviderUnreachableError on
@@ -53,6 +58,10 @@ class ChainProvider(ABC):
 
         Uses >= for amount (overpayment is acceptable on-chain).
         block_hint: If > 0, providers can use this for O(1) lookup instead of scanning.
+        max_scan_blocks: Upper bound on how far back to scan when ``block_hint``
+        is 0. CLI lookups can pass a wider window (e.g. reservation lifetime) so
+        users who post-tx late still resolve the block client-side. Ignored by
+        providers with a native "find tx by hash" RPC (e.g. Bitcoin).
 
         Not called directly by application code — use ``verify_transaction``,
         which wraps this with the common confirmed/sender post-checks.
@@ -67,6 +76,7 @@ class ChainProvider(ABC):
         block_hint: int = 0,
         expected_sender: Optional[str] = None,
         require_confirmed: bool = False,
+        max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
         """Verify a transaction against the shared post-fetch checklist.
 
@@ -90,6 +100,7 @@ class ChainProvider(ABC):
             expected_recipient=expected_recipient,
             expected_amount=expected_amount,
             block_hint=block_hint,
+            max_scan_blocks=max_scan_blocks,
         )
         if tx_info is None:
             return None

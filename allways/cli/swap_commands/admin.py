@@ -87,29 +87,6 @@ def set_reservation_ttl(blocks: int):
     )
 
 
-@admin_group.command('set-fee-divisor', show_disclaimer=True)
-@click.argument('divisor', type=int)
-def set_fee_divisor(divisor: int):
-    """Set the fee divisor (100 = 1% fee, 50 = 2% fee, 20 = 5% fee max).
-
-    [dim]Examples:
-        $ alw admin set-fee-divisor 100[/dim]
-    """
-    if divisor < 20:
-        console.print('[red]Divisor must be at least 20 (max 5% fee)[/red]')
-        return
-    new_pct = 100 / divisor
-    _run_setter(
-        title='Set Fee Divisor',
-        getter=lambda c: c.get_fee_divisor(),
-        setter=lambda c, w: c.set_fee_divisor(wallet=w, divisor=divisor),
-        noun='fee divisor',
-        format_current=lambda v: f'{v} ({100 / v:g}% fee)' if v > 0 else f'{v} (0% fee)',
-        new_display=f'{divisor} ({new_pct:g}% fee)',
-        success_msg=f'Fee divisor set to {divisor} ({new_pct:g}% fee)',
-    )
-
-
 @admin_group.command('set-min-collateral', show_disclaimer=True)
 @click.argument('amount_tao', type=float)
 def set_min_collateral(amount_tao: float):
