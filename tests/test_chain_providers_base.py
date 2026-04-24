@@ -27,7 +27,12 @@ class _FakeProvider(ChainProvider):
         return None
 
     def fetch_matching_tx(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
         return self._tx
 
