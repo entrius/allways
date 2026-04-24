@@ -4,7 +4,7 @@ import os
 import time
 from typing import Optional
 
-import rich_click as click
+import click
 from rich.panel import Panel
 
 from allways.chain_providers import create_chain_providers
