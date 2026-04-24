@@ -20,6 +20,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -279,7 +280,7 @@ async def handle_swap_reserve(
         if provider is None:
             reject_synapse(synapse, f'Unsupported chain: {synapse.from_chain}', ctx)
             return synapse
-        proof_message = f'allways-reserve:{synapse.from_address}:{synapse.block_anchor}'
+        proof_message = reserve_proof_message(synapse.from_address, synapse.block_anchor)
         if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_address_proof):
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse
@@ -471,7 +472,7 @@ async def handle_swap_confirm(
             # tx could submit a confirm with their own to_address and redirect the
             # miner's fulfillment — the on-chain sender check alone doesn't bind
             # the confirm caller to the source address.
-            proof_message = f'allways-swap:{synapse.from_tx_hash}'
+            proof_message = swap_proof_message(synapse.from_tx_hash)
             if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_tx_proof):
                 reject_synapse(synapse, 'Invalid source tx proof', ctx)
                 return synapse

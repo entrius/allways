@@ -32,6 +32,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
@@ -77,11 +78,10 @@ def sign_and_broadcast_confirm(
     but is waiting for source tx confirmations before voting to initiate.
     """
     console.print('[dim]Submitting swap to validators...[/dim]')
-    proof_message = f'allways-swap:{from_tx_hash}'
     from_proof = sign_or_prompt_external(
         provider,
         user_from_address,
-        proof_message,
+        swap_proof_message(from_tx_hash),
         key=from_key,
         chain=from_chain,
         skip_confirm=skip_confirm,
@@ -182,11 +182,10 @@ def broadcast_reserve_with_retry(
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
     current_block = subtensor.get_current_block()
-    reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
     from_address_proof = sign_or_prompt_external(
         provider,
         user_from_address,
-        reserve_proof_message,
+        reserve_proof_message(user_from_address, current_block),
         key=from_key,
         chain=from_chain,
         skip_confirm=skip_confirm,
@@ -218,11 +217,10 @@ def broadcast_reserve_with_retry(
     for attempt in range(max_retries + 1):
         if attempt > 0:
             current_block = subtensor.get_current_block()
-            reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
             from_address_proof = sign_or_prompt_external(
                 provider,
                 user_from_address,
-                reserve_proof_message,
+                reserve_proof_message(user_from_address, current_block),
                 key=from_key,
                 chain=from_chain,
                 skip_confirm=skip_confirm,
