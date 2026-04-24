@@ -21,7 +21,7 @@ from allways.validator.event_watcher import (
     decode_topic_fields,
     load_event_registry,
 )
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator.state_store import PendingConfirm, ValidatorStateStore
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
 
@@ -166,6 +166,33 @@ class TestBusyIntervals:
         assert w.open_swap_count == {'hk_a': 1, 'hk_b': 1}
         busy_now = w.get_busy_miners_at(100)
         assert busy_now == {'hk_a': 1, 'hk_b': 1}
+        w.state_store.close()
+
+
+class TestReservationExtended:
+    def test_event_bumps_queued_reserved_until(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.state_store.enqueue(
+            PendingConfirm(
+                miner_hotkey='hk_a',
+                from_tx_hash='tx',
+                from_chain='btc',
+                to_chain='tao',
+                from_address='u',
+                to_address='u',
+                tao_amount=1,
+                from_amount=1,
+                to_amount=1,
+                miner_from_address='m',
+                miner_to_address='m',
+                rate_str='1',
+                reserved_until=100,
+            )
+        )
+
+        w.apply_event(101, 'ReservationExtended', {'miner': 'hk_a', 'reserved_until': 300})
+
+        assert w.state_store.get_all()[0].reserved_until == 300
         w.state_store.close()
 
 

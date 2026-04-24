@@ -129,6 +129,18 @@ class ValidatorStateStore:
             count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
             return int(count)
 
+    def update_reserved_until(self, miner_hotkey: str, reserved_until: int) -> bool:
+        """Bump a queued confirm's ``reserved_until`` after an on-chain
+        extension. Monotonic so a replayed older event can't shorten it."""
+        with self.lock:
+            conn = self.require_connection()
+            cursor = conn.execute(
+                'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ? AND reserved_until < ?',
+                (reserved_until, miner_hotkey, reserved_until),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def purge_expired_pending_confirms(self) -> int:
         """Drop pending confirms whose reservation has already expired."""
         if self.current_block_fn is None:
