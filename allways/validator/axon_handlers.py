@@ -204,12 +204,12 @@ async def handle_miner_activate(
                 reject_synapse(synapse, 'No commitment found', ctx)
                 return synapse
 
-            if contract.get_miner_active_flag(miner_hotkey):
+            collateral, active, _, _, _ = contract.get_miner_snapshot(miner_hotkey)
+            if active:
                 reject_synapse(synapse, 'Miner is already active', ctx)
                 return synapse
 
-            collateral = contract.get_miner_collateral(miner_hotkey)
-            min_collateral = contract.get_min_collateral()
+            min_collateral = validator.bounds_cache.min_collateral()
             if collateral < min_collateral:
                 reject_synapse(synapse, f'Insufficient collateral: {collateral} < {min_collateral}', ctx)
                 return synapse
@@ -323,31 +323,27 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Insufficient source balance', ctx)
                 return synapse
 
-            if not contract.get_miner_active_flag(miner):
+            collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
+            if not active:
                 reject_synapse(synapse, 'Miner not active', ctx)
                 return synapse
-
-            if contract.get_miner_has_active_swap(miner):
+            if has_swap:
                 reject_synapse(synapse, 'Miner has an active swap', ctx)
                 return synapse
-
-            reserved_until = contract.get_miner_reserved_until(miner)
             if reserved_until >= validator.block:
                 reject_synapse(synapse, 'Miner already reserved', ctx)
                 return synapse
-
-            collateral = contract.get_miner_collateral(miner)
             if synapse.tao_amount > collateral:
                 reject_synapse(synapse, 'Insufficient miner collateral', ctx)
                 return synapse
 
-            min_collateral = contract.get_min_collateral()
+            min_collateral = validator.bounds_cache.min_collateral()
             if min_collateral > 0 and collateral < min_collateral:
                 reject_synapse(synapse, 'Miner collateral below minimum', ctx)
                 return synapse
 
-            min_swap = contract.get_min_swap_amount()
-            max_swap = contract.get_max_swap_amount()
+            min_swap = validator.bounds_cache.min_swap_amount()
+            max_swap = validator.bounds_cache.max_swap_amount()
             if min_swap > 0 and synapse.tao_amount < min_swap:
                 reject_synapse(synapse, f'Swap amount below minimum ({synapse.tao_amount} < {min_swap} rao)', ctx)
                 return synapse
