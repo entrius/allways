@@ -337,9 +337,12 @@ async def confirm_miner_fulfillments(
             bt.logging.warning(f'Swap {swap.id}: provider unreachable, deferring verification')
             uncertain.add(swap.id)
             continue
-        if isinstance(result, Exception):
-            bt.logging.error(f'Swap {swap.id}: verification error: {result}')
-            continue
+        if isinstance(result, BaseException):
+            # Any other exception is a programming error, not a transient
+            # network failure. Re-raise so the forward loop crashes loudly
+            # rather than silently skipping votes and letting honest miners
+            # roll to timeout.
+            raise result
         if result:
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
