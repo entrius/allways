@@ -1,7 +1,5 @@
 """alw swap quote - Preview rates and estimated receive amounts before swapping."""
 
-from decimal import Decimal
-
 import rich_click as click
 from rich.table import Table
 
@@ -13,6 +11,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     loading,
     read_miner_commitments,
+    to_smallest_unit,
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
@@ -72,9 +71,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     config, _, subtensor, client = get_cli_context(need_wallet=False)
     netuid = config['netuid']
 
-    # Convert to smallest units
-    src_chain_def = get_chain(from_chain)
-    from_amount = int(Decimal(str(amount)) * (10**src_chain_def.decimals))
+    from_amount = to_smallest_unit(amount, from_chain)
 
     fee_divisor = FEE_DIVISOR
     fee_pct = 100 / fee_divisor

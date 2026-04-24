@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -10,6 +11,7 @@ import bittensor as bt
 import click
 from rich.console import Console
 
+from allways.chains import get_chain
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
@@ -158,6 +160,21 @@ def to_rao(amount_tao: float) -> int:
 def from_rao(amount_rao: int) -> float:
     """Convert rao to TAO."""
     return amount_rao / TAO_TO_RAO
+
+
+def to_smallest_unit(amount: float, chain_id: str) -> int:
+    """Convert a human-readable amount to the smallest unit for a chain.
+
+    Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
+    """
+    chain = get_chain(chain_id)
+    return int(Decimal(str(amount)) * (10**chain.decimals))
+
+
+def from_smallest_unit(amount: int, chain_id: str) -> float:
+    """Convert from smallest unit to human-readable amount."""
+    chain = get_chain(chain_id)
+    return amount / (10**chain.decimals)
 
 
 def load_cli_config() -> dict:
