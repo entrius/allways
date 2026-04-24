@@ -42,13 +42,14 @@ def score_and_reward_miners(self: Validator) -> None:
 
 
 def _contract_is_halted(self: Validator) -> bool:
-    """Best-effort halt check. RPC flakiness should not zero every miner's
-    reward, so any exception falls through to normal scoring."""
+    """Halt check, fail-closed. If the RPC errors we cannot prove the chain is
+    live, so treat it as halted — emissions stall rather than paying miners
+    through an active lockdown and causing cross-validator weight divergence."""
     try:
         return bool(self.contract_client.get_halted())
     except Exception as e:
-        bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
-        return False
+        bt.logging.warning(f'halt RPC check failed, treating as halted: {e}')
+        return True
 
 
 def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:

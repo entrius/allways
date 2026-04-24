@@ -550,6 +550,7 @@ mod allways_swap_manager {
             from_tx_hash: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
+            self.ensure_not_halted()?;
 
             // Verify hash
             let computed = Self::hash_request(&(&miner, &from_tx_hash));
@@ -612,6 +613,7 @@ mod allways_swap_manager {
             rate: String,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
+            self.ensure_not_halted()?;
             let current_block = self.env().block_number();
 
             // Verify hash — covers the full swap shape so no field can be substituted
@@ -870,6 +872,7 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn vote_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
             self.ensure_validator()?;
+            self.ensure_not_halted()?;
             let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
 
             if swap.status != SwapStatus::Fulfilled {
