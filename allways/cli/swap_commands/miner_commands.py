@@ -210,14 +210,18 @@ def miner_activate():
 
     # Show per-validator results
     accepted = 0
+    no_response = 0
     for i, resp in enumerate(responses):
         if getattr(resp, 'accepted', None):
             console.print(f'  Validator {i + 1}: [green]accepted[/green]')
             accepted += 1
+            continue
+        raw_reason = getattr(resp, 'rejection_reason', '') or ''
+        if not raw_reason:
+            console.print(f'  Validator {i + 1}: [yellow]no response — timeout or validator down[/yellow]')
+            no_response += 1
         else:
-            raw_reason = getattr(resp, 'rejection_reason', '') or ''
-            friendly = friendly_rejection(raw_reason)
-            console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly}')
+            console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly_rejection(raw_reason)}')
 
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')
 
@@ -239,7 +243,12 @@ def miner_activate():
         console.print('[green]Miner activated successfully[/green]\n')
         return
 
-    if accepted == 0:
+    if accepted == 0 and no_response == len(validator_axons):
+        console.print('[yellow]No validators responded within the dendrite timeout.[/yellow]')
+        console.print('[dim]The chain may be slow — the vote could still land after this check.[/dim]')
+        console.print('[dim]Retry with a longer timeout: ALW_DENDRITE_TIMEOUT=90 alw miner activate[/dim]')
+        console.print('[dim]Or re-run `alw miner status` in a minute to see if activation completed.[/dim]\n')
+    elif accepted == 0:
         console.print('[red]Activation failed — no validators accepted the request.[/red]')
         console.print('[dim]Prerequisites:[/dim]')
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
