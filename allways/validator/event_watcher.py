@@ -226,6 +226,11 @@ class ContractEventWatcher:
         self.busy_events: List[BusyEvent] = []
         self.active_events: List[ActiveEvent] = []
         self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
+        # Swap IDs whose +1 was seeded directly from the contract's active-swap
+        # list during initialize(). Replay must skip their SwapInitiated event
+        # to avoid double-counting — the busy tick is already in open_swap_count.
+        # Entries are discarded on the matching terminal event.
+        self.bootstrapped_swap_ids: Set[int] = set()
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
@@ -301,6 +306,9 @@ class ContractEventWatcher:
                     init_block = getattr(swap, 'initiated_block', current_block)
                     if not hk:
                         continue
+                    swap_id = getattr(swap, 'id', None)
+                    if isinstance(swap_id, int):
+                        self.bootstrapped_swap_ids.add(swap_id)
                     seen_hotkeys.add(hk)
                     self.open_swap_count[hk] = self.open_swap_count.get(hk, 0) + 1
                     self.busy_events.append(BusyEvent(hotkey=hk, delta=+1, block=init_block))
@@ -403,8 +411,15 @@ class ContractEventWatcher:
             active = bool(values.get('active'))
             self.record_active_transition(block_num, hotkey, active)
         elif name == 'SwapInitiated':
+            swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if miner:
+                # Skip if this swap's +1 was already seeded from the contract's
+                # live active-swap list at bootstrap — otherwise a restart
+                # whose replay window covers the original SwapInitiated would
+                # double-count the miner as busy.
+                if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
+                    return
                 self.apply_busy_delta(block_num, miner, +1)
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
@@ -417,6 +432,7 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                self.bootstrapped_swap_ids.discard(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
         elif name == 'SwapTimedOut':
@@ -430,6 +446,7 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                self.bootstrapped_swap_ids.discard(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
         elif name == 'ReservationExtensionFinalized':
