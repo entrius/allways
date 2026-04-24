@@ -220,6 +220,24 @@ def miner_activate():
 
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')
 
+    # Poll chain — the on-chain flag is authoritative. A validator can
+    # finalize vote_activate after the dendrite response times out, so
+    # synapse accepted counts aren't reliable on their own.
+    activated = False
+    with loading('Checking on-chain activation...'):
+        for _ in range(15):
+            time.sleep(2)
+            try:
+                if client.get_miner_active_flag(hotkey):
+                    activated = True
+                    break
+            except ContractError:
+                pass
+
+    if activated:
+        console.print('[green]Miner activated successfully[/green]\n')
+        return
+
     if accepted == 0:
         console.print('[red]Activation failed — no validators accepted the request.[/red]')
         console.print('[dim]Prerequisites:[/dim]')
@@ -227,24 +245,10 @@ def miner_activate():
         console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
         console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
         console.print('[dim]Run `alw miner status` to see which are missing.[/dim]\n')
-        return
-
-    # Poll contract for activation
-    with loading('Waiting for quorum...'):
-        for _ in range(15):
-            time.sleep(2)
-            try:
-                if client.get_miner_active_flag(hotkey):
-                    break
-            except ContractError:
-                pass
-        else:
-            console.print(
-                '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
-            )
-            return
-
-    console.print('[green]Miner activated successfully[/green]\n')
+    else:
+        console.print(
+            '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
+        )
 
 
 @miner_group.command('deactivate')
