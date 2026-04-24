@@ -439,7 +439,8 @@ async def handle_swap_confirm(
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until < validator.block:
+            # Read the current block via axon_subtensor — see handle_swap_reserve.
+            if reserved_until < validator.axon_subtensor.get_current_block():
                 reject_synapse(synapse, 'No active reservation for this miner', ctx)
                 return synapse
 
