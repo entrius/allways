@@ -125,11 +125,17 @@ def resolve_swap_direction(
 
 
 def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
-    """Read miner commitment and validate chains differ. Returns commitment or None."""
+    """Read miner commitment and validate chains differ. Returns commitment or None.
+
+    Passes the validator's cached metagraph so read_miner_commitment skips the
+    full subnet metagraph download — that sync takes 30s+ on testnet finney and
+    was the real source of axon handler timeouts.
+    """
     commitment = read_miner_commitment(
         subtensor=validator.axon_subtensor,
         netuid=validator.config.netuid,
         hotkey=miner_hotkey,
+        metagraph=validator.metagraph,
     )
     if commitment is None or commitment.from_chain == commitment.to_chain:
         return None
@@ -199,6 +205,7 @@ async def handle_miner_activate(
                 subtensor=validator.axon_subtensor,
                 netuid=validator.config.netuid,
                 hotkey=miner_hotkey,
+                metagraph=validator.metagraph,
             )
             if commitment is None:
                 reject_synapse(synapse, 'No commitment found', ctx)
@@ -330,7 +337,11 @@ async def handle_swap_reserve(
             if has_swap:
                 reject_synapse(synapse, 'Miner has an active swap', ctx)
                 return synapse
-            if reserved_until >= validator.block:
+            # Read the current block via axon_subtensor — validator.block goes
+            # through self.subtensor, which the forward loop already uses;
+            # concurrent reads collide on the same websocket.
+            cur_block = validator.axon_subtensor.get_current_block()
+            if reserved_until >= cur_block:
                 reject_synapse(synapse, 'Miner already reserved', ctx)
                 return synapse
             if synapse.tao_amount > collateral:
@@ -354,7 +365,7 @@ async def handle_swap_reserve(
             strike_count, last_expired = contract.get_cooldown(synapse.from_address)
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
-                if validator.block < last_expired + cooldown:
+                if cur_block < last_expired + cooldown:
                     reject_synapse(synapse, f'Address on cooldown ({cooldown} blocks remaining)', ctx)
                     return synapse
 
@@ -428,7 +439,8 @@ async def handle_swap_confirm(
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until < validator.block:
+            # Read the current block via axon_subtensor — see handle_swap_reserve.
+            if reserved_until < validator.axon_subtensor.get_current_block():
                 reject_synapse(synapse, 'No active reservation for this miner', ctx)
                 return synapse
 
