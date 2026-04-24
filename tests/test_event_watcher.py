@@ -168,6 +168,66 @@ class TestBusyIntervals:
         assert busy_now == {'hk_a': 1, 'hk_b': 1}
         w.state_store.close()
 
+    def test_bootstrapped_swap_initiated_replay_is_idempotent(self, tmp_path: Path):
+        """Restart scenario: a swap that was live at bootstrap is seeded with
+        +1 from the contract, then its SwapInitiated event replays during
+        sync_to. The replay must NOT add a second +1."""
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 42, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+        assert w.open_swap_count['hk_a'] == 1
+
+        # sync_to replays the SwapInitiated event for swap 42 — must be a no-op.
+        w.apply_event(50, 'SwapInitiated', {'swap_id': 42, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 1, 'bootstrapped swap must not double-count on replay'
+
+        # And when the matching terminal event fires, count returns to 0.
+        w.apply_event(120, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 42 not in w.bootstrapped_swap_ids
+        w.state_store.close()
+
+    def test_non_bootstrapped_initiated_still_increments(self, tmp_path: Path):
+        """A SwapInitiated whose id wasn't in the bootstrap set (new swap
+        after startup) applies the +1 normally."""
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 42, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        # swap_id 99 was not in the bootstrap set — treat normally.
+        w.apply_event(110, 'SwapInitiated', {'swap_id': 99, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 2
+        w.state_store.close()
+
+    def test_bootstrapped_swap_timeout_also_clears_set(self, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 7, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+        assert 7 in w.bootstrapped_swap_ids
+
+        w.apply_event(130, 'SwapTimedOut', {'swap_id': 7, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 7 not in w.bootstrapped_swap_ids
+        w.state_store.close()
+
 
 class TestSCALEDecoder:
     """Decoder fixtures: hand-build event bytes and feed them through.
