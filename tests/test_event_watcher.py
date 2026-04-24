@@ -287,3 +287,69 @@ class TestBootstrap:
         assert w.active_miners == set()
         assert w.cursor == 0
         w.state_store.close()
+
+
+class TestSyncToCursorAdvance:
+    """sync_to must not advance the cursor past a block it failed to read —
+    otherwise a transient RPC hiccup drops that block's events forever."""
+
+    def test_cursor_stops_at_first_failed_block(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 100
+
+        # Block 101 succeeds, 102 raises, 103 would succeed but shouldn't be reached.
+        calls: list[int] = []
+
+        def fake_get_hash(block_num: int):
+            calls.append(block_num)
+            if block_num == 102:
+                raise RuntimeError('websocket closed')
+            return f'0xhash{block_num}'
+
+        w.substrate.get_block_hash.side_effect = fake_get_hash
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(current_block=105)
+
+        assert w.cursor == 101, 'cursor should stop at the last successful block'
+        assert 102 in calls, 'the failing block must be attempted'
+        assert 103 not in calls, 'cursor must not keep scanning past a failure'
+        w.state_store.close()
+
+    def test_retry_on_next_tick_replays_failed_block(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 100
+
+        attempts: dict[int, int] = {}
+
+        def flaky_get_hash(block_num: int):
+            attempts[block_num] = attempts.get(block_num, 0) + 1
+            if block_num == 102 and attempts[block_num] == 1:
+                raise RuntimeError('transient')
+            return f'0xhash{block_num}'
+
+        w.substrate.get_block_hash.side_effect = flaky_get_hash
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(current_block=105)
+        assert w.cursor == 101
+
+        # Next tick — 102 now succeeds; cursor should catch up.
+        w.sync_to(current_block=105)
+        assert w.cursor == 105
+        assert attempts[102] == 2, 'block 102 must be retried on the next tick'
+        w.state_store.close()
+
+    def test_none_block_hash_halts_cursor(self, tmp_path: Path):
+        """A None / empty block_hash (pruned or not-yet-synced) is treated as
+        a failure so we don't silently skip its events."""
+        w = make_watcher(tmp_path)
+        w.cursor = 200
+
+        w.substrate.get_block_hash.side_effect = lambda n: None if n == 202 else f'0xhash{n}'
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(current_block=205)
+
+        assert w.cursor == 201
+        w.state_store.close()

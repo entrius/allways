@@ -312,24 +312,38 @@ class ContractEventWatcher:
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
-        chunks so a long outage doesn't freeze the forward loop."""
+        chunks so a long outage doesn't freeze the forward loop.
+
+        Stops advancing the cursor at the first block whose events we could
+        not fetch — a transient RPC hiccup would otherwise drop SwapCompleted
+        / SwapTimedOut events forever and strand miners in busy state. The
+        next tick will retry from the same point.
+        """
         if current_block <= self.cursor:
             return
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
+        last_success = self.cursor
         for block_num in range(self.cursor + 1, end + 1):
-            self.process_block(block_num)
-        self.cursor = end
+            if not self.process_block(block_num):
+                break
+            last_success = block_num
+        self.cursor = last_success
         self.prune_old_events(current_block)
 
-    def process_block(self, block_num: int) -> None:
+    def process_block(self, block_num: int) -> bool:
+        """Fetch and apply events for ``block_num``. Returns True if the
+        block was successfully read (regardless of whether it contained
+        any contract events); False if the read failed or the hash was
+        unavailable, so ``sync_to`` knows to stop advancing the cursor."""
         try:
             block_hash = self.substrate.get_block_hash(block_num)
             if not block_hash:
-                return
+                bt.logging.debug(f'EventWatcher: block {block_num} hash unavailable; will retry')
+                return False
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
             bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
-            return
+            return False
 
         for event_record in events:
             decoded = self.decode_contract_event(event_record)
@@ -337,6 +351,7 @@ class ContractEventWatcher:
                 continue
             name, values = decoded
             self.apply_event(block_num, name, values)
+        return True
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
