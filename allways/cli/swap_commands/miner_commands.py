@@ -13,6 +13,7 @@ from allways.cli.dendrite_lite import discover_validators
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -288,7 +289,7 @@ def miner_deactivate():
         console.print(f'[green]Deactivated successfully[/green] (tx: {tx_hash[:16]}...)')
         timeout = client.get_fulfillment_timeout()
         console.print(
-            f'[dim]Collateral withdrawal available after {timeout * 2} blocks (~{timeout * 2 * 12 // 60} min)[/dim]\n'
+            f'[dim]Collateral withdrawal available after {timeout * 2} blocks ({blocks_to_minutes_str(timeout * 2)})[/dim]\n'
         )
     except ContractError as e:
         print_contract_error('Failed to deactivate', e)

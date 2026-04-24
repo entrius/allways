@@ -16,6 +16,7 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
+    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     from_rao,
@@ -807,9 +808,7 @@ def view_contract():
     try:
         with loading('Reading contract parameters...'):
             timeout_blocks = client.get_fulfillment_timeout()
-            timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
             reservation_ttl_blocks = client.get_reservation_ttl()
-            reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
             consensus_threshold = client.get_consensus_threshold()
             min_collateral_rao = client.get_min_collateral()
             max_collateral_rao = client.get_max_collateral()
@@ -831,8 +830,10 @@ def view_contract():
     table.add_column('Parameter', style='cyan')
     table.add_column('Value', style='green')
 
-    table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks (~{timeout_minutes:.0f} min)')
-    table.add_row('Reservation TTL', f'{reservation_ttl_blocks} blocks (~{reservation_ttl_minutes:.0f} min)')
+    table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks ({blocks_to_minutes_str(timeout_blocks)})')
+    table.add_row(
+        'Reservation TTL', f'{reservation_ttl_blocks} blocks ({blocks_to_minutes_str(reservation_ttl_blocks)})'
+    )
     fee_pct = 100 / FEE_DIVISOR
     table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
     # Collapsed: the threshold is the knob, required_votes is what it resolves
@@ -1024,9 +1025,8 @@ def view_reservation():
 
     if is_active:
         remaining = reserved_until - current_block
-        remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
-        table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+        table.add_row('Time Remaining', f'~{remaining} blocks ({blocks_to_minutes_str(remaining)})')
     elif consumed_swap is not None:
         table.add_row('Status', f'[green]INITIATED (swap #{consumed_swap.id})[/green]')
         table.add_row('Swap Status', consumed_swap.status.name)

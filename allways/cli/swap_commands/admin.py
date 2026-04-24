@@ -4,7 +4,7 @@ import click
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -59,8 +59,8 @@ def set_timeout(blocks: int):
         getter=lambda c: c.get_fulfillment_timeout(),
         setter=lambda c, w: c.set_fulfillment_timeout(wallet=w, blocks=blocks),
         noun='fulfillment timeout',
-        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
-        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
+        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
         success_msg=f'Fulfillment timeout set to {blocks} blocks',
     )
 
@@ -81,8 +81,8 @@ def set_reservation_ttl(blocks: int):
         getter=lambda c: c.get_reservation_ttl(),
         setter=lambda c, w: c.set_reservation_ttl(wallet=w, blocks=blocks),
         noun='reservation TTL',
-        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
-        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
+        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
         success_msg=f'Reservation TTL set to {blocks} blocks',
     )
 
