@@ -50,6 +50,10 @@ RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
 RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
 MAX_RESERVATIONS_PER_ADDRESS = 1
 EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend when this many blocks remain
+# Max age of the CLI-signed reserve-proof's block_anchor vs the validator's
+# current block. Tight enough that a leaked/observed proof can't be replayed
+# indefinitely; loose enough to cover CLI→validator network latency.
+RESERVE_PROOF_MAX_AGE_BLOCKS = 30  # ~6 min
 # A user's tx is often invisible to a validator's RPC for the first few seconds
 # after submission (mempool propagation lag, regional RPC differences). Treat
 # "not found" as transient until the same entry has polled null this many times.
