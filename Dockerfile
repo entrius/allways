@@ -12,15 +12,16 @@ RUN pip install --break-system-packages uv
 
 WORKDIR /app
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./
-
-# Create venv and sync dependencies
+# Point uv at /opt/venv so `uv sync` installs there (default is .venv in cwd).
 ENV VENV_DIR=/opt/venv
 ENV VIRTUAL_ENV=$VENV_DIR
+ENV UV_PROJECT_ENVIRONMENT=$VENV_DIR
 ENV PATH="$VENV_DIR/bin:$PATH"
-RUN uv venv --python python3 $VENV_DIR && uv sync
 
-# Copy application code and install
+# Install locked deps first (source not yet present) — cache-friendly.
+COPY pyproject.toml uv.lock ./
+RUN uv venv --python python3 $VENV_DIR && uv sync --frozen --no-install-project
+
+# Install the project itself against the locked dep set.
 COPY . .
-RUN uv pip install --no-deps -e .
+RUN uv sync --frozen
