@@ -137,11 +137,11 @@ def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[
 
 
 def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
-    """Mark a synapse as rejected with a reason and debug log."""
+    """Mark a synapse as rejected with a reason and log it."""
     synapse.accepted = False
     synapse.rejection_reason = reason
     if context:
-        bt.logging.debug(f'{context}: {reason}')
+        bt.logging.info(f'{context}: {reason}')
 
 
 # =============================================================================
@@ -157,7 +157,7 @@ async def blacklist_miner_activate(
     if synapse.dendrite is None or synapse.dendrite.hotkey is None:
         return True, 'Missing dendrite or hotkey'
     if synapse.dendrite.hotkey not in validator.metagraph.hotkeys:
-        bt.logging.debug(f'Blacklisted unregistered hotkey: {synapse.dendrite.hotkey}')
+        bt.logging.info(f'Blacklisted unregistered hotkey: {synapse.dendrite.hotkey}')
         return True, 'Unregistered hotkey'
     return False, 'Hotkey recognized'
 
