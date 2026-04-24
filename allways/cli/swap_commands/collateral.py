@@ -15,6 +15,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
 from allways.contract_client import ContractError, is_contract_rejection
+from allways.utils.misc import is_reserved
 
 
 @click.group('collateral', cls=StyledGroup, show_disclaimer=True)
@@ -148,7 +149,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
                 )
                 return
 
-        if reserved_until >= current_block:
+        if is_reserved(reserved_until, current_block):
             console.print('[red]Cannot withdraw while miner is reserved for a swap.[/red]')
             return
 

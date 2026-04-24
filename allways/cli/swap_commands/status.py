@@ -15,6 +15,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 
 @click.command('status', cls=StyledCommand)
@@ -81,8 +82,9 @@ def status_command():
         if pending:
             try:
                 reserved_until = client.get_miner_reserved_until(pending.miner_hotkey)
-                if reserved_until > subtensor.get_current_block():
-                    remaining = reserved_until - subtensor.get_current_block()
+                current_block = subtensor.get_current_block()
+                if is_reserved(reserved_until, current_block):
+                    remaining = reserved_until - current_block
                     remaining_min = remaining * SECONDS_PER_BLOCK / 60
                     table.add_row(
                         'Pending Reservation',

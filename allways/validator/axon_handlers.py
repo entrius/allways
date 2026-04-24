@@ -20,6 +20,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.misc import is_reserved
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -332,7 +333,7 @@ async def handle_swap_reserve(
                 return synapse
 
             reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until >= validator.block:
+            if is_reserved(reserved_until, validator.block):
                 reject_synapse(synapse, 'Miner already reserved', ctx)
                 return synapse
 
@@ -432,7 +433,7 @@ async def handle_swap_confirm(
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until < validator.block:
+            if not is_reserved(reserved_until, validator.block):
                 reject_synapse(synapse, 'No active reservation for this miner', ctx)
                 return synapse
 
