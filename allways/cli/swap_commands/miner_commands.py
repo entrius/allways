@@ -192,18 +192,18 @@ def miner_activate():
 
     # Discover whitelisted validators from metagraph
     dendrite = bt.Dendrite(wallet=wallet)
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
 
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]\n')
         return
 
-    console.print(f'Broadcasting to {len(validator_axons)} validators...')
-
     # Broadcast
-    responses = asyncio.get_event_loop().run_until_complete(
-        dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=30.0)
-    )
+    with loading(f'Broadcasting to {len(validator_axons)} validators...'):
+        responses = asyncio.get_event_loop().run_until_complete(
+            dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=30.0)
+        )
 
     # Show per-validator results
     accepted = 0
@@ -220,7 +220,11 @@ def miner_activate():
 
     if accepted == 0:
         console.print('[red]Activation failed — no validators accepted the request.[/red]')
-        console.print('[dim]Check prerequisites: alw miner status[/dim]\n')
+        console.print('[dim]Prerequisites:[/dim]')
+        console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
+        console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
+        console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
+        console.print('[dim]Run `alw miner status` to see which are missing.[/dim]\n')
         return
 
     # Poll contract for activation
