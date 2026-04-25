@@ -312,24 +312,29 @@ class ContractEventWatcher:
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
-        chunks so a long outage doesn't freeze the forward loop."""
+        chunks so a long outage doesn't freeze the forward loop. Only advance
+        cursor past blocks that processed cleanly — a transient RPC failure
+        on one block must not strand its events."""
         if current_block <= self.cursor:
             return
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
+        last_ok = self.cursor
         for block_num in range(self.cursor + 1, end + 1):
-            self.process_block(block_num)
-        self.cursor = end
+            if not self.process_block(block_num):
+                break
+            last_ok = block_num
+        self.cursor = last_ok
         self.prune_old_events(current_block)
 
-    def process_block(self, block_num: int) -> None:
+    def process_block(self, block_num: int) -> bool:
         try:
             block_hash = self.substrate.get_block_hash(block_num)
             if not block_hash:
-                return
+                return False
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
             bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
-            return
+            return False
 
         for event_record in events:
             decoded = self.decode_contract_event(event_record)
@@ -337,6 +342,7 @@ class ContractEventWatcher:
                 continue
             name, values = decoded
             self.apply_event(block_num, name, values)
+        return True
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
