@@ -30,6 +30,7 @@ from allways.utils.scale import (
     decode_u128,
     strip_hex_prefix,
 )
+from allways.validator.contract_events import ContractEventName
 from allways.validator.state_store import ValidatorStateStore
 
 DATA_DECODERS = {
@@ -338,7 +339,7 @@ class ContractEventWatcher:
             name, values = decoded
             self.apply_event(block_num, name, values)
 
-    def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    def decode_contract_event(self, event_record: Any) -> Optional[Tuple[ContractEventName, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
         event = record.get('event', record) if isinstance(record, dict) else record
         module = event.get('module_id', '') if isinstance(event, dict) else ''
@@ -376,20 +377,32 @@ class ContractEventWatcher:
         except Exception as e:
             bt.logging.warning(f'EventWatcher: failed to decode {event_def.name}: {e}')
             return None
-        return event_def.name, values
+        try:
+            event_name = ContractEventName(event_def.name)
+        except ValueError:
+            bt.logging.warning(f'EventWatcher: unsupported contract event label {event_def.name!r} in metadata')
+            return None
+        return event_name, values
 
-    def apply_event(self, block_num: int, name: str, values: Dict[str, Any]) -> None:
-        if name == 'MinerActivated':
+    def apply_event(self, block_num: int, name: str | ContractEventName, values: Dict[str, Any]) -> None:
+        if isinstance(name, str):
+            try:
+                name = ContractEventName(name)
+            except ValueError:
+                bt.logging.warning(f'EventWatcher: unsupported event name {name!r} ignored')
+                return
+
+        if name is ContractEventName.MINER_ACTIVATED:
             hotkey = values.get('miner', '')
             if not hotkey:
                 return
             active = bool(values.get('active'))
             self.record_active_transition(block_num, hotkey, active)
-        elif name == 'SwapInitiated':
+        elif name is ContractEventName.SWAP_INITIATED:
             miner = values.get('miner', '')
             if miner:
                 self.apply_busy_delta(block_num, miner, +1)
-        elif name == 'SwapCompleted':
+        elif name is ContractEventName.SWAP_COMPLETED:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
@@ -400,7 +413,7 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
-        elif name == 'SwapTimedOut':
+        elif name is ContractEventName.SWAP_TIMED_OUT:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:

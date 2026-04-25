@@ -293,6 +293,17 @@ def is_contract_rejection(e: BaseException) -> bool:
     return 'contract rejected' in msg or 'ContractReverted' in msg
 
 
+def is_already_voted(e: BaseException) -> bool:
+    """Return True if ``e`` is the contract's "already voted" rejection.
+
+    This keeps all "already voted" matching in one place so call sites do not
+    hardcode error names or re-implement fragile string checks.
+    """
+    msg = str(e)
+    already_voted_name = CONTRACT_ERROR_VARIANTS.get(3, ('AlreadyVoted', ''))[0]
+    return f': {already_voted_name} ' in msg or f': {already_voted_name} —' in msg
+
+
 # =========================================================================
 # Client
 # =========================================================================
