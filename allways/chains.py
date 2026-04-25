@@ -14,7 +14,8 @@ class ChainDefinition:
     decimals: int  # Precision (e.g. 8 for BTC, 9 for TAO)
     env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_RPC_URL)
     seconds_per_block: int = 12  # Average block time on this chain
-    min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
+    min_confirmations: int = 1  # Default — source leg (user→miner): miner bears reorg risk
+    destination_min_confirmations: int = 0  # 0 = use min_confirmations; user→miner direction
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -26,6 +27,7 @@ CHAIN_BTC = ChainDefinition(
     env_prefix='BTC',
     seconds_per_block=600,
     min_confirmations=3,
+    destination_min_confirmations=6,
 )
 CHAIN_TAO = ChainDefinition(
     id='tao',
@@ -68,3 +70,14 @@ def confirmations_to_subtensor_blocks(chain_id: str) -> int:
     """How many subtensor blocks a chain's min_confirmations take."""
     chain = get_chain(chain_id)
     return math.ceil(chain.min_confirmations * chain.seconds_per_block / SUBTENSOR_BLOCK_SECONDS)
+
+
+def get_destination_min_confirmations(chain_id: str) -> int:
+    """Confirmations required for the miner→user fulfillment leg.
+
+    The user has already given up their funds when this leg runs, so a
+    reorg dropping the miner's send falls on the user. Use a higher
+    threshold than the source leg, where the miner bears reorg risk.
+    """
+    chain = get_chain(chain_id)
+    return chain.destination_min_confirmations or chain.min_confirmations

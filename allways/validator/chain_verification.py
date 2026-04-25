@@ -6,6 +6,7 @@ from typing import Dict
 import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.chains import get_destination_min_confirmations
 from allways.classes import Swap
 from allways.utils.rate import expected_swap_amounts
 
@@ -35,6 +36,7 @@ class SwapVerifier:
         expected_amount: int,
         block_hint: int = 0,
         expected_sender: str = '',
+        is_destination: bool = False,
     ) -> bool:
         """Verify a confirmed transaction on a specific chain.
 
@@ -66,7 +68,15 @@ class SwapVerifier:
                     f'(tx={tx_hash[:16]}... block_hint={block_hint})'
                 )
                 return False
-            if not tx_info.confirmed:
+            if is_destination:
+                # User has already given up source funds; reorg risk falls on them.
+                # Require the higher destination_min_confirmations regardless of
+                # the provider's source-leg `confirmed` flag.
+                required = get_destination_min_confirmations(chain)
+                if tx_info.confirmations < required:
+                    self.log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
+                    return False
+            elif not tx_info.confirmed:
                 self.log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
                 return False
             return True
@@ -137,6 +147,7 @@ class SwapVerifier:
             expected_user_receives,
             swap.to_tx_block,
             swap.miner_to_address,
+            True,
         )
 
         return source_ok and dest_ok
