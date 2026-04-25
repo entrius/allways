@@ -169,11 +169,23 @@ class BitcoinProvider(ChainProvider):
         confirmations = raw_tx.get('confirmations', 0)
         confirmed = confirmations >= self.get_chain().min_confirmations
         block_number = None
+        tx_blockhash = raw_tx.get('blockhash')
 
-        if confirmed and 'blockhash' in raw_tx:
-            block_info = self.rpc_call('getblock', [raw_tx['blockhash']])
+        if confirmed and tx_blockhash:
+            block_info = self.rpc_call('getblock', [tx_blockhash])
             if block_info:
                 block_number = block_info.get('height')
+                # Re-anchor against the canonical chain at vote time. Without
+                # this, a tx whose containing block was reorged out can still
+                # report >=min_confirmations from a stale RPC view, and we'd
+                # vote on a tx that's no longer in the canonical history.
+                canonical = self.rpc_call('getblockhash', [block_number])
+                if canonical and canonical != tx_blockhash:
+                    bt.logging.warning(
+                        f'BTC verify {tx_hash[:16]}: blockhash {tx_blockhash[:16]} '
+                        f'!= canonical {canonical[:16]} at height {block_number} — reorg detected'
+                    )
+                    confirmed = False
 
         for vout in raw_tx.get('vout', []):
             addresses = vout.get('scriptPubKey', {}).get('addresses', [])
@@ -245,12 +257,30 @@ class BitcoinProvider(ChainProvider):
             resp.raise_for_status()
             data = resp.json()
 
-            confirmed = data.get('status', {}).get('confirmed', False)
-            block_number = data.get('status', {}).get('block_height')
+            status = data.get('status', {})
+            confirmed = status.get('confirmed', False)
+            block_number = status.get('block_height')
+            tx_block_hash = status.get('block_hash')
             confirmations = 0
 
             if confirmed and block_number:
                 confirmations = self.blockstream_calc_confirmations(block_number)
+                # Re-anchor against the canonical chain at vote time —
+                # `status.confirmed` is self-reported by whichever Blockstream
+                # instance answered and doesn't survive a reorg.
+                if tx_block_hash:
+                    try:
+                        canon_resp = requests.get(
+                            f'{self.blockstream_api_url()}/block-height/{block_number}', timeout=10
+                        )
+                        if canon_resp.ok and canon_resp.text.strip() != tx_block_hash:
+                            bt.logging.warning(
+                                f'BTC verify {tx_hash[:16]}: blockhash {tx_block_hash[:16]} '
+                                f'!= canonical {canon_resp.text.strip()[:16]} at height {block_number} — reorg detected'
+                            )
+                            confirmed = False
+                    except Exception:
+                        pass
 
             min_confs = self.get_chain().min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
