@@ -801,6 +801,7 @@ mod allways_swap_manager {
                     fee_amount: actual_fee,
                 });
 
+                this.used_from_tx.remove(&swap.from_tx_hash);
                 this.swaps.remove(swap_id);
                 this.clear_pending_swap_votes(swap_id);
                 Ok(())
@@ -858,6 +859,7 @@ mod allways_swap_manager {
                     slash_amount: actual_slash,
                 });
 
+                this.used_from_tx.remove(&swap.from_tx_hash);
                 this.swaps.remove(swap_id);
                 this.clear_pending_swap_votes(swap_id);
                 Ok(())
