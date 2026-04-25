@@ -1,5 +1,6 @@
 """Shared commitment parsing logic — used by validator, miner, and CLI."""
 
+import math
 from typing import List, Optional
 
 import bittensor as bt
@@ -40,6 +41,11 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         rate = float(rate_str)
         counter_rate_str = parts[6]
         counter_rate = float(counter_rate_str)
+
+        if not (math.isfinite(rate) and rate > 0):
+            return None
+        if not (math.isfinite(counter_rate) and counter_rate > 0):
+            return None
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
