@@ -226,6 +226,12 @@ def get_cli_context(
     """
     config = get_effective_config()
     network = config.get('network', 'finney')
+    known_networks = {'finney', 'test', 'local', 'archive'}
+    if network not in known_networks:
+        console.print(
+            f"[red]Unknown network '{network}'. Expected one of: {', '.join(sorted(known_networks))}.[/red]"
+        )
+        raise SystemExit(2)
     with console.status(
         f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'
     ):
