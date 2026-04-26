@@ -17,6 +17,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     get_cli_context,
     load_pending_swap,
+    loading,
     resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import (
@@ -93,7 +94,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
 
     # Check if swap is already on-chain (cheap bool check before expensive scan)
     try:
-        if client.get_miner_has_active_swap(state.miner_hotkey):
+        with loading('Checking on-chain swap status...'):
+            has_swap = client.get_miner_has_active_swap(state.miner_hotkey)
+        if has_swap:
             for swap in client.get_miner_active_swaps(state.miner_hotkey):
                 is_ours = (
                     swap.user_from_address == state.user_from_address or swap.user_to_address == state.receive_address
@@ -115,8 +118,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
 
     # Check reservation status — if expired, there's nothing to resume
     try:
-        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-        current_block = subtensor.get_current_block()
+        with loading('Reading reservation status...'):
+            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
+            current_block = subtensor.get_current_block()
         reservation_active = reserved_until > current_block
     except ContractError as e:
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
@@ -150,7 +154,8 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     from_key = wallet.coldkey if state.from_chain == 'tao' else None
 
     # Discover validators before prompting for tx hash (fail early)
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return
@@ -180,7 +185,7 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     )
 
     console.print('\n[dim]Confirming with validators...[/dim]')
-    accepted, queued = sign_and_broadcast_confirm(
+    accepted, queued, info = sign_and_broadcast_confirm(
         provider,
         state.user_from_address,
         from_key,
@@ -192,10 +197,14 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
         from_chain=state.from_chain,
         to_chain=state.to_chain,
         from_tx_block=from_tx_block,
+        miner_uid=state.miner_uid,
     )
 
     if accepted == 0:
-        console.print('[yellow]No validators accepted. You can retry: alw swap resume-reservation[/yellow]')
+        # Translator already printed the headline. Avoid suggesting retry when
+        # the rejection cannot be fixed by re-running with the same inputs.
+        if not info.deterministic:
+            console.print('[dim]Retry with: [cyan]alw swap resume-reservation[/cyan][/dim]')
         return
 
     all_queued = queued > 0 and queued == accepted
