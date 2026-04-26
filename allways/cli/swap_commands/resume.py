@@ -18,6 +18,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     load_pending_swap,
     loading,
+    mark_pending_swap_tx_sent,
     resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import (
@@ -171,6 +172,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
             return
 
     from_tx_hash = from_tx_hash_opt.strip()
+    # The user has asserted they've sent funds — persist the tx hash so
+    # `alw view reservation` reflects that, even if validators reject below.
+    mark_pending_swap_tx_sent(from_tx_hash)
 
     # Reservation-wide block lookup so a resumed tx still ±3-hints the
     # validator. 0 = miss (falls back to validator-side scan).

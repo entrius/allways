@@ -1022,11 +1022,16 @@ def view_reservation():
         else:
             table.add_row('Chain Amounts', f'[green]✓ locked {from_rao(chain_tao):.4f} TAO[/green]')
 
+    sent_tx_hash = (state.from_tx_hash or '').strip()
+
     if is_active:
         remaining = reserved_until - current_block
         remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+        if sent_tx_hash:
+            tx_display = sent_tx_hash if len(sent_tx_hash) <= 24 else sent_tx_hash[:24] + '...'
+            table.add_row(f'Source TX ({src_up})', tx_display)
     elif consumed_swap is not None:
         table.add_row('Status', f'[green]INITIATED (swap #{consumed_swap.id})[/green]')
         table.add_row('Swap Status', consumed_swap.status.name)
@@ -1037,11 +1042,21 @@ def view_reservation():
     console.print(table)
 
     if is_active:
-        console.print(
-            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
-            f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
-        )
-        console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
+        if sent_tx_hash:
+            console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{sent_tx_hash}[/cyan]')
+            console.print(
+                '[dim]Validators are waiting on source-chain confirmations before initiating the swap '
+                'on-chain. Nothing more to do — leave this reservation alone until it either initiates '
+                'or expires.[/dim]'
+            )
+            console.print('\n[dim]If validators never picked up your confirm, re-broadcast it with:[/dim]')
+            console.print(f'  [bold cyan]alw swap post-tx {sent_tx_hash}[/bold cyan]\n')
+        else:
+            console.print(
+                f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
+                f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
+            )
+            console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
     elif consumed_swap is not None:
         console.print(
             f'\n[green]Reservation was consumed into swap #{consumed_swap.id} — it is in progress on-chain.[/green]'
