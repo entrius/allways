@@ -622,7 +622,9 @@ def swap_now_command(
         if from_chain == 'tao':
             console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
         else:
-            has_private_key = bool(os.environ.get('BTC_PRIVATE_KEY'))
+            # Prefix-check the value (not just truthy): dotenv can leak an inline comment as the var.
+            wif_raw = (os.environ.get('BTC_PRIVATE_KEY') or '').strip()
+            has_private_key = bool(wif_raw) and wif_raw[0] in '5KLc9'
             btc_mode = os.environ.get('BTC_MODE', 'lightweight')
             is_local = is_local_network(config.get('network', 'finney'))
 
