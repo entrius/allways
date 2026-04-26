@@ -96,6 +96,12 @@ class BitcoinProvider(ChainProvider):
             if not self.network:
                 self.network = 'mainnet'
 
+        # Disable HTTP keepalive: validators are long-running and the default
+        # global session pools idle TLS sockets that Blockstream's CDN silently
+        # drops, wedging subsequent reads until our timeout fires.
+        self.http = requests.Session()
+        self.http.headers['Connection'] = 'close'
+
     def get_chain(self) -> ChainDefinition:
         return CHAIN_BTC
 
@@ -108,7 +114,7 @@ class BitcoinProvider(ChainProvider):
             except ImportError as e:
                 raise ConnectionError('BTC_MODE=lightweight requires embit (pip install embit)') from e
             try:
-                resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+                resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
                 resp.raise_for_status()
                 tip = int(resp.text.strip())
                 bt.logging.success(f'BTC lightweight mode: network={self.network}, Blockstream tip={tip}')
@@ -133,7 +139,7 @@ class BitcoinProvider(ChainProvider):
         }
         try:
             auth = (self.rpc_user, self.rpc_pass) if self.rpc_user else None
-            response = requests.post(self.rpc_url, json=payload, auth=auth, timeout=30)
+            response = self.http.post(self.rpc_url, json=payload, auth=auth, timeout=30)
             response.raise_for_status()
             result = response.json()
             if result.get('error'):
@@ -225,7 +231,7 @@ class BitcoinProvider(ChainProvider):
     def blockstream_calc_confirmations(self, block_number: int) -> int:
         """Fetch the chain tip from Blockstream and calculate confirmations for a block."""
         try:
-            tip_resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+            tip_resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
             if tip_resp.ok:
                 tip_height = int(tip_resp.text.strip())
                 return tip_height - block_number + 1
@@ -239,7 +245,7 @@ class BitcoinProvider(ChainProvider):
         """Verify via Blockstream API; raises ProviderUnreachableError if unreachable."""
         try:
             url = f'{self.blockstream_api_url()}/tx/{tx_hash}'
-            resp = requests.get(url, timeout=15)
+            resp = self.http.get(url, timeout=15)
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -300,7 +306,7 @@ class BitcoinProvider(ChainProvider):
         """Get balance via Blockstream API. Returns satoshis."""
         try:
             url = f'{self.blockstream_api_url()}/address/{address}'
-            resp = requests.get(url, timeout=15)
+            resp = self.http.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             funded = data.get('chain_stats', {}).get('funded_txo_sum', 0)
@@ -472,7 +478,7 @@ class BitcoinProvider(ChainProvider):
                 # Legacy P2PKH: need full previous transaction for signing
                 for i, utxo in enumerate(selected):
                     tx_url = f'{self.blockstream_api_url()}/tx/{utxo["txid"]}/hex'
-                    tx_resp = requests.get(tx_url, timeout=15)
+                    tx_resp = self.http.get(tx_url, timeout=15)
                     tx_resp.raise_for_status()
                     prev_tx = Transaction.from_string(tx_resp.text.strip())
                     psbt.inputs[i].non_witness_utxo = prev_tx
@@ -523,7 +529,7 @@ class BitcoinProvider(ChainProvider):
                 bt.logging.error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
                 return None
             utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
-            resp = requests.get(utxo_url, timeout=15)
+            resp = self.http.get(utxo_url, timeout=15)
             resp.raise_for_status()
             utxos = resp.json()
             if not utxos:
@@ -538,7 +544,7 @@ class BitcoinProvider(ChainProvider):
                 if idx > 0:
                     _time.sleep(1)
                 utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
-                resp = requests.get(utxo_url, timeout=15)
+                resp = self.http.get(utxo_url, timeout=15)
                 resp.raise_for_status()
                 candidate_utxos = resp.json()
                 if candidate_utxos:
@@ -574,7 +580,7 @@ class BitcoinProvider(ChainProvider):
     def broadcast_tx(self, raw_hex: str) -> Optional[str]:
         """Broadcast a raw transaction via Blockstream. Returns tx_hash or None."""
         url = f'{self.blockstream_api_url()}/tx'
-        resp = requests.post(url, data=raw_hex, timeout=15)
+        resp = self.http.post(url, data=raw_hex, timeout=15)
         if resp.status_code != 200:
             bt.logging.error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
             return None
@@ -591,7 +597,7 @@ class BitcoinProvider(ChainProvider):
         min_fee_rate = BTC_MIN_FEE_RATE
         try:
             url = f'{self.blockstream_api_url()}/fee-estimates'
-            resp = requests.get(url, timeout=10)
+            resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
             # Target 2-3 blocks (~20-30 min confirmation)
