@@ -11,6 +11,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     get_cli_context,
     load_pending_swap,
+    loading,
     print_contract_error,
     resolve_source_tx_block,
 )
@@ -56,8 +57,9 @@ def post_tx_command(tx_hash: str, tx_block: int):
 
     # Validate reservation is still active on-chain
     try:
-        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-        current_block = subtensor.get_current_block()
+        with loading('Reading reservation status...'):
+            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
+            current_block = subtensor.get_current_block()
     except ContractError as e:
         print_contract_error('Failed to read reservation status', e)
         return
@@ -115,7 +117,8 @@ def post_tx_command(tx_hash: str, tx_block: int):
         )
 
     # Discover validators
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return
@@ -123,7 +126,7 @@ def post_tx_command(tx_hash: str, tx_block: int):
     ephemeral_wallet = get_ephemeral_wallet()
 
     # Sign and broadcast confirm synapse
-    accepted, queued = sign_and_broadcast_confirm(
+    accepted, queued, info = sign_and_broadcast_confirm(
         provider,
         state.user_from_address,
         from_key,
@@ -135,10 +138,14 @@ def post_tx_command(tx_hash: str, tx_block: int):
         from_chain=state.from_chain,
         to_chain=state.to_chain,
         from_tx_block=from_tx_block,
+        miner_uid=state.miner_uid,
     )
 
     if accepted == 0:
-        console.print('[yellow]No validators accepted. You can retry this command.[/yellow]')
+        # Translator already printed the headline. Suppress retry hint when the
+        # failure is deterministic — the same tx hash will reject the same way.
+        if not info.deterministic:
+            console.print('[dim]You can retry this command.[/dim]')
         return
 
     if queued > 0 and queued == accepted:
