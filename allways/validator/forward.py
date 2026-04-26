@@ -248,6 +248,11 @@ def try_extend_reservation(
             from_tx_hash=item.from_tx_hash,
         )
         self.extend_reservation_voted_at[vote_key] = reserved_until
+        # Refresh the local cache from the contract: if quorum landed this vote
+        # the on-chain reserved_until has advanced, and the up-front purge would
+        # otherwise delete this row at the original TTL while the reservation
+        # is still alive on-chain.
+        refresh_cached_reserved_until(self, item)
         bt.logging.info(
             f'PendingConfirm [{swap_label} {miner_short}]: '
             f'voted to extend reservation ({reserved_until - current_block} blocks remaining)'
@@ -257,10 +262,22 @@ def try_extend_reservation(
             self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = (
                 self.contract_client.get_miner_reserved_until(item.miner_hotkey)
             )
+            refresh_cached_reserved_until(self, item)
         else:
             bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
     except Exception as e:
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
+
+
+def refresh_cached_reserved_until(self: Validator, item: PendingConfirm) -> None:
+    try:
+        latest = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{item.miner_hotkey[:8]}]: reserved_until refresh failed: {e}')
+        return
+    if latest > item.reserved_until:
+        self.state_store.update_reserved_until(item.miner_hotkey, latest)
+        item.reserved_until = latest
 
 
 def poll_commitments(self: Validator) -> None:
