@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
     is_local_network,
     load_pending_swap,
     loading,
+    mark_pending_swap_tx_sent,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
@@ -905,6 +906,7 @@ def swap_now_command(
         # Funds already sent externally — use provided tx hash
         from_tx_hash = from_tx_hash_opt
         console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
+        mark_pending_swap_tx_sent(from_tx_hash)
         from_tx_block = resolve_source_tx_block(
             provider=provider,
             tx_hash=from_tx_hash,
@@ -950,6 +952,7 @@ def swap_now_command(
                         getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
                     )
                 console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                mark_pending_swap_tx_sent(from_tx_hash)
             except Exception as e:
                 console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
                 console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
@@ -965,6 +968,7 @@ def swap_now_command(
             if send_result is None:
                 return
             from_tx_hash = send_result[0]
+            mark_pending_swap_tx_sent(from_tx_hash)
             # send_btc returns (tx_hash, block_number). 0 means unknown
             # (e.g. lightweight broadcaster); that's fine — validator falls
             # back to the scan path.

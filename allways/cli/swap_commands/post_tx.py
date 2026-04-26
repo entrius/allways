@@ -12,6 +12,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     load_pending_swap,
     loading,
+    mark_pending_swap_tx_sent,
     print_contract_error,
     resolve_source_tx_block,
 )
@@ -90,6 +91,9 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     tx_hash = tx_hash.strip()
+    # The user is asserting they've sent funds — record it so that even if
+    # validators reject the confirm, `alw view reservation` reflects reality.
+    mark_pending_swap_tx_sent(tx_hash)
 
     # Set up chain provider and signing key
     chain_providers = create_chain_providers(subtensor=subtensor)
