@@ -7,7 +7,8 @@ from websockets.exceptions import ConnectionClosedError
 
 from allways import __spec_version__ as spec_version
 from allways.utils.config import add_args, check_config, config
-from allways.utils.misc import ttl_get_block
+
+_BLOCK_CACHE_TTL_SECONDS = 12
 
 
 class BaseNeuron(ABC):
@@ -37,7 +38,12 @@ class BaseNeuron(ABC):
 
     @property
     def block(self):
-        return ttl_get_block(self)
+        """Current chain head, cached for one block (~12 s) to amortize the RPC round-trip."""
+        now = time.monotonic()
+        if now - self._cached_block_at >= _BLOCK_CACHE_TTL_SECONDS:
+            self._cached_block = self.subtensor.get_current_block()
+            self._cached_block_at = now
+        return self._cached_block
 
     def __init__(self, config=None):
         base_config = copy.deepcopy(config or BaseNeuron.config())
@@ -54,6 +60,9 @@ class BaseNeuron(ABC):
         self.wallet = bt.Wallet(config=self.config)
         self.subtensor = bt.Subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
+
+        self._cached_block: int = 0
+        self._cached_block_at: float = 0.0
 
         bt.logging.info(f'Wallet: {self.wallet}')
         bt.logging.info(f'Subtensor: {self.subtensor}')
