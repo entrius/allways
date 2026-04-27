@@ -8,7 +8,7 @@ from typing import Dict, List, Set
 import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
-from allways.constants import EXTEND_THRESHOLD_BLOCKS, VALIDATOR_INIT_BACKFILL_BLOCKS
+from allways.constants import EXTEND_THRESHOLD_BLOCKS
 from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
@@ -17,16 +17,19 @@ ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 # RPC flakes without the fragile timeout-block inference the V1 tracker used.
 NULL_SWAP_RETRY_LIMIT = 3
 
+# Cold-start backward scan halts after this many consecutive None lookups.
+# Resolved swaps are pruned from contract storage (`swaps.remove`), so a long
+# run of Nones means we've passed the live-swap region. Block-age cutoffs
+# silently dropped long-stuck ACTIVE swaps; this does not. Tuned low for
+# current volume — bump if the gap between contiguous active swap IDs grows.
+MAX_INIT_GAP = 20
+
 
 class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
 
-    def __init__(
-        self,
-        client: AllwaysContractClient,
-        fulfillment_timeout_blocks: int,
-    ):
+    def __init__(self, client: AllwaysContractClient):
         self.client = client
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
@@ -36,35 +39,37 @@ class SwapTracker:
         # the voted value so the next extension round can vote again.
         self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
-        self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
-    def initialize(self, current_block: int):
-        """Cold start: scan backward from latest swap to seed active set."""
+    def initialize(self):
+        """Cold start: scan backward from latest swap to seed active set.
+
+        Halts on consecutive Nones (resolved/pruned region) rather than on
+        block age — an ACTIVE swap orphaned by a prior validator outage can be
+        arbitrarily old, and a block-based cutoff would let it fall through.
+        """
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
             self.last_scanned_id = 0
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
 
-        cutoff_block = current_block - max(self.fulfillment_timeout_blocks, VALIDATOR_INIT_BACKFILL_BLOCKS)
-        latest_id = next_id - 1
-
-        for swap_id in reversed(range(1, next_id)):
+        consecutive_none = 0
+        for swap_id in range(next_id - 1, 0, -1):
             swap = self.client.get_swap(swap_id)
             if swap is None:
+                consecutive_none += 1
+                if consecutive_none >= MAX_INIT_GAP:
+                    bt.logging.debug(
+                        f'SwapTracker init: stopping at swap {swap_id} '
+                        f'after {consecutive_none} consecutive resolved/pruned swaps'
+                    )
+                    break
                 continue
-
-            if swap.initiated_block < cutoff_block:
-                bt.logging.debug(
-                    f'SwapTracker init: stopping at swap {swap_id} '
-                    f'(initiated_block={swap.initiated_block} < cutoff={cutoff_block})'
-                )
-                break
-
+            consecutive_none = 0
             if swap.status in ACTIVE_STATUSES:
                 self.active[swap.id] = swap
 
-        self.last_scanned_id = latest_id
+        self.last_scanned_id = next_id - 1
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 

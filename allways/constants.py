@@ -67,10 +67,3 @@ DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
 RESERVATION_TTL_BLOCKS = 30  # ~5 min
-
-# ─── Validator Init ───────────────────────────────────────
-# Floor for the SwapTracker cold-start scan. Without it the cutoff equals
-# fulfillment_timeout_blocks (~5 min), so a validator restart >5 min after
-# a swap was initiated drops the swap from the active set and no one ever
-# votes timeout — the swap stays ACTIVE on chain forever.
-VALIDATOR_INIT_BACKFILL_BLOCKS = 300  # ~1h at 12s/block
