@@ -104,11 +104,8 @@ class Validator(BaseValidatorNeuron):
             contract_client=self.contract_client,
         )
 
-        self.swap_tracker = SwapTracker(
-            client=self.contract_client,
-            fulfillment_timeout_blocks=timeout_blocks,
-        )
-        self.swap_tracker.initialize(self.block)
+        self.swap_tracker = SwapTracker(client=self.contract_client)
+        self.swap_tracker.initialize()
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
 
         self.swap_verifier = SwapVerifier(
