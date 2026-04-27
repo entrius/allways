@@ -326,7 +326,16 @@ def broadcast_reserve_with_retry(
             return None
         if reserved:
             ttl_remaining = reserved_until - subtensor.get_current_block()
-            console.print(f'[green]Miner reserved! ~{ttl_remaining * 12 // 60} min to send funds.[/green]')
+            minutes_remaining = ttl_remaining * 12 // 60
+            console.print(
+                f'[green]Miner reserved! You have ~{minutes_remaining} minutes to send your funds '
+                f'before the reservation expires.[/green]'
+            )
+            console.print(
+                '[yellow]Please account for network latency — give your tx a couple of minutes '
+                'to land in a block. Do NOT send near or after the reservation window closes, '
+                'or your transaction may not confirm in time and the reservation will expire.[/yellow]'
+            )
 
         if reserved:
             break
