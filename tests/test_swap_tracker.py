@@ -93,12 +93,17 @@ class TestInitialize:
         assert tracker.last_scanned_id == 11
 
     def test_initialize_stops_at_cutoff_block(self):
-        """Backward scan halts when it reaches a swap older than the cutoff."""
+        """Backward scan halts when it reaches a swap older than the cutoff.
+
+        The cutoff is ``max(fulfillment_timeout, VALIDATOR_INIT_BACKFILL_BLOCKS)``
+        so a fresh validator can recover ACTIVE swaps orphaned during outages
+        longer than the fulfillment timeout window.
+        """
         tracker = make_tracker()
         stale = make_swap(swap_id=5)
-        stale.initiated_block = 900  # below 1000 - 30 = 970 cutoff
+        stale.initiated_block = 600  # below 1000 - 300 = 700 cutoff
         active = make_swap(swap_id=6)
-        active.initiated_block = 980
+        active.initiated_block = 800
 
         tracker.client.get_next_swap_id.return_value = 7
         tracker.client.get_swap.side_effect = lambda sid: {5: stale, 6: active}.get(sid)

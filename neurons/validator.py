@@ -56,7 +56,10 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        self.contract_client = AllwaysContractClient(subtensor=self.subtensor)
+        self.contract_client = AllwaysContractClient(
+            subtensor=self.subtensor,
+            reconnect_subtensor=self.reconnect_and_propagate,
+        )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
         timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
@@ -118,7 +121,10 @@ class Validator(BaseValidatorNeuron):
         # to prevent "cannot call recv while another coroutine is already running recv" errors.
         self.axon_lock = threading.Lock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_contract_client = AllwaysContractClient(subtensor=self.axon_subtensor)
+        self.axon_contract_client = AllwaysContractClient(
+            subtensor=self.axon_subtensor,
+            reconnect_subtensor=self.reconnect_axon_subtensor,
+        )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
         # Must read the current block via axon_subtensor — the block getter on
         # self (self.block) goes through self.subtensor, which the forward loop
@@ -150,6 +156,25 @@ class Validator(BaseValidatorNeuron):
             priority_fn=partial(priority_swap_confirm, self),
         )
         bt.logging.info('Axon handlers attached: MinerActivate, SwapReserve, SwapConfirm')
+
+    def reconnect_and_propagate(self):
+        """Rebuild the main subtensor and update components that hold it."""
+        self.reconnect_subtensor()
+        self.contract_client.subtensor = self.subtensor
+        tao_provider = self.chain_providers.get('tao')
+        if tao_provider and hasattr(tao_provider, 'subtensor'):
+            tao_provider.subtensor = self.subtensor
+
+    def reconnect_axon_subtensor(self):
+        """Rebuild the axon-side subtensor used by handler threads."""
+        bt.logging.info('Reconnecting axon subtensor...')
+        old = self.axon_subtensor
+        self.axon_subtensor = bt.Subtensor(config=self.config)
+        self.axon_contract_client.subtensor = self.axon_subtensor
+        try:
+            old.close()
+        except Exception:
+            pass
 
     async def forward(self):
         """Validator forward pass - delegates to allways.validator.forward."""

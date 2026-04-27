@@ -8,7 +8,7 @@ from typing import Dict, List, Set
 import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
-from allways.constants import EXTEND_THRESHOLD_BLOCKS
+from allways.constants import EXTEND_THRESHOLD_BLOCKS, VALIDATOR_INIT_BACKFILL_BLOCKS
 from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
@@ -46,7 +46,7 @@ class SwapTracker:
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
 
-        cutoff_block = current_block - self.fulfillment_timeout_blocks
+        cutoff_block = current_block - max(self.fulfillment_timeout_blocks, VALIDATOR_INIT_BACKFILL_BLOCKS)
         latest_id = next_id - 1
 
         for swap_id in reversed(range(1, next_id)):
