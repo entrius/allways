@@ -35,7 +35,10 @@ class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        self.contract_client = AllwaysContractClient(subtensor=self.subtensor)
+        self.contract_client = AllwaysContractClient(
+            subtensor=self.subtensor,
+            reconnect_subtensor=self.reconnect_and_propagate,
+        )
         self.chain_providers = create_chain_providers(check=True, subtensor=self.subtensor, wallet=self.wallet)
 
         self.swap_poller = SwapPoller(
