@@ -64,6 +64,11 @@ class SwapConfirmSynapse(bt.Synapse):
     from_tx_hash: str
     from_tx_proof: str
     from_address: str
+    # Block the source tx was included in. When > 0, the validator uses
+    # it as a ±3 block hint so verification is O(1) instead of scanning
+    # the last 150 blocks — needed when the user post-tx's late or the
+    # underlying node has pruned state past the default scan window.
+    from_tx_block: int = 0
     to_address: str = ''
     from_chain: str = ''  # User's source chain (for bilateral pair support)
     to_chain: str = ''  # User's dest chain

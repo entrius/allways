@@ -43,11 +43,12 @@ Layout
 
 import os
 import struct
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 import bittensor as bt
 from substrateinterface import Keypair
 from substrateinterface.exceptions import ExtrinsicNotFound
+from websockets.exceptions import ConnectionClosed
 
 try:
     from async_substrate_interface.errors import ExtrinsicNotFound as AsyncExtrinsicNotFound
@@ -72,6 +73,8 @@ from allways.utils.scale import (
     encode_u128,
     strip_hex_prefix,
 )
+
+T = TypeVar('T')
 
 # =========================================================================
 # Contract selectors (from metadata — deterministic per contract build)
@@ -124,6 +127,7 @@ CONTRACT_SELECTORS = {
     'get_miner_deactivation_block': bytes.fromhex('361acc31'),
     'get_consensus_threshold': bytes.fromhex('2c283460'),
     'get_validator_count': bytes.fromhex('a30ab5c4'),
+    'get_validators': bytes.fromhex('a28acf8e'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
@@ -197,6 +201,7 @@ CONTRACT_ARG_TYPES = {
     'get_miner_deactivation_block': [('miner', 'AccountId')],
     'get_consensus_threshold': [],
     'get_validator_count': [],
+    'get_validators': [],
     'get_reservation_data': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'vote_extend_reservation': [
@@ -300,6 +305,15 @@ def get_contract_address() -> Optional[str]:
     return os.environ.get('CONTRACT_ADDRESS') or CONTRACT_ADDRESS
 
 
+# Errors that signal a wedged substrate WebSocket — caller can swap the
+# connection and retry once. Anything else propagates as-is.
+RECONNECT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    ConnectionClosed,
+    ConnectionError,
+    TimeoutError,
+)
+
+
 class AllwaysContractClient:
     """Client for the Allways Swap Manager contract using raw RPC calls."""
 
@@ -307,14 +321,46 @@ class AllwaysContractClient:
         self,
         contract_address: Optional[str] = None,
         subtensor: Optional[bt.Subtensor] = None,
+        reconnect_subtensor: Optional[Callable[[], None]] = None,
     ):
         self.contract_address = contract_address or get_contract_address() or ''
         self.subtensor = subtensor
+        # Owner-supplied callback that rebuilds substrate state and updates
+        # ``self.subtensor`` to a fresh ``bt.Subtensor``. Invoked at most once
+        # per RPC call when a connection-class error fires; on success the
+        # call is retried, on failure the original error is re-raised.
+        self.reconnect_subtensor = reconnect_subtensor
         self.readonly_keypair = Keypair.create_from_uri('//Alice')
         self.initialized = False
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
+
+    def substrate_call(self, fn: Callable[[Any], T]) -> T:
+        """Run ``fn(substrate)``; on a connection-class error, invoke the
+        reconnect callback once and retry. Caller's callback is responsible
+        for replacing ``self.subtensor`` with a fresh handle.
+
+        Retry is safe for reads and for writes that the contract guards
+        against duplicates (e.g. vote_*, mark_fulfilled — already-voted /
+        status checks reject the second submission). Do NOT use this path
+        for value-bearing or otherwise non-idempotent extrinsics: if the
+        WS dies after the node accepted the first extrinsic but before the
+        receipt returned, the retry composes a fresh nonce and submits a
+        second extrinsic that can also land.
+        """
+        try:
+            return fn(self.subtensor.substrate)
+        except RECONNECT_EXCEPTIONS as e:
+            if self.reconnect_subtensor is None:
+                raise
+            bt.logging.warning(f'Substrate WS error ({e!s}); reconnecting and retrying once')
+            try:
+                self.reconnect_subtensor()
+            except Exception as reconnect_err:
+                bt.logging.error(f'Substrate reconnect callback failed: {reconnect_err}')
+                raise e from reconnect_err
+            return fn(self.subtensor.substrate)
 
     def ensure_initialized(self):
         if not self.contract_address:
@@ -360,7 +406,9 @@ class AllwaysContractClient:
 
             prefix = origin + dest + value + gas_limit + storage_limit
             call_params = prefix + compact_encode_len(len(input_data)) + input_data
-            result = substrate.rpc_request('state_call', ['ContractsApi_call', '0x' + call_params.hex()])
+            result = self.substrate_call(
+                lambda s: s.rpc_request('state_call', ['ContractsApi_call', '0x' + call_params.hex()])
+            )
 
             if not result.get('result'):
                 return None
@@ -447,11 +495,9 @@ class AllwaysContractClient:
         encoded_args = self.encode_args(method, args or {})
         call_data = selector + encoded_args
 
-        substrate = self.subtensor.substrate
-
         signer_address = keypair.ss58_address
         try:
-            account_info = substrate.query('System', 'Account', [signer_address])
+            account_info = self.substrate_call(lambda s: s.query('System', 'Account', [signer_address]))
         except Exception as e:
             raise ContractError(f'{method}: balance query failed: {e}') from e
 
@@ -460,8 +506,8 @@ class AllwaysContractClient:
         if free_balance < MIN_BALANCE_FOR_TX_RAO:
             raise ContractError(f'{method}: free={free_balance}')
 
-        try:
-            call = substrate.compose_call(
+        def submit_extrinsic(s):
+            call = s.compose_call(
                 call_module='Contracts',
                 call_function='call',
                 call_params={
@@ -472,8 +518,11 @@ class AllwaysContractClient:
                     'data': '0x' + call_data.hex(),
                 },
             )
-            extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
-            receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=False)
+            extrinsic = s.create_signed_extrinsic(call=call, keypair=keypair)
+            return s.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=False)
+
+        try:
+            receipt = self.substrate_call(submit_extrinsic)
         except Exception as e:
             raise ContractError(f'{method}: exec failed: {e}') from e
 
@@ -781,6 +830,44 @@ class AllwaysContractClient:
 
     def is_validator(self, account: str) -> bool:
         return self.read_bool('is_validator', {'account': account})
+
+    def get_validators(self) -> List[str]:
+        """Return all whitelisted validator SS58 addresses.
+
+        Payload is a SCALE Vec<AccountId>: compact-encoded length followed
+        by N * 32 bytes. Returns [] on any read/decode failure so callers
+        can treat it like an empty set without special-casing.
+        """
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_validators')
+        if not data:
+            return []
+        try:
+            first = data[0]
+            mode = first & 0x03
+            if mode == 0:
+                count = first >> 2
+                offset = 1
+            elif mode == 1:
+                if len(data) < 2:
+                    return []
+                count = (first | (data[1] << 8)) >> 2
+                offset = 2
+            else:
+                if len(data) < 4:
+                    return []
+                count = (first | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)) >> 2
+                offset = 4
+            validators: List[str] = []
+            for _ in range(count):
+                if offset + ACCOUNT_ID_BYTES > len(data):
+                    break
+                addr, offset = decode_account_id(data, offset)
+                validators.append(addr)
+            return validators
+        except Exception as e:
+            bt.logging.debug(f'get_validators decode failed: {e}')
+            return []
 
     def get_miner_reserved_until(self, miner_hotkey: str) -> int:
         return self.read_u32('get_miner_reserved_until', {'miner': miner_hotkey})
