@@ -482,7 +482,7 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
     for attempt in range(max_retries + 1):
         result = attempt_send()
         if result:
-            console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
+            console.print(f'[green]BTC sent (tx: {result[0]})[/green]')
             return result
 
         # Drain async log output so the reason lands above the Retry prompt
@@ -992,7 +992,7 @@ def swap_now_command(
                             getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
                             or 'tao_transfer'
                         )
-                    console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                    console.print(f'[green]TAO sent (tx: {from_tx_hash})[/green]')
                     mark_pending_swap_tx_sent(from_tx_hash)
                     break
                 except Exception as e:
@@ -1041,7 +1041,7 @@ def swap_now_command(
     )
 
     if accepted == 0:
-        console.print('[dim]Resume with: [cyan]alw swap post-tx <tx_hash>[/cyan][/dim]')
+        console.print(f'[dim]Resume with: [cyan]alw swap post-tx {from_tx_hash}[/cyan][/dim]')
         return
 
     all_queued = queued > 0 and queued == accepted
