@@ -27,6 +27,7 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
+    probe_pending_reservation,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
@@ -589,22 +590,31 @@ def swap_now_command(
     # Check for pending reservation
     existing = load_pending_swap()
     if existing:
-        try:
-            reserved_until = client.get_miner_reserved_until(existing.miner_hotkey)
-            current_block = subtensor.get_current_block()
-            if reserved_until > current_block:
-                remaining = reserved_until - current_block
-                remaining_min = remaining * SECONDS_PER_BLOCK / 60
-                console.print(
-                    f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
-                )
-                console.print('  Complete it with: [cyan]alw swap post-tx <tx_hash>[/cyan]\n')
-                if not skip_confirm and not click.confirm('Start a new swap instead?'):
-                    return
-            else:
-                clear_pending_swap()
-        except ContractError:
+        status = probe_pending_reservation(client, existing)
+        if status.kind == 'rpc_error':
             console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
+        elif status.kind == 'ours_active':
+            try:
+                current_block = subtensor.get_current_block()
+                remaining = max(0, status.reserved_until - current_block)
+            except Exception:
+                remaining = 0
+            remaining_min = remaining * SECONDS_PER_BLOCK / 60
+            console.print(
+                f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
+            )
+            console.print('  Complete it with: [cyan]alw swap post-tx <tx_hash>[/cyan]\n')
+            if not skip_confirm and not click.confirm('Start a new swap instead?'):
+                return
+        elif status.kind == 'our_swap':
+            console.print(
+                f'[dim]Previous reservation is now swap #{status.swap.id} ({status.swap.status.name}) — '
+                f'cleared local state. Watch with: alw view swap {status.swap.id} --watch[/dim]\n'
+            )
+            clear_pending_swap()
+        else:  # 'replaced' or 'expired'
+            console.print('[dim]Previous reservation is no longer active — cleared local state.[/dim]\n')
+            clear_pending_swap()
 
     # Interactive mode: force lightweight BTC (no local Bitcoin node needed).
     # Non-interactive mode: respect environment config (local dev uses node mode for RPC signing).
