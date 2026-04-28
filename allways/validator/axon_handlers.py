@@ -366,7 +366,13 @@ async def handle_swap_reserve(
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
                 if cur_block < last_expired + cooldown:
-                    reject_synapse(synapse, f'Address on cooldown ({cooldown} blocks remaining)', ctx)
+                    remaining = (last_expired + cooldown) - cur_block
+                    reject_synapse(
+                        synapse,
+                        f'Address on cooldown: ~{remaining} blocks remaining '
+                        f'(strike {strike_count}, {cooldown}-block window)',
+                        ctx,
+                    )
                     return synapse
 
             contract.vote_reserve(

@@ -86,8 +86,9 @@ _RULES: list[_Rule] = [
         True,
         lambda ctx: (
             f'Source address [yellow]{_ctx_get(ctx, "from_address", "<your source address>")}[/yellow] '
-            f'is on a reservation cooldown ({_ctx_get(ctx, "raw_reason", "")}). Wait for it to clear or '
-            'reserve from a different address.'
+            f'is cooling down — {_ctx_get(ctx, "raw_reason", "").removeprefix("Address on cooldown: ")}. '
+            f'Each failed reservation doubles the next cooldown; wait it out or reserve from a different '
+            'address.'
         ),
     ),
     (
