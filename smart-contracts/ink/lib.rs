@@ -605,6 +605,120 @@ mod allways_swap_manager {
         }
 
         // =====================================================================
+        // Optimistic Reservation Extension (single-validator + challenge window)
+        // =====================================================================
+        //
+        // Validator-driven, no consensus quorum: any active validator can
+        // propose, any can challenge within CHALLENGE_WINDOW_BLOCKS, any can
+        // finalize after the window. Because window=8 < EXTEND_THRESHOLD=20,
+        // finalization always lands before reserved_until expires, so a
+        // challenge cleanly deletes the entry without needing a soft-hold on
+        // vote_reserve. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3.
+
+        #[ink(message)]
+        pub fn propose_extend_reservation(
+            &mut self,
+            miner: AccountId,
+            from_tx_hash: Hash,
+            target_block: u32,
+        ) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(reservation) = self.reservations.get(miner) else {
+                return Err(Error::NoReservation);
+            };
+
+            let current = self.env().block_number();
+            if target_block <= current {
+                return Err(Error::InvalidTarget);
+            }
+            // saturating_sub keeps the comparison correct even if a malicious
+            // caller passes target_block close to u32::MAX.
+            if target_block.saturating_sub(current) > MAX_EXTENSION_BLOCKS {
+                return Err(Error::ExtensionTooLong);
+            }
+            if target_block <= reservation.reserved_until {
+                return Err(Error::TargetNotForward);
+            }
+            if self.pending_reservation_extensions.get(miner).is_some() {
+                return Err(Error::ProposalAlreadyPending);
+            }
+
+            let caller = self.env().caller();
+            self.pending_reservation_extensions.insert(
+                miner,
+                &PendingExtension { submitter: caller, target_block, proposed_at: current },
+            );
+            self.env().emit_event(ReservationExtensionProposed {
+                miner,
+                from_tx_hash,
+                target_block,
+                by: caller,
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn challenge_extend_reservation(&mut self, miner: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_reservation_extensions.get(miner) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current >= pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowClosed);
+            }
+
+            self.pending_reservation_extensions.remove(miner);
+            self.env().emit_event(ReservationExtensionChallenged {
+                miner,
+                voided_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn finalize_extend_reservation(&mut self, miner: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_reservation_extensions.get(miner) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current < pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowOpen);
+            }
+
+            // Reservation may have been cleared between propose and finalize
+            // (cancellation, completed swap). If so, the proposal no longer
+            // applies — drop it silently rather than reviving a stale state.
+            let Some(mut reservation) = self.reservations.get(miner) else {
+                self.pending_reservation_extensions.remove(miner);
+                return Err(Error::NoReservation);
+            };
+            reservation.reserved_until = pending.target_block;
+            self.reservations.insert(miner, &reservation);
+            self.pending_reservation_extensions.remove(miner);
+
+            self.env().emit_event(ReservationExtensionFinalized {
+                miner,
+                applied_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_pending_reservation_extension(
+            &self,
+            miner: AccountId,
+        ) -> Option<PendingExtension> {
+            self.pending_reservation_extensions.get(miner)
+        }
+
+        // =====================================================================
         // Swap Lifecycle
         // =====================================================================
 
