@@ -270,6 +270,10 @@ class PendingSwapState:
     wallet_name: str
     hotkey_name: str
     created_at: float
+    # Empty until the user has broadcast the source-chain tx — once set, the
+    # swap is waiting on validator confirm/initiate, not on the user. Lets
+    # `alw view reservation` stop instructing the user to send funds again.
+    from_tx_hash: str = ''
 
 
 def save_pending_swap(state: PendingSwapState) -> None:
@@ -301,6 +305,24 @@ def load_pending_swap() -> Optional[PendingSwapState]:
 def clear_pending_swap() -> None:
     """Remove the pending swap state file."""
     PENDING_SWAP_FILE.unlink(missing_ok=True)
+
+
+def mark_pending_swap_tx_sent(tx_hash: str) -> None:
+    """Record that the source-chain tx has been broadcast for the pending swap.
+
+    Best-effort — silently no-ops when the pending file is missing or the hash
+    is empty. Without this, `alw view reservation` keeps instructing the user
+    to send funds even after they already have, and the wizard's polling /
+    Ctrl+C exit paths leave that state behind.
+    """
+    tx_hash = (tx_hash or '').strip()
+    if not tx_hash:
+        return
+    state = load_pending_swap()
+    if not state:
+        return
+    state.from_tx_hash = tx_hash
+    save_pending_swap(state)
 
 
 # Fallback when the contract's reservation TTL can't be read. Mirrors the

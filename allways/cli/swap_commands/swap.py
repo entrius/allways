@@ -1,6 +1,7 @@
 """alw swap - Guided interactive swap with automatic fund sending."""
 
 import os
+import sys
 import time
 from typing import Optional
 
@@ -24,10 +25,13 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     is_local_network,
     load_pending_swap,
+    loading,
+    mark_pending_swap_tx_sent,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
 )
+from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
@@ -70,13 +74,16 @@ def sign_and_broadcast_confirm(
     to_chain: str = '',
     skip_confirm: bool = False,
     from_tx_block: int = 0,
+    miner_uid: Optional[int] = None,
 ) -> tuple:
     """Sign source tx proof and broadcast SwapConfirmSynapse to validators.
 
-    Returns (accepted_count, queued_count). Queued means the validator accepted
-    but is waiting for source tx confirmations before voting to initiate.
+    Returns (accepted_count, queued_count, info). ``info`` is a RejectionInfo
+    with aggregate counts and — when accepted == 0 — a translated headline +
+    deterministic flag so callers can decide whether to prompt for retry.
     """
-    console.print('[dim]Submitting swap to validators...[/dim]')
+    # Signing is fast for the internal path and may prompt interactively for
+    # the external (paste-a-signature) path — never wrap it in a spinner.
     proof_message = f'allways-swap:{from_tx_hash}'
     from_proof = sign_or_prompt_external(
         provider,
@@ -88,7 +95,7 @@ def sign_and_broadcast_confirm(
     )
     if not from_proof:
         console.print('[red]Could not obtain source tx proof signature — cannot confirm swap.[/red]')
-        return 0, 0
+        return 0, 0, RejectionInfo()
 
     confirm_synapse = SwapConfirmSynapse(
         reservation_id=miner_hotkey,
@@ -101,27 +108,28 @@ def sign_and_broadcast_confirm(
         to_chain=to_chain,
     )
 
-    console.print(f'  Broadcasting to {len(validator_axons)} validators...')
-    confirm_responses = broadcast_synapse(ephemeral_wallet, validator_axons, confirm_synapse, timeout=60.0)
+    with loading(f'Broadcasting confirmation to {len(validator_axons)} validators...'):
+        confirm_responses = broadcast_synapse(ephemeral_wallet, validator_axons, confirm_synapse, timeout=60.0)
 
-    accepted = 0
-    queued = 0
-    for i, resp in enumerate(confirm_responses):
-        raw_reason = (getattr(resp, 'rejection_reason', '') or '').strip()
-        if getattr(resp, 'accepted', None):
-            accepted += 1
-            if 'Queued' in raw_reason:
-                queued += 1
-                console.print(f'    V{i + 1}: [yellow]queued[/yellow] {raw_reason}')
-            else:
-                console.print(f'    V{i + 1}: [green]ok[/green]')
-        else:
-            # Blank = validator didn't respond; be explicit so the user can
-            # distinguish "rejected with reason" from "silently unreachable".
-            reason = raw_reason or '(no response — timeout or validator down)'
-            console.print(f'    V{i + 1}: [red]no[/red] {reason}')
+    info = render_and_aggregate(
+        console,
+        confirm_responses,
+        label='V',
+        context={
+            'from_chain': from_chain,
+            'from_chain_upper': from_chain.upper(),
+            'to_chain': to_chain,
+            'to_chain_upper': to_chain.upper(),
+            'from_address': user_from_address,
+            'miner_hotkey': miner_hotkey,
+            'miner_uid': miner_uid,
+        },
+    )
 
-    return accepted, queued
+    if info.accepted == 0 and info.headline:
+        console.print(f'\n[red]{info.headline}[/red]')
+
+    return info.accepted, info.queued, info
 
 
 def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
@@ -183,6 +191,8 @@ def broadcast_reserve_with_retry(
     """
     current_block = subtensor.get_current_block()
     reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
+    # Signing is fast internally and may prompt interactively for external
+    # signers — never wrap it in a spinner.
     from_address_proof = sign_or_prompt_external(
         provider,
         user_from_address,
@@ -208,10 +218,23 @@ def broadcast_reserve_with_retry(
     )
 
     ephemeral_wallet = get_ephemeral_wallet()
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return None
+
+    from_amount_human = from_smallest_unit(from_amount, from_chain)
+    rejection_context = {
+        'from_chain': from_chain,
+        'from_chain_upper': from_chain.upper(),
+        'to_chain': to_chain,
+        'to_chain_upper': to_chain.upper(),
+        'from_address': user_from_address,
+        'from_amount_human': f'{from_amount_human:g}',
+        'miner_uid': selected_pair.uid,
+        'miner_hotkey': selected_pair.hotkey,
+    }
 
     reserved = False
     reserved_until = 0
@@ -242,25 +265,25 @@ def broadcast_reserve_with_retry(
                 to_chain=to_chain,
             )
 
-        console.print(f'  Broadcasting to {len(validator_axons)} validators...')
-        responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=60.0)
+        with loading(f'Broadcasting reservation to {len(validator_axons)} validators...'):
+            responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=60.0)
 
-        accepted = sum(1 for r in responses if getattr(r, 'accepted', None))
-        for i, resp in enumerate(responses):
-            was_accepted = bool(getattr(resp, 'accepted', None))
-            raw_reason = (getattr(resp, 'rejection_reason', '') or '').strip()
-            if was_accepted:
-                # Accepted means the validator responded. Blank reason is
-                # normal here — don't render the 'no response' fallback.
-                suffix = f' {raw_reason}' if raw_reason else ''
-                console.print(f'    V{i + 1}: [green]ok[/green]{suffix}')
-            else:
-                reason = raw_reason or '(no response — timeout or validator down)'
-                console.print(f'    V{i + 1}: [red]no[/red] {reason}')
+        info = render_and_aggregate(console, responses, label='V', context=rejection_context)
+        accepted = info.accepted
 
         if accepted == 0:
-            console.print('[red]No validators accepted the reservation.[/red]')
-            if attempt < max_retries and not skip_confirm and click.confirm('Retry?', default=True):
+            if info.headline:
+                console.print(f'\n[red]{info.headline}[/red]')
+            else:
+                console.print('\n[red]No validators accepted the reservation.[/red]')
+            # Deterministic failures (insufficient balance, invalid proof, wrong direction…)
+            # cannot succeed by retrying with the same inputs — skip the retry prompt.
+            if info.deterministic:
+                console.print(
+                    '[dim]Retrying with the same inputs will not change this — fix the underlying issue first.[/dim]'
+                )
+                return None
+            if attempt < max_retries and not skip_confirm and click.confirm('Retry?', default=False):
                 console.print('[dim]Retrying reservation...[/dim]')
                 continue
             return None
@@ -304,7 +327,16 @@ def broadcast_reserve_with_retry(
             return None
         if reserved:
             ttl_remaining = reserved_until - subtensor.get_current_block()
-            console.print(f'[green]Miner reserved! ~{ttl_remaining * 12 // 60} min to send funds.[/green]')
+            minutes_remaining = ttl_remaining * 12 // 60
+            console.print(
+                f'[green]Miner reserved! You have ~{minutes_remaining} minutes to send your funds '
+                f'before the reservation expires.[/green]'
+            )
+            console.print(
+                '[yellow]Please account for network latency — give your tx a couple of minutes '
+                'to land in a block. Do NOT send near or after the reservation window closes, '
+                'or your transaction may not confirm in time and the reservation will expire.[/yellow]'
+            )
 
         if reserved:
             break
@@ -423,29 +455,33 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
 
 
 def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
-    """Send BTC with fallback: embit lightweight -> RPC -> manual (with retry).
+    """Send BTC, retry on failure, fall back to manual tx-hash entry.
 
+    In lightweight mode there is no Bitcoin Core fallback — both paths route
+    through the same Blockstream API — so we don't pretend otherwise.
     Returns (tx_hash, block_number) or None (manual fallback failed/skipped).
     """
     provider = chain_providers.get('btc')
     is_local = is_local_network(config.get('network', 'finney'))
     human_amount = amount_sat / 100_000_000
+    is_lightweight = getattr(provider, 'mode', None) == 'lightweight'
 
-    max_retries = 2
-    for attempt in range(max_retries + 1):
-        # 1. Try embit lightweight wallet (mainnet/testnet only — no public APIs on regtest)
+    def attempt_send():
         if not is_local and hasattr(provider, 'send_amount_lightweight'):
             console.print('[dim]Sending BTC via lightweight wallet...[/dim]')
             result = provider.send_amount_lightweight(to_address, amount_sat, from_address=from_address)
             if result:
-                console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
                 return result
-
-        # 2. Try Bitcoin Core RPC
+            if is_lightweight:
+                return None
         console.print('[dim]Sending BTC via Bitcoin Core RPC...[/dim]')
-        result = provider.send_amount(to_address, amount_sat)
+        return provider.send_amount(to_address, amount_sat)
+
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        result = attempt_send()
         if result:
-            console.print(f'[green]BTC sent via RPC (tx: {result[0][:16]}...)[/green]')
+            console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
             return result
 
         # Retry or fall through to manual
@@ -476,9 +512,19 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
                 break
             console.print('[dim]Retrying...[/dim]')
         else:
-            console.print('[yellow]BTC send failed after retries.[/yellow]')
+            console.print('[yellow]BTC send failed.[/yellow]')
 
-    # 3. Manual fallback
+        if attempt >= max_retries:
+            console.print('[yellow]Giving up after retries.[/yellow]')
+            break
+        if not click.confirm('Retry?', default=True):
+            break
+        # Brief backoff so a flaky upstream (Blockstream/Core) has a moment to
+        # recover before we hammer it again.
+        time.sleep(1)
+        console.print('[dim]Retrying...[/dim]')
+
+    # Manual fallback
     console.print(f'\n  Send [green]{human_amount} BTC[/green] to: [cyan]{to_address}[/cyan]\n')
     tx_hash = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
     if not tx_hash or tx_hash.lower() == 'skip':
@@ -604,24 +650,25 @@ def swap_now_command(
     # Step 2: Find available miners (bilateral matching).
     # Done BEFORE any confirm prompts — if no miner can fill this swap, bail
     # out before the user wastes time answering BTC-signing questions.
-    console.print('\n[dim]Reading miner commitments...[/dim]')
-    all_pairs = read_miner_commitments(subtensor, netuid)
+    with loading('Reading miner commitments from chain...'):
+        all_pairs = read_miner_commitments(subtensor, netuid)
 
     matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
 
     if not matching_pairs:
-        console.print(f'[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]')
+        console.print(f'\n[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]')
         console.print('[dim]Run [cyan]alw view rates[/cyan] to see active pairs, or try again later.[/dim]\n')
         return
 
     available_miners = []
     try:
-        for pair in matching_pairs:
-            is_active = client.get_miner_active_flag(pair.hotkey)
-            has_swap = client.get_miner_has_active_swap(pair.hotkey)
-            collateral = client.get_miner_collateral(pair.hotkey)
-            if is_active and not has_swap and collateral > 0:
-                available_miners.append((pair, collateral))
+        with loading(f'Checking eligibility for {len(matching_pairs)} miner(s)...'):
+            for pair in matching_pairs:
+                is_active = client.get_miner_active_flag(pair.hotkey)
+                has_swap = client.get_miner_has_active_swap(pair.hotkey)
+                collateral = client.get_miner_collateral(pair.hotkey)
+                if is_active and not has_swap and collateral > 0:
+                    available_miners.append((pair, collateral))
     except ContractError as e:
         console.print(f'[red]Failed to read miner data: {e}[/red]')
         return
@@ -643,7 +690,9 @@ def swap_now_command(
         if from_chain == 'tao':
             console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
         else:
-            has_private_key = bool(os.environ.get('BTC_PRIVATE_KEY'))
+            # Prefix-check the value (not just truthy): dotenv can leak an inline comment as the var.
+            wif_raw = (os.environ.get('BTC_PRIVATE_KEY') or '').strip()
+            has_private_key = bool(wif_raw) and wif_raw[0] in '5KLc9'
             btc_mode = os.environ.get('BTC_MODE', 'lightweight')
             is_local = is_local_network(config.get('network', 'finney'))
 
@@ -737,8 +786,9 @@ def swap_now_command(
     # (collateral) so we fail loudly here instead of after the user has
     # reserved and sent funds.
     try:
-        min_swap = client.get_min_swap_amount()
-        max_swap = client.get_max_swap_amount()
+        with loading('Reading protocol swap bounds...'):
+            min_swap = client.get_min_swap_amount()
+            max_swap = client.get_max_swap_amount()
     except ContractError:
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
         min_swap, max_swap = 0, 0
@@ -788,7 +838,8 @@ def swap_now_command(
 
     # Step 6b: Verify sender has enough funds
     if from_chain == 'tao':
-        tao_balance = subtensor.get_balance(wallet.coldkeypub.ss58_address)
+        with loading('Checking TAO balance...'):
+            tao_balance = subtensor.get_balance(wallet.coldkeypub.ss58_address)
         if tao_balance.rao < from_amount:
             console.print(
                 f'[red]Insufficient balance: you have {tao_balance} but need {bt.Balance.from_rao(from_amount)}[/red]'
@@ -900,6 +951,7 @@ def swap_now_command(
         # Funds already sent externally — use provided tx hash
         from_tx_hash = from_tx_hash_opt
         console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
+        mark_pending_swap_tx_sent(from_tx_hash)
         from_tx_block = resolve_source_tx_block(
             provider=provider,
             tx_hash=from_tx_hash,
@@ -922,32 +974,46 @@ def swap_now_command(
 
         from_tx_hash = None
         if from_chain == 'tao':
-            try:
-                response = subtensor.transfer(
-                    wallet=wallet,
-                    destination_ss58=selected_pair.from_address,
-                    amount=bt.Balance.from_rao(from_amount),
-                    wait_for_inclusion=True,
-                    wait_for_finalization=False,
-                )
-                if not response.success:
-                    console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-                    console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                    return
+            for attempt in range(2):
                 try:
-                    receipt = response.extrinsic_receipt
-                    from_tx_hash = receipt.extrinsic_hash
-                    if getattr(receipt, 'block_hash', None):
-                        from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-                except Exception:
-                    from_tx_hash = (
-                        getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-                    )
-                console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
-            except Exception as e:
-                console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
-                console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                return
+                    with loading('Submitting TAO transfer to chain...'):
+                        response = subtensor.transfer(
+                            wallet=wallet,
+                            destination_ss58=selected_pair.from_address,
+                            amount=bt.Balance.from_rao(from_amount),
+                            wait_for_inclusion=True,
+                            wait_for_finalization=False,
+                        )
+                    if not response.success:
+                        # Extrinsic may have been submitted but rejected on-chain;
+                        # post-tx is a valid recovery if the user has the hash.
+                        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
+                        console.print(
+                            '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>[/yellow]'
+                        )
+                        return
+                    try:
+                        receipt = response.extrinsic_receipt
+                        from_tx_hash = receipt.extrinsic_hash
+                        if getattr(receipt, 'block_hash', None):
+                            from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
+                    except Exception:
+                        from_tx_hash = (
+                            getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
+                            or 'tao_transfer'
+                        )
+                    console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                    mark_pending_swap_tx_sent(from_tx_hash)
+                    break
+                except Exception as e:
+                    console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
+                    if attempt == 0 and click.confirm('Retry?', default=True):
+                        time.sleep(1)
+                        continue
+                    # Pre-broadcast failure: no tx hash exists, so post-tx
+                    # recovery isn't applicable. Just let the reservation lapse.
+                    console.print('[yellow]Reservation will expire on its own — start a new swap when ready.[/yellow]')
+                    return
         else:
             send_result = send_btc(
                 chain_providers,
@@ -959,6 +1025,7 @@ def swap_now_command(
             if send_result is None:
                 return
             from_tx_hash = send_result[0]
+            mark_pending_swap_tx_sent(from_tx_hash)
             # send_btc returns (tx_hash, block_number). 0 means unknown
             # (e.g. lightweight broadcaster); that's fine — validator falls
             # back to the scan path.
@@ -968,7 +1035,7 @@ def swap_now_command(
     # Step 10: Post tx hash to validators
     console.print('\n[dim]Step 3/3: Confirming with validators...[/dim]')
 
-    accepted, queued = sign_and_broadcast_confirm(
+    accepted, queued, _ = sign_and_broadcast_confirm(
         provider,
         user_from_address,
         from_key,
@@ -980,10 +1047,11 @@ def swap_now_command(
         from_chain=from_chain,
         to_chain=to_chain,
         from_tx_block=from_tx_block,
+        miner_uid=selected_pair.uid,
     )
 
     if accepted == 0:
-        console.print('[yellow]No validators accepted. Resume with: alw swap post-tx <tx_hash>[/yellow]')
+        console.print('[dim]Resume with: [cyan]alw swap post-tx <tx_hash>[/cyan][/dim]')
         return
 
     all_queued = queued > 0 and queued == accepted

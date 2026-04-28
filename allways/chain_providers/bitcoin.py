@@ -96,6 +96,20 @@ class BitcoinProvider(ChainProvider):
             if not self.network:
                 self.network = 'mainnet'
 
+        # Disable HTTP keepalive: validators are long-running and the default
+        # global session pools idle TLS sockets that Blockstream's CDN silently
+        # drops, wedging subsequent reads until our timeout fires.
+        self.http = requests.Session()
+        self.http.headers['Connection'] = 'close'
+
+        # Last failure reason from send_amount / send_amount_lightweight, so
+        # callers can surface a useful message without scraping logs.
+        self.last_send_error: Optional[str] = None
+
+    def _send_error(self, msg: str) -> None:
+        self.last_send_error = msg
+        bt.logging.error(msg)
+
     def get_chain(self) -> ChainDefinition:
         return CHAIN_BTC
 
@@ -108,7 +122,7 @@ class BitcoinProvider(ChainProvider):
             except ImportError as e:
                 raise ConnectionError('BTC_MODE=lightweight requires embit (pip install embit)') from e
             try:
-                resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+                resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
                 resp.raise_for_status()
                 tip = int(resp.text.strip())
                 bt.logging.success(f'BTC lightweight mode: network={self.network}, Blockstream tip={tip}')
@@ -133,7 +147,7 @@ class BitcoinProvider(ChainProvider):
         }
         try:
             auth = (self.rpc_user, self.rpc_pass) if self.rpc_user else None
-            response = requests.post(self.rpc_url, json=payload, auth=auth, timeout=30)
+            response = self.http.post(self.rpc_url, json=payload, auth=auth, timeout=30)
             response.raise_for_status()
             result = response.json()
             if result.get('error'):
@@ -225,7 +239,7 @@ class BitcoinProvider(ChainProvider):
     def blockstream_calc_confirmations(self, block_number: int) -> int:
         """Fetch the chain tip from Blockstream and calculate confirmations for a block."""
         try:
-            tip_resp = requests.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+            tip_resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
             if tip_resp.ok:
                 tip_height = int(tip_resp.text.strip())
                 return tip_height - block_number + 1
@@ -239,7 +253,7 @@ class BitcoinProvider(ChainProvider):
         """Verify via Blockstream API; raises ProviderUnreachableError if unreachable."""
         try:
             url = f'{self.blockstream_api_url()}/tx/{tx_hash}'
-            resp = requests.get(url, timeout=15)
+            resp = self.http.get(url, timeout=15)
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -300,7 +314,7 @@ class BitcoinProvider(ChainProvider):
         """Get balance via Blockstream API. Returns satoshis."""
         try:
             url = f'{self.blockstream_api_url()}/address/{address}'
-            resp = requests.get(url, timeout=15)
+            resp = self.http.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             funded = data.get('chain_stats', {}).get('funded_txo_sum', 0)
@@ -409,6 +423,7 @@ class BitcoinProvider(ChainProvider):
 
         Does NOT work on regtest (no public APIs). Returns (tx_hash, 0) or None.
         """
+        self.last_send_error = None
         try:
             from embit.ec import PrivateKey as EmbitPrivateKey
             from embit.networks import NETWORKS
@@ -416,12 +431,12 @@ class BitcoinProvider(ChainProvider):
             from embit.script import Witness, address_to_scriptpubkey, p2pkh, p2sh, p2wpkh
             from embit.transaction import Transaction, TransactionInput, TransactionOutput
         except ImportError:
-            bt.logging.error('embit not installed (pip install embit)')
+            self._send_error('embit not installed (pip install embit)')
             return None
 
         wif = os.environ.get('BTC_PRIVATE_KEY')
         if not wif:
-            bt.logging.error('BTC_PRIVATE_KEY not set')
+            self._send_error('BTC_PRIVATE_KEY not set')
             return None
 
         try:
@@ -472,14 +487,14 @@ class BitcoinProvider(ChainProvider):
                 # Legacy P2PKH: need full previous transaction for signing
                 for i, utxo in enumerate(selected):
                     tx_url = f'{self.blockstream_api_url()}/tx/{utxo["txid"]}/hex'
-                    tx_resp = requests.get(tx_url, timeout=15)
+                    tx_resp = self.http.get(tx_url, timeout=15)
                     tx_resp.raise_for_status()
                     prev_tx = Transaction.from_string(tx_resp.text.strip())
                     psbt.inputs[i].non_witness_utxo = prev_tx
 
             num_sigs = psbt.sign_with(privkey)
             if num_sigs != len(selected):
-                bt.logging.error(f'Expected {len(selected)} sigs, got {num_sigs}')
+                self._send_error(f'Expected {len(selected)} sigs, got {num_sigs}')
                 return None
 
             # Finalize: extract tx (psbt.tx returns a copy each time) and attach signatures
@@ -508,7 +523,7 @@ class BitcoinProvider(ChainProvider):
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
             return (tx_hash, 0)
         except Exception as e:
-            bt.logging.error(f'embit send failed: {e}')
+            self._send_error(f'embit send failed: {e}')
             return None
 
     def resolve_sender_utxos(self, from_address, type_to_script):
@@ -516,18 +531,18 @@ class BitcoinProvider(ChainProvider):
         if from_address:
             detected = detect_address_type(from_address)
             if detected not in type_to_script:
-                bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
+                self._send_error(f'Unsupported address type for {from_address}: {detected}')
                 return None
             atype, script, addr = type_to_script[detected]
             if addr != from_address:
-                bt.logging.error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
+                self._send_error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
                 return None
             utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
-            resp = requests.get(utxo_url, timeout=15)
+            resp = self.http.get(utxo_url, timeout=15)
             resp.raise_for_status()
             utxos = resp.json()
             if not utxos:
-                bt.logging.error(f'No UTXOs found for {from_address}')
+                self._send_error(f'No UTXOs found for {from_address}')
                 return None
             return script, addr, utxos, atype
 
@@ -538,7 +553,7 @@ class BitcoinProvider(ChainProvider):
                 if idx > 0:
                     _time.sleep(1)
                 utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
-                resp = requests.get(utxo_url, timeout=15)
+                resp = self.http.get(utxo_url, timeout=15)
                 resp.raise_for_status()
                 candidate_utxos = resp.json()
                 if candidate_utxos:
@@ -547,7 +562,7 @@ class BitcoinProvider(ChainProvider):
             except Exception:
                 continue
 
-        bt.logging.error('No UTXOs found for any address type')
+        self._send_error('No UTXOs found for any address type')
         return None
 
     def select_utxos(self, utxos, amount: int, is_segwit: bool):
@@ -567,16 +582,16 @@ class BitcoinProvider(ChainProvider):
         est_vsize = 11 + len(selected) * input_vsize + 2 * 31
         fee = est_vsize * fee_rate
         if total_in < amount + fee:
-            bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            self._send_error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
             return None
         return selected, total_in, fee
 
     def broadcast_tx(self, raw_hex: str) -> Optional[str]:
         """Broadcast a raw transaction via Blockstream. Returns tx_hash or None."""
         url = f'{self.blockstream_api_url()}/tx'
-        resp = requests.post(url, data=raw_hex, timeout=15)
+        resp = self.http.post(url, data=raw_hex, timeout=15)
         if resp.status_code != 200:
-            bt.logging.error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
+            self._send_error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
             return None
         return resp.text.strip()
 
@@ -591,7 +606,7 @@ class BitcoinProvider(ChainProvider):
         min_fee_rate = BTC_MIN_FEE_RATE
         try:
             url = f'{self.blockstream_api_url()}/fee-estimates'
-            resp = requests.get(url, timeout=10)
+            resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
             # Target 2-3 blocks (~20-30 min confirmation)
@@ -619,13 +634,14 @@ class BitcoinProvider(ChainProvider):
         if self.mode == 'lightweight':
             return self.send_amount_lightweight(to_address, amount, from_address=from_address)
 
+        self.last_send_error = None
         btc_amount = amount / BTC_TO_SAT
         if from_address:
             tx_hash = self.rpc_send_from_address(from_address, to_address, btc_amount)
         else:
             tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
         if not tx_hash or not isinstance(tx_hash, str):
-            bt.logging.error(f'BTC send failed for {amount} sat to {to_address}')
+            self._send_error(f'BTC send failed for {amount} sat to {to_address}')
             return None
 
         block_count = self.rpc_call('getblockcount', [])
