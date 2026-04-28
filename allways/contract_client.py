@@ -55,7 +55,7 @@ try:
 except ImportError:
     AsyncExtrinsicNotFound = ExtrinsicNotFound
 
-from allways.classes import Swap, SwapStatus
+from allways.classes import PendingExtension, Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
 from allways.utils.scale import (
     ACCOUNT_ID_BYTES,
@@ -133,6 +133,14 @@ CONTRACT_SELECTORS = {
     'get_cooldown': bytes.fromhex('19a837c6'),
     'vote_extend_reservation': bytes.fromhex('f668d950'),
     'vote_extend_timeout': bytes.fromhex('0fb2d2e5'),
+    'propose_extend_reservation': bytes.fromhex('9c9a8e8e'),
+    'challenge_extend_reservation': bytes.fromhex('40b77e21'),
+    'finalize_extend_reservation': bytes.fromhex('baf47953'),
+    'get_pending_reservation_extension': bytes.fromhex('d79424b8'),
+    'propose_extend_timeout': bytes.fromhex('94c87a1d'),
+    'challenge_extend_timeout': bytes.fromhex('682cf8eb'),
+    'finalize_extend_timeout': bytes.fromhex('b23b4d80'),
+    'get_pending_timeout_extension': bytes.fromhex('6bd06828'),
     'set_halted': bytes.fromhex('8fe1c210'),
     'get_halted': bytes.fromhex('ec540804'),
 }
@@ -210,6 +218,21 @@ CONTRACT_ARG_TYPES = {
         ('from_tx_hash', 'str'),
     ],
     'vote_extend_timeout': [('swap_id', 'u64')],
+    'propose_extend_reservation': [
+        ('miner', 'AccountId'),
+        ('from_tx_hash', 'hash'),
+        ('target_block', 'u32'),
+    ],
+    'challenge_extend_reservation': [('miner', 'AccountId')],
+    'finalize_extend_reservation': [('miner', 'AccountId')],
+    'get_pending_reservation_extension': [('miner', 'AccountId')],
+    'propose_extend_timeout': [
+        ('swap_id', 'u64'),
+        ('target_block', 'u32'),
+    ],
+    'challenge_extend_timeout': [('swap_id', 'u64')],
+    'finalize_extend_timeout': [('swap_id', 'u64')],
+    'get_pending_timeout_extension': [('swap_id', 'u64')],
     'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
     'get_halted': [],
@@ -269,6 +292,13 @@ CONTRACT_ERROR_VARIANTS = {
     24: ('PendingConflict', 'A pending vote exists for a different request'),
     25: ('SameChain', 'Source and destination chains must be different'),
     26: ('SystemHalted', 'System is halted — no new activity allowed'),
+    27: ('ProposalAlreadyPending', 'An optimistic extension proposal already exists for this entity'),
+    28: ('ChallengeWindowOpen', 'Cannot finalize: challenge window has not yet elapsed'),
+    29: ('ChallengeWindowClosed', 'Cannot challenge: challenge window has already elapsed'),
+    30: ('NoProposal', 'No pending optimistic extension exists for this entity'),
+    31: ('ExtensionTooLong', 'Proposed extension target exceeds MAX_EXTENSION_BLOCKS'),
+    32: ('TargetNotForward', 'Proposed target must be strictly greater than the current deadline'),
+    33: ('InvalidTarget', 'Proposed target is invalid (e.g. not strictly in the future)'),
 }
 
 
@@ -972,6 +1002,110 @@ class AllwaysContractClient:
         )
         bt.logging.info(f'Vote extend timeout for swap {swap_id}: {tx_hash}')
         return tx_hash
+
+    # ─── Optimistic extensions ────────────────────────────────────────────
+    # Single-validator propose/challenge/finalize. See
+    # OPTIMISTIC_EXTENSION_REDESIGN.md §4.4.
+
+    def propose_extend_reservation(
+        self,
+        wallet: bt.Wallet,
+        miner_hotkey: str,
+        from_tx_hash: bytes,
+        target_block: int,
+    ) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'propose_extend_reservation',
+            args={'miner': miner_hotkey, 'from_tx_hash': from_tx_hash, 'target_block': target_block},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Propose extend reservation miner={miner_hotkey} target={target_block}: {tx_hash}')
+        return tx_hash
+
+    def challenge_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'challenge_extend_reservation',
+            args={'miner': miner_hotkey},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Challenge extend reservation miner={miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def finalize_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'finalize_extend_reservation',
+            args={'miner': miner_hotkey},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Finalize extend reservation miner={miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def propose_extend_timeout(
+        self,
+        wallet: bt.Wallet,
+        swap_id: int,
+        target_block: int,
+    ) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'propose_extend_timeout',
+            args={'swap_id': swap_id, 'target_block': target_block},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Propose extend timeout swap={swap_id} target={target_block}: {tx_hash}')
+        return tx_hash
+
+    def challenge_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'challenge_extend_timeout',
+            args={'swap_id': swap_id},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Challenge extend timeout swap={swap_id}: {tx_hash}')
+        return tx_hash
+
+    def finalize_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'finalize_extend_timeout',
+            args={'swap_id': swap_id},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Finalize extend timeout swap={swap_id}: {tx_hash}')
+        return tx_hash
+
+    def _decode_pending_extension(self, data: bytes) -> Optional[PendingExtension]:
+        """Decode an Option<PendingExtension> SCALE payload."""
+        if not data:
+            return None
+        # Option discriminant: 0x00 = None, 0x01 = Some
+        if data[0] == 0x00:
+            return None
+        if data[0] != 0x01:
+            return None
+        o = 1
+        submitter, o = decode_account_id(data, o)
+        target_block, o = decode_u32(data, o)
+        proposed_at, _ = decode_u32(data, o)
+        return PendingExtension(submitter=submitter, target_block=target_block, proposed_at=proposed_at)
+
+    def get_pending_reservation_extension(self, miner_hotkey: str) -> Optional[PendingExtension]:
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_pending_reservation_extension', {'miner': miner_hotkey})
+        if data is None:
+            return None
+        return self._decode_pending_extension(data)
+
+    def get_pending_timeout_extension(self, swap_id: int) -> Optional[PendingExtension]:
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_pending_timeout_extension', {'swap_id': swap_id})
+        if data is None:
+            return None
+        return self._decode_pending_extension(data)
 
     def cancel_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         self.ensure_initialized()
