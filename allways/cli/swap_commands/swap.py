@@ -1,6 +1,7 @@
 """alw swap - Guided interactive swap with automatic fund sending."""
 
 import os
+import sys
 import time
 from typing import Optional
 
@@ -454,41 +455,57 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
 
 
 def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
-    """Send BTC with fallback: embit lightweight -> RPC -> manual (with retry).
+    """Send BTC, retry on failure, fall back to manual tx-hash entry.
 
+    In lightweight mode there is no Bitcoin Core fallback — both paths route
+    through the same Blockstream API — so we don't pretend otherwise.
     Returns (tx_hash, block_number) or None (manual fallback failed/skipped).
     """
     provider = chain_providers.get('btc')
     is_local = is_local_network(config.get('network', 'finney'))
     human_amount = amount_sat / 100_000_000
+    is_lightweight = getattr(provider, 'mode', None) == 'lightweight'
 
-    max_retries = 2
-    for attempt in range(max_retries + 1):
-        # 1. Try embit lightweight wallet (mainnet/testnet only — no public APIs on regtest)
+    def attempt_send():
         if not is_local and hasattr(provider, 'send_amount_lightweight'):
             console.print('[dim]Sending BTC via lightweight wallet...[/dim]')
             result = provider.send_amount_lightweight(to_address, amount_sat, from_address=from_address)
             if result:
-                console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
                 return result
-
-        # 2. Try Bitcoin Core RPC
+            if is_lightweight:
+                return None
         console.print('[dim]Sending BTC via Bitcoin Core RPC...[/dim]')
-        result = provider.send_amount(to_address, amount_sat)
+        return provider.send_amount(to_address, amount_sat)
+
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        result = attempt_send()
         if result:
-            console.print(f'[green]BTC sent via RPC (tx: {result[0][:16]}...)[/green]')
+            console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
             return result
 
-        # Retry or fall through to manual
-        if attempt < max_retries:
-            console.print('[yellow]BTC send failed.[/yellow]')
-            if not click.confirm('Retry?', default=True):
-                break
-            console.print('[dim]Retrying...[/dim]')
-        else:
-            console.print('[yellow]BTC send failed after retries.[/yellow]')
+        # Drain async log output so the reason lands above the Retry prompt
+        # rather than after it.
+        sys.stderr.flush()
+        time.sleep(0.2)
 
-    # 3. Manual fallback
+        reason = getattr(provider, 'last_send_error', None)
+        if reason:
+            console.print(f'[yellow]BTC send failed:[/yellow] {reason}')
+        else:
+            console.print('[yellow]BTC send failed.[/yellow]')
+
+        if attempt >= max_retries:
+            console.print('[yellow]Giving up after retries.[/yellow]')
+            break
+        if not click.confirm('Retry?', default=True):
+            break
+        # Brief backoff so a flaky upstream (Blockstream/Core) has a moment to
+        # recover before we hammer it again.
+        time.sleep(1)
+        console.print('[dim]Retrying...[/dim]')
+
+    # Manual fallback
     console.print(f'\n  Send [green]{human_amount} BTC[/green] to: [cyan]{to_address}[/cyan]\n')
     tx_hash = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
     if not tx_hash or tx_hash.lower() == 'skip':
@@ -938,34 +955,46 @@ def swap_now_command(
 
         from_tx_hash = None
         if from_chain == 'tao':
-            try:
-                with loading('Submitting TAO transfer to chain...'):
-                    response = subtensor.transfer(
-                        wallet=wallet,
-                        destination_ss58=selected_pair.from_address,
-                        amount=bt.Balance.from_rao(from_amount),
-                        wait_for_inclusion=True,
-                        wait_for_finalization=False,
-                    )
-                if not response.success:
-                    console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-                    console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                    return
+            for attempt in range(2):
                 try:
-                    receipt = response.extrinsic_receipt
-                    from_tx_hash = receipt.extrinsic_hash
-                    if getattr(receipt, 'block_hash', None):
-                        from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-                except Exception:
-                    from_tx_hash = (
-                        getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-                    )
-                console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
-                mark_pending_swap_tx_sent(from_tx_hash)
-            except Exception as e:
-                console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
-                console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                return
+                    with loading('Submitting TAO transfer to chain...'):
+                        response = subtensor.transfer(
+                            wallet=wallet,
+                            destination_ss58=selected_pair.from_address,
+                            amount=bt.Balance.from_rao(from_amount),
+                            wait_for_inclusion=True,
+                            wait_for_finalization=False,
+                        )
+                    if not response.success:
+                        # Extrinsic may have been submitted but rejected on-chain;
+                        # post-tx is a valid recovery if the user has the hash.
+                        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
+                        console.print(
+                            '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>[/yellow]'
+                        )
+                        return
+                    try:
+                        receipt = response.extrinsic_receipt
+                        from_tx_hash = receipt.extrinsic_hash
+                        if getattr(receipt, 'block_hash', None):
+                            from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
+                    except Exception:
+                        from_tx_hash = (
+                            getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
+                            or 'tao_transfer'
+                        )
+                    console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                    mark_pending_swap_tx_sent(from_tx_hash)
+                    break
+                except Exception as e:
+                    console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
+                    if attempt == 0 and click.confirm('Retry?', default=True):
+                        time.sleep(1)
+                        continue
+                    # Pre-broadcast failure: no tx hash exists, so post-tx
+                    # recovery isn't applicable. Just let the reservation lapse.
+                    console.print('[yellow]Reservation will expire on its own — start a new swap when ready.[/yellow]')
+                    return
         else:
             send_result = send_btc(
                 chain_providers,
