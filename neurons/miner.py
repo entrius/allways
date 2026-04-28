@@ -70,21 +70,22 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
 
     def unlock_coldkey(self) -> None:
-        """Decrypt and cache the coldkey at startup so per-swap TAO transfers
-        don't re-prompt for a password each time. Without this, every
+        """Decrypt and cache the bittensor coldkey at startup so per-swap TAO
+        transfers don't re-prompt for a password each time. Without this, every
         ``send_amount`` call hits ``wallet.coldkey`` which re-reads the keyfile;
         when the miner runs detached from a TTY, ``getpass`` returns garbage
         and every fulfillment fails with "password invalid".
 
-        If ``MINER_COLDKEY_PASSWORD`` is set in the environment, it is forwarded
-        into bittensor's per-keyfile env var so unlocking is non-interactive.
-        Otherwise this prompts once at startup (when the operator is present).
+        If ``MINER_BITTENSOR_COLDKEY_PASSWORD`` is set in the environment, it
+        is forwarded into bittensor's per-keyfile env var so unlocking is
+        non-interactive. Otherwise this prompts once at startup (when the
+        operator is present).
         """
-        password = os.environ.get('MINER_COLDKEY_PASSWORD')
+        password = os.environ.get('MINER_BITTENSOR_COLDKEY_PASSWORD')
         if password:
             os.environ[self.wallet.coldkey_file.env_var_name()] = password
         self.wallet.unlock_coldkey()
-        bt.logging.info('Coldkey unlocked')
+        bt.logging.info('Bittensor coldkey unlocked')
 
     def load_my_addresses(self) -> Dict[str, str]:
         """Read this miner's committed pair once and map chain → address.
