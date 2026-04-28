@@ -384,10 +384,13 @@ def probe_pending_reservation(client, state: PendingSwapState) -> ReservationSta
 
       Step 5 — within tolerance: ``ours_active``.
     """
+    # Cheap-bool short-circuit: skip the swap-range scan when the miner has
+    # no active swap, which is the common case for the status/swap-now path.
     try:
-        for swap in client.get_miner_active_swaps(state.miner_hotkey):
-            if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
-                return ReservationStatus(kind='our_swap', swap=swap)
+        if client.get_miner_has_active_swap(state.miner_hotkey):
+            for swap in client.get_miner_active_swaps(state.miner_hotkey):
+                if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
+                    return ReservationStatus(kind='our_swap', swap=swap)
     except ContractError:
         return ReservationStatus(kind='rpc_error')
 

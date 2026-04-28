@@ -972,14 +972,12 @@ def view_reservation():
 
     with loading('Reading reservation...'):
         status = probe_pending_reservation(client, state)
-        try:
-            current_block = subtensor.get_current_block()
-        except Exception:
-            current_block = 0
 
     if status.kind == 'rpc_error':
         console.print('[red]Failed to read reservation status from contract.[/red]')
         return
+
+    current_block = subtensor.get_current_block()
 
     console.print('\n[bold]Swap Reservation[/bold]\n')
 

@@ -62,6 +62,9 @@ def make_swap(**overrides) -> Swap:
 def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None, ttl=4032):
     """Build a contract-client double whose only behavior is what the probe touches."""
     client = MagicMock()
+    # has_active_swap mirrors whether the test set up any active swaps so the
+    # probe's cheap-bool short-circuit behaves like real chain state.
+    client.get_miner_has_active_swap.return_value = bool(active_swaps)
     client.get_miner_active_swaps.return_value = list(active_swaps)
     client.get_miner_reserved_until.return_value = reserved_until
     client.get_reservation_data.return_value = reservation_data
@@ -153,9 +156,21 @@ def test_ours_active_when_unchanged():
     assert result.kind == 'ours_active'
 
 
+def test_skips_active_swap_scan_when_miner_has_no_active_swap():
+    """The cheap-bool short-circuit avoids the swap-range scan in the common case."""
+    state = make_state()
+    client = make_client()
+    client.get_miner_has_active_swap.return_value = False
+
+    probe_pending_reservation(client, state)
+
+    client.get_miner_active_swaps.assert_not_called()
+
+
 def test_rpc_error_short_circuits_when_active_swaps_call_fails():
     state = make_state()
     client = MagicMock()
+    client.get_miner_has_active_swap.return_value = True
     client.get_miner_active_swaps.side_effect = ContractError('rpc down')
 
     result = probe_pending_reservation(client, state)
