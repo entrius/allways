@@ -955,34 +955,46 @@ def swap_now_command(
 
         from_tx_hash = None
         if from_chain == 'tao':
-            try:
-                with loading('Submitting TAO transfer to chain...'):
-                    response = subtensor.transfer(
-                        wallet=wallet,
-                        destination_ss58=selected_pair.from_address,
-                        amount=bt.Balance.from_rao(from_amount),
-                        wait_for_inclusion=True,
-                        wait_for_finalization=False,
-                    )
-                if not response.success:
-                    console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-                    console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                    return
+            for attempt in range(2):
                 try:
-                    receipt = response.extrinsic_receipt
-                    from_tx_hash = receipt.extrinsic_hash
-                    if getattr(receipt, 'block_hash', None):
-                        from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-                except Exception:
-                    from_tx_hash = (
-                        getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-                    )
-                console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
-                mark_pending_swap_tx_sent(from_tx_hash)
-            except Exception as e:
-                console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
-                console.print('[yellow]Resume with: alw swap post-tx <tx_hash>[/yellow]')
-                return
+                    with loading('Submitting TAO transfer to chain...'):
+                        response = subtensor.transfer(
+                            wallet=wallet,
+                            destination_ss58=selected_pair.from_address,
+                            amount=bt.Balance.from_rao(from_amount),
+                            wait_for_inclusion=True,
+                            wait_for_finalization=False,
+                        )
+                    if not response.success:
+                        # Extrinsic may have been submitted but rejected on-chain;
+                        # post-tx is a valid recovery if the user has the hash.
+                        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
+                        console.print(
+                            '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>[/yellow]'
+                        )
+                        return
+                    try:
+                        receipt = response.extrinsic_receipt
+                        from_tx_hash = receipt.extrinsic_hash
+                        if getattr(receipt, 'block_hash', None):
+                            from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
+                    except Exception:
+                        from_tx_hash = (
+                            getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
+                            or 'tao_transfer'
+                        )
+                    console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                    mark_pending_swap_tx_sent(from_tx_hash)
+                    break
+                except Exception as e:
+                    console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
+                    if attempt == 0 and click.confirm('Retry?', default=True):
+                        time.sleep(1)
+                        continue
+                    # Pre-broadcast failure: no tx hash exists, so post-tx
+                    # recovery isn't applicable. Just let the reservation lapse.
+                    console.print('[yellow]Reservation will expire on its own — start a new swap when ready.[/yellow]')
+                    return
         else:
             send_result = send_btc(
                 chain_providers,
