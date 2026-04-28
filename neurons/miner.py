@@ -96,6 +96,7 @@ class Miner(BaseMinerNeuron):
             pass
         except Exception as e:
             bt.logging.warning(f'Miner load_state failed, starting fresh: {e}')
+
     def unlock_coldkey(self) -> None:
         """Decrypt and cache the bittensor coldkey at startup so per-swap TAO
         transfers don't re-prompt for a password each time. Without this, every
