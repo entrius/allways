@@ -509,7 +509,10 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
     console.print(f'\n  Send [green]{human_amount} BTC[/green] to: [cyan]{to_address}[/cyan]\n')
     tx_hash = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
     if not tx_hash or tx_hash.lower() == 'skip':
-        console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
+        console.print(
+            '[yellow]Swap paused. Run [cyan]alw view reservation[/cyan] to see your '
+            'reservation status and the resume command once you have a tx hash.[/yellow]'
+        )
         return None
     return (tx_hash.strip(), 0)
 

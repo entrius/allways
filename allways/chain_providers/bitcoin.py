@@ -471,7 +471,11 @@ class BitcoinProvider(ChainProvider):
                 txid_bytes = bytes.fromhex(utxo['txid'])
                 tx.vin.append(TransactionInput(txid_bytes, utxo['vout']))
 
-            tx.vout.append(TransactionOutput(amount, address_to_scriptpubkey(to_address)))
+            to_script = address_to_scriptpubkey(to_address)
+            if to_script is None:
+                self._send_error(f'Could not derive scriptPubKey for destination {to_address}')
+                return None
+            tx.vout.append(TransactionOutput(amount, to_script))
             if change > 546:  # dust threshold
                 tx.vout.append(TransactionOutput(change, my_script))
 
@@ -523,7 +527,10 @@ class BitcoinProvider(ChainProvider):
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
             return (tx_hash, 0)
         except Exception as e:
-            self._send_error(f'embit send failed: {e}')
+            import traceback
+
+            bt.logging.debug(f'embit send traceback:\n{traceback.format_exc()}')
+            self._send_error(f'embit send failed: {type(e).__name__}: {e}')
             return None
 
     def resolve_sender_utxos(self, from_address, type_to_script):
