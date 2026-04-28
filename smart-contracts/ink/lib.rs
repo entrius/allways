@@ -4,7 +4,7 @@ mod types;
 mod errors;
 mod events;
 
-use types::{Reservation, SwapData, SwapStatus, VoteType};
+use types::{PendingExtension, Reservation, SwapData, SwapStatus, VoteType};
 use errors::Error;
 
 #[ink::contract]
@@ -68,6 +68,13 @@ mod allways_swap_manager {
         // reservation_* / miner_reserved_until Mappings into one struct.
         reservations: Mapping<AccountId, Reservation>,
 
+        // Optimistic extension proposals. One pending entry per entity at a
+        // time; challenged entries are deleted, finalized entries are removed
+        // when reserved_until / timeout_block is updated. See
+        // OPTIMISTIC_EXTENSION_REDESIGN.md §4.3 for the lifecycle.
+        pending_reservation_extensions: Mapping<AccountId, PendingExtension>,
+        pending_timeout_extensions: Mapping<u64, PendingExtension>,
+
         // Cooldown strike tracking (lazy eval) — (strike_count, last_expired_block)
         address_cooldown: Mapping<String, (u8, u32)>,
         // Financials
@@ -91,6 +98,13 @@ mod allways_swap_manager {
     // Callers on both the miner and validator side hardcode the same value so
     // no one needs to poll the contract to compute fee_amount.
     const FEE_DIVISOR: u128 = 100;
+
+    // Optimistic extension parameters. Window kept comfortably below the
+    // client-side EXTEND_THRESHOLD_BLOCKS (=20) so finalization always lands
+    // before the original reserved_until / timeout_block expires — no
+    // soft-hold rule needed. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3 / §9.1.
+    const CHALLENGE_WINDOW_BLOCKS: u32 = 8;
+    const MAX_EXTENSION_BLOCKS: u32 = 250;
 
     // =========================================================================
     // Internal helpers
@@ -364,6 +378,8 @@ mod allways_swap_manager {
                 pending_swap_votes: Mapping::default(),
 
                 reservations: Mapping::default(),
+                pending_reservation_extensions: Mapping::default(),
+                pending_timeout_extensions: Mapping::default(),
 
                 address_cooldown: Mapping::default(),
                 accumulated_fees: 0,

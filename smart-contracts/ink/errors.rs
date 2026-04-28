@@ -58,4 +58,18 @@ pub enum Error {
     SameChain,
     /// System is halted — no new activity allowed
     SystemHalted,
+    /// An optimistic extension proposal already exists for this entity
+    ProposalAlreadyPending,
+    /// Cannot finalize: challenge window has not yet elapsed
+    ChallengeWindowOpen,
+    /// Cannot challenge: challenge window has already elapsed
+    ChallengeWindowClosed,
+    /// No pending optimistic extension exists for this entity
+    NoProposal,
+    /// Proposed extension target exceeds MAX_EXTENSION_BLOCKS
+    ExtensionTooLong,
+    /// Proposed target must be strictly greater than the current deadline
+    TargetNotForward,
+    /// Proposed target is invalid (e.g. not strictly in the future)
+    InvalidTarget,
 }

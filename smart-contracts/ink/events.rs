@@ -171,3 +171,73 @@ pub struct ReservationCancelled {
     #[ink(topic)]
     pub miner: AccountId,
 }
+
+// ─── Optimistic extensions ─────────────────────────────────────────────────
+// Six events split by side (reservation vs timeout) so downstream indexers get
+// per-entity schemas without polymorphic keys. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3.
+
+/// Reservation extension proposed by a validator (single-validator, optimistic).
+#[ink::event]
+pub struct ReservationExtensionProposed {
+    #[ink(topic)]
+    pub miner: AccountId,
+    /// Source-tx hash this proposal correlates to. Lets indexers tie the
+    /// extension activity back to the swap attempt without a join.
+    pub from_tx_hash: ink::primitives::Hash,
+    pub target_block: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
+
+/// Reservation extension challenged within the challenge window. The pending
+/// entry is deleted; any validator may re-propose immediately.
+#[ink::event]
+pub struct ReservationExtensionChallenged {
+    #[ink(topic)]
+    pub miner: AccountId,
+    /// What target was being claimed; useful for "how off?" analytics.
+    pub voided_target: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
+
+/// Reservation extension finalized — `reserved_until` is now `applied_target`.
+#[ink::event]
+pub struct ReservationExtensionFinalized {
+    #[ink(topic)]
+    pub miner: AccountId,
+    pub applied_target: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
+
+/// Fulfillment-timeout extension proposed by a validator.
+#[ink::event]
+pub struct TimeoutExtensionProposed {
+    #[ink(topic)]
+    pub swap_id: u64,
+    pub target_block: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
+
+/// Fulfillment-timeout extension challenged within the challenge window.
+#[ink::event]
+pub struct TimeoutExtensionChallenged {
+    #[ink(topic)]
+    pub swap_id: u64,
+    pub voided_target: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
+
+/// Fulfillment-timeout extension finalized — `timeout_block` is now
+/// `applied_target`.
+#[ink::event]
+pub struct TimeoutExtensionFinalized {
+    #[ink(topic)]
+    pub swap_id: u64,
+    pub applied_target: u32,
+    #[ink(topic)]
+    pub by: AccountId,
+}
