@@ -1025,6 +1025,119 @@ mod allways_swap_manager {
             })
         }
 
+        // =====================================================================
+        // Optimistic Timeout Extension (single-validator + challenge window)
+        // =====================================================================
+        //
+        // Mirror of the reservation-extension flow, keyed on swap_id and
+        // updating SwapData.timeout_block. Same window/cap semantics —
+        // window=8 < EXTEND_THRESHOLD=20 so finalize beats the original
+        // timeout. Only valid against Fulfilled swaps (matching the existing
+        // vote_extend_timeout guard).
+
+        #[ink(message)]
+        pub fn propose_extend_timeout(
+            &mut self,
+            swap_id: u64,
+            target_block: u32,
+        ) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+            if swap.status != SwapStatus::Fulfilled {
+                return Err(Error::InvalidStatus);
+            }
+
+            let current = self.env().block_number();
+            if target_block <= current {
+                return Err(Error::InvalidTarget);
+            }
+            if target_block.saturating_sub(current) > MAX_EXTENSION_BLOCKS {
+                return Err(Error::ExtensionTooLong);
+            }
+            if target_block <= swap.timeout_block {
+                return Err(Error::TargetNotForward);
+            }
+            if self.pending_timeout_extensions.get(swap_id).is_some() {
+                return Err(Error::ProposalAlreadyPending);
+            }
+
+            let caller = self.env().caller();
+            self.pending_timeout_extensions.insert(
+                swap_id,
+                &PendingExtension { submitter: caller, target_block, proposed_at: current },
+            );
+            self.env().emit_event(TimeoutExtensionProposed {
+                swap_id,
+                target_block,
+                by: caller,
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn challenge_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_timeout_extensions.get(swap_id) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current >= pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowClosed);
+            }
+
+            self.pending_timeout_extensions.remove(swap_id);
+            self.env().emit_event(TimeoutExtensionChallenged {
+                swap_id,
+                voided_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn finalize_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_timeout_extensions.get(swap_id) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current < pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowOpen);
+            }
+
+            // Swap may have completed/timed-out between propose and finalize;
+            // drop the proposal silently rather than mutating a finalized swap.
+            let Some(mut swap) = self.swaps.get(swap_id) else {
+                self.pending_timeout_extensions.remove(swap_id);
+                return Err(Error::SwapNotFound);
+            };
+            if swap.status != SwapStatus::Fulfilled {
+                self.pending_timeout_extensions.remove(swap_id);
+                return Err(Error::InvalidStatus);
+            }
+            swap.timeout_block = pending.target_block;
+            self.swaps.insert(swap_id, &swap);
+            self.pending_timeout_extensions.remove(swap_id);
+
+            self.env().emit_event(TimeoutExtensionFinalized {
+                swap_id,
+                applied_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_pending_timeout_extension(
+            &self,
+            swap_id: u64,
+        ) -> Option<PendingExtension> {
+            self.pending_timeout_extensions.get(swap_id)
+        }
+
         /// Claim a pending slash payout (user calls after failed transfer)
         #[ink(message)]
         pub fn claim_slash(&mut self, swap_id: u64) -> Result<(), Error> {
