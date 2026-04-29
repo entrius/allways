@@ -676,8 +676,19 @@ mod allways_swap_manager {
             // applies — drop it silently rather than reviving a stale state.
             let Some(mut reservation) = self.reservations.get(miner) else {
                 self.pending_reservation_extensions.remove(miner);
+                self.reservation_extension_count.remove(miner);
                 return Err(Error::NoReservation);
             };
+            // Reservations don't auto-expire on read; a row whose reserved_until
+            // already passed is "dead" but still in storage. Finalizing one
+            // would resurrect it with a future deadline, locking out the next
+            // user via the MinerReserved guard. Refuse instead — and clear the
+            // pending entry so the miner isn't blocked from a fresh reservation.
+            if reservation.reserved_until < current {
+                self.pending_reservation_extensions.remove(miner);
+                self.reservation_extension_count.remove(miner);
+                return Err(Error::NoReservation);
+            }
             reservation.reserved_until = pending.target_block;
             self.reservations.insert(miner, &reservation);
             self.pending_reservation_extensions.remove(miner);

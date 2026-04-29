@@ -273,6 +273,15 @@ def try_extend_reservation(
     except ValueError:
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: malformed from_tx_hash, skipping propose')
         return
+    if len(from_tx_hash_bytes) != 32:
+        # The contract's `Hash` parameter is fixed at 32 bytes and the SCALE
+        # encoder silently pads/truncates anything else, which would emit an
+        # event topic that doesn't match the user's actual tx_hash. Bail.
+        bt.logging.debug(
+            f'PendingConfirm [{swap_label} {miner_short}]: from_tx_hash is '
+            f'{len(from_tx_hash_bytes)}B, expected 32; skipping propose'
+        )
+        return
 
     proposed = self.optimistic_extensions.maybe_propose_reservation(
         miner_hotkey=item.miner_hotkey,

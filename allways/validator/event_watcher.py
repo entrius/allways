@@ -342,7 +342,13 @@ class ContractEventWatcher:
             if decoded is None:
                 continue
             name, values = decoded
-            self.apply_event(block_num, name, values)
+            try:
+                self.apply_event(block_num, name, values)
+            except Exception as e:
+                # Don't propagate — sync_to wouldn't advance the cursor,
+                # which would re-replay every successful apply_event in the
+                # same block on the next pass and double-apply busy deltas.
+                bt.logging.warning(f'EventWatcher: apply_event {name}@{block_num} failed: {e}')
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
