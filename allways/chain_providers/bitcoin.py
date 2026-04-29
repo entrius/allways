@@ -102,6 +102,14 @@ class BitcoinProvider(ChainProvider):
         self.http = requests.Session()
         self.http.headers['Connection'] = 'close'
 
+        # Last failure reason from send_amount / send_amount_lightweight, so
+        # callers can surface a useful message without scraping logs.
+        self.last_send_error: Optional[str] = None
+
+    def _send_error(self, msg: str) -> None:
+        self.last_send_error = msg
+        bt.logging.error(msg)
+
     def get_chain(self) -> ChainDefinition:
         return CHAIN_BTC
 
@@ -402,7 +410,11 @@ class BitcoinProvider(ChainProvider):
             return False
 
     def send_amount_lightweight(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
+        self,
+        to_address: str,
+        amount: int,
+        from_address: Optional[str] = None,
+        fee_rate_override: Optional[int] = None,
     ) -> Optional[Tuple[str, int]]:
         """Send BTC via embit + Blockstream API (no full node required). Amount in satoshis.
 
@@ -413,8 +425,11 @@ class BitcoinProvider(ChainProvider):
         matching address type is derived directly from the WIF key. Otherwise,
         all types are probed to find where UTXOs exist.
 
+        ``fee_rate_override`` (sat/vB) skips estimation and the network floor.
+
         Does NOT work on regtest (no public APIs). Returns (tx_hash, 0) or None.
         """
+        self.last_send_error = None
         try:
             from embit.ec import PrivateKey as EmbitPrivateKey
             from embit.networks import NETWORKS
@@ -422,12 +437,12 @@ class BitcoinProvider(ChainProvider):
             from embit.script import Witness, address_to_scriptpubkey, p2pkh, p2sh, p2wpkh
             from embit.transaction import Transaction, TransactionInput, TransactionOutput
         except ImportError:
-            bt.logging.error('embit not installed (pip install embit)')
+            self._send_error('embit not installed (pip install embit)')
             return None
 
         wif = os.environ.get('BTC_PRIVATE_KEY')
         if not wif:
-            bt.logging.error('BTC_PRIVATE_KEY not set')
+            self._send_error('BTC_PRIVATE_KEY not set')
             return None
 
         try:
@@ -450,7 +465,7 @@ class BitcoinProvider(ChainProvider):
             is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            coin_selection = self.select_utxos(utxos, amount, is_segwit)
+            coin_selection = self.select_utxos(utxos, amount, is_segwit, fee_rate_override=fee_rate_override)
             if coin_selection is None:
                 return None
             selected, total_in, fee = coin_selection
@@ -462,7 +477,11 @@ class BitcoinProvider(ChainProvider):
                 txid_bytes = bytes.fromhex(utxo['txid'])
                 tx.vin.append(TransactionInput(txid_bytes, utxo['vout']))
 
-            tx.vout.append(TransactionOutput(amount, address_to_scriptpubkey(to_address)))
+            to_script = address_to_scriptpubkey(to_address)
+            if to_script is None:
+                self._send_error(f'Could not derive scriptPubKey for destination {to_address}')
+                return None
+            tx.vout.append(TransactionOutput(amount, to_script))
             if change > 546:  # dust threshold
                 tx.vout.append(TransactionOutput(change, my_script))
 
@@ -485,7 +504,7 @@ class BitcoinProvider(ChainProvider):
 
             num_sigs = psbt.sign_with(privkey)
             if num_sigs != len(selected):
-                bt.logging.error(f'Expected {len(selected)} sigs, got {num_sigs}')
+                self._send_error(f'Expected {len(selected)} sigs, got {num_sigs}')
                 return None
 
             # Finalize: extract tx (psbt.tx returns a copy each time) and attach signatures
@@ -514,7 +533,10 @@ class BitcoinProvider(ChainProvider):
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
             return (tx_hash, 0)
         except Exception as e:
-            bt.logging.error(f'embit send failed: {e}')
+            import traceback
+
+            bt.logging.debug(f'embit send traceback:\n{traceback.format_exc()}')
+            self._send_error(f'embit send failed: {type(e).__name__}: {e}')
             return None
 
     def resolve_sender_utxos(self, from_address, type_to_script):
@@ -522,18 +544,18 @@ class BitcoinProvider(ChainProvider):
         if from_address:
             detected = detect_address_type(from_address)
             if detected not in type_to_script:
-                bt.logging.error(f'Unsupported address type for {from_address}: {detected}')
+                self._send_error(f'Unsupported address type for {from_address}: {detected}')
                 return None
             atype, script, addr = type_to_script[detected]
             if addr != from_address:
-                bt.logging.error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
+                self._send_error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
                 return None
             utxo_url = f'{self.blockstream_api_url()}/address/{addr}/utxo'
             resp = self.http.get(utxo_url, timeout=15)
             resp.raise_for_status()
             utxos = resp.json()
             if not utxos:
-                bt.logging.error(f'No UTXOs found for {from_address}')
+                self._send_error(f'No UTXOs found for {from_address}')
                 return None
             return script, addr, utxos, atype
 
@@ -553,12 +575,12 @@ class BitcoinProvider(ChainProvider):
             except Exception:
                 continue
 
-        bt.logging.error('No UTXOs found for any address type')
+        self._send_error('No UTXOs found for any address type')
         return None
 
-    def select_utxos(self, utxos, amount: int, is_segwit: bool):
+    def select_utxos(self, utxos, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None):
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
-        fee_rate = self.estimate_fee_rate()
+        fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
         selected = []
         total_in = 0
@@ -573,7 +595,7 @@ class BitcoinProvider(ChainProvider):
         est_vsize = 11 + len(selected) * input_vsize + 2 * 31
         fee = est_vsize * fee_rate
         if total_in < amount + fee:
-            bt.logging.error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            self._send_error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
             return None
         return selected, total_in, fee
 
@@ -582,31 +604,36 @@ class BitcoinProvider(ChainProvider):
         url = f'{self.blockstream_api_url()}/tx'
         resp = self.http.post(url, data=raw_hex, timeout=15)
         if resp.status_code != 200:
-            bt.logging.error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
+            self._send_error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
             return None
         return resp.text.strip()
 
-    def estimate_fee_rate(self) -> int:
-        """Estimate fee rate (sat/vbyte) from Blockstream/mempool. Falls back to 5 sat/vb.
+    def estimate_fee_rate(self, override: Optional[int] = None) -> int:
+        """Estimate fee rate (sat/vbyte) from Blockstream.
 
-        Targets 2-3 block confirmation (~20-30 min) with a floor of 2 sat/vB
-        to avoid stuck transactions during low-fee periods.
+        Targets 2-3 block confirmation (~20-30 min) with a small safety pad on
+        top, so a swap source tx reliably clears within the reservation
+        without overpaying for next-block urgency. ``override`` (sat/vB) skips
+        estimation, floor, and multiplier — caller is taking explicit
+        responsibility for the rate (e.g. CPFP / manual bump).
         """
-        from allways.constants import BTC_MIN_FEE_RATE
+        if override is not None:
+            return max(1, override)
 
-        min_fee_rate = BTC_MIN_FEE_RATE
+        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
+
         try:
             url = f'{self.blockstream_api_url()}/fee-estimates'
             resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
-            # Target 2-3 blocks (~20-30 min confirmation)
-            for target in ('2', '3', '4'):
+            for target in ('2', '3'):
                 if target in estimates:
-                    return max(min_fee_rate, int(estimates[target]))
-            return max(min_fee_rate, 5)
+                    padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
+                    return max(BTC_MIN_FEE_RATE, padded)
         except Exception:
-            return max(min_fee_rate, 5)
+            pass
+        return BTC_MIN_FEE_RATE
 
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None
@@ -625,13 +652,14 @@ class BitcoinProvider(ChainProvider):
         if self.mode == 'lightweight':
             return self.send_amount_lightweight(to_address, amount, from_address=from_address)
 
+        self.last_send_error = None
         btc_amount = amount / BTC_TO_SAT
         if from_address:
             tx_hash = self.rpc_send_from_address(from_address, to_address, btc_amount)
         else:
             tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
         if not tx_hash or not isinstance(tx_hash, str):
-            bt.logging.error(f'BTC send failed for {amount} sat to {to_address}')
+            self._send_error(f'BTC send failed for {amount} sat to {to_address}')
             return None
 
         block_count = self.rpc_call('getblockcount', [])

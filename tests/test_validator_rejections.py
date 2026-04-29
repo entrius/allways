@@ -62,7 +62,7 @@ def test_insufficient_source_balance_translates():
 
 
 def test_address_cooldown_includes_raw_reason():
-    raw = 'Address on cooldown (50 blocks remaining)'
+    raw = 'Address on cooldown: ~50 blocks remaining (strike 2, 300-block window)'
     info = render_and_aggregate(
         _silent_console(),
         [FakeResp(accepted=False, rejection_reason=raw)],
@@ -71,6 +71,10 @@ def test_address_cooldown_includes_raw_reason():
     assert info.category == 'address_cooldown'
     assert info.deterministic is True
     assert '50 blocks remaining' in info.headline
+    assert 'strike 2' in info.headline
+    assert 'doubles' in info.headline
+    # No double-wrapped 'Address on cooldown: Address on cooldown'
+    assert info.headline.lower().count('address on cooldown') == 0
 
 
 def test_miner_busy_is_not_deterministic():

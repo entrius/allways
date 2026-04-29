@@ -11,7 +11,7 @@ import click
 from rich.console import Console
 
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.classes import MinerPair, SwapStatus
+from allways.classes import MinerPair, Swap, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
@@ -331,6 +331,98 @@ def mark_pending_swap_tx_sent(tx_hash: str) -> None:
 _DEFAULT_RESERVATION_TTL_BLOCKS = 4032
 
 
+@dataclass
+class ReservationStatus:
+    """Result of reconciling pending_swap.json against on-chain state.
+
+    ``kind`` is one of:
+      - ``ours_active``: reservation still on chain and matches our local row
+      - ``our_swap``: reservation already advanced into a swap on the same
+        miner that matches our user addresses; ``swap`` is set
+      - ``replaced``: a different reservation now occupies the miner — ours
+        is gone (expired or consumed-and-completed)
+      - ``expired``: no reservation on chain and no matching active swap
+      - ``rpc_error``: contract reads failed; caller should not act on result
+    """
+
+    kind: str
+    swap: Optional[Swap] = None
+    reserved_until: int = 0
+
+
+def probe_pending_reservation(client, state: PendingSwapState, current_block: int) -> ReservationStatus:
+    """Reconcile a saved pending_swap.json against on-chain state.
+
+    The naive ``reserved_until > current_block`` check (the old logic) breaks
+    in two ways:
+
+      1. ``vote_extend_reservation`` advances ``reserved_until`` in-place when
+         a validator sees the source tx, so the saved value can legitimately
+         lag the on-chain value. Equality with the saved block is wrong.
+      2. After our reservation is consumed (vote_initiate) and the resulting
+         swap completes, the swap is pruned but the miner can be re-reserved
+         by another user. The miner's new ``reserved_until`` is in the future
+         — the old check then mis-reports our stale local row as "ACTIVE".
+
+    Resolution order (strongest signal first):
+
+      Step 1 — probe ``get_miner_active_swaps`` and match by user addresses.
+        Survives extension and into FULFILLED. If hit, our reservation has
+        already advanced into a swap.
+
+      Step 2 — read on-chain reservation. No row + no swap match means our
+        reservation is gone (expired or consumed-and-pruned) — ``expired``.
+
+      Step 3 — ``reserved_until`` is in the past. The contract leaves expired
+        rows in the map until the miner is re-reserved (lazy clear in
+        ``vote_reserve``), so a non-zero stale row is still expired — ours
+        if amounts match, someone else's if not, but either way the local
+        file is dead. ``expired``.
+
+      Step 4 — if a row exists but the amounts differ from our saved state,
+        it's someone else's reservation — ``replaced``.
+
+      Step 5 — amounts match but ``reserved_until`` is more than ``ttl``
+        blocks past our saved value: a single extension can't push the value
+        beyond ``current_block + ttl``, and we'd have caught chained
+        extensions in step 1 once ``vote_initiate`` ran. So this is a
+        replacement that happens to share our amounts — ``replaced``.
+
+      Step 6 — within tolerance: ``ours_active``.
+    """
+    # Cheap-bool short-circuit: skip the swap-range scan when the miner has
+    # no active swap, which is the common case for the status/swap-now path.
+    try:
+        if client.get_miner_has_active_swap(state.miner_hotkey):
+            for swap in client.get_miner_active_swaps(state.miner_hotkey):
+                if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
+                    return ReservationStatus(kind='our_swap', swap=swap)
+    except ContractError:
+        return ReservationStatus(kind='rpc_error')
+
+    try:
+        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
+        on_chain = client.get_reservation_data(state.miner_hotkey)
+    except ContractError:
+        return ReservationStatus(kind='rpc_error')
+
+    if reserved_until == 0 or on_chain is None or reserved_until < current_block:
+        return ReservationStatus(kind='expired')
+
+    chain_tao, chain_from, chain_to = on_chain
+    if chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount:
+        return ReservationStatus(kind='replaced')
+
+    try:
+        ttl = int(client.get_reservation_ttl())
+    except ContractError:
+        ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
+    if reserved_until - state.reserved_until_block > ttl:
+        return ReservationStatus(kind='replaced')
+
+    return ReservationStatus(kind='ours_active', reserved_until=reserved_until)
+
+
 def resolve_source_tx_block(
     provider,
     tx_hash: str,
@@ -381,7 +473,12 @@ def resolve_source_tx_block(
         console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
         return int(tx_info.block_number)
 
-    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
+    # In lightweight mode there is no local node — the lookup goes through a
+    # remote API (e.g. Blockstream for BTC), so don't claim "your local node".
+    source = (
+        'via lightweight wallet lookup' if getattr(provider, 'mode', None) == 'lightweight' else 'on your local node'
+    )
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks {source}.[/yellow]')
     console.print(
         '[dim]  Validators will scan too; if they reject, retry with: '
         '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
