@@ -615,14 +615,17 @@ class BitcoinProvider(ChainProvider):
         return BTC_MIN_FEE_RATE_MAINNET if self.network == 'mainnet' else BTC_MIN_FEE_RATE_TESTNET
 
     def estimate_fee_rate(self, override: Optional[int] = None) -> int:
-        """Estimate fee rate (sat/vbyte) from Blockstream/mempool.
+        """Estimate fee rate (sat/vbyte) from Blockstream.
 
-        Targets 2-3 block confirmation (~20-30 min) with a network-aware floor.
-        ``override`` (sat/vB) skips estimation and floor — caller is taking
-        explicit responsibility for the rate (e.g. CPFP / manual bump).
+        Default targets next-block confirmation and applies a safety multiplier
+        on top — we'd rather overpay a few sats than have a source tx stuck.
+        ``override`` (sat/vB) skips estimation, floor, and multiplier — caller
+        is taking explicit responsibility for the rate (e.g. CPFP / manual bump).
         """
         if override is not None:
             return max(1, override)
+
+        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER
 
         floor = self.min_fee_rate()
         try:
@@ -630,10 +633,11 @@ class BitcoinProvider(ChainProvider):
             resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
-            # Target 2-3 blocks (~20-30 min confirmation)
-            for target in ('2', '3', '4'):
+            # Target next-block first; fall back to 2-block before the floor.
+            for target in ('1', '2'):
                 if target in estimates:
-                    return max(floor, int(estimates[target]))
+                    padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
+                    return max(floor, padded)
             return max(floor, 5)
         except Exception:
             return max(floor, 5)
