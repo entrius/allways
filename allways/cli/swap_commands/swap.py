@@ -590,11 +590,12 @@ def swap_now_command(
     # Check for pending reservation
     existing = load_pending_swap()
     if existing:
-        status = probe_pending_reservation(client, existing)
+        current_block = subtensor.get_current_block()
+        status = probe_pending_reservation(client, existing, current_block)
         if status.kind == 'rpc_error':
             console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
         elif status.kind == 'ours_active':
-            remaining = max(0, status.reserved_until - subtensor.get_current_block())
+            remaining = max(0, status.reserved_until - current_block)
             remaining_min = remaining * SECONDS_PER_BLOCK / 60
             console.print(
                 f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'

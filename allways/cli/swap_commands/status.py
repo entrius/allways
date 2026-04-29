@@ -80,9 +80,10 @@ def status_command():
         # Pending reservation
         pending = load_pending_swap()
         if pending:
-            res_status = probe_pending_reservation(client, pending)
+            current_block = subtensor.get_current_block()
+            res_status = probe_pending_reservation(client, pending, current_block)
             if res_status.kind == 'ours_active':
-                remaining = max(0, res_status.reserved_until - subtensor.get_current_block())
+                remaining = max(0, res_status.reserved_until - current_block)
                 remaining_min = remaining * SECONDS_PER_BLOCK / 60
                 table.add_row(
                     'Pending Reservation',

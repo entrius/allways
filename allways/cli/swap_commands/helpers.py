@@ -350,7 +350,7 @@ class ReservationStatus:
     reserved_until: int = 0
 
 
-def probe_pending_reservation(client, state: PendingSwapState) -> ReservationStatus:
+def probe_pending_reservation(client, state: PendingSwapState, current_block: int) -> ReservationStatus:
     """Reconcile a saved pending_swap.json against on-chain state.
 
     The naive ``reserved_until > current_block`` check (the old logic) breaks
@@ -373,16 +373,22 @@ def probe_pending_reservation(client, state: PendingSwapState) -> ReservationSta
       Step 2 — read on-chain reservation. No row + no swap match means our
         reservation is gone (expired or consumed-and-pruned) — ``expired``.
 
-      Step 3 — if a row exists but the amounts differ from our saved state,
+      Step 3 — ``reserved_until`` is in the past. The contract leaves expired
+        rows in the map until the miner is re-reserved (lazy clear in
+        ``vote_reserve``), so a non-zero stale row is still expired — ours
+        if amounts match, someone else's if not, but either way the local
+        file is dead. ``expired``.
+
+      Step 4 — if a row exists but the amounts differ from our saved state,
         it's someone else's reservation — ``replaced``.
 
-      Step 4 — amounts match but ``reserved_until`` is more than ``ttl``
+      Step 5 — amounts match but ``reserved_until`` is more than ``ttl``
         blocks past our saved value: a single extension can't push the value
         beyond ``current_block + ttl``, and we'd have caught chained
         extensions in step 1 once ``vote_initiate`` ran. So this is a
         replacement that happens to share our amounts — ``replaced``.
 
-      Step 5 — within tolerance: ``ours_active``.
+      Step 6 — within tolerance: ``ours_active``.
     """
     # Cheap-bool short-circuit: skip the swap-range scan when the miner has
     # no active swap, which is the common case for the status/swap-now path.
@@ -400,7 +406,7 @@ def probe_pending_reservation(client, state: PendingSwapState) -> ReservationSta
     except ContractError:
         return ReservationStatus(kind='rpc_error')
 
-    if reserved_until == 0 or on_chain is None:
+    if reserved_until == 0 or on_chain is None or reserved_until < current_block:
         return ReservationStatus(kind='expired')
 
     chain_tao, chain_from, chain_to = on_chain
