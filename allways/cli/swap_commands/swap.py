@@ -128,7 +128,10 @@ def sign_and_broadcast_confirm(
     )
 
     if info.accepted == 0 and info.headline:
-        console.print(f'\n[red]{info.headline}[/red]')
+        # tx_not_found is almost always propagation lag, not a real failure —
+        # render it in yellow so it doesn't scan as "your swap broke".
+        color = 'yellow' if info.category == 'tx_not_found' else 'red'
+        console.print(f'\n[{color}]{info.headline}[/{color}]')
 
     return info.accepted, info.queued, info
 
