@@ -35,8 +35,6 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step. Phase order matters — each phase may depend
     on state mutated by the previous one."""
-    bt.logging.info(f'Forward step {self.step}')
-
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
 
@@ -377,8 +375,8 @@ async def confirm_miner_fulfillments(
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
-            else:
-                bt.logging.info(f'Swap {swap.id}: confirm vote did not land, retrying next step')
+            # On vote failure, voting.confirm_swap already logs the error;
+            # the entry stays in tracker and retries next step.
     return uncertain
 
 
@@ -449,5 +447,4 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
         if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
-        else:
-            bt.logging.debug(f'Swap {swap.id}: timeout vote did not land, retrying next step')
+        # On vote failure, voting.timeout_swap already logs the error.
