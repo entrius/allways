@@ -970,14 +970,13 @@ def view_reservation():
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
 
+    current_block = subtensor.get_current_block()
     with loading('Reading reservation...'):
-        status = probe_pending_reservation(client, state)
+        status = probe_pending_reservation(client, state, current_block)
 
     if status.kind == 'rpc_error':
         console.print('[red]Failed to read reservation status from contract.[/red]')
         return
-
-    current_block = subtensor.get_current_block()
 
     console.print('\n[bold]Swap Reservation[/bold]\n')
 
