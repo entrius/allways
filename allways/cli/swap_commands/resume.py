@@ -23,9 +23,8 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
-    poll_for_swap_with_progress,
-    resolve_recent_swap_id,
     sign_and_broadcast_confirm,
+    wait_for_swap_initiation,
 )
 from allways.contract_client import ContractError
 
@@ -225,31 +224,10 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
         )
 
     max_polls = 600 if all_queued else 60
-    try:
-        swap_id = poll_for_swap_with_progress(client, state.miner_hotkey, state.from_chain, max_polls)
-    except KeyboardInterrupt:
-        try:
-            swap_id = resolve_recent_swap_id(client, state.miner_hotkey)
-        except ContractError:
-            swap_id = None
-        console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        if swap_id is not None:
-            clear_pending_swap()
-            console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
-            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
-        else:
-            console.print(f'[dim]Miner UID {state.miner_uid} — check progress with: alw view reservation[/dim]\n')
-        return
-
+    swap_id = wait_for_swap_initiation(client, state.miner_hotkey, state.miner_uid, state.from_chain, max_polls)
     if swap_id is None:
-        console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print(
-            f'[dim]Miner UID {state.miner_uid} — check: alw view reservation '
-            '(pending_swap.json kept for retry with `alw swap resume-reservation`)[/dim]\n'
-        )
         return
 
-    clear_pending_swap()
     console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
 
     if skip_confirm:
