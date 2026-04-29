@@ -122,7 +122,7 @@ def is_valid_ss58(address: str) -> bool:
     extrinsic whose typo would silently fail.
     """
     try:
-        from scalecodec.utils.ss58 import ss58_decode
+        from bittensor.utils import ss58_decode
 
         ss58_decode(address)
         return True

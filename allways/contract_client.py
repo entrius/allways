@@ -46,14 +46,9 @@ import struct
 from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 import bittensor as bt
-from substrateinterface import Keypair
-from substrateinterface.exceptions import ExtrinsicNotFound
+from async_substrate_interface.errors import ExtrinsicNotFound
+from bittensor import Keypair
 from websockets.exceptions import ConnectionClosed
-
-try:
-    from async_substrate_interface.errors import ExtrinsicNotFound as AsyncExtrinsicNotFound
-except ImportError:
-    AsyncExtrinsicNotFound = ExtrinsicNotFound
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
@@ -225,8 +220,7 @@ CONTRACT_ARG_TYPES = {
 
 DEFAULT_GAS_LIMIT = {'ref_time': 10_000_000_000, 'proof_size': 500_000}
 
-# Exception types for receipt checking (computed once at import time)
-_EXTRINSIC_NOT_FOUND = tuple(t for t in [ExtrinsicNotFound, AsyncExtrinsicNotFound] if t is not None)
+_EXTRINSIC_NOT_FOUND = (ExtrinsicNotFound,)
 
 
 # ContractExecResult byte layout offsets (after gas prefix)

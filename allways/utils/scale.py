@@ -8,7 +8,7 @@ so compound structs can chain reads without manual offset bookkeeping.
 import struct
 from typing import Tuple
 
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor.utils import ss58_encode
 
 # SS58 prefix for Bittensor (matches substrate.ss58_format on all configured networks).
 SS58_PREFIX = 42
