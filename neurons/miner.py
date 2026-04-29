@@ -70,22 +70,25 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
 
     def unlock_coldkey(self) -> None:
-        """Cache the coldkey password into bittensor's per-keyfile env var so
-        every later ``unlock_coldkey()`` call is non-interactive. As of
-        bittensor 10.3.0, ``subtensor.transfer`` re-runs ``unlock_coldkey()``
-        on every extrinsic; without the env var, each transfer re-prompts and
-        a detached miner reads garbage from stdin, producing spurious
+        """Cache the coldkey password through bittensor's keyfile so every
+        later ``unlock_coldkey()`` call is non-interactive. As of bittensor
+        10.3.0, ``subtensor.transfer`` re-runs ``unlock_coldkey()`` on every
+        extrinsic; without a cached password, each transfer re-prompts and a
+        detached miner reads garbage from stdin, producing spurious
         "password invalid" errors mid-swap.
 
         Reads ``MINER_BITTENSOR_COLDKEY_PASSWORD`` if set, otherwise prompts
-        once at startup.
+        once at startup. Uses ``save_password_to_env`` (not direct
+        ``os.environ`` assignment) because bittensor-wallet 4.0.1 stores the
+        password via its own encoding — a plaintext value in the
+        ``BT_PW__...`` env var is rejected as malformed base64.
         """
         from getpass import getpass
 
         password = os.environ.get('MINER_BITTENSOR_COLDKEY_PASSWORD')
         if not password:
             password = getpass(f'Enter password to unlock coldkey ({self.wallet.name}): ')
-        os.environ[self.wallet.coldkey_file.env_var_name()] = password
+        self.wallet.coldkey_file.save_password_to_env(password)
         self.wallet.unlock_coldkey()
         bt.logging.info('Bittensor coldkey unlocked')
 
