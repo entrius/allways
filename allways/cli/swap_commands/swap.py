@@ -879,7 +879,10 @@ def swap_now_command(
     receive_human = from_smallest_unit(user_receives, to_chain)
     fee_human = from_smallest_unit(fee_in_dest, to_chain)
 
+    # Pin the fee rate at summary time so the send path uses the exact rate
+    # the user agreed to — also avoids a second Blockstream round-trip.
     btc_fee_line = ''
+    pinned_btc_fee_rate: Optional[int] = btc_fee_rate_opt
     btc_provider = chain_providers.get('btc')
     if (
         from_chain == 'btc'
@@ -888,11 +891,11 @@ def swap_now_command(
         and hasattr(btc_provider, 'estimate_fee_rate')
     ):
         try:
-            chosen_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
+            pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
             origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
-            btc_fee_line = f'  BTC Fee Rate: ~{chosen_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
+            btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
         except Exception:
-            pass  # display-only; send path will surface real failures
+            pass  # display-only; send path will fall back to estimating itself
 
     summary = (
         f'  You Send:     [red]{amount} {src_up}[/red]\n'
@@ -1050,7 +1053,7 @@ def swap_now_command(
                 selected_pair.from_address,
                 from_amount,
                 from_address=user_from_address,
-                fee_rate_override=btc_fee_rate_opt,
+                fee_rate_override=pinned_btc_fee_rate,
             )
             if send_result is None:
                 return
