@@ -458,7 +458,14 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
     return None
 
 
-def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
+def send_btc(
+    chain_providers,
+    config,
+    to_address: str,
+    amount_sat: int,
+    from_address: str = None,
+    fee_rate_override: Optional[int] = None,
+):
     """Send BTC, retry on failure, fall back to manual tx-hash entry.
 
     In lightweight mode there is no Bitcoin Core fallback — both paths route
@@ -473,7 +480,9 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
     def attempt_send():
         if not is_local and hasattr(provider, 'send_amount_lightweight'):
             console.print('[dim]Sending BTC via lightweight wallet...[/dim]')
-            result = provider.send_amount_lightweight(to_address, amount_sat, from_address=from_address)
+            result = provider.send_amount_lightweight(
+                to_address, amount_sat, from_address=from_address, fee_rate_override=fee_rate_override
+            )
             if result:
                 return result
             if is_lightweight:
@@ -540,6 +549,18 @@ def swap_group():
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
+@click.option(
+    '--btc-fee-rate',
+    'btc_fee_rate_opt',
+    type=click.IntRange(min=1),
+    default=None,
+    metavar='SAT_PER_VB',
+    help=(
+        'Fee rate for the BTC source tx, in satoshis per virtual byte (sat/vB). '
+        'Higher = faster confirmation. Typical mainnet values: 5-20. Default '
+        'auto-estimates from the mempool. Lightweight wallet only.'
+    ),
+)
 def swap_now_command(
     from_chain_opt: Optional[str],
     to_chain_opt: Optional[str],
@@ -549,6 +570,7 @@ def swap_now_command(
     from_tx_hash_opt: Optional[str],
     auto_select: bool,
     skip_confirm: bool,
+    btc_fee_rate_opt: Optional[int],
 ):
     """Guided interactive swap - step by step.
 
@@ -860,6 +882,25 @@ def swap_now_command(
     # the miner will deliver the destination funds.
     receive_human = from_smallest_unit(user_receives, to_chain)
     fee_human = from_smallest_unit(fee_in_dest, to_chain)
+
+    # Pin the fee rate at summary time so the send path uses the exact rate
+    # the user agreed to — also avoids a second Blockstream round-trip.
+    btc_fee_line = ''
+    pinned_btc_fee_rate: Optional[int] = btc_fee_rate_opt
+    btc_provider = chain_providers.get('btc')
+    if (
+        from_chain == 'btc'
+        and btc_provider is not None
+        and getattr(btc_provider, 'mode', None) == 'lightweight'
+        and hasattr(btc_provider, 'estimate_fee_rate')
+    ):
+        try:
+            pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
+            origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
+            btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
+        except Exception:
+            pass  # display-only; send path will fall back to estimating itself
+
     summary = (
         f'  You Send:     [red]{amount} {src_up}[/red]\n'
         f'    From:       [yellow]{user_from_address}[/yellow]  [dim](your {src_up} address)[/dim]\n'
@@ -868,6 +909,7 @@ def swap_now_command(
         f'    To:         [yellow]{receive_address}[/yellow]  [dim](your {dst_up} address)[/dim]\n'
         f'\n'
         f'  Protocol Fee: {fee_percent:g}% ({fee_human:.8f} {dst_up})\n'
+        f'{btc_fee_line}'
         f'  Rate:         {rate_line}\n'
         f'  Miner:        UID {selected_pair.uid}'
     )
@@ -1015,6 +1057,7 @@ def swap_now_command(
                 selected_pair.from_address,
                 from_amount,
                 from_address=user_from_address,
+                fee_rate_override=pinned_btc_fee_rate,
             )
             if send_result is None:
                 return
