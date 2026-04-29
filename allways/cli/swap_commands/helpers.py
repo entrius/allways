@@ -356,9 +356,9 @@ def probe_pending_reservation(client, state: PendingSwapState) -> ReservationSta
     The naive ``reserved_until > current_block`` check (the old logic) breaks
     in two ways:
 
-      1. ``vote_extend_reservation`` advances ``reserved_until`` in-place when
-         a validator sees the source tx, so the saved value can legitimately
-         lag the on-chain value. Equality with the saved block is wrong.
+      1. ``finalize_extend_reservation`` advances ``reserved_until`` in-place
+         when a validator's optimistic propose lands, so the saved value can
+         legitimately lag the on-chain value. Equality with the saved block is wrong.
       2. After our reservation is consumed (vote_initiate) and the resulting
          swap completes, the swap is pruned but the miner can be re-reserved
          by another user. The miner's new ``reserved_until`` is in the future

@@ -1,22 +1,27 @@
 """Optimistic extension watcher.
 
-Replaces the ``vote_extend_reservation`` / ``vote_extend_timeout`` consensus
-flows with single-validator propose / challenge / finalize. See
-OPTIMISTIC_EXTENSION_REDESIGN.md (local planning doc) for full background.
+Single-validator propose / challenge / finalize for reservation and timeout
+extensions, with tiered evidence and a per-entity cap. See
+OPTIMISTIC_EXTENSION_REDESIGN.md (local planning doc) for full background,
+including §13 for the tier model.
 
 This module provides only the per-decision primitives — picking the right
-moments to invoke them lives in the validator forward loop (slice #8).
-Each method takes the inputs it needs as parameters so the class is fully
-mockable in unit tests without spinning up a chain.
+moments to invoke them lives in the validator forward loop. Each method
+takes the inputs it needs as parameters so the class is fully mockable in
+unit tests without spinning up a chain.
 """
 
 from typing import Optional
 
 import bittensor as bt
 
-from allways.chains import compute_extension_target
+from allways.chains import compute_extension_target, compute_extension_target_tier1
 from allways.classes import PendingExtension
-from allways.constants import EXTENSION_BUCKET_BLOCKS
+from allways.constants import (
+    EXTENSION_BUCKET_BLOCKS,
+    MAX_EXTENSIONS_PER_RESERVATION,
+    MAX_EXTENSIONS_PER_SWAP,
+)
 from allways.contract_client import (
     AllwaysContractClient,
     ContractError,
@@ -48,22 +53,35 @@ class OptimisticExtensionWatcher:
         current_block: int,
         reserved_until: int,
         observed_confirmations: int,
+        extension_count: int,
     ) -> bool:
-        """Submit a propose_extend_reservation if no proposal is pending.
+        """Submit a propose_extend_reservation if no proposal is pending,
+        tiered on ``extension_count`` per redesign §13.
 
-        ``reserved_until`` is the on-chain deadline as last seen by the caller
-        — we re-check it inside compute_extension_target via the chain registry.
-        Returns True if a propose tx was submitted (i.e. no pending entry
-        existed and we put one there), False otherwise (already pending,
-        target wouldn't be a forward step, contract rejected, RPC error).
+        - Tier 0 (first extension): caller is responsible for ensuring the tx
+          is visible (``tx_info != None``); target sized for one chain block.
+        - Tier 1 (second extension): requires ``observed_confirmations >= 1``;
+          target = chain-aware full-confirmation window.
+        - Tier 2+: refused locally to avoid a doomed tx (contract rejects too).
+
+        Returns True if a propose tx was submitted, False otherwise.
         """
+        if extension_count >= MAX_EXTENSIONS_PER_RESERVATION:
+            return False
+
         existing = self._safe_get_pending_reservation(miner_hotkey)
         if existing is not None:
             return False
 
-        target_block = compute_extension_target(
-            from_chain_id, observed_confirmations, current_block
-        )
+        if extension_count == 0:
+            target_block = compute_extension_target_tier1(from_chain_id, current_block)
+        else:
+            if observed_confirmations < 1:
+                return False
+            target_block = compute_extension_target(
+                from_chain_id, observed_confirmations, current_block
+            )
+
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
             # extension is unnecessary, don't waste a tx.
@@ -146,14 +164,25 @@ class OptimisticExtensionWatcher:
         current_block: int,
         timeout_block: int,
         observed_confirmations: int,
+        extension_count: int,
     ) -> bool:
+        """Tiered timeout-extension propose. See ``maybe_propose_reservation``."""
+        if extension_count >= MAX_EXTENSIONS_PER_SWAP:
+            return False
+
         existing = self._safe_get_pending_timeout(swap_id)
         if existing is not None:
             return False
 
-        target_block = compute_extension_target(
-            dest_chain_id, observed_confirmations, current_block
-        )
+        if extension_count == 0:
+            target_block = compute_extension_target_tier1(dest_chain_id, current_block)
+        else:
+            if observed_confirmations < 1:
+                return False
+            target_block = compute_extension_target(
+                dest_chain_id, observed_confirmations, current_block
+            )
+
         if target_block <= timeout_block:
             return False
 

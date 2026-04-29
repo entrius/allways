@@ -62,6 +62,19 @@ PENDING_CONFIRM_NULL_RETRY_LIMIT = 3
 EXTENSION_PADDING_SECONDS = 300  # safety buffer on top of confirmation time
 EXTENSION_BUCKET_BLOCKS = 30  # round target up so validator views converge
 MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
+# Mirrors the contract's CHALLENGE_WINDOW_BLOCKS — must stay in sync with
+# smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally
+# to avoid known-doomed txs; the contract is authoritative.
+CHALLENGE_WINDOW_BLOCKS = 8
+
+# Tiered escalation (redesign §13). First extension fires on tx visibility
+# alone (mempool OK) and buys time for one block; second extension requires
+# ≥1 confirmation and buys the full chain-aware confirmation window. Hard
+# cap is enforced contract-side via MAX_EXTENSIONS_PER_RESERVATION /
+# _PER_SWAP — these client constants must mirror the contract values.
+EXTENSION_TIER1_PADDING_SECONDS = 300  # buffer over one chain block
+MAX_EXTENSIONS_PER_RESERVATION = 2
+MAX_EXTENSIONS_PER_SWAP = 2
 
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.

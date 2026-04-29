@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from allways.constants import (
     EXTENSION_BUCKET_BLOCKS,
     EXTENSION_PADDING_SECONDS,
+    EXTENSION_TIER1_PADDING_SECONDS,
     MAX_EXTENSION_BLOCKS,
 )
 
@@ -92,6 +93,26 @@ def compute_extension_target(
     chain = get_chain(from_chain_id)
     remaining = max(0, chain.min_confirmations - current_confirmations)
     seconds_needed = remaining * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
+    blocks_needed = math.ceil(seconds_needed / SUBTENSOR_BLOCK_SECONDS)
+    blocks_needed = math.ceil(blocks_needed / EXTENSION_BUCKET_BLOCKS) * EXTENSION_BUCKET_BLOCKS
+    blocks_needed = min(blocks_needed, MAX_EXTENSION_BLOCKS)
+    return current_subnet_block + blocks_needed
+
+
+def compute_extension_target_tier1(
+    from_chain_id: str,
+    current_subnet_block: int,
+) -> int:
+    """Tier-1 (first extension) target: enough wall-clock for one chain block
+    to land plus padding. Triggered on tx visibility alone — we haven't yet
+    seen any confirmation, so we just budget for the *next* block. Tier-2
+    handles the remaining confirmations once we have hard evidence.
+
+    Same bucketing/cap pattern as the main helper so two validators on the
+    same chain converge to the same target.
+    """
+    chain = get_chain(from_chain_id)
+    seconds_needed = chain.seconds_per_block + EXTENSION_TIER1_PADDING_SECONDS
     blocks_needed = math.ceil(seconds_needed / SUBTENSOR_BLOCK_SECONDS)
     blocks_needed = math.ceil(blocks_needed / EXTENSION_BUCKET_BLOCKS) * EXTENSION_BUCKET_BLOCKS
     blocks_needed = min(blocks_needed, MAX_EXTENSION_BLOCKS)

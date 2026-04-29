@@ -48,36 +48,73 @@ def make_watcher(pending_reservation=None, pending_timeout=None, propose_raises=
 
 
 class TestMaybeProposeReservation:
-    def test_proposes_when_no_pending_and_target_advances(self):
+    def test_tier0_proposes_on_visibility_with_short_target(self):
+        # Tier 0 (extension_count=0): caller has already verified tx visibility;
+        # target = current + tier1_blocks. For BTC: (600+300)/12 = 75 → bucket(90).
+        # current=1000, reserved_until=1050 (< 1090) → propose fires with target=1090.
         w = make_watcher(pending_reservation=None)
-        # BTC at 0/3 confs gives a 180-block bucketed extension; current=1000 →
-        # target=1180. reserved_until=1100 < 1180, so propose should fire.
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100, observed_confirmations=0,
+            current_block=1000, reserved_until=1050,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is True
-        w.contract_client.propose_extend_reservation.assert_called_once()
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
         assert call_kwargs['miner_hotkey'] == MINER
-        assert call_kwargs['target_block'] == 1180
+        assert call_kwargs['target_block'] == 1090
+
+    def test_tier1_proposes_with_chain_aware_target(self):
+        # Tier 1 (extension_count=1): require ≥1 conf; target = chain-aware.
+        # BTC at 1/3 confs → remaining=2, seconds=1500, blocks=125 → bucket(150).
+        w = make_watcher(pending_reservation=None)
+        result = w.maybe_propose_reservation(
+            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
+            current_block=1000, reserved_until=1100,
+            observed_confirmations=1, extension_count=1,
+        )
+        assert result is True
+        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1150
+
+    def test_tier1_skips_when_below_one_confirmation(self):
+        # Tier 1 demands ≥1 confirmation — mempool-only tx is not enough.
+        w = make_watcher(pending_reservation=None)
+        result = w.maybe_propose_reservation(
+            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
+            current_block=1000, reserved_until=1100,
+            observed_confirmations=0, extension_count=1,
+        )
+        assert result is False
+        w.contract_client.propose_extend_reservation.assert_not_called()
+
+    def test_skips_when_at_extension_cap(self):
+        # extension_count=MAX → contract would reject; refuse locally.
+        w = make_watcher(pending_reservation=None)
+        result = w.maybe_propose_reservation(
+            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
+            current_block=1000, reserved_until=1100,
+            observed_confirmations=1, extension_count=2,
+        )
+        assert result is False
+        w.contract_client.propose_extend_reservation.assert_not_called()
 
     def test_skips_when_pending_already_exists(self):
         w = make_watcher(pending_reservation=PendingExtension(OTHER_HOTKEY, 1180, 990))
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100, observed_confirmations=0,
+            current_block=1000, reserved_until=1100,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
 
-    def test_skips_when_target_does_not_advance(self):
-        # BTC at 3/3 confs: only padding remains (300s/12 = 25 → bucketed to 30).
-        # Target = current + 30 = 1030. If reserved_until is already 1100, no need.
+    def test_tier0_skips_when_target_does_not_advance(self):
+        # Tier 0 target = current + 90 = 1090. If reserved_until is already
+        # past 1090, no need to propose.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100, observed_confirmations=3,
+            current_block=1000, reserved_until=1100,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -89,7 +126,8 @@ class TestMaybeProposeReservation:
         )
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100, observed_confirmations=0,
+            current_block=1000, reserved_until=1050,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is False  # rejection means we didn't successfully propose
 
@@ -181,21 +219,42 @@ class TestMaybeFinalizeReservation:
 
 
 class TestMaybeProposeTimeout:
-    def test_proposes_when_no_pending_and_target_advances(self):
+    def test_tier0_proposes_on_visibility(self):
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
             swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1100, observed_confirmations=0,
+            current_block=1000, timeout_block=1050,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is True
-        w.contract_client.propose_extend_timeout.assert_called_once()
-        assert w.contract_client.propose_extend_timeout.call_args.kwargs['swap_id'] == 42
+        kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
+        assert kwargs['swap_id'] == 42
+        assert kwargs['target_block'] == 1090
+
+    def test_tier1_requires_confirmations(self):
+        w = make_watcher(pending_timeout=None)
+        result = w.maybe_propose_timeout(
+            swap_id=42, dest_chain_id='btc',
+            current_block=1000, timeout_block=1100,
+            observed_confirmations=0, extension_count=1,
+        )
+        assert result is False
+
+    def test_skips_when_at_cap(self):
+        w = make_watcher(pending_timeout=None)
+        result = w.maybe_propose_timeout(
+            swap_id=42, dest_chain_id='btc',
+            current_block=1000, timeout_block=1100,
+            observed_confirmations=1, extension_count=2,
+        )
+        assert result is False
 
     def test_skips_when_pending(self):
         w = make_watcher(pending_timeout=PendingExtension(OTHER_HOTKEY, 1180, 990))
         result = w.maybe_propose_timeout(
             swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1100, observed_confirmations=0,
+            current_block=1000, timeout_block=1050,
+            observed_confirmations=0, extension_count=0,
         )
         assert result is False
 

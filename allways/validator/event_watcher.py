@@ -31,6 +31,7 @@ from allways.utils.scale import (
     strip_hex_prefix,
 )
 from allways.validator.state_store import ValidatorStateStore
+from allways.validator.swap_tracker import SwapTracker
 
 DATA_DECODERS = {
     'u32': decode_u32,
@@ -205,10 +206,15 @@ class ContractEventWatcher:
         contract_address: str,
         metadata_path: Path,
         state_store: ValidatorStateStore,
+        swap_tracker: Optional[SwapTracker] = None,
     ):
         self.substrate = substrate
         self.contract_address = contract_address
         self.state_store = state_store
+        # Late-bindable so the validator can construct the tracker after the
+        # watcher (cycle in current init order). Timeout extension finalize
+        # writes are skipped until this is set.
+        self.swap_tracker = swap_tracker
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
 
@@ -411,6 +417,25 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+        elif name == 'ReservationExtensionFinalized':
+            # Event-driven cache update for the local pending_confirms row —
+            # replaces the polling refresh that the legacy vote-extend flow
+            # needed (commit 1b942e8). Without this write the upstream
+            # purge_expired sweep would delete a still-live entry at its
+            # stale reserved_until.
+            miner = values.get('miner', '')
+            applied_target = values.get('applied_target')
+            if miner and isinstance(applied_target, int):
+                self.state_store.update_reserved_until(miner, applied_target)
+        elif name == 'TimeoutExtensionFinalized':
+            swap_id = values.get('swap_id')
+            applied_target = values.get('applied_target')
+            if (
+                self.swap_tracker is not None
+                and isinstance(swap_id, int)
+                and isinstance(applied_target, int)
+            ):
+                self.swap_tracker.update_timeout_block(swap_id, applied_target)
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state

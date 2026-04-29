@@ -1,6 +1,5 @@
-"""Thin wrappers around the swap-vote extrinsics. confirm_swap and
-timeout_swap return False on any error; extend_swap_timeout propagates so
-the caller can distinguish ``AlreadyVoted`` from real failures."""
+"""Thin wrappers around the swap-vote extrinsics. Both return False on any
+error; the caller decides whether to retry or escalate."""
 
 import bittensor as bt
 
@@ -27,10 +26,3 @@ def timeout_swap(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int)
     except Exception as e:
         bt.logging.error(f'Timeout swap failed for swap {swap_id}: {e}')
         return False
-
-
-def extend_swap_timeout(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int) -> bool:
-    """Vote to extend a FULFILLED swap's deadline. Lets exceptions propagate
-    so the caller can distinguish ``AlreadyVoted`` from real errors."""
-    client.vote_extend_timeout(wallet=wallet, swap_id=swap_id)
-    return True
