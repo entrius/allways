@@ -78,9 +78,7 @@ class OptimisticExtensionWatcher:
         else:
             if observed_confirmations < 1:
                 return False
-            target_block = compute_extension_target(
-                from_chain_id, observed_confirmations, current_block
-            )
+            target_block = compute_extension_target(from_chain_id, observed_confirmations, current_block)
 
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
@@ -116,16 +114,15 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        expected = compute_extension_target(
-            from_chain_id, observed_confirmations, current_block
-        )
+        expected = compute_extension_target(from_chain_id, observed_confirmations, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
         return self._try_call(
             'challenge_extend_reservation',
             lambda: self.contract_client.challenge_extend_reservation(
-                wallet=self.wallet, miner_hotkey=miner_hotkey,
+                wallet=self.wallet,
+                miner_hotkey=miner_hotkey,
             ),
         )
 
@@ -151,7 +148,8 @@ class OptimisticExtensionWatcher:
         return self._try_call(
             'finalize_extend_reservation',
             lambda: self.contract_client.finalize_extend_reservation(
-                wallet=self.wallet, miner_hotkey=miner_hotkey,
+                wallet=self.wallet,
+                miner_hotkey=miner_hotkey,
             ),
         )
 
@@ -179,9 +177,7 @@ class OptimisticExtensionWatcher:
         else:
             if observed_confirmations < 1:
                 return False
-            target_block = compute_extension_target(
-                dest_chain_id, observed_confirmations, current_block
-            )
+            target_block = compute_extension_target(dest_chain_id, observed_confirmations, current_block)
 
         if target_block <= timeout_block:
             return False
@@ -189,7 +185,9 @@ class OptimisticExtensionWatcher:
         return self._try_call(
             'propose_extend_timeout',
             lambda: self.contract_client.propose_extend_timeout(
-                wallet=self.wallet, swap_id=swap_id, target_block=target_block,
+                wallet=self.wallet,
+                swap_id=swap_id,
+                target_block=target_block,
             ),
         )
 
@@ -206,16 +204,15 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        expected = compute_extension_target(
-            dest_chain_id, observed_confirmations, current_block
-        )
+        expected = compute_extension_target(dest_chain_id, observed_confirmations, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
         return self._try_call(
             'challenge_extend_timeout',
             lambda: self.contract_client.challenge_extend_timeout(
-                wallet=self.wallet, swap_id=swap_id,
+                wallet=self.wallet,
+                swap_id=swap_id,
             ),
         )
 
@@ -234,7 +231,8 @@ class OptimisticExtensionWatcher:
         return self._try_call(
             'finalize_extend_timeout',
             lambda: self.contract_client.finalize_extend_timeout(
-                wallet=self.wallet, swap_id=swap_id,
+                wallet=self.wallet,
+                swap_id=swap_id,
             ),
         )
 

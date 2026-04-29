@@ -122,6 +122,7 @@ class TestPendingExtensionDecode:
     @staticmethod
     def _encode_some(submitter_bytes: bytes, target: int, proposed: int) -> bytes:
         import struct
+
         return b'\x01' + submitter_bytes + struct.pack('<II', target, proposed)
 
     def test_decodes_some(self):
@@ -151,37 +152,50 @@ class TestPendingExtensionDecode:
 class TestExtensionSelectorWiring:
     """Selectors and arg schemas are wired up for every new method."""
 
-    @pytest.mark.parametrize('method,expected_selector', [
-        ('propose_extend_reservation', '9c9a8e8e'),
-        ('challenge_extend_reservation', '40b77e21'),
-        ('finalize_extend_reservation', 'baf47953'),
-        ('propose_extend_timeout', '94c87a1d'),
-        ('challenge_extend_timeout', '682cf8eb'),
-        ('finalize_extend_timeout', 'b23b4d80'),
-        ('get_pending_reservation_extension', 'd79424b8'),
-        ('get_pending_timeout_extension', '6bd06828'),
-    ])
+    @pytest.mark.parametrize(
+        'method,expected_selector',
+        [
+            ('propose_extend_reservation', '9c9a8e8e'),
+            ('challenge_extend_reservation', '40b77e21'),
+            ('finalize_extend_reservation', 'baf47953'),
+            ('propose_extend_timeout', '94c87a1d'),
+            ('challenge_extend_timeout', '682cf8eb'),
+            ('finalize_extend_timeout', 'b23b4d80'),
+            ('get_pending_reservation_extension', 'd79424b8'),
+            ('get_pending_timeout_extension', '6bd06828'),
+        ],
+    )
     def test_selector_matches_metadata(self, method, expected_selector):
         from allways.contract_client import CONTRACT_SELECTORS
+
         assert CONTRACT_SELECTORS[method].hex() == expected_selector
 
     def test_propose_reservation_args_encode(self):
         # Spot-check that encode_args runs end-to-end for the three-field
         # propose call (the most complex new signature).
         client = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor())
-        encoded = client.encode_args('propose_extend_reservation', {
-            'miner': bytes(32),
-            'from_tx_hash': bytes(32),
-            'target_block': 100,
-        })
+        encoded = client.encode_args(
+            'propose_extend_reservation',
+            {
+                'miner': bytes(32),
+                'from_tx_hash': bytes(32),
+                'target_block': 100,
+            },
+        )
         # 32 (miner) + 32 (hash) + 4 (u32 LE) = 68 bytes
         assert len(encoded) == 68
         assert encoded[-4:] == (100).to_bytes(4, 'little')
 
     def test_new_error_variants_present(self):
         from allways.contract_client import CONTRACT_ERROR_VARIANTS
+
         names = {CONTRACT_ERROR_VARIANTS[i][0] for i in range(27, 34)}
         assert names == {
-            'ProposalAlreadyPending', 'ChallengeWindowOpen', 'ChallengeWindowClosed',
-            'NoProposal', 'ExtensionTooLong', 'TargetNotForward', 'InvalidTarget',
+            'ProposalAlreadyPending',
+            'ChallengeWindowOpen',
+            'ChallengeWindowClosed',
+            'NoProposal',
+            'ExtensionTooLong',
+            'TargetNotForward',
+            'InvalidTarget',
         }

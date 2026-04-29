@@ -7,13 +7,9 @@ silent) given a specific input.
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from allways.classes import PendingExtension
-from allways.constants import EXTENSION_BUCKET_BLOCKS
 from allways.contract_client import ContractError
 from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
-
 
 OUR_HOTKEY = '5Our000000000000000000000000000000000000000000'
 OTHER_HOTKEY = '5Other00000000000000000000000000000000000000000'
@@ -54,9 +50,13 @@ class TestMaybeProposeReservation:
         # current=1000, reserved_until=1050 (< 1090) → propose fires with target=1090.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1050,
-            observed_confirmations=0, extension_count=0,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1050,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is True
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
@@ -68,9 +68,13 @@ class TestMaybeProposeReservation:
         # BTC at 1/3 confs → remaining=2, seconds=1500, blocks=125 → bucket(150).
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100,
-            observed_confirmations=1, extension_count=1,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1100,
+            observed_confirmations=1,
+            extension_count=1,
         )
         assert result is True
         assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1150
@@ -79,9 +83,13 @@ class TestMaybeProposeReservation:
         # Tier 1 demands ≥1 confirmation — mempool-only tx is not enough.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100,
-            observed_confirmations=0, extension_count=1,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1100,
+            observed_confirmations=0,
+            extension_count=1,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -90,9 +98,13 @@ class TestMaybeProposeReservation:
         # extension_count=MAX → contract would reject; refuse locally.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100,
-            observed_confirmations=1, extension_count=2,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1100,
+            observed_confirmations=1,
+            extension_count=2,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -100,9 +112,13 @@ class TestMaybeProposeReservation:
     def test_skips_when_pending_already_exists(self):
         w = make_watcher(pending_reservation=PendingExtension(OTHER_HOTKEY, 1180, 990))
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100,
-            observed_confirmations=0, extension_count=0,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1100,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -112,9 +128,13 @@ class TestMaybeProposeReservation:
         # past 1090, no need to propose.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1100,
-            observed_confirmations=0, extension_count=0,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1100,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -125,9 +145,13 @@ class TestMaybeProposeReservation:
             propose_raises=ContractError('contract reverted: ProposalAlreadyPending'),
         )
         result = w.maybe_propose_reservation(
-            miner_hotkey=MINER, from_chain_id='btc', from_tx_hash=bytes(32),
-            current_block=1000, reserved_until=1050,
-            observed_confirmations=0, extension_count=0,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1050,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is False  # rejection means we didn't successfully propose
 
@@ -140,8 +164,10 @@ class TestMaybeChallengeReservation:
             pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
         result = w.maybe_challenge_reservation(
-            miner_hotkey=MINER, from_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is True
         w.contract_client.challenge_extend_reservation.assert_called_once()
@@ -153,8 +179,10 @@ class TestMaybeChallengeReservation:
             pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=995),
         )
         result = w.maybe_challenge_reservation(
-            miner_hotkey=MINER, from_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -162,8 +190,10 @@ class TestMaybeChallengeReservation:
     def test_skips_when_no_pending(self):
         w = make_watcher(pending_reservation=None)
         result = w.maybe_challenge_reservation(
-            miner_hotkey=MINER, from_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -174,8 +204,10 @@ class TestMaybeChallengeReservation:
             pending_reservation=PendingExtension(OUR_HOTKEY, target_block=2000, proposed_at=995),
         )
         result = w.maybe_challenge_reservation(
-            miner_hotkey=MINER, from_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -188,7 +220,9 @@ class TestMaybeFinalizeReservation:
         )
         # window=8, proposed_at=992 → finalize-eligible at block 1000.
         result = w.maybe_finalize_reservation(
-            miner_hotkey=MINER, current_block=1000, challenge_window_blocks=8,
+            miner_hotkey=MINER,
+            current_block=1000,
+            challenge_window_blocks=8,
         )
         assert result is True
         w.contract_client.finalize_extend_reservation.assert_called_once()
@@ -199,7 +233,9 @@ class TestMaybeFinalizeReservation:
         )
         # 997 + 8 = 1005, current=1000 → too early.
         result = w.maybe_finalize_reservation(
-            miner_hotkey=MINER, current_block=1000, challenge_window_blocks=8,
+            miner_hotkey=MINER,
+            current_block=1000,
+            challenge_window_blocks=8,
         )
         assert result is False
         w.contract_client.finalize_extend_reservation.assert_not_called()
@@ -207,7 +243,9 @@ class TestMaybeFinalizeReservation:
     def test_skips_when_no_pending(self):
         w = make_watcher(pending_reservation=None)
         result = w.maybe_finalize_reservation(
-            miner_hotkey=MINER, current_block=1000, challenge_window_blocks=8,
+            miner_hotkey=MINER,
+            current_block=1000,
+            challenge_window_blocks=8,
         )
         assert result is False
         w.contract_client.finalize_extend_reservation.assert_not_called()
@@ -222,9 +260,12 @@ class TestMaybeProposeTimeout:
     def test_tier0_proposes_on_visibility(self):
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
-            swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1050,
-            observed_confirmations=0, extension_count=0,
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1050,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is True
         kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
@@ -234,27 +275,36 @@ class TestMaybeProposeTimeout:
     def test_tier1_requires_confirmations(self):
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
-            swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1100,
-            observed_confirmations=0, extension_count=1,
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1100,
+            observed_confirmations=0,
+            extension_count=1,
         )
         assert result is False
 
     def test_skips_when_at_cap(self):
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
-            swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1100,
-            observed_confirmations=1, extension_count=2,
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1100,
+            observed_confirmations=1,
+            extension_count=2,
         )
         assert result is False
 
     def test_skips_when_pending(self):
         w = make_watcher(pending_timeout=PendingExtension(OTHER_HOTKEY, 1180, 990))
         result = w.maybe_propose_timeout(
-            swap_id=42, dest_chain_id='btc',
-            current_block=1000, timeout_block=1050,
-            observed_confirmations=0, extension_count=0,
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1050,
+            observed_confirmations=0,
+            extension_count=0,
         )
         assert result is False
 
@@ -265,8 +315,10 @@ class TestMaybeChallengeTimeout:
             pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
         result = w.maybe_challenge_timeout(
-            swap_id=42, dest_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            swap_id=42,
+            dest_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is True
 
@@ -275,8 +327,10 @@ class TestMaybeChallengeTimeout:
             pending_timeout=PendingExtension(OUR_HOTKEY, target_block=2000, proposed_at=995),
         )
         result = w.maybe_challenge_timeout(
-            swap_id=42, dest_chain_id='btc',
-            observed_confirmations=1, current_block=1000,
+            swap_id=42,
+            dest_chain_id='btc',
+            observed_confirmations=1,
+            current_block=1000,
         )
         assert result is False
 
@@ -287,7 +341,9 @@ class TestMaybeFinalizeTimeout:
             pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=992),
         )
         result = w.maybe_finalize_timeout(
-            swap_id=42, current_block=1000, challenge_window_blocks=8,
+            swap_id=42,
+            current_block=1000,
+            challenge_window_blocks=8,
         )
         assert result is True
 
@@ -296,6 +352,8 @@ class TestMaybeFinalizeTimeout:
             pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=997),
         )
         result = w.maybe_finalize_timeout(
-            swap_id=42, current_block=1000, challenge_window_blocks=8,
+            swap_id=42,
+            current_block=1000,
+            challenge_window_blocks=8,
         )
         assert result is False

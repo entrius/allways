@@ -430,11 +430,7 @@ class ContractEventWatcher:
         elif name == 'TimeoutExtensionFinalized':
             swap_id = values.get('swap_id')
             applied_target = values.get('applied_target')
-            if (
-                self.swap_tracker is not None
-                and isinstance(swap_id, int)
-                and isinstance(applied_target, int)
-            ):
+            if self.swap_tracker is not None and isinstance(swap_id, int) and isinstance(applied_target, int):
                 self.swap_tracker.update_timeout_block(swap_id, applied_target)
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
