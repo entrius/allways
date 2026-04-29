@@ -473,7 +473,12 @@ def resolve_source_tx_block(
         console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
         return int(tx_info.block_number)
 
-    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
+    # In lightweight mode there is no local node — the lookup goes through a
+    # remote API (e.g. Blockstream for BTC), so don't claim "your local node".
+    source = (
+        'via lightweight wallet lookup' if getattr(provider, 'mode', None) == 'lightweight' else 'on your local node'
+    )
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks {source}.[/yellow]')
     console.print(
         '[dim]  Validators will scan too; if they reject, retry with: '
         '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
