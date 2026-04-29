@@ -149,22 +149,6 @@ pub struct MinerReserved {
     pub reserved_until: u32,
 }
 
-/// Event emitted when a miner reservation is extended (BTC confirmation wait)
-#[ink::event]
-pub struct ReservationExtended {
-    #[ink(topic)]
-    pub miner: AccountId,
-    pub reserved_until: u32,
-}
-
-/// Event emitted when a swap timeout is extended (dest tx confirmation wait)
-#[ink::event]
-pub struct SwapTimeoutExtended {
-    #[ink(topic)]
-    pub swap_id: u64,
-    pub new_timeout_block: u32,
-}
-
 /// Event emitted when a miner reservation is cancelled
 #[ink::event]
 pub struct ReservationCancelled {

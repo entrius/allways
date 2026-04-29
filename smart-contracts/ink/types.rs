@@ -21,7 +21,6 @@ pub enum SwapStatus {
 pub enum VoteType {
     Confirm = 0,
     Timeout = 1,
-    ExtendTimeout = 2,
 }
 
 /// Confirmed reservation for a miner after validator quorum.
