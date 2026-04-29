@@ -1,8 +1,9 @@
 """probe_pending_reservation: reconcile pending_swap.json with on-chain state.
 
-Pins the five-branch decision the helper makes so the UX bug it fixes
-(stale local file shown as ACTIVE because miner was re-reserved by another
-user) doesn't regress.
+Pins the six-branch decision the helper makes so the UX bugs it fixes don't
+regress: stale local file shown as ACTIVE because the miner was re-reserved
+by another user, and stale local file shown as ACTIVE because the contract
+leaves expired rows in the reservation map until lazy clear.
 """
 
 from unittest.mock import MagicMock
@@ -59,6 +60,11 @@ def make_swap(**overrides) -> Swap:
     return Swap(**base)
 
 
+# Default current block sits below every ``reserved_until`` value used here,
+# so the past-block check stays inert in tests that aren't exercising it.
+CURRENT_BLOCK = 1_000_000
+
+
 def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None, ttl=4032):
     """Build a contract-client double whose only behavior is what the probe touches."""
     client = MagicMock()
@@ -77,7 +83,7 @@ def test_our_swap_when_active_swaps_match_user_addresses():
     swap = make_swap(user_from_address=state.user_from_address, user_to_address=state.receive_address)
     client = make_client(active_swaps=[swap])
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'our_swap'
     assert result.swap is swap
@@ -89,7 +95,7 @@ def test_active_swap_for_different_user_does_not_match():
     other = make_swap(user_from_address='tb1qsomeoneelse', user_to_address='5OtherHk')
     client = make_client(active_swaps=[other])
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'expired'
 
@@ -98,7 +104,22 @@ def test_expired_when_no_swap_and_no_reservation():
     state = make_state()
     client = make_client()
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'expired'
+
+
+def test_expired_when_reserved_until_is_in_the_past():
+    """Contract leaves expired rows in the map (lazy clear). A non-zero stale
+    row whose reserved_until is below current_block must read as ``expired``,
+    not ``ours_active`` with ~0 blocks left."""
+    state = make_state(reserved_until_block=1_000_100)
+    client = make_client(
+        reserved_until=1_000_100,
+        reservation_data=(state.tao_amount, state.from_amount, state.to_amount),
+    )
+
+    result = probe_pending_reservation(client, state, current_block=1_000_101)
 
     assert result.kind == 'expired'
 
@@ -110,7 +131,7 @@ def test_replaced_when_reservation_amounts_differ():
         reservation_data=(state.tao_amount + 1, state.from_amount, state.to_amount),
     )
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'replaced'
 
@@ -124,7 +145,7 @@ def test_replaced_when_reserved_until_is_more_than_ttl_past_saved():
         ttl=4032,
     )
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'replaced'
 
@@ -138,7 +159,7 @@ def test_ours_active_when_amounts_match_and_within_ttl():
         ttl=4032,
     )
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'ours_active'
     assert result.reserved_until == 1_000_100 + 4031
@@ -151,7 +172,7 @@ def test_ours_active_when_unchanged():
         reservation_data=(state.tao_amount, state.from_amount, state.to_amount),
     )
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'ours_active'
 
@@ -162,7 +183,7 @@ def test_skips_active_swap_scan_when_miner_has_no_active_swap():
     client = make_client()
     client.get_miner_has_active_swap.return_value = False
 
-    probe_pending_reservation(client, state)
+    probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     client.get_miner_active_swaps.assert_not_called()
 
@@ -173,7 +194,7 @@ def test_rpc_error_short_circuits_when_active_swaps_call_fails():
     client.get_miner_has_active_swap.return_value = True
     client.get_miner_active_swaps.side_effect = ContractError('rpc down')
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result == ReservationStatus(kind='rpc_error')
 
@@ -183,6 +204,6 @@ def test_rpc_error_when_reservation_read_fails():
     client = make_client()
     client.get_miner_reserved_until.side_effect = ContractError('rpc down')
 
-    result = probe_pending_reservation(client, state)
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'rpc_error'

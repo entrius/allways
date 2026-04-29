@@ -128,7 +128,10 @@ def sign_and_broadcast_confirm(
     )
 
     if info.accepted == 0 and info.headline:
-        console.print(f'\n[red]{info.headline}[/red]')
+        # tx_not_found is almost always propagation lag, not a real failure —
+        # render it in yellow so it doesn't scan as "your swap broke".
+        color = 'yellow' if info.category == 'tx_not_found' else 'red'
+        console.print(f'\n[{color}]{info.headline}[/{color}]')
 
     return info.accepted, info.queued, info
 
@@ -455,7 +458,14 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
     return None
 
 
-def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_address: str = None):
+def send_btc(
+    chain_providers,
+    config,
+    to_address: str,
+    amount_sat: int,
+    from_address: str = None,
+    fee_rate_override: Optional[int] = None,
+):
     """Send BTC, retry on failure, fall back to manual tx-hash entry.
 
     In lightweight mode there is no Bitcoin Core fallback — both paths route
@@ -470,7 +480,9 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
     def attempt_send():
         if not is_local and hasattr(provider, 'send_amount_lightweight'):
             console.print('[dim]Sending BTC via lightweight wallet...[/dim]')
-            result = provider.send_amount_lightweight(to_address, amount_sat, from_address=from_address)
+            result = provider.send_amount_lightweight(
+                to_address, amount_sat, from_address=from_address, fee_rate_override=fee_rate_override
+            )
             if result:
                 return result
             if is_lightweight:
@@ -482,7 +494,7 @@ def send_btc(chain_providers, config, to_address: str, amount_sat: int, from_add
     for attempt in range(max_retries + 1):
         result = attempt_send()
         if result:
-            console.print(f'[green]BTC sent (tx: {result[0][:16]}...)[/green]')
+            console.print(f'[green]BTC sent (tx: {result[0]})[/green]')
             return result
 
         # Drain async log output so the reason lands above the Retry prompt
@@ -537,6 +549,18 @@ def swap_group():
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
+@click.option(
+    '--btc-fee-rate',
+    'btc_fee_rate_opt',
+    type=click.IntRange(min=1),
+    default=None,
+    metavar='SAT_PER_VB',
+    help=(
+        'Fee rate for the BTC source tx, in satoshis per virtual byte (sat/vB). '
+        'Higher = faster confirmation. Typical mainnet values: 5-20. Default '
+        'auto-estimates from the mempool. Lightweight wallet only.'
+    ),
+)
 def swap_now_command(
     from_chain_opt: Optional[str],
     to_chain_opt: Optional[str],
@@ -546,6 +570,7 @@ def swap_now_command(
     from_tx_hash_opt: Optional[str],
     auto_select: bool,
     skip_confirm: bool,
+    btc_fee_rate_opt: Optional[int],
 ):
     """Guided interactive swap - step by step.
 
@@ -590,11 +615,12 @@ def swap_now_command(
     # Check for pending reservation
     existing = load_pending_swap()
     if existing:
-        status = probe_pending_reservation(client, existing)
+        current_block = subtensor.get_current_block()
+        status = probe_pending_reservation(client, existing, current_block)
         if status.kind == 'rpc_error':
             console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
         elif status.kind == 'ours_active':
-            remaining = max(0, status.reserved_until - subtensor.get_current_block())
+            remaining = max(0, status.reserved_until - current_block)
             remaining_min = remaining * SECONDS_PER_BLOCK / 60
             console.print(
                 f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
@@ -856,6 +882,25 @@ def swap_now_command(
     # the miner will deliver the destination funds.
     receive_human = from_smallest_unit(user_receives, to_chain)
     fee_human = from_smallest_unit(fee_in_dest, to_chain)
+
+    # Pin the fee rate at summary time so the send path uses the exact rate
+    # the user agreed to — also avoids a second Blockstream round-trip.
+    btc_fee_line = ''
+    pinned_btc_fee_rate: Optional[int] = btc_fee_rate_opt
+    btc_provider = chain_providers.get('btc')
+    if (
+        from_chain == 'btc'
+        and btc_provider is not None
+        and getattr(btc_provider, 'mode', None) == 'lightweight'
+        and hasattr(btc_provider, 'estimate_fee_rate')
+    ):
+        try:
+            pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
+            origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
+            btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
+        except Exception:
+            pass  # display-only; send path will fall back to estimating itself
+
     summary = (
         f'  You Send:     [red]{amount} {src_up}[/red]\n'
         f'    From:       [yellow]{user_from_address}[/yellow]  [dim](your {src_up} address)[/dim]\n'
@@ -864,6 +909,7 @@ def swap_now_command(
         f'    To:         [yellow]{receive_address}[/yellow]  [dim](your {dst_up} address)[/dim]\n'
         f'\n'
         f'  Protocol Fee: {fee_percent:g}% ({fee_human:.8f} {dst_up})\n'
+        f'{btc_fee_line}'
         f'  Rate:         {rate_line}\n'
         f'  Miner:        UID {selected_pair.uid}'
     )
@@ -992,7 +1038,7 @@ def swap_now_command(
                             getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
                             or 'tao_transfer'
                         )
-                    console.print(f'[green]TAO sent (tx: {from_tx_hash[:16]}...)[/green]')
+                    console.print(f'[green]TAO sent (tx: {from_tx_hash})[/green]')
                     mark_pending_swap_tx_sent(from_tx_hash)
                     break
                 except Exception as e:
@@ -1011,6 +1057,7 @@ def swap_now_command(
                 selected_pair.from_address,
                 from_amount,
                 from_address=user_from_address,
+                fee_rate_override=pinned_btc_fee_rate,
             )
             if send_result is None:
                 return
@@ -1041,7 +1088,7 @@ def swap_now_command(
     )
 
     if accepted == 0:
-        console.print('[dim]Resume with: [cyan]alw swap post-tx <tx_hash>[/cyan][/dim]')
+        console.print(f'[dim]Resume with: [cyan]alw swap post-tx {from_tx_hash}[/cyan][/dim]')
         return
 
     all_queued = queued > 0 and queued == accepted

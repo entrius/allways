@@ -3,7 +3,7 @@
 from typing import List, Optional
 
 import bittensor as bt
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor.utils import ss58_encode
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair

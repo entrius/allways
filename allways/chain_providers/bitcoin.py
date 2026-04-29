@@ -410,7 +410,11 @@ class BitcoinProvider(ChainProvider):
             return False
 
     def send_amount_lightweight(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
+        self,
+        to_address: str,
+        amount: int,
+        from_address: Optional[str] = None,
+        fee_rate_override: Optional[int] = None,
     ) -> Optional[Tuple[str, int]]:
         """Send BTC via embit + Blockstream API (no full node required). Amount in satoshis.
 
@@ -420,6 +424,8 @@ class BitcoinProvider(ChainProvider):
         If from_address is provided (e.g. the miner's committed address), the
         matching address type is derived directly from the WIF key. Otherwise,
         all types are probed to find where UTXOs exist.
+
+        ``fee_rate_override`` (sat/vB) skips estimation and the network floor.
 
         Does NOT work on regtest (no public APIs). Returns (tx_hash, 0) or None.
         """
@@ -459,7 +465,7 @@ class BitcoinProvider(ChainProvider):
             is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            coin_selection = self.select_utxos(utxos, amount, is_segwit)
+            coin_selection = self.select_utxos(utxos, amount, is_segwit, fee_rate_override=fee_rate_override)
             if coin_selection is None:
                 return None
             selected, total_in, fee = coin_selection
@@ -572,9 +578,9 @@ class BitcoinProvider(ChainProvider):
         self._send_error('No UTXOs found for any address type')
         return None
 
-    def select_utxos(self, utxos, amount: int, is_segwit: bool):
+    def select_utxos(self, utxos, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None):
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
-        fee_rate = self.estimate_fee_rate()
+        fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
         selected = []
         total_in = 0
@@ -602,27 +608,32 @@ class BitcoinProvider(ChainProvider):
             return None
         return resp.text.strip()
 
-    def estimate_fee_rate(self) -> int:
-        """Estimate fee rate (sat/vbyte) from Blockstream/mempool. Falls back to 5 sat/vb.
+    def estimate_fee_rate(self, override: Optional[int] = None) -> int:
+        """Estimate fee rate (sat/vbyte) from Blockstream.
 
-        Targets 2-3 block confirmation (~20-30 min) with a floor of 2 sat/vB
-        to avoid stuck transactions during low-fee periods.
+        Targets 2-3 block confirmation (~20-30 min) with a small safety pad on
+        top, so a swap source tx reliably clears within the reservation
+        without overpaying for next-block urgency. ``override`` (sat/vB) skips
+        estimation, floor, and multiplier — caller is taking explicit
+        responsibility for the rate (e.g. CPFP / manual bump).
         """
-        from allways.constants import BTC_MIN_FEE_RATE
+        if override is not None:
+            return max(1, override)
 
-        min_fee_rate = BTC_MIN_FEE_RATE
+        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
+
         try:
             url = f'{self.blockstream_api_url()}/fee-estimates'
             resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
-            # Target 2-3 blocks (~20-30 min confirmation)
-            for target in ('2', '3', '4'):
+            for target in ('2', '3'):
                 if target in estimates:
-                    return max(min_fee_rate, int(estimates[target]))
-            return max(min_fee_rate, 5)
+                    padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
+                    return max(BTC_MIN_FEE_RATE, padded)
         except Exception:
-            return max(min_fee_rate, 5)
+            pass
+        return BTC_MIN_FEE_RATE
 
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None

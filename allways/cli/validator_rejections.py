@@ -217,10 +217,17 @@ _RULES: list[_Rule] = [
         'tx_not_found',
         'source transaction not found',
         False,
+        # The same validator path that rejects here will queue the tx with
+        # `0/N confirmations` once it propagates, so this is almost always
+        # just a freshly broadcast tx that hasn't reached validator nodes
+        # yet. Frame it as a wait, not a hard error — a stern "could not
+        # find" message has scared users into thinking the swap failed.
         lambda ctx: (
-            'Validators could not find your source transaction (or sender/amount mismatched). '
-            'It may need more time to propagate, or the hash/sender may be off. Retry in a few blocks; '
-            'if you have it, pass [cyan]--block <N>[/cyan].'
+            'Source tx not yet visible to validators — usually just propagation lag. '
+            'Retry in a few seconds with the resume hint below; validators will queue and '
+            'auto-initiate once the tx lands.\n'
+            '[dim]If it keeps rejecting, the hash or sender may be off — '
+            'pass [cyan]--block <N>[/cyan] if you have it.[/dim]'
         ),
     ),
     (

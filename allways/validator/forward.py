@@ -36,8 +36,6 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step. Phase order matters — each phase may depend
     on state mutated by the previous one."""
-    bt.logging.info(f'Forward step {self.step}')
-
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
 
@@ -81,7 +79,7 @@ def clear_provider_caches(self: Validator) -> None:
 
 def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
-    from substrateinterface import Keypair
+    from bittensor import Keypair
 
     items = self.state_store.get_all()
     # Drop per-entry receipts whose pending_confirm has been removed
@@ -374,6 +372,8 @@ async def confirm_miner_fulfillments(
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+            # On vote failure, voting.confirm_swap already logs the error;
+            # the entry stays in tracker and retries next step.
     return uncertain
 
 
@@ -461,3 +461,4 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
         if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
+        # On vote failure, voting.timeout_swap already logs the error.

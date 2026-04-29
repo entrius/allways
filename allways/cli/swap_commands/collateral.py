@@ -49,7 +49,8 @@ def collateral_deposit(amount: float | None, yes: bool):
     console.print('\n[bold]Depositing Collateral[/bold]\n')
     console.print(f'  Amount:  [green]{amount} TAO[/green] ({amount_rao} rao)')
     console.print(f'  Wallet:  {wallet.name}')
-    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}')
+    console.print('  [dim]Funds are debited from the hotkey balance (not the coldkey).[/dim]\n')
 
     try:
         max_collateral_rao = client.get_max_collateral()

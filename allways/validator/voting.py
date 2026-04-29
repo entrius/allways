@@ -7,8 +7,7 @@ from allways.contract_client import AllwaysContractClient
 
 
 def confirm_swap(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int) -> bool:
-    """Vote to confirm a FULFILLED swap as COMPLETED."""
-    bt.logging.info(f'Confirming swap {swap_id}')
+    """Vote to confirm a FULFILLED swap as COMPLETED. Caller logs the outcome."""
     try:
         client.confirm_swap(wallet=wallet, swap_id=swap_id)
         return True
@@ -18,8 +17,7 @@ def confirm_swap(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int)
 
 
 def timeout_swap(client: AllwaysContractClient, wallet: bt.Wallet, swap_id: int) -> bool:
-    """Vote to time out a swap past its deadline."""
-    bt.logging.info(f'Timing out swap {swap_id}')
+    """Vote to time out a swap past its deadline. Caller logs the outcome."""
     try:
         client.timeout_swap(wallet=wallet, swap_id=swap_id)
         return True
