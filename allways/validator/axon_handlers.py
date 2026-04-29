@@ -12,8 +12,8 @@ to inject the validator context.
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
+from bittensor import Keypair
 from Crypto.Hash import keccak
-from substrateinterface import Keypair
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment

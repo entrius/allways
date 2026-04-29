@@ -24,7 +24,7 @@ if os.environ.get('_ALW_COMPLETE'):
     from unittest.mock import MagicMock as _MagicMock
 
     _mock = _MagicMock()
-    for _pkg in ['bittensor', 'substrateinterface']:
+    for _pkg in ['bittensor', 'async_substrate_interface']:
         for _suffix in [
             '',
             '.core',

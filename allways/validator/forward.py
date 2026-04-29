@@ -73,7 +73,7 @@ def clear_provider_caches(self: Validator) -> None:
 
 def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
-    from substrateinterface import Keypair
+    from bittensor import Keypair
 
     items = self.state_store.get_all()
     # Drop per-entry receipts whose pending_confirm has been removed
@@ -240,7 +240,7 @@ def try_extend_reservation(
     reason: str = '',
 ) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
-    from substrateinterface import Keypair
+    from bittensor import Keypair
 
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
