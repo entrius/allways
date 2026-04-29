@@ -617,10 +617,11 @@ class BitcoinProvider(ChainProvider):
     def estimate_fee_rate(self, override: Optional[int] = None) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream.
 
-        Default targets next-block confirmation and applies a safety multiplier
-        on top — we'd rather overpay a few sats than have a source tx stuck.
-        ``override`` (sat/vB) skips estimation, floor, and multiplier — caller
-        is taking explicit responsibility for the rate (e.g. CPFP / manual bump).
+        Targets 2-3 block confirmation (~20-30 min) with a small safety pad on
+        top, so a swap source tx reliably clears within the reservation
+        without overpaying for next-block urgency. ``override`` (sat/vB) skips
+        estimation, floor, and multiplier — caller is taking explicit
+        responsibility for the rate (e.g. CPFP / manual bump).
         """
         if override is not None:
             return max(1, override)
@@ -633,8 +634,7 @@ class BitcoinProvider(ChainProvider):
             resp = self.http.get(url, timeout=10)
             resp.raise_for_status()
             estimates = resp.json()
-            # Target next-block first; fall back to 2-block before the floor.
-            for target in ('1', '2'):
+            for target in ('2', '3'):
                 if target in estimates:
                     padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
                     return max(floor, padded)

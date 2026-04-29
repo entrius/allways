@@ -551,7 +551,12 @@ def swap_group():
     'btc_fee_rate_opt',
     type=click.IntRange(min=1),
     default=None,
-    help='Override BTC fee rate (sat/vB). Lightweight wallet only.',
+    metavar='SAT_PER_VB',
+    help=(
+        'Fee rate for the BTC source tx, in satoshis per virtual byte (sat/vB). '
+        'Higher = faster confirmation. Typical mainnet values: 5-20. Default '
+        'auto-estimates from the mempool. Lightweight wallet only.'
+    ),
 )
 def swap_now_command(
     from_chain_opt: Optional[str],
@@ -884,8 +889,8 @@ def swap_now_command(
     ):
         try:
             chosen_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
-            origin = 'override' if btc_fee_rate_opt is not None else 'estimate'
-            btc_fee_line = f'  Network Fee:  ~{chosen_fee_rate} sat/vB ({origin})\n'
+            origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
+            btc_fee_line = f'  BTC Fee Rate: ~{chosen_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
         except Exception:
             pass  # display-only; send path will surface real failures
 
