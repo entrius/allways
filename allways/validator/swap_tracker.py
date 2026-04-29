@@ -25,6 +25,10 @@ NULL_SWAP_RETRY_LIMIT = 3
 MAX_INIT_GAP = 20
 
 
+def _swap_label(swap: Swap) -> str:
+    return f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
+
+
 class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
@@ -139,9 +143,7 @@ class SwapTracker:
                 if swap.status in ACTIVE_STATUSES:
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
-
-        if new_ids:
-            bt.logging.debug(f'SwapTracker: discovered {len(fresh)} active from {len(new_ids)} new IDs')
+                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -170,6 +172,9 @@ class SwapTracker:
                 if self.bump_null_retry(sid):
                     resolved_ids.append(sid)
             elif result.status in ACTIVE_STATUSES:
+                prev = self.active.get(sid)
+                if prev is not None and prev.status != result.status:
+                    bt.logging.info(f'Swap {sid} [{_swap_label(result)}]: {prev.status.name} -> {result.status.name}')
                 self.active[sid] = result
                 self.null_retry_count.pop(sid, None)
             else:

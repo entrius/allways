@@ -127,7 +127,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
-            try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(self, item, current_block, swap_label, miner_short, reason='provider unreachable')
             continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
@@ -142,7 +142,14 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                     f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... '
                     f'not found (attempt {attempts}/{PENDING_CONFIRM_NULL_RETRY_LIMIT}), retrying'
                 )
-                try_extend_reservation(self, item, current_block, swap_label, miner_short)
+                try_extend_reservation(
+                    self,
+                    item,
+                    current_block,
+                    swap_label,
+                    miner_short,
+                    reason=f'tx_not_found {attempts}/{PENDING_CONFIRM_NULL_RETRY_LIMIT}',
+                )
                 continue
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
@@ -161,7 +168,14 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         )
 
         if not tx_info.confirmed:
-            try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(
+                self,
+                item,
+                current_block,
+                swap_label,
+                miner_short,
+                reason=f'unconfirmed {tx_info.confirmations}/{min_confs}',
+            )
             continue
 
         # Only drop the queued entry once the vote is accepted (or the contract
@@ -225,6 +239,7 @@ def try_extend_reservation(
     current_block: int,
     swap_label: str,
     miner_short: str,
+    reason: str = '',
 ) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
     from substrateinterface import Keypair
@@ -253,9 +268,10 @@ def try_extend_reservation(
         # otherwise delete this row at the original TTL while the reservation
         # is still alive on-chain.
         refresh_cached_reserved_until(self, item)
+        reason_str = f' [{reason}]' if reason else ''
         bt.logging.info(
             f'PendingConfirm [{swap_label} {miner_short}]: '
-            f'voted to extend reservation ({reserved_until - current_block} blocks remaining)'
+            f'voted to extend reservation{reason_str} ({reserved_until - current_block} blocks remaining)'
         )
     except ContractError as e:
         if 'AlreadyVoted' in str(e):
@@ -361,6 +377,8 @@ async def confirm_miner_fulfillments(
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+            else:
+                bt.logging.info(f'Swap {swap.id}: confirm vote did not land, retrying next step')
     return uncertain
 
 
@@ -431,3 +449,5 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
         if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
+        else:
+            bt.logging.debug(f'Swap {swap.id}: timeout vote did not land, retrying next step')
