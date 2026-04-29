@@ -23,11 +23,10 @@ RATE_PRECISION = 10**18
 
 # ─── Transaction Fees ────────────────────────────────────
 MIN_BALANCE_FOR_TX_RAO = 250_000_000  # 0.25 TAO minimum for extrinsic fees
-# BTC fee floor (sat/vB). Mainnet floor catches the case where the upstream
-# estimator returns nonsense low; testnet rarely has fee pressure so 2 keeps
-# regtest/testnet UX cheap.
-BTC_MIN_FEE_RATE_TESTNET = 2
-BTC_MIN_FEE_RATE_MAINNET = 5
+# BTC fee floor (sat/vB). Catches the case where the upstream estimator
+# returns nonsense low. 5 is cheap enough to barely register on mainnet
+# and still clears testnet quickly, so a single floor covers both.
+BTC_MIN_FEE_RATE = 5
 # Modest pad on estimated fee rates (not on explicit user overrides) against
 # mempool conditions drifting between estimate and broadcast. Goal is
 # 'reliably confirms within ~30 min', not 'next block at any cost'.

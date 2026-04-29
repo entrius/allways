@@ -608,12 +608,6 @@ class BitcoinProvider(ChainProvider):
             return None
         return resp.text.strip()
 
-    def min_fee_rate(self) -> int:
-        """Network-aware fee floor (sat/vB). See constants for rationale."""
-        from allways.constants import BTC_MIN_FEE_RATE_MAINNET, BTC_MIN_FEE_RATE_TESTNET
-
-        return BTC_MIN_FEE_RATE_MAINNET if self.network == 'mainnet' else BTC_MIN_FEE_RATE_TESTNET
-
     def estimate_fee_rate(self, override: Optional[int] = None) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream.
 
@@ -626,9 +620,8 @@ class BitcoinProvider(ChainProvider):
         if override is not None:
             return max(1, override)
 
-        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER
+        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
 
-        floor = self.min_fee_rate()
         try:
             url = f'{self.blockstream_api_url()}/fee-estimates'
             resp = self.http.get(url, timeout=10)
@@ -637,10 +630,10 @@ class BitcoinProvider(ChainProvider):
             for target in ('2', '3'):
                 if target in estimates:
                     padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
-                    return max(floor, padded)
-            return max(floor, 5)
+                    return max(BTC_MIN_FEE_RATE, padded)
         except Exception:
-            return max(floor, 5)
+            pass
+        return BTC_MIN_FEE_RATE
 
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None
