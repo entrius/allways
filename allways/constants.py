@@ -23,7 +23,11 @@ RATE_PRECISION = 10**18
 
 # ─── Transaction Fees ────────────────────────────────────
 MIN_BALANCE_FOR_TX_RAO = 250_000_000  # 0.25 TAO minimum for extrinsic fees
-BTC_MIN_FEE_RATE = 2  # sat/vB — floor to avoid stuck txs
+# BTC fee floor (sat/vB). Mainnet floor is higher because the mempool
+# regularly evicts <5 sat/vB during congestion; testnet rarely has fee
+# pressure so 2 keeps regtest/testnet UX cheap.
+BTC_MIN_FEE_RATE_TESTNET = 2
+BTC_MIN_FEE_RATE_MAINNET = 5
 
 # ─── Miner ───────────────────────────────────────────────
 # Cushion subtracted from each swap's timeout before the miner agrees to
