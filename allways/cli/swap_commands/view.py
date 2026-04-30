@@ -709,9 +709,7 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0, client=None):
 
 def display_swap(swap, chain_info=True, current_block: int = 0, client=None):
     """Render a single swap with timeline view."""
-    console.print(
-        build_swap_text(swap, chain_info=chain_info, current_block=current_block, client=client)
-    )
+    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block, client=client))
 
 
 @view_group.command('swap')
