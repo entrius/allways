@@ -11,7 +11,7 @@ import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from substrateinterface.utils.ss58 import ss58_decode
+from bittensor.utils import ss58_decode
 
 from allways.validator.event_watcher import (
     ContractEventWatcher,

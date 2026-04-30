@@ -3,7 +3,7 @@
 from typing import List, Optional
 
 import bittensor as bt
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor.utils import ss58_encode
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
@@ -117,13 +117,20 @@ def read_miner_commitment(
     block: Optional[int] = None,
     metagraph: Optional['bt.Metagraph'] = None,
 ) -> Optional[MinerPair]:
-    """Read a single miner's commitment, optionally at a specific block."""
-    if metagraph is None:
-        metagraph = subtensor.metagraph(netuid)
-    hotkey_to_uid = {metagraph.hotkeys[uid]: uid for uid in range(metagraph.n.item())}
-    uid = hotkey_to_uid.get(hotkey)
-    if uid is None:
-        return None
+    """Read a single miner's commitment, optionally at a specific block.
+
+    When ``metagraph`` is None the uid lookup is skipped (uid defaults to 0).
+    Callers that need the uid — or want to avoid returning commitments for
+    unregistered hotkeys — must pass their cached metagraph. Downloading a
+    fresh metagraph here on every call was a 30s+ RPC on testnet finney.
+    """
+    uid = 0
+    if metagraph is not None:
+        hotkey_to_uid = {metagraph.hotkeys[u]: u for u in range(metagraph.n.item())}
+        resolved = hotkey_to_uid.get(hotkey)
+        if resolved is None:
+            return None
+        uid = resolved
     commitment = get_commitment(subtensor, netuid, hotkey, block=block)
     if commitment:
         return parse_commitment_data(commitment, uid=uid, hotkey=hotkey)

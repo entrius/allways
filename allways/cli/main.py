@@ -24,7 +24,7 @@ if os.environ.get('_ALW_COMPLETE'):
     from unittest.mock import MagicMock as _MagicMock
 
     _mock = _MagicMock()
-    for _pkg in ['bittensor', 'substrateinterface']:
+    for _pkg in ['bittensor', 'async_substrate_interface']:
         for _suffix in [
             '',
             '.core',
@@ -92,10 +92,7 @@ def show_config():
         table.add_column('Value', style='green')
 
         for key, value in config.items():
-            str_val = str(value)
-            if len(str_val) > 25:
-                str_val = str_val[:12] + '...' + str_val[-10:]
-            table.add_row(key, str_val)
+            table.add_row(key, str(value))
 
         console.print(table)
         console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]\n')
@@ -112,14 +109,16 @@ KNOWN_NETWORKS = {
     'local': 'ws://127.0.0.1:9944',
 }
 
+VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address')
+
 
 @config_group.command('set')
-@click.argument('key', type=str)
+@click.argument('key', type=click.Choice(VALID_CONFIG_KEYS, case_sensitive=False))
 @click.argument('value', type=str)
 def config_set(key: str, value: str):
     """Set a configuration value.
 
-    [dim]Common keys:
+    [dim]Valid keys:
         wallet              Wallet name
         hotkey              Hotkey name
         contract-address    Contract address

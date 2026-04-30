@@ -21,13 +21,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "bittensor==10.1.0",
-    "bittensor-cli==9.17.0",
+    "bittensor==10.3.0",
+    "bittensor-cli==9.21.0",
     "bittensor-commit-reveal==0.4.0",
-    "bittensor-wallet==4.0.0",
+    "bittensor-wallet==4.0.1",
     "wandb==0.21.3",
     "python-dotenv==1.2.1",
-    "substrate-interface",
     "requests",
     "bitcoin-message-tool",
     "click",
@@ -44,6 +43,7 @@ alw = "allways.cli.main:main"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.2.0",
     "pytest>=9.0.0",
     "ruff>=0.14.10",
 ]
@@ -58,18 +58,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["allways"]
-
-[tool.black]
-line-length = 120
-skip-string-normalization = true
-target-version = ['py39']
-
-[tool.isort]
-profile = "black"
-line_length = 120
-multi_line_output = 3
-include_trailing_comma = true
-skip_gitignore = true
 
 [tool.ruff]
 line-length = 120

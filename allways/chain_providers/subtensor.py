@@ -3,8 +3,8 @@ from hashlib import blake2b
 from typing import Any, Dict, Optional, Tuple
 
 import bittensor as bt
-from substrateinterface import Keypair
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor import Keypair
+from bittensor.utils import ss58_encode
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition
@@ -166,13 +166,19 @@ class SubtensorProvider(ChainProvider):
             return None
 
     def fetch_matching_tx(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int, block_hint: int = 0
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
         """Scan for a TAO transfer matching recipient + amount.
 
-        If block_hint > 0, checks the hinted block ±3. Otherwise scans the last
-        150 blocks. The ±3 window covers small clock/finality skews between the
-        caller's block_hint and the block the transfer actually landed in.
+        If block_hint > 0, checks the hinted block ±3. Otherwise scans
+        ``max_scan_blocks`` back from current (newest first). The ±3 window
+        covers small clock/finality skews between the caller's hint and the
+        block the transfer actually landed in.
 
         Raises ProviderUnreachableError if subtensor is unreachable.
         """
@@ -184,7 +190,8 @@ class SubtensorProvider(ChainProvider):
         if block_hint > 0:
             blocks_to_check = [block_hint + offset for offset in range(-3, 4) if block_hint + offset >= 0]
         else:
-            blocks_to_check = [current_block - offset for offset in range(150) if current_block - offset >= 0]
+            window = max(1, int(max_scan_blocks))
+            blocks_to_check = [current_block - offset for offset in range(window) if current_block - offset >= 0]
 
         try:
             for block_num in blocks_to_check:

@@ -28,9 +28,13 @@ mod allways_swap_manager {
         min_swap_amount: Balance,
         max_swap_amount: Balance,
         consensus_threshold_percent: u8,
-        validator_count: u32,
         halted: bool,
-        validators: Mapping<AccountId, bool>,
+        // Whitelisted validator set. A Vec (not Mapping) because we need to
+        // enumerate for `get_validators()` and Ink! mappings aren't iterable.
+        // N is bounded to a handful of validators in practice, so the O(N)
+        // `contains` in ensure_validator costs nothing. Replaces the earlier
+        // Mapping<AccountId,bool> + separate validator_count counter.
+        validators: Vec<AccountId>,
 
         // Swap state
         next_swap_id: u64,
@@ -44,10 +48,11 @@ mod allways_swap_manager {
         miner_deactivation_block: Mapping<AccountId, u32>,
 
         // Consensus voting — all vote types use unique request IDs (like swap IDs).
-        // Votes keyed by (request_id, validator) so they never conflict across rounds.
+        // Voters held as a Vec per request so the entire round drops in one op
+        // on quorum/expiry; a per-(request, validator) Mapping leaves trie
+        // entries behind forever because ink! Mappings aren't iterable.
         next_request_id: u64,
-        request_votes: Mapping<(u64, AccountId), bool>,
-        request_vote_count: Mapping<u64, u32>,
+        request_voters: Mapping<u64, Vec<AccountId>>,
         request_created: Mapping<u64, u32>,
         request_hash: Mapping<u64, Hash>,
 
@@ -100,7 +105,7 @@ mod allways_swap_manager {
         }
 
         fn ensure_validator(&self) -> Result<(), Error> {
-            if !self.validators.get(self.env().caller()).unwrap_or(false) {
+            if !self.validators.contains(&self.env().caller()) {
                 return Err(Error::NotValidator);
             }
             Ok(())
@@ -114,11 +119,13 @@ mod allways_swap_manager {
         }
 
         fn get_required_votes(&self) -> u32 {
-            if self.validator_count == 0 {
+            // Validator set is tiny by policy (bounded handful); saturating at
+            // u32::MAX is defensive only. try_from lets clippy see the bound.
+            let count = u32::try_from(self.validators.len()).unwrap_or(u32::MAX);
+            if count == 0 {
                 return 1;
             }
-            let numerator = (self.validator_count)
-                .saturating_mul(self.consensus_threshold_percent as u32);
+            let numerator = count.saturating_mul(self.consensus_threshold_percent as u32);
             let required = numerator.saturating_add(99) / 100;
             core::cmp::max(1, required)
         }
@@ -151,14 +158,15 @@ mod allways_swap_manager {
             id
         }
 
-        /// Record a vote on a request. Returns (vote_count, is_new_vote).
+        /// Record a vote on a request. Returns the new vote count.
         fn record_vote(&mut self, request_id: u64, caller: AccountId) -> Result<u32, Error> {
-            if self.request_votes.get((request_id, caller)).unwrap_or(false) {
+            let mut voters = self.request_voters.get(request_id).unwrap_or_default();
+            if voters.contains(&caller) {
                 return Err(Error::AlreadyVoted);
             }
-            self.request_votes.insert((request_id, caller), &true);
-            let count = self.request_vote_count.get(request_id).unwrap_or(0).saturating_add(1);
-            self.request_vote_count.insert(request_id, &count);
+            voters.push(caller);
+            let count = u32::try_from(voters.len()).unwrap_or(u32::MAX);
+            self.request_voters.insert(request_id, &voters);
             Ok(count)
         }
 
@@ -187,7 +195,7 @@ mod allways_swap_manager {
 
         /// Remove scalar metadata for a completed/expired request.
         fn clear_request_data(&mut self, request_id: u64) {
-            self.request_vote_count.remove(request_id);
+            self.request_voters.remove(request_id);
             self.request_created.remove(request_id);
             self.request_hash.remove(request_id);
         }
@@ -336,9 +344,8 @@ mod allways_swap_manager {
                 min_swap_amount,
                 max_swap_amount,
                 consensus_threshold_percent,
-                validator_count: 0,
                 halted: false,
-                validators: Mapping::default(),
+                validators: Vec::new(),
 
                 next_swap_id: 1,
                 swaps: Mapping::default(),
@@ -350,8 +357,7 @@ mod allways_swap_manager {
                 miner_deactivation_block: Mapping::default(),
 
                 next_request_id: 1,
-                request_votes: Mapping::default(),
-                request_vote_count: Mapping::default(),
+                request_voters: Mapping::default(),
                 request_created: Mapping::default(),
                 request_hash: Mapping::default(),
                 miner_active_request: Mapping::default(),
@@ -1006,10 +1012,11 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn add_validator(&mut self, validator: AccountId) -> Result<(), Error> {
             self.ensure_owner()?;
-            if !self.validators.get(validator).unwrap_or(false) {
-                self.validator_count = self.validator_count.saturating_add(1);
+            // Idempotent: double-add is a no-op rather than an error, matching
+            // the prior Mapping-based behaviour.
+            if !self.validators.contains(&validator) {
+                self.validators.push(validator);
             }
-            self.validators.insert(validator, &true);
             self.env().emit_event(ValidatorUpdated { validator, registered: true });
             Ok(())
         }
@@ -1017,10 +1024,8 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn remove_validator(&mut self, validator: AccountId) -> Result<(), Error> {
             self.ensure_owner()?;
-            if self.validators.get(validator).unwrap_or(false) {
-                self.validator_count = self.validator_count.saturating_sub(1);
-            }
-            self.validators.remove(validator);
+            // Idempotent: removing a non-member is a no-op.
+            self.validators.retain(|v| v != &validator);
             self.env().emit_event(ValidatorUpdated { validator, registered: false });
             Ok(())
         }
@@ -1173,7 +1178,15 @@ mod allways_swap_manager {
 
         #[ink(message)]
         pub fn is_validator(&self, account: AccountId) -> bool {
-            self.validators.get(account).unwrap_or(false)
+            self.validators.contains(&account)
+        }
+
+        /// Returns the full whitelisted validator set. O(N) storage read with N
+        /// bounded by the (small) validator count. Callers wanting just the
+        /// count should prefer `get_validator_count` which skips the clone.
+        #[ink(message)]
+        pub fn get_validators(&self) -> Vec<AccountId> {
+            self.validators.clone()
         }
 
         #[ink(message)]
@@ -1276,7 +1289,7 @@ mod allways_swap_manager {
 
         #[ink(message)]
         pub fn get_validator_count(&self) -> u32 {
-            self.validator_count
+            u32::try_from(self.validators.len()).unwrap_or(u32::MAX)
         }
 
         /// Returns the reservation amounts (tao, from, to) if one exists.
@@ -1296,7 +1309,11 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_pending_reserve_vote_count(&self, miner: AccountId) -> u32 {
             match self.miner_active_request.get((miner, REQ_RESERVE)) {
-                Some(id) => self.request_vote_count.get(id).unwrap_or(0),
+                Some(id) => self
+                    .request_voters
+                    .get(id)
+                    .map(|v| u32::try_from(v.len()).unwrap_or(u32::MAX))
+                    .unwrap_or(0),
                 None => 0,
             }
         }

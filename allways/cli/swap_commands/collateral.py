@@ -49,7 +49,8 @@ def collateral_deposit(amount: float | None, yes: bool):
     console.print('\n[bold]Depositing Collateral[/bold]\n')
     console.print(f'  Amount:  [green]{amount} TAO[/green] ({amount_rao} rao)')
     console.print(f'  Wallet:  {wallet.name}')
-    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}')
+    console.print('  [dim]Funds are debited from the hotkey balance (not the coldkey).[/dim]\n')
 
     try:
         max_collateral_rao = client.get_max_collateral()
@@ -69,8 +70,13 @@ def collateral_deposit(amount: float | None, yes: bool):
         required = amount_rao + MIN_BALANCE_FOR_TX_RAO
         if free_balance < required:
             console.print(
-                f'[red]Insufficient balance. Free: {from_rao(free_balance):.4f} TAO, '
+                f'[red]Insufficient hotkey balance. Free: {from_rao(free_balance):.4f} TAO, '
                 f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+            )
+            console.print('[dim]Collateral is posted from the hotkey, not the coldkey.[/dim]')
+            console.print(
+                f'[dim]Transfer TAO with: btcli wallet transfer --destination {wallet.hotkey.ss58_address} '
+                '--amount <tao>[/dim]'
             )
             return
     except ContractError as e:
@@ -134,7 +140,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         )
 
         if is_active:
-            console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
+            console.print('[red]Cannot withdraw while miner is active. Run `alw miner deactivate` first.[/red]')
             return
 
         if deactivation_block > 0:

@@ -11,7 +11,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.swap_tracker import NULL_SWAP_RETRY_LIMIT, SwapTracker
+from allways.validator.swap_tracker import MAX_INIT_GAP, NULL_SWAP_RETRY_LIMIT, SwapTracker
 
 
 def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500) -> Swap:
@@ -34,7 +34,7 @@ def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500
 
 def make_tracker() -> SwapTracker:
     client = MagicMock()
-    return SwapTracker(client=client, fulfillment_timeout_blocks=30)
+    return SwapTracker(client=client)
 
 
 class TestResolve:
@@ -70,7 +70,7 @@ class TestInitialize:
         tracker = make_tracker()
         tracker.client.get_next_swap_id.return_value = 1  # next_id=1 means no swaps exist
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert tracker.last_scanned_id == 0
         assert tracker.active == {}
@@ -78,46 +78,61 @@ class TestInitialize:
     def test_initialize_picks_up_active_swaps_from_backward_scan(self):
         tracker = make_tracker()
         swap_active = make_swap(swap_id=10)
-        swap_active.initiated_block = 990
         swap_fulfilled = make_swap(swap_id=11)
         swap_fulfilled.status = SwapStatus.FULFILLED
-        swap_fulfilled.initiated_block = 995
 
         tracker.client.get_next_swap_id.return_value = 12
         tracker.client.get_swap.side_effect = lambda sid: {10: swap_active, 11: swap_fulfilled}.get(sid)
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert 10 in tracker.active
         assert 11 in tracker.active
         assert tracker.last_scanned_id == 11
 
-    def test_initialize_stops_at_cutoff_block(self):
-        """Backward scan halts when it reaches a swap older than the cutoff."""
+    def test_initialize_recovers_old_orphaned_active_swap(self):
+        """An ACTIVE swap older than any cold-start time window must be picked
+        up — it is the exact case (validator outage long enough that no one
+        voted timeout) the recovery scan exists for.
+        """
         tracker = make_tracker()
-        stale = make_swap(swap_id=5)
-        stale.initiated_block = 900  # below 1000 - 30 = 970 cutoff
-        active = make_swap(swap_id=6)
-        active.initiated_block = 980
+        ancient = make_swap(swap_id=1)
+        ancient.initiated_block = 100  # arbitrarily old vs current_block
 
-        tracker.client.get_next_swap_id.return_value = 7
-        tracker.client.get_swap.side_effect = lambda sid: {5: stale, 6: active}.get(sid)
+        tracker.client.get_next_swap_id.return_value = 2
+        tracker.client.get_swap.side_effect = lambda sid: {1: ancient}.get(sid)
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
-        assert 5 not in tracker.active
-        assert 6 in tracker.active
+        assert 1 in tracker.active
+        assert tracker.last_scanned_id == 1
+
+    def test_initialize_halts_after_consecutive_pruned_swaps(self):
+        """A long run of pruned (None) swap IDs short-circuits the scan so
+        cold start stays bounded on contracts with millions of resolved swaps.
+        """
+        tracker = make_tracker()
+        recent = make_swap(swap_id=1000)
+        # swaps 1..999 all return None (pruned). The active swap at 1000 is
+        # found, then the scan walks 999..(1000 - MAX_INIT_GAP) Nones and stops.
+        tracker.client.get_next_swap_id.return_value = 1001
+        tracker.client.get_swap.side_effect = lambda sid: recent if sid == 1000 else None
+
+        tracker.initialize()
+
+        assert 1000 in tracker.active
+        # call_count == the active swap + MAX_INIT_GAP Nones before halting
+        assert tracker.client.get_swap.call_count == 1 + MAX_INIT_GAP
 
     def test_initialize_skips_terminal_swaps(self):
         tracker = make_tracker()
         completed = make_swap(swap_id=20)
         completed.status = SwapStatus.COMPLETED
-        completed.initiated_block = 990
 
         tracker.client.get_next_swap_id.return_value = 21
         tracker.client.get_swap.return_value = completed
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert 20 not in tracker.active
 

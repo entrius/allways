@@ -17,16 +17,23 @@ ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 # RPC flakes without the fragile timeout-block inference the V1 tracker used.
 NULL_SWAP_RETRY_LIMIT = 3
 
+# Cold-start backward scan halts after this many consecutive None lookups.
+# Resolved swaps are pruned from contract storage (`swaps.remove`), so a long
+# run of Nones means we've passed the live-swap region. Block-age cutoffs
+# silently dropped long-stuck ACTIVE swaps; this does not. Tuned low for
+# current volume — bump if the gap between contiguous active swap IDs grows.
+MAX_INIT_GAP = 20
+
+
+def _swap_label(swap: Swap) -> str:
+    return f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
+
 
 class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
 
-    def __init__(
-        self,
-        client: AllwaysContractClient,
-        fulfillment_timeout_blocks: int,
-    ):
+    def __init__(self, client: AllwaysContractClient):
         self.client = client
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
@@ -36,35 +43,37 @@ class SwapTracker:
         # the voted value so the next extension round can vote again.
         self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
-        self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
-    def initialize(self, current_block: int):
-        """Cold start: scan backward from latest swap to seed active set."""
+    def initialize(self):
+        """Cold start: scan backward from latest swap to seed active set.
+
+        Halts on consecutive Nones (resolved/pruned region) rather than on
+        block age — an ACTIVE swap orphaned by a prior validator outage can be
+        arbitrarily old, and a block-based cutoff would let it fall through.
+        """
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
             self.last_scanned_id = 0
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
 
-        cutoff_block = current_block - self.fulfillment_timeout_blocks
-        latest_id = next_id - 1
-
-        for swap_id in reversed(range(1, next_id)):
+        consecutive_none = 0
+        for swap_id in range(next_id - 1, 0, -1):
             swap = self.client.get_swap(swap_id)
             if swap is None:
+                consecutive_none += 1
+                if consecutive_none >= MAX_INIT_GAP:
+                    bt.logging.debug(
+                        f'SwapTracker init: stopping at swap {swap_id} '
+                        f'after {consecutive_none} consecutive resolved/pruned swaps'
+                    )
+                    break
                 continue
-
-            if swap.initiated_block < cutoff_block:
-                bt.logging.debug(
-                    f'SwapTracker init: stopping at swap {swap_id} '
-                    f'(initiated_block={swap.initiated_block} < cutoff={cutoff_block})'
-                )
-                break
-
+            consecutive_none = 0
             if swap.status in ACTIVE_STATUSES:
                 self.active[swap.id] = swap
 
-        self.last_scanned_id = latest_id
+        self.last_scanned_id = next_id - 1
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
@@ -102,7 +111,7 @@ class SwapTracker:
             return False
         return True
 
-    async def poll(self, current_block: int = 0):
+    async def poll(self):
         """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
@@ -134,9 +143,7 @@ class SwapTracker:
                 if swap.status in ACTIVE_STATUSES:
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
-
-        if new_ids:
-            bt.logging.debug(f'SwapTracker: discovered {len(fresh)} active from {len(new_ids)} new IDs')
+                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -165,6 +172,9 @@ class SwapTracker:
                 if self.bump_null_retry(sid):
                     resolved_ids.append(sid)
             elif result.status in ACTIVE_STATUSES:
+                prev = self.active.get(sid)
+                if prev is not None and prev.status != result.status:
+                    bt.logging.info(f'Swap {sid} [{_swap_label(result)}]: {prev.status.name} -> {result.status.name}')
                 self.active[sid] = result
                 self.null_retry_count.pop(sid, None)
             else:
