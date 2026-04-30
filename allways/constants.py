@@ -79,7 +79,6 @@ CHALLENGE_WINDOW_BLOCKS = 8
 # ≥1 confirmation and buys the full chain-aware confirmation window. Hard
 # cap is enforced contract-side via MAX_EXTENSIONS_PER_RESERVATION /
 # _PER_SWAP — these client constants must mirror the contract values.
-EXTENSION_TIER1_PADDING_SECONDS = 300  # buffer over one chain block
 MAX_EXTENSIONS_PER_RESERVATION = 2
 MAX_EXTENSIONS_PER_SWAP = 2
 

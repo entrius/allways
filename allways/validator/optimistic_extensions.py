@@ -15,7 +15,7 @@ from typing import Optional
 
 import bittensor as bt
 
-from allways.chains import compute_extension_target, compute_extension_target_tier1
+from allways.chains import compute_extension_target, get_chain
 from allways.classes import PendingExtension
 from allways.constants import (
     EXTENSION_BUCKET_BLOCKS,
@@ -74,11 +74,13 @@ class OptimisticExtensionWatcher:
             return False
 
         if extension_count == 0:
-            target_block = compute_extension_target_tier1(from_chain_id, current_block)
+            remaining = 1
         else:
             if observed_confirmations < 1:
                 return False
-            target_block = compute_extension_target(from_chain_id, observed_confirmations, current_block)
+            chain = get_chain(from_chain_id)
+            remaining = max(0, chain.min_confirmations - observed_confirmations)
+        target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
@@ -114,7 +116,9 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        expected = compute_extension_target(from_chain_id, observed_confirmations, current_block)
+        chain = get_chain(from_chain_id)
+        remaining = max(0, chain.min_confirmations - observed_confirmations)
+        expected = compute_extension_target(from_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
@@ -173,11 +177,13 @@ class OptimisticExtensionWatcher:
             return False
 
         if extension_count == 0:
-            target_block = compute_extension_target_tier1(dest_chain_id, current_block)
+            remaining = 1
         else:
             if observed_confirmations < 1:
                 return False
-            target_block = compute_extension_target(dest_chain_id, observed_confirmations, current_block)
+            chain = get_chain(dest_chain_id)
+            remaining = max(0, chain.min_confirmations - observed_confirmations)
+        target_block = compute_extension_target(dest_chain_id, remaining, current_block)
 
         if target_block <= timeout_block:
             return False
@@ -204,7 +210,9 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        expected = compute_extension_target(dest_chain_id, observed_confirmations, current_block)
+        chain = get_chain(dest_chain_id)
+        remaining = max(0, chain.min_confirmations - observed_confirmations)
+        expected = compute_extension_target(dest_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
