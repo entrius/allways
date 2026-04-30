@@ -1,7 +1,5 @@
 """Tests for resolve_dendrite_timeout — env var sanitization (issue #240)."""
 
-import os
-
 import pytest
 
 from allways.cli.dendrite_lite import resolve_dendrite_timeout
