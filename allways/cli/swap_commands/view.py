@@ -25,7 +25,13 @@ from allways.cli.swap_commands.helpers import (
     probe_pending_reservation,
     read_miner_commitments,
 )
-from allways.constants import FEE_DIVISOR
+from allways.constants import (
+    CHALLENGE_WINDOW_BLOCKS,
+    FEE_DIVISOR,
+    MAX_EXTENSION_BLOCKS,
+    MAX_EXTENSIONS_PER_RESERVATION,
+    MAX_EXTENSIONS_PER_SWAP,
+)
 from allways.contract_client import ContractError
 
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
@@ -594,13 +600,18 @@ def view_active_swaps(status: str):
     console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def build_swap_text(swap, chain_info=True, current_block: int = 0):
+def build_swap_text(swap, chain_info=True, current_block: int = 0, client=None):
     """Build swap display as a Rich markup string.
 
     ``current_block`` — when > 0 and the swap is still in-flight, a "Now"
     row is added to the timeline showing how many blocks remain until
     timeout. Gives the reader a frame of reference without having to
     cross-check against ``alw status``.
+
+    ``client`` — when provided and the swap is in-flight, the optimistic-
+    extension state (count + any pending proposal) is fetched and rendered.
+    Best-effort: read failures fall back to no extension info rather than
+    aborting the swap render.
     """
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
     parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
@@ -649,6 +660,34 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0):
         else:
             parts.append(f'    [cyan]⏲ Now            Block {current_block}[/cyan]  [red](past timeout)[/red]')
 
+    if client is not None and in_flight:
+        try:
+            ext_count = client.get_swap_extension_count(swap.id)
+        except ContractError:
+            ext_count = None
+        try:
+            pending = client.get_pending_timeout_extension(swap.id)
+        except ContractError:
+            pending = None
+        if ext_count is not None or pending is not None:
+            parts.append('')
+            parts.append('  [bold]Extensions:[/bold]')
+            if ext_count is not None:
+                parts.append(f'    Used: {ext_count}/{MAX_EXTENSIONS_PER_SWAP}')
+            if pending is not None and current_block > 0:
+                finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
+                blocks_until_finalize = max(0, finalize_at - current_block)
+                target_blocks = max(0, pending.target_block - current_block)
+                target_min = target_blocks * SECONDS_PER_BLOCK / 60
+                if blocks_until_finalize > 0:
+                    finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
+                else:
+                    finalize_hint = 'finalize window open'
+                parts.append(
+                    f'    Pending: target block {pending.target_block} (~{target_min:.0f} min) · '
+                    f'{finalize_hint} · by {pending.submitter[:16]}...'
+                )
+
     parts.append('')
     parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
     parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
@@ -668,9 +707,11 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0):
     return '\n'.join(parts)
 
 
-def display_swap(swap, chain_info=True, current_block: int = 0):
+def display_swap(swap, chain_info=True, current_block: int = 0, client=None):
     """Render a single swap with timeline view."""
-    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block))
+    console.print(
+        build_swap_text(swap, chain_info=chain_info, current_block=current_block, client=client)
+    )
 
 
 @view_group.command('swap')
@@ -719,7 +760,7 @@ def view_swap(swap_id: int, watch: bool):
             current_block = subtensor.get_current_block()
         except Exception:
             current_block = 0
-        display_swap(swap, current_block=current_block)
+        display_swap(swap, current_block=current_block, client=client)
         return
 
     watch_swap(client, swap_id, swap)
@@ -753,7 +794,7 @@ def watch_swap(client, swap_id: int, swap=None):
             return 0
 
     def render(s, chain_info=True, watching=True, current_block=0):
-        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block)
+        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block, client=client)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
         return Text.from_markup(markup)
@@ -839,8 +880,11 @@ def view_contract():
     # Collapsed: the threshold is the knob, required_votes is what it resolves
     # to at current validator_count — showing both on separate rows read as
     # redundant (especially on small validator sets where they coincide).
+    # Consensus quorum applies to vote_reserve / vote_initiate / vote_confirm /
+    # vote_timeout — extensions follow the optimistic propose/challenge/finalize
+    # path instead, so this row deliberately does not cover them.
     table.add_row(
-        'Consensus',
+        'Consensus (reserve/initiate/confirm/timeout)',
         f'{consensus_threshold}% → {required_votes} of {validator_count} validators needed',
     )
     # Contract treats 0 as "bound disabled" (see lib.rs::vote_reserve — the
@@ -863,6 +907,23 @@ def view_contract():
         'Max Swap Amount',
         f'{from_rao(max_swap_rao):.4f} TAO' if max_swap_rao > 0 else 'Unlimited',
     )
+    # Optimistic extension parameters. These are contract constants (no
+    # on-chain getter), mirrored from allways/constants.py and held in lock-
+    # step with smart-contracts/ink/lib.rs — a redeploy is the only way to
+    # change them. Surfaced here so users can predict how long their swap
+    # can be held alive before forced timeout.
+    challenge_window_minutes = CHALLENGE_WINDOW_BLOCKS * SECONDS_PER_BLOCK / 60
+    max_ext_minutes = MAX_EXTENSION_BLOCKS * SECONDS_PER_BLOCK / 60
+    table.add_row(
+        'Extension Challenge Window',
+        f'{CHALLENGE_WINDOW_BLOCKS} blocks (~{challenge_window_minutes:.0f} min)',
+    )
+    table.add_row(
+        'Max Extension Length',
+        f'{MAX_EXTENSION_BLOCKS} blocks (~{max_ext_minutes:.0f} min) per finalize',
+    )
+    table.add_row('Max Extensions / Reservation', str(MAX_EXTENSIONS_PER_RESERVATION))
+    table.add_row('Max Extensions / Swap', str(MAX_EXTENSIONS_PER_SWAP))
     table.add_row('Next Swap ID', str(next_swap_id))
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
@@ -949,7 +1010,8 @@ def view_validators():
     console.print(table)
     console.print(
         f'\n[dim]Total: {len(validators)} validators · '
-        f'consensus {consensus_threshold}% → {required} votes needed for quorum.[/dim]\n'
+        f'consensus {consensus_threshold}% → {required} votes needed for quorum on '
+        f'reserve/initiate/confirm/timeout. Optimistic extensions use propose+challenge instead.[/dim]\n'
     )
 
 
@@ -1009,6 +1071,31 @@ def view_reservation():
         remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+        # Optimistic-extension visibility — silent on read failure: best-effort
+        # signal, not core to the reservation status.
+        try:
+            ext_count = client.get_reservation_extension_count(state.miner_hotkey)
+            table.add_row('Extensions', f'{ext_count}/{MAX_EXTENSIONS_PER_RESERVATION}')
+        except ContractError:
+            pass
+        try:
+            pending = client.get_pending_reservation_extension(state.miner_hotkey)
+        except ContractError:
+            pending = None
+        if pending is not None:
+            finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
+            blocks_until_finalize = max(0, finalize_at - current_block)
+            target_blocks = max(0, pending.target_block - current_block)
+            target_min = target_blocks * SECONDS_PER_BLOCK / 60
+            if blocks_until_finalize > 0:
+                finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
+            else:
+                finalize_hint = 'finalize window open'
+            table.add_row(
+                'Pending Extension',
+                f'target block {pending.target_block} (~{target_min:.0f} min) · {finalize_hint} · '
+                f'by {pending.submitter[:16]}...',
+            )
         if sent_tx_hash:
             tx_display = sent_tx_hash if len(sent_tx_hash) <= 24 else sent_tx_hash[:24] + '...'
             table.add_row(f'Source TX ({src_up})', tx_display)

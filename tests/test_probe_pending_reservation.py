@@ -65,7 +65,7 @@ def make_swap(**overrides) -> Swap:
 CURRENT_BLOCK = 1_000_000
 
 
-def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None, ttl=4032):
+def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None):
     """Build a contract-client double whose only behavior is what the probe touches."""
     client = MagicMock()
     # has_active_swap mirrors whether the test set up any active swaps so the
@@ -74,7 +74,6 @@ def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None, ttl
     client.get_miner_active_swaps.return_value = list(active_swaps)
     client.get_miner_reserved_until.return_value = reserved_until
     client.get_reservation_data.return_value = reservation_data
-    client.get_reservation_ttl.return_value = ttl
     return client
 
 
@@ -136,13 +135,21 @@ def test_replaced_when_reservation_amounts_differ():
     assert result.kind == 'replaced'
 
 
-def test_replaced_when_reserved_until_is_more_than_ttl_past_saved():
-    """The user's bug: same miner re-reserved with same params after our swap completed."""
+def test_replaced_when_reserved_until_grows_beyond_extension_ceiling():
+    """The user's bug: same miner re-reserved with same params after our swap completed.
+
+    Total legitimate growth from saved value is bounded by
+    ``MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS`` (each finalize
+    bumps reserved_until by at most ``MAX_EXTENSION_BLOCKS``, capped at the
+    contract's per-reservation limit). Anything beyond is a replacement.
+    """
+    from allways.constants import MAX_EXTENSION_BLOCKS, MAX_EXTENSIONS_PER_RESERVATION
+
+    ceiling = MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS
     state = make_state(reserved_until_block=1_000_100)
     client = make_client(
-        reserved_until=1_000_100 + 4033,
+        reserved_until=1_000_100 + ceiling + 1,
         reservation_data=(state.tao_amount, state.from_amount, state.to_amount),
-        ttl=4032,
     )
 
     result = probe_pending_reservation(client, state, CURRENT_BLOCK)
@@ -150,19 +157,41 @@ def test_replaced_when_reserved_until_is_more_than_ttl_past_saved():
     assert result.kind == 'replaced'
 
 
-def test_ours_active_when_amounts_match_and_within_ttl():
-    """Single extension: reserved_until advanced but stays within ttl of saved."""
+def test_ours_active_when_amounts_match_and_within_extension_ceiling():
+    """Optimistic extensions: reserved_until advanced but stays within the
+    contract's per-reservation extension ceiling. This is the case the old
+    ttl-based tolerance got wrong — one tier-0 BTC extension (~180 blocks)
+    on a tier-2 reservation_ttl=50 setup blew past ttl and was misreported
+    as ``replaced`` even though it was the user's own reservation."""
+    from allways.constants import MAX_EXTENSION_BLOCKS, MAX_EXTENSIONS_PER_RESERVATION
+
+    ceiling = MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS
     state = make_state(reserved_until_block=1_000_100)
     client = make_client(
-        reserved_until=1_000_100 + 4031,
+        reserved_until=1_000_100 + ceiling,
         reservation_data=(state.tao_amount, state.from_amount, state.to_amount),
-        ttl=4032,
     )
 
     result = probe_pending_reservation(client, state, CURRENT_BLOCK)
 
     assert result.kind == 'ours_active'
-    assert result.reserved_until == 1_000_100 + 4031
+    assert result.reserved_until == 1_000_100 + ceiling
+
+
+def test_ours_active_after_single_btc_tier0_extension_on_short_ttl():
+    """Concrete regression: BTC tier-0 honest target pushes reserved_until by
+    ~180 blocks. With reservation_ttl=50 and the old `> ttl` tolerance, this
+    legitimate extension was misclassified as ``replaced``. The new ceiling
+    accommodates it."""
+    state = make_state(reserved_until_block=1_000_100)
+    client = make_client(
+        reserved_until=1_000_100 + 180,
+        reservation_data=(state.tao_amount, state.from_amount, state.to_amount),
+    )
+
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'ours_active'
 
 
 def test_ours_active_when_unchanged():
