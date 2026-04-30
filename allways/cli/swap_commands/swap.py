@@ -599,6 +599,16 @@ def swap_now_command(
     except ContractError:
         pass
 
+    # Lowercase before validating so users can type tickers as 'BTC' / 'TAO'.
+    # Sister commands (`swap quote`, `miner post`) already do this — `swap now`
+    # was the lone case-sensitive holdout (issue #248). Lowercasing here also
+    # propagates to from_chain / to_chain downstream, matching SUPPORTED_CHAINS
+    # keys, which are lowercase.
+    if from_chain_opt:
+        from_chain_opt = from_chain_opt.lower()
+    if to_chain_opt:
+        to_chain_opt = to_chain_opt.lower()
+
     # Validate provided chain options early
     if from_chain_opt and from_chain_opt not in SUPPORTED_CHAINS:
         console.print(f'[red]Unknown source chain: {from_chain_opt}[/red]')
