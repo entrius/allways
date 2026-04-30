@@ -114,6 +114,29 @@ def sign_or_prompt_external(
     return pasted
 
 
+def parse_netuid(value, source: str = 'netuid') -> int:
+    """Parse a netuid into a non-negative int, raising a clean Click error.
+
+    Without this guard, ``int('notanumber')`` deep inside ``get_cli_context``
+    surfaces as a Python traceback to the user (issue #236). ``isdigit()``
+    rejects empty strings, negatives (``-1``), and fractions (``1.5``) in one
+    check; bool is filtered up front because ``isinstance(True, int)`` is
+    ``True``. ``source`` names where the value came from for the error.
+    """
+    if isinstance(value, bool):
+        raise click.UsageError(f'{source} must be a non-negative integer (got {value!r})')
+    if isinstance(value, int):
+        if value < 0:
+            raise click.UsageError(f'{source} must be a non-negative integer (got {value})')
+        return value
+    if not isinstance(value, str):
+        raise click.UsageError(f'{source} must be a non-negative integer (got {value!r})')
+    stripped = value.strip()
+    if not stripped.isdigit():
+        raise click.UsageError(f'{source} must be a non-negative integer (got {value!r})')
+    return int(stripped)
+
+
 def is_valid_ss58(address: str) -> bool:
     """Check if a string is a syntactically valid SS58 address.
 
@@ -238,11 +261,14 @@ def get_cli_context(
             )
         contract_addr = config.get('contract-address') or config.get('contract_address') or DEFAULT_CONTRACT_ADDRESS
         client = AllwaysContractClient(contract_address=contract_addr, subtensor=subtensor) if need_client else None
-    # Ensure netuid is resolved for callers
+    # Ensure netuid is resolved for callers. Validate before int() so a
+    # bad value from --netuid or ~/.allways/config.json fails with a
+    # one-line UsageError instead of a Python traceback (issue #236).
     if 'netuid' not in config:
         config['netuid'] = NETUID_FINNEY
     else:
-        config['netuid'] = int(config['netuid'])
+        source = '--netuid' if 'netuid' in _CLI_OVERRIDES else 'netuid (from ~/.allways/config.json)'
+        config['netuid'] = parse_netuid(config['netuid'], source=source)
     return config, wallet, subtensor, client
 
 

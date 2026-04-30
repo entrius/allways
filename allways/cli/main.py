@@ -47,7 +47,13 @@ from rich.table import Table  # noqa: E402
 load_dotenv()
 
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
-from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402
+from allways.cli.swap_commands.helpers import (  # noqa: E402
+    ALLWAYS_DIR,
+    CONFIG_FILE,
+    apply_global_flags,
+    console,
+    parse_netuid,
+)
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
@@ -152,6 +158,11 @@ def config_set(key: str, value: str):
             if value == endpoint:
                 value = name
                 break
+
+    # Validate netuid here so a bad value never lands in the file (issue #236).
+    # Stored as int so later reads don't need to re-parse.
+    if key == 'netuid':
+        value = parse_netuid(value, source='netuid')
 
     old_value = config.get(key)
     config[key] = value
