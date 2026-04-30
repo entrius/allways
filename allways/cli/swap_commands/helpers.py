@@ -174,7 +174,11 @@ def parse_global_flags() -> dict:
     """Extract global flags (--network, --wallet, etc.) from sys.argv.
 
     Strips matched flags and their values from sys.argv so Click
-    subcommands don't choke on unknown options.
+    subcommands don't choke on unknown options. A bare ``--netuid`` (or
+    ``--netuid=``) at the end of argv used to fall through unconsumed and
+    surface as Click's misleading ``No such option: --netuid`` (issue
+    #238) — instead, raise ``click.UsageError`` up front so the user sees
+    a clear ``--netuid requires a value``.
     """
     overrides = {}
     new_argv = [sys.argv[0]]
@@ -185,15 +189,18 @@ def parse_global_flags() -> dict:
         if '=' in arg:
             flag, value = arg.split('=', 1)
             if flag in _GLOBAL_FLAGS:
+                if value == '':
+                    raise click.UsageError(f'{flag} requires a value')
                 overrides[_GLOBAL_FLAGS[flag]] = value
                 i += 1
                 continue
         # Handle --flag value form
         if arg in _GLOBAL_FLAGS:
-            if i + 1 < len(sys.argv):
-                overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
-                i += 2
-                continue
+            if i + 1 >= len(sys.argv):
+                raise click.UsageError(f'{arg} requires a value')
+            overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
+            i += 2
+            continue
         new_argv.append(arg)
         i += 1
     sys.argv[:] = new_argv
