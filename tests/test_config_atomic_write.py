@@ -94,8 +94,9 @@ class TestLoudLoadCliConfig:
         result = load_cli_config()
         assert result == {}  # still {} so callers don't crash
         captured = capsys.readouterr()
-        # Either stdout (Rich) or stderr — Rich Console prints to stdout by default.
-        output = captured.out + captured.err
+        # Rich line-wraps to terminal width, so the path can split across
+        # lines — collapse whitespace before substring matching.
+        output = ' '.join((captured.out + captured.err).split())
         assert 'Warning' in output
         assert 'unreadable' in output
         assert 'config.json' in output
