@@ -158,7 +158,7 @@ pub struct ReservationCancelled {
 
 // ─── Optimistic extensions ─────────────────────────────────────────────────
 // Six events split by side (reservation vs timeout) so downstream indexers get
-// per-entity schemas without polymorphic keys. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3.
+// per-entity schemas without polymorphic keys.
 
 /// Reservation extension proposed by a validator (single-validator, optimistic).
 #[ink::event]

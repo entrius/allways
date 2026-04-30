@@ -1,9 +1,7 @@
 """Optimistic extension watcher.
 
 Single-validator propose / challenge / finalize for reservation and timeout
-extensions, with tiered evidence and a per-entity cap. See
-OPTIMISTIC_EXTENSION_REDESIGN.md (local planning doc) for full background,
-including §13 for the tier model.
+extensions, with tiered evidence and a per-entity cap.
 
 This module provides only the per-decision primitives — picking the right
 moments to invoke them lives in the validator forward loop. Each method
@@ -56,7 +54,7 @@ class OptimisticExtensionWatcher:
         extension_count: int,
     ) -> bool:
         """Submit a propose_extend_reservation if no proposal is pending,
-        tiered on ``extension_count`` per redesign §13.
+        tiered on ``extension_count``.
 
         - Tier 0 (first extension): caller is responsible for ensuring the tx
           is visible (``tx_info != None``); target sized for one chain block.

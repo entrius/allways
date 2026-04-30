@@ -966,7 +966,6 @@ class AllwaysContractClient:
 
     # ─── Optimistic extensions ────────────────────────────────────────────
     # Single-validator propose/challenge/finalize with tiered evidence + cap.
-    # See OPTIMISTIC_EXTENSION_REDESIGN.md §4.4 and §13.
 
     def propose_extend_reservation(
         self,
@@ -1070,9 +1069,9 @@ class AllwaysContractClient:
 
     def get_reservation_extension_count(self, miner_hotkey: str) -> int:
         """How many extensions have been finalized on this miner's current
-        reservation. Drives tier selection (redesign §13). Returns 0 on read
-        failure or for miners with no extensions yet — both are equivalent
-        for tier-1 eligibility."""
+        reservation. Drives tier selection. Returns 0 on read failure or for
+        miners with no extensions yet — both are equivalent for tier-1
+        eligibility."""
         self.ensure_initialized()
         data = self.raw_contract_read('get_reservation_extension_count', {'miner': miner_hotkey})
         if not data:

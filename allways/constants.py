@@ -74,11 +74,11 @@ MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
 # to avoid known-doomed txs; the contract is authoritative.
 CHALLENGE_WINDOW_BLOCKS = 8
 
-# Tiered escalation (redesign §13). First extension fires on tx visibility
-# alone (mempool OK) and buys time for one block; second extension requires
-# ≥1 confirmation and buys the full chain-aware confirmation window. Hard
-# cap is enforced contract-side via MAX_EXTENSIONS_PER_RESERVATION /
-# _PER_SWAP — these client constants must mirror the contract values.
+# Tiered escalation. First extension fires on tx visibility alone (mempool
+# OK) and buys time for one block; second extension requires ≥1 confirmation
+# and buys the full chain-aware confirmation window. Hard cap is enforced
+# contract-side via MAX_EXTENSIONS_PER_RESERVATION / _PER_SWAP — these client
+# constants must mirror the contract values.
 MAX_EXTENSIONS_PER_RESERVATION = 2
 MAX_EXTENSIONS_PER_SWAP = 2
 

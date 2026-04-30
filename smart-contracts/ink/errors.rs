@@ -73,6 +73,6 @@ pub enum Error {
     /// Proposed target is invalid (e.g. not strictly in the future)
     InvalidTarget,
     /// Cumulative extension cap reached (see MAX_EXTENSIONS_PER_RESERVATION /
-    /// MAX_EXTENSIONS_PER_SWAP). Tiered escalation per redesign §13.
+    /// MAX_EXTENSIONS_PER_SWAP).
     MaxExtensionsExceeded,
 }

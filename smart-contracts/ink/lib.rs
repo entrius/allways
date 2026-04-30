@@ -70,12 +70,11 @@ mod allways_swap_manager {
 
         // Optimistic extension proposals. One pending entry per entity at a
         // time; challenged entries are deleted, finalized entries are removed
-        // when reserved_until / timeout_block is updated. See
-        // OPTIMISTIC_EXTENSION_REDESIGN.md §4.3 for the lifecycle.
+        // when reserved_until / timeout_block is updated.
         pending_reservation_extensions: Mapping<AccountId, PendingExtension>,
         pending_timeout_extensions: Mapping<u64, PendingExtension>,
 
-        // Tiered escalation counters (redesign §13). One u8 per entity tracks
+        // Tiered escalation counters. One u8 per entity tracks
         // how many extensions have been finalized on the *current* reservation
         // / swap. Reset to zero (via remove) when the reservation/swap ends so
         // the next one starts fresh. Sibling maps rather than fields on
@@ -108,11 +107,11 @@ mod allways_swap_manager {
     // Optimistic extension parameters. Window kept comfortably below the
     // client-side EXTEND_THRESHOLD_BLOCKS (=20) so finalization always lands
     // before the original reserved_until / timeout_block expires — no
-    // soft-hold rule needed. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3 / §9.1.
+    // soft-hold rule needed.
     const CHALLENGE_WINDOW_BLOCKS: u32 = 8;
     const MAX_EXTENSION_BLOCKS: u32 = 250;
 
-    // Tiered escalation cap (redesign §13). Per-entity ceiling on cumulative
+    // Tiered escalation cap. Per-entity ceiling on cumulative
     // finalized extensions. Both sides match: 2 extensions cover (a) tx-hash
     // visibility → first conf, (b) first conf → full confirmation. A third
     // tier doesn't exist — bounded blast radius is the point.
@@ -587,7 +586,7 @@ mod allways_swap_manager {
         // finalize after the window. Because window=8 < EXTEND_THRESHOLD=20,
         // finalization always lands before reserved_until expires, so a
         // challenge cleanly deletes the entry without needing a soft-hold on
-        // vote_reserve. See OPTIMISTIC_EXTENSION_REDESIGN.md §4.3.
+        // vote_reserve.
 
         #[ink(message)]
         pub fn propose_extend_reservation(
@@ -617,8 +616,8 @@ mod allways_swap_manager {
             if self.pending_reservation_extensions.get(miner).is_some() {
                 return Err(Error::ProposalAlreadyPending);
             }
-            // Tiered escalation cap (redesign §13). Counter persists across
-            // a reservation's lifetime; clear_confirmed_reservation resets it.
+            // Tiered escalation cap. Counter persists across a reservation's
+            // lifetime; clear_confirmed_reservation resets it.
             let count = self.reservation_extension_count.get(miner).unwrap_or(0);
             if count >= MAX_EXTENSIONS_PER_RESERVATION {
                 return Err(Error::MaxExtensionsExceeded);
@@ -715,8 +714,8 @@ mod allways_swap_manager {
 
         /// Number of finalized extensions on the miner's current reservation.
         /// Used by validators to know which tier of evidence the next propose
-        /// requires (redesign §13). Returns 0 for miners with no reservation
-        /// or no extensions yet.
+        /// requires. Returns 0 for miners with no reservation or no extensions
+        /// yet.
         #[ink(message)]
         pub fn get_reservation_extension_count(&self, miner: AccountId) -> u8 {
             self.reservation_extension_count.get(miner).unwrap_or(0)
@@ -1121,7 +1120,7 @@ mod allways_swap_manager {
         }
 
         /// Number of finalized extensions on this swap's fulfillment timeout.
-        /// Used by validators to tier the next propose (redesign §13).
+        /// Used by validators to tier the next propose.
         #[ink(message)]
         pub fn get_swap_extension_count(&self, swap_id: u64) -> u8 {
             self.swap_extension_count.get(swap_id).unwrap_or(0)

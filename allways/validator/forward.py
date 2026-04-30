@@ -235,8 +235,7 @@ def try_extend_reservation(
     couldn't see the tx, and we should still help close its window. Propose
     and challenge require *visibility* (``tx_info != None``); the watcher
     itself enforces the per-tier evidence rule (tier 0: visibility OK; tier 1:
-    confirmations >= 1; tier 2+: refused). See OPTIMISTIC_EXTENSION_REDESIGN.md
-    §13.
+    confirmations >= 1; tier 2+: refused).
     """
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
@@ -390,7 +389,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     """Drive tiered optimistic timeout extensions for FULFILLED swaps near
     deadline. Same dispatch shape as ``try_extend_reservation``: finalize
     always; propose/challenge fire on visibility, with the watcher enforcing
-    per-tier evidence rules (§13).
+    per-tier evidence rules.
     """
     tracker: SwapTracker = self.swap_tracker
     current_block = self.block

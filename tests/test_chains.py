@@ -57,7 +57,6 @@ class TestConfirmationsToSubtensorBlocks:
 
 class TestComputeExtensionTarget:
     # BTC: 600s/block, padding 300s, bucket 30 blocks.
-    # Worked examples in OPTIMISTIC_EXTENSION_REDESIGN.md §4.2.
     # Callers compute remaining_blocks themselves: tier-1 passes 1; tier-2
     # passes max(0, min_confirmations - observed_confirmations).
 
