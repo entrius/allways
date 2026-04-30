@@ -20,6 +20,7 @@ from allways.utils.logging import log_on_change
 from allways.validator import voting
 from allways.validator.axon_handlers import (
     keccak256,
+    miner_public_key_bytes,
     scale_encode_extend_hash_input,
     scale_encode_initiate_hash_input,
 )
@@ -73,7 +74,6 @@ def clear_provider_caches(self: Validator) -> None:
 
 def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
-    from bittensor import Keypair
 
     items = self.state_store.get_all()
     # Drop per-entry receipts whose pending_confirm has been removed
@@ -180,7 +180,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         # rejects it as already-initiated). Transient RPC failures leave the
         # entry queued so the next forward step retries.
         try:
-            miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
+            miner_bytes = miner_public_key_bytes(item.miner_hotkey)
             hash_input = scale_encode_initiate_hash_input(
                 miner_bytes,
                 item.from_tx_hash,
@@ -240,7 +240,6 @@ def try_extend_reservation(
     reason: str = '',
 ) -> None:
     """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
-    from bittensor import Keypair
 
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
@@ -252,7 +251,7 @@ def try_extend_reservation(
         if voted_at is not None and reserved_until <= voted_at:
             return  # already voted under this reservation; contract hasn't extended yet
 
-        miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
+        miner_bytes = miner_public_key_bytes(item.miner_hotkey)
         extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
         self.contract_client.vote_extend_reservation(
             wallet=self.wallet,
