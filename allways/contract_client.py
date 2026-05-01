@@ -513,8 +513,18 @@ class AllwaysContractClient:
         keypair: Optional[Keypair] = None,
         value: int = 0,
         gas_limit: dict = None,
+        wait_for_inclusion: bool = True,
     ) -> str:
-        """Execute a contract method via raw extrinsic submission. Returns tx hash."""
+        """Execute a contract method via raw extrinsic submission. Returns tx hash.
+
+        ``wait_for_inclusion=False`` returns immediately after submission and
+        skips the receipt-success check, so contract reverts can't be detected
+        in-band. Use only for idempotent calls whose dedup is contract-side
+        (e.g. propose/challenge extension flows that the contract rejects via
+        ProposalAlreadyPending / ChallengeWindow* if our local snapshot is
+        stale). The forward step gets back a step-time worth of latency that
+        a synchronous inclusion wait would otherwise burn.
+        """
         gas_limit = gas_limit or DEFAULT_GAS_LIMIT
         selector = CONTRACT_SELECTORS.get(method)
         if not selector:
@@ -547,12 +557,18 @@ class AllwaysContractClient:
                 },
             )
             extrinsic = s.create_signed_extrinsic(call=call, keypair=keypair)
-            return s.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=False)
+            return s.submit_extrinsic(extrinsic, wait_for_inclusion=wait_for_inclusion, wait_for_finalization=False)
 
         try:
             receipt = self.substrate_call(submit_extrinsic)
         except Exception as e:
             raise ContractError(f'{method}: exec failed: {e}') from e
+
+        if not wait_for_inclusion:
+            # No block to inspect; trust the submission and let the next event
+            # sync surface the actual outcome. Caller relies on contract-side
+            # idempotency to absorb stale-view duplicates.
+            return receipt.extrinsic_hash
 
         try:
             if receipt.is_success:
@@ -1037,6 +1053,7 @@ class AllwaysContractClient:
             'propose_extend_reservation',
             args={'miner': miner_hotkey, 'from_tx_hash': from_tx_hash, 'target_block': target_block},
             keypair=wallet.hotkey,
+            wait_for_inclusion=False,
         )
         bt.logging.info(f'Propose extend reservation miner={miner_hotkey} target={target_block}: {tx_hash}')
         return tx_hash
@@ -1047,6 +1064,7 @@ class AllwaysContractClient:
             'challenge_extend_reservation',
             args={'miner': miner_hotkey},
             keypair=wallet.hotkey,
+            wait_for_inclusion=False,
         )
         bt.logging.info(f'Challenge extend reservation miner={miner_hotkey}: {tx_hash}')
         return tx_hash
@@ -1072,6 +1090,7 @@ class AllwaysContractClient:
             'propose_extend_timeout',
             args={'swap_id': swap_id, 'target_block': target_block},
             keypair=wallet.hotkey,
+            wait_for_inclusion=False,
         )
         bt.logging.info(f'Propose extend timeout swap={swap_id} target={target_block}: {tx_hash}')
         return tx_hash
@@ -1082,6 +1101,7 @@ class AllwaysContractClient:
             'challenge_extend_timeout',
             args={'swap_id': swap_id},
             keypair=wallet.hotkey,
+            wait_for_inclusion=False,
         )
         bt.logging.info(f'Challenge extend timeout swap={swap_id}: {tx_hash}')
         return tx_hash
