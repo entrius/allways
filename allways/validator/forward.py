@@ -410,11 +410,16 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
-        self.optimistic_extensions.maybe_finalize_timeout(
+        finalized_target = self.optimistic_extensions.maybe_finalize_timeout(
             swap_id=swap.id,
             current_block=current_block,
             challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
         )
+        if finalized_target is not None:
+            # Same-step write so enforce_swap_timeouts (which runs immediately
+            # after this loop) reads the bumped deadline rather than the
+            # pre-finalize value the next event sync would otherwise carry in.
+            tracker.update_timeout_block(swap.id, finalized_target)
 
         provider = self.chain_providers.get(swap.to_chain)
         if not provider or not swap.to_tx_hash:

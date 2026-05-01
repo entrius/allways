@@ -248,20 +248,24 @@ class OptimisticExtensionWatcher:
         swap_id: int,
         current_block: int,
         challenge_window_blocks: int,
-    ) -> bool:
+    ) -> Optional[int]:
+        """Same shape as ``maybe_finalize_reservation``: returns the applied
+        ``target_block`` so the caller can refresh ``swap_tracker`` in-line
+        before the same step's ``enforce_swap_timeouts`` reads from it."""
         pending = self._safe_get_pending_timeout(swap_id)
         if pending is None:
-            return False
+            return None
         if current_block < pending.proposed_at + challenge_window_blocks:
-            return False
+            return None
 
-        return self._try_call(
+        success = self._try_call(
             'finalize_extend_timeout',
             lambda: self.contract_client.finalize_extend_timeout(
                 wallet=self.wallet,
                 swap_id=swap_id,
             ),
         )
+        return pending.target_block if success else None
 
     # ─── Internals ───────────────────────────────────────────────────────
 

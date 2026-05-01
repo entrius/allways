@@ -382,7 +382,9 @@ class TestMaybeFinalizeTimeout:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is True
+        # Returns the applied target so extend_fulfilled_near_timeout can
+        # bump swap_tracker before enforce_swap_timeouts reads from it.
+        assert result == 1180
 
     def test_skips_when_window_not_yet_elapsed(self):
         w = make_watcher(
@@ -393,4 +395,16 @@ class TestMaybeFinalizeTimeout:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is False
+        assert result is None
+
+    def test_returns_none_when_contract_call_fails(self):
+        w = make_watcher(
+            pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=992),
+            propose_raises=ContractError('NoSwap'),
+        )
+        result = w.maybe_finalize_timeout(
+            swap_id=42,
+            current_block=1000,
+            challenge_window_blocks=8,
+        )
+        assert result is None
