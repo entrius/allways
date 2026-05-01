@@ -41,18 +41,24 @@ async def forward(self: Validator) -> None:
 
     clear_provider_caches(self)
 
-    # Sync events before purge so any ReservationExtensionFinalized in the
-    # last block writes the new reserved_until back to state_store before the
-    # purge sweep runs — otherwise a row whose contract deadline just bumped
-    # would still be deleted at its stale (original) reserved_until.
+    # Sync events first so ReservationExtensionFinalized writes from the
+    # previous block reach state_store before the per-row finalize/init loop
+    # reads them.
     try:
         self.event_watcher.sync_to(self.block)
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
-    self.state_store.purge_expired_pending_confirms()
-
+    # Init runs *before* purge so maybe_finalize_reservation gets a chance to
+    # fire on rows whose original reserved_until has just lapsed. A successful
+    # finalize bumps state_store.reserved_until in-line (see
+    # try_extend_reservation), so the subsequent purge sees the fresh deadline
+    # and leaves the row alone. Without this ordering, any propose whose
+    # finalize-eligible step lands at-or-after the original reserved_until
+    # would be silently lost to the purge before init ever sees the row.
     initialize_pending_user_reservations(self)
+
+    self.state_store.purge_expired_pending_confirms()
 
     poll_commitments(self)
 
@@ -243,11 +249,17 @@ def try_extend_reservation(
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: reserved_until read failed: {e}')
         reserved_until = item.reserved_until
 
-    self.optimistic_extensions.maybe_finalize_reservation(
+    finalized_target = self.optimistic_extensions.maybe_finalize_reservation(
         miner_hotkey=item.miner_hotkey,
         current_block=current_block,
         challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
     )
+    if finalized_target is not None:
+        # Same-step write so the upstream purge sweep sees the bumped deadline.
+        # The matching ReservationExtensionFinalized event won't be picked up
+        # until the next forward step's event_watcher.sync_to.
+        self.state_store.update_reserved_until(item.miner_hotkey, finalized_target)
+        reserved_until = finalized_target
 
     if tx_info is None:
         return

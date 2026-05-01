@@ -224,7 +224,10 @@ class TestMaybeFinalizeReservation:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is True
+        # Returns the applied target so the caller can refresh local caches
+        # (e.g. state_store.update_reserved_until) without waiting for the
+        # next event sync.
+        assert result == 1180
         w.contract_client.finalize_extend_reservation.assert_called_once()
 
     def test_skips_when_window_not_yet_elapsed(self):
@@ -237,7 +240,7 @@ class TestMaybeFinalizeReservation:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is False
+        assert result is None
         w.contract_client.finalize_extend_reservation.assert_not_called()
 
     def test_skips_when_no_pending(self):
@@ -247,8 +250,21 @@ class TestMaybeFinalizeReservation:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is False
+        assert result is None
         w.contract_client.finalize_extend_reservation.assert_not_called()
+
+    def test_returns_none_when_contract_call_fails(self):
+        # Contract rejection (e.g. reservation already expired) → no target.
+        w = make_watcher(
+            pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=992),
+            propose_raises=ContractError('NoReservation'),
+        )
+        result = w.maybe_finalize_reservation(
+            miner_hotkey=MINER,
+            current_block=1000,
+            challenge_window_blocks=8,
+        )
+        assert result is None
 
 
 # =============================================================================

@@ -75,6 +75,11 @@ MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
 # smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally
 # to avoid known-doomed txs; the contract is authoritative.
 CHALLENGE_WINDOW_BLOCKS = 8
+# Conservative upper bound on subtensor blocks elapsed per validator forward
+# step (base poll + per-step work + jitter). Used as a safety margin when
+# sizing extension targets so a single delayed step doesn't strand a propose
+# whose finalize window opens past the original reservation deadline.
+VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
 
 # Tiered escalation. First extension fires on tx visibility alone (mempool
 # OK) and buys time for one block; second extension requires ≥1 confirmation

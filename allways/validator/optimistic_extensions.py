@@ -16,9 +16,11 @@ import bittensor as bt
 from allways.chains import compute_extension_target, get_chain
 from allways.classes import PendingExtension
 from allways.constants import (
+    CHALLENGE_WINDOW_BLOCKS,
     EXTENSION_BUCKET_BLOCKS,
     MAX_EXTENSIONS_PER_RESERVATION,
     MAX_EXTENSIONS_PER_SWAP,
+    VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE,
 )
 from allways.contract_client import (
     AllwaysContractClient,
@@ -80,6 +82,19 @@ class OptimisticExtensionWatcher:
             remaining = max(0, chain.min_confirmations - observed_confirmations)
         target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
+        # Defensive floor: target must outlast the challenge window plus one
+        # forward-step worth of jitter so a single missed step still leaves
+        # finalize-eligible time before the new deadline lapses. Round up to
+        # an EXTENSION_BUCKET_BLOCKS boundary so validators converge.
+        min_safe_target = current_block + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
+        if target_block < min_safe_target:
+            target_block = (
+                (min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1)
+                // EXTENSION_BUCKET_BLOCKS
+                * EXTENSION_BUCKET_BLOCKS
+                + current_block
+            )
+
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
             # extension is unnecessary, don't waste a tx.
@@ -133,27 +148,30 @@ class OptimisticExtensionWatcher:
         miner_hotkey: str,
         current_block: int,
         challenge_window_blocks: int,
-    ) -> bool:
+    ) -> Optional[int]:
         """Finalize the pending reservation extension if its window has elapsed.
 
-        Returns True if a finalize tx was submitted. The contract's own check
-        is authoritative — we just gate on the local view to avoid known-doomed
-        txs. ``challenge_window_blocks`` is passed in (rather than imported)
-        so tests can vary it cheaply.
+        Returns the applied ``target_block`` on success, ``None`` otherwise.
+        Callers use the returned target to refresh local caches (e.g.
+        state_store.update_reserved_until) without waiting for the next event
+        sync. The contract's own check is authoritative — we just gate on the
+        local view to avoid known-doomed txs. ``challenge_window_blocks`` is
+        passed in (rather than imported) so tests can vary it cheaply.
         """
         pending = self._safe_get_pending_reservation(miner_hotkey)
         if pending is None:
-            return False
+            return None
         if current_block < pending.proposed_at + challenge_window_blocks:
-            return False
+            return None
 
-        return self._try_call(
+        success = self._try_call(
             'finalize_extend_reservation',
             lambda: self.contract_client.finalize_extend_reservation(
                 wallet=self.wallet,
                 miner_hotkey=miner_hotkey,
             ),
         )
+        return pending.target_block if success else None
 
     # ─── Timeout side ────────────────────────────────────────────────────
 
