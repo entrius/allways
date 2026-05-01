@@ -345,6 +345,24 @@ class TestMaybeProposeTimeout:
         )
         assert result is False
 
+    def test_floor_widens_target_when_natural_target_too_close_to_timeout_block(self):
+        # Mirror of the reservation-side floor: BTC tier-0 natural target = 1090,
+        # but timeout_block=1085 means a successful finalize would land only +5
+        # past the old deadline before re-arming. Floor anchors at
+        # timeout_block + 8 + 20 = 1113 and bucket-rounds (current=1000) to 1120.
+        w = make_watcher(pending_timeout=None)
+        result = w.maybe_propose_timeout(
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1085,
+            observed_confirmations=0,
+            extension_count=0,
+        )
+        assert result is True
+        target = w.contract_client.propose_extend_timeout.call_args.kwargs['target_block']
+        assert target == 1120
+
 
 class TestMaybeChallengeTimeout:
     def test_challenges_when_target_too_far(self):
@@ -382,7 +400,9 @@ class TestMaybeFinalizeTimeout:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is True
+        # Returns the applied target so extend_fulfilled_near_timeout can
+        # bump swap_tracker before enforce_swap_timeouts reads from it.
+        assert result == 1180
 
     def test_skips_when_window_not_yet_elapsed(self):
         w = make_watcher(
@@ -393,4 +413,16 @@ class TestMaybeFinalizeTimeout:
             current_block=1000,
             challenge_window_blocks=8,
         )
-        assert result is False
+        assert result is None
+
+    def test_returns_none_when_contract_call_fails(self):
+        w = make_watcher(
+            pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=992),
+            propose_raises=ContractError('NoSwap'),
+        )
+        result = w.maybe_finalize_timeout(
+            swap_id=42,
+            current_block=1000,
+            challenge_window_blocks=8,
+        )
+        assert result is None
