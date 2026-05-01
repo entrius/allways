@@ -207,6 +207,20 @@ class OptimisticExtensionWatcher:
         if target_block <= timeout_block:
             return False
 
+        # Mirror of the floor in maybe_propose_reservation: a propose whose
+        # natural target lands only a few blocks past the existing
+        # timeout_block immediately re-arms the next extension cycle, since
+        # finalize itself eats CHALLENGE_WINDOW_BLOCKS and one forward step
+        # of jitter before the new deadline starts paying. Anchor on
+        # timeout_block (not current_block) so each successful extension
+        # buys a meaningful chunk of runway, then bucket-round so validators
+        # converge on the same target.
+        min_safe_target = timeout_block + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
+        if target_block < min_safe_target:
+            target_block = (
+                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
+            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
+
         return self._try_call(
             'propose_extend_timeout',
             lambda: self.contract_client.propose_extend_timeout(
