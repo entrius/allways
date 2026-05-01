@@ -58,14 +58,6 @@ def scale_encode_reserve_hash_input(
     )
 
 
-def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
-    """SCALE-encode the extend hash input tuple: (AccountId, &str).
-
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
-    """
-    return miner_bytes + encode_str(from_tx_hash)
-
-
 def scale_encode_initiate_hash_input(
     miner_bytes: bytes,
     from_tx_hash: str,

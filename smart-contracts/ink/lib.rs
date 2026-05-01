@@ -4,7 +4,7 @@ mod types;
 mod errors;
 mod events;
 
-use types::{Reservation, SwapData, SwapStatus, VoteType};
+use types::{PendingExtension, Reservation, SwapData, SwapStatus, VoteType};
 use errors::Error;
 
 #[ink::contract]
@@ -68,6 +68,20 @@ mod allways_swap_manager {
         // reservation_* / miner_reserved_until Mappings into one struct.
         reservations: Mapping<AccountId, Reservation>,
 
+        // Optimistic extension proposals. One pending entry per entity at a
+        // time; challenged entries are deleted, finalized entries are removed
+        // when reserved_until / timeout_block is updated.
+        pending_reservation_extensions: Mapping<AccountId, PendingExtension>,
+        pending_timeout_extensions: Mapping<u64, PendingExtension>,
+
+        // Tiered escalation counters. One u8 per entity tracks
+        // how many extensions have been finalized on the *current* reservation
+        // / swap. Reset to zero (via remove) when the reservation/swap ends so
+        // the next one starts fresh. Sibling maps rather than fields on
+        // Reservation / SwapData to keep those decoders stable.
+        reservation_extension_count: Mapping<AccountId, u8>,
+        swap_extension_count: Mapping<u64, u8>,
+
         // Cooldown strike tracking (lazy eval) — (strike_count, last_expired_block)
         address_cooldown: Mapping<String, (u8, u32)>,
         // Financials
@@ -80,8 +94,6 @@ mod allways_swap_manager {
     const REQ_ACTIVATE: u8 = 0;
     const REQ_RESERVE: u8 = 1;
     const REQ_INITIATE: u8 = 2;
-    const REQ_EXTEND: u8 = 3;
-    const REQ_EXTEND_TIMEOUT: u8 = 4;
     const REQ_DEACTIVATE: u8 = 5;
     // Swap-keyed request types (used with pending_swap_votes).
     const REQ_CONFIRM: u8 = 6;
@@ -91,6 +103,20 @@ mod allways_swap_manager {
     // Callers on both the miner and validator side hardcode the same value so
     // no one needs to poll the contract to compute fee_amount.
     const FEE_DIVISOR: u128 = 100;
+
+    // Optimistic extension parameters. Window kept comfortably below the
+    // client-side EXTEND_THRESHOLD_BLOCKS (=20) so finalization always lands
+    // before the original reserved_until / timeout_block expires — no
+    // soft-hold rule needed.
+    const CHALLENGE_WINDOW_BLOCKS: u32 = 8;
+    const MAX_EXTENSION_BLOCKS: u32 = 250;
+
+    // Tiered escalation cap. Per-entity ceiling on cumulative
+    // finalized extensions. Both sides match: 2 extensions cover (a) tx-hash
+    // visibility → first conf, (b) first conf → full confirmation. A third
+    // tier doesn't exist — bounded blast radius is the point.
+    const MAX_EXTENSIONS_PER_RESERVATION: u8 = 2;
+    const MAX_EXTENSIONS_PER_SWAP: u8 = 2;
 
     // =========================================================================
     // Internal helpers
@@ -142,6 +168,11 @@ mod allways_swap_manager {
 
         fn clear_confirmed_reservation(&mut self, miner: AccountId) {
             self.reservations.remove(miner);
+            // Reset tiered-extension state alongside the reservation. Any
+            // dangling propose for this miner is also voided so the next
+            // reservation isn't blocked by a stale entry.
+            self.pending_reservation_extensions.remove(miner);
+            self.reservation_extension_count.remove(miner);
         }
 
         fn reserved_until_of(&self, miner: AccountId) -> u32 {
@@ -289,7 +320,7 @@ mod allways_swap_manager {
 
         /// Clear every pending swap-vote round for a resolved swap.
         fn clear_pending_swap_votes(&mut self, swap_id: u64) {
-            for req_type in [REQ_CONFIRM, REQ_TIMEOUT, REQ_EXTEND_TIMEOUT] {
+            for req_type in [REQ_CONFIRM, REQ_TIMEOUT] {
                 if let Some(id) = self.pending_swap_votes.get((swap_id, req_type)) {
                     self.clear_request_data(id);
                     self.pending_swap_votes.remove((swap_id, req_type));
@@ -364,6 +395,10 @@ mod allways_swap_manager {
                 pending_swap_votes: Mapping::default(),
 
                 reservations: Mapping::default(),
+                pending_reservation_extensions: Mapping::default(),
+                pending_timeout_extensions: Mapping::default(),
+                reservation_extension_count: Mapping::default(),
+                swap_extension_count: Mapping::default(),
 
                 address_cooldown: Mapping::default(),
                 accumulated_fees: 0,
@@ -542,50 +577,148 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        // =====================================================================
+        // Optimistic Reservation Extension (single-validator + challenge window)
+        // =====================================================================
+        //
+        // Validator-driven, no consensus quorum: any active validator can
+        // propose, any can challenge within CHALLENGE_WINDOW_BLOCKS, any can
+        // finalize after the window. Because window=8 < EXTEND_THRESHOLD=20,
+        // finalization always lands before reserved_until expires, so a
+        // challenge cleanly deletes the entry without needing a soft-hold on
+        // vote_reserve.
+
         #[ink(message)]
-        pub fn vote_extend_reservation(
+        pub fn propose_extend_reservation(
             &mut self,
-            request_hash: Hash,
             miner: AccountId,
-            from_tx_hash: String,
+            from_tx_hash: Hash,
+            target_block: u32,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
 
-            // Verify hash
-            let computed = Self::hash_request(&(&miner, &from_tx_hash));
-            if computed != request_hash {
-                return Err(Error::HashMismatch);
+            let Some(reservation) = self.reservations.get(miner) else {
+                return Err(Error::NoReservation);
+            };
+
+            let current = self.env().block_number();
+            if target_block <= current {
+                return Err(Error::InvalidTarget);
+            }
+            // saturating_sub keeps the comparison correct even if a malicious
+            // caller passes target_block close to u32::MAX.
+            if target_block.saturating_sub(current) > MAX_EXTENSION_BLOCKS {
+                return Err(Error::ExtensionTooLong);
+            }
+            if target_block <= reservation.reserved_until {
+                return Err(Error::TargetNotForward);
+            }
+            if self.pending_reservation_extensions.get(miner).is_some() {
+                return Err(Error::ProposalAlreadyPending);
+            }
+            // Tiered escalation cap. Counter persists across a reservation's
+            // lifetime; clear_confirmed_reservation resets it.
+            let count = self.reservation_extension_count.get(miner).unwrap_or(0);
+            if count >= MAX_EXTENSIONS_PER_RESERVATION {
+                return Err(Error::MaxExtensionsExceeded);
             }
 
-            // Miner must be active and not already in a swap
-            if !self.miner_active.get(miner).unwrap_or(false) {
-                return Err(Error::MinerNotActive);
-            }
-            if self.miner_has_active_swap.get(miner).unwrap_or(false) {
-                return Err(Error::MinerHasActiveSwap);
+            let caller = self.env().caller();
+            self.pending_reservation_extensions.insert(
+                miner,
+                &PendingExtension { submitter: caller, target_block, proposed_at: current },
+            );
+            self.env().emit_event(ReservationExtensionProposed {
+                miner,
+                from_tx_hash,
+                target_block,
+                by: caller,
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn challenge_extend_reservation(&mut self, miner: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_reservation_extensions.get(miner) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current >= pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowClosed);
             }
 
-            // Reservation data must exist (a prior reserve quorum succeeded)
-            if self.reservations.get(miner).is_none() {
+            self.pending_reservation_extensions.remove(miner);
+            self.env().emit_event(ReservationExtensionChallenged {
+                miner,
+                voided_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn finalize_extend_reservation(&mut self, miner: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_reservation_extensions.get(miner) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current < pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowOpen);
+            }
+
+            // Reservation may have been cleared between propose and finalize
+            // (cancellation, completed swap). If so, the proposal no longer
+            // applies — drop it silently rather than reviving a stale state.
+            let Some(mut reservation) = self.reservations.get(miner) else {
+                self.pending_reservation_extensions.remove(miner);
+                self.reservation_extension_count.remove(miner);
+                return Err(Error::NoReservation);
+            };
+            // Reservations don't auto-expire on read; a row whose reserved_until
+            // already passed is "dead" but still in storage. Finalizing one
+            // would resurrect it with a future deadline, locking out the next
+            // user via the MinerReserved guard. Refuse instead — and clear the
+            // pending entry so the miner isn't blocked from a fresh reservation.
+            if reservation.reserved_until < current {
+                self.pending_reservation_extensions.remove(miner);
+                self.reservation_extension_count.remove(miner);
                 return Err(Error::NoReservation);
             }
+            reservation.reserved_until = pending.target_block;
+            self.reservations.insert(miner, &reservation);
+            self.pending_reservation_extensions.remove(miner);
+            // Increment cumulative count after the target lands. Saturating so
+            // we can never wrap; the cap check at propose time is the gate.
+            let count = self.reservation_extension_count.get(miner).unwrap_or(0);
+            self.reservation_extension_count.insert(miner, &count.saturating_add(1));
 
-            self.consensus_vote(miner, REQ_EXTEND, request_hash, move |this| {
-                // Re-read on quorum — the pre-check above already proved it exists
-                // at call time, but the closure runs after consensus so we reload.
-                let Some(mut reservation) = this.reservations.get(miner) else {
-                    return Err(Error::NoReservation);
-                };
-                let new_reserved_until =
-                    this.env().block_number().saturating_add(this.reservation_ttl);
-                reservation.reserved_until = new_reserved_until;
-                this.reservations.insert(miner, &reservation);
-                this.env().emit_event(ReservationExtended {
-                    miner,
-                    reserved_until: new_reserved_until,
-                });
-                Ok(())
-            })
+            self.env().emit_event(ReservationExtensionFinalized {
+                miner,
+                applied_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_pending_reservation_extension(
+            &self,
+            miner: AccountId,
+        ) -> Option<PendingExtension> {
+            self.pending_reservation_extensions.get(miner)
+        }
+
+        /// Number of finalized extensions on the miner's current reservation.
+        /// Used by validators to know which tier of evidence the next propose
+        /// requires. Returns 0 for miners with no reservation or no extensions
+        /// yet.
+        #[ink(message)]
+        pub fn get_reservation_extension_count(&self, miner: AccountId) -> u8 {
+            self.reservation_extension_count.get(miner).unwrap_or(0)
         }
 
         // =====================================================================
@@ -803,6 +936,8 @@ mod allways_swap_manager {
 
                 this.swaps.remove(swap_id);
                 this.clear_pending_swap_votes(swap_id);
+                this.pending_timeout_extensions.remove(swap_id);
+                this.swap_extension_count.remove(swap_id);
                 Ok(())
             })
         }
@@ -860,39 +995,135 @@ mod allways_swap_manager {
 
                 this.swaps.remove(swap_id);
                 this.clear_pending_swap_votes(swap_id);
+                this.pending_timeout_extensions.remove(swap_id);
+                this.swap_extension_count.remove(swap_id);
                 Ok(())
             })
         }
 
-        /// Extend swap timeout — validator-only, quorum mechanism.
-        /// Used when a miner has fulfilled (sent dest funds) but the dest tx
-        /// hasn't reached enough confirmations before the timeout expires.
-        #[ink(message)]
-        pub fn vote_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
-            self.ensure_validator()?;
-            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
+        // =====================================================================
+        // Optimistic Timeout Extension (single-validator + challenge window)
+        // =====================================================================
+        //
+        // Mirror of the reservation-extension flow, keyed on swap_id and
+        // updating SwapData.timeout_block. Same window/cap semantics —
+        // window=8 < EXTEND_THRESHOLD=20 so finalize beats the original
+        // timeout. Only valid against Fulfilled swaps.
 
+        #[ink(message)]
+        pub fn propose_extend_timeout(
+            &mut self,
+            swap_id: u64,
+            target_block: u32,
+        ) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let swap = self.swaps.get(swap_id).ok_or(Error::SwapNotFound)?;
             if swap.status != SwapStatus::Fulfilled {
                 return Err(Error::InvalidStatus);
             }
 
-            self.consensus_swap_vote(swap_id, REQ_EXTEND_TIMEOUT, VoteType::ExtendTimeout, move |this| {
-                let mut swap = match this.swaps.get(swap_id) {
-                    Some(s) => s,
-                    None => return Err(Error::SwapNotFound),
-                };
-                let new_timeout = this.env().block_number().saturating_add(this.fulfillment_timeout_blocks);
-                swap.timeout_block = new_timeout;
-                this.swaps.insert(swap_id, &swap);
-                // clear_pending_swap_votes runs in consensus_swap_vote after this
-                // closure via the standard cleanup path — the caller can vote
-                // again for another extension on the next round.
-                this.env().emit_event(SwapTimeoutExtended {
-                    swap_id,
-                    new_timeout_block: new_timeout,
-                });
-                Ok(())
-            })
+            let current = self.env().block_number();
+            if target_block <= current {
+                return Err(Error::InvalidTarget);
+            }
+            if target_block.saturating_sub(current) > MAX_EXTENSION_BLOCKS {
+                return Err(Error::ExtensionTooLong);
+            }
+            if target_block <= swap.timeout_block {
+                return Err(Error::TargetNotForward);
+            }
+            if self.pending_timeout_extensions.get(swap_id).is_some() {
+                return Err(Error::ProposalAlreadyPending);
+            }
+            let count = self.swap_extension_count.get(swap_id).unwrap_or(0);
+            if count >= MAX_EXTENSIONS_PER_SWAP {
+                return Err(Error::MaxExtensionsExceeded);
+            }
+
+            let caller = self.env().caller();
+            self.pending_timeout_extensions.insert(
+                swap_id,
+                &PendingExtension { submitter: caller, target_block, proposed_at: current },
+            );
+            self.env().emit_event(TimeoutExtensionProposed {
+                swap_id,
+                target_block,
+                by: caller,
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn challenge_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_timeout_extensions.get(swap_id) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current >= pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowClosed);
+            }
+
+            self.pending_timeout_extensions.remove(swap_id);
+            self.env().emit_event(TimeoutExtensionChallenged {
+                swap_id,
+                voided_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn finalize_extend_timeout(&mut self, swap_id: u64) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let Some(pending) = self.pending_timeout_extensions.get(swap_id) else {
+                return Err(Error::NoProposal);
+            };
+            let current = self.env().block_number();
+            if current < pending.proposed_at.saturating_add(CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Error::ChallengeWindowOpen);
+            }
+
+            // Swap may have completed/timed-out between propose and finalize;
+            // drop the proposal silently rather than mutating a finalized swap.
+            let Some(mut swap) = self.swaps.get(swap_id) else {
+                self.pending_timeout_extensions.remove(swap_id);
+                return Err(Error::SwapNotFound);
+            };
+            if swap.status != SwapStatus::Fulfilled {
+                self.pending_timeout_extensions.remove(swap_id);
+                return Err(Error::InvalidStatus);
+            }
+            swap.timeout_block = pending.target_block;
+            self.swaps.insert(swap_id, &swap);
+            self.pending_timeout_extensions.remove(swap_id);
+            let count = self.swap_extension_count.get(swap_id).unwrap_or(0);
+            self.swap_extension_count.insert(swap_id, &count.saturating_add(1));
+
+            self.env().emit_event(TimeoutExtensionFinalized {
+                swap_id,
+                applied_target: pending.target_block,
+                by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_pending_timeout_extension(
+            &self,
+            swap_id: u64,
+        ) -> Option<PendingExtension> {
+            self.pending_timeout_extensions.get(swap_id)
+        }
+
+        /// Number of finalized extensions on this swap's fulfillment timeout.
+        /// Used by validators to tier the next propose.
+        #[ink(message)]
+        pub fn get_swap_extension_count(&self, swap_id: u64) -> u8 {
+            self.swap_extension_count.get(swap_id).unwrap_or(0)
         }
 
         /// Claim a pending slash payout (user calls after failed transfer)

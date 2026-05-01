@@ -14,7 +14,12 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, Swap, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
-from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.constants import (
+    MAX_EXTENSION_BLOCKS,
+    MAX_EXTENSIONS_PER_RESERVATION,
+    NETUID_FINNEY,
+    TAO_TO_RAO,
+)
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
 ALLWAYS_DIR = Path.home() / '.allways'
@@ -356,9 +361,9 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
     The naive ``reserved_until > current_block`` check (the old logic) breaks
     in two ways:
 
-      1. ``vote_extend_reservation`` advances ``reserved_until`` in-place when
-         a validator sees the source tx, so the saved value can legitimately
-         lag the on-chain value. Equality with the saved block is wrong.
+      1. ``finalize_extend_reservation`` advances ``reserved_until`` in-place
+         when a validator's optimistic propose lands, so the saved value can
+         legitimately lag the on-chain value. Equality with the saved block is wrong.
       2. After our reservation is consumed (vote_initiate) and the resulting
          swap completes, the swap is pruned but the miner can be re-reserved
          by another user. The miner's new ``reserved_until`` is in the future
@@ -382,11 +387,13 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
       Step 4 — if a row exists but the amounts differ from our saved state,
         it's someone else's reservation — ``replaced``.
 
-      Step 5 — amounts match but ``reserved_until`` is more than ``ttl``
-        blocks past our saved value: a single extension can't push the value
-        beyond ``current_block + ttl``, and we'd have caught chained
-        extensions in step 1 once ``vote_initiate`` ran. So this is a
-        replacement that happens to share our amounts — ``replaced``.
+      Step 5 — amounts match but ``reserved_until`` has grown beyond what
+        the optimistic-extension flow could legitimately push it to: each
+        finalize bumps reserved_until by at most ``MAX_EXTENSION_BLOCKS``,
+        and the contract caps the count at ``MAX_EXTENSIONS_PER_RESERVATION``.
+        So total growth from our saved value is bounded by their product;
+        anything beyond is a replacement that happens to share our amounts —
+        ``replaced``.
 
       Step 6 — within tolerance: ``ours_active``.
     """
@@ -413,11 +420,8 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
     if chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount:
         return ReservationStatus(kind='replaced')
 
-    try:
-        ttl = int(client.get_reservation_ttl())
-    except ContractError:
-        ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
-    if reserved_until - state.reserved_until_block > ttl:
+    max_extension_growth = MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS
+    if reserved_until - state.reserved_until_block > max_extension_growth:
         return ReservationStatus(kind='replaced')
 
     return ReservationStatus(kind='ours_active', reserved_until=reserved_until)

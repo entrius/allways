@@ -38,10 +38,6 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
-        # swap_id → timeout_block at vote time. ``is_extend_timeout_voted``
-        # auto-clears the entry once the contract has bumped the swap past
-        # the voted value so the next extension round can vote again.
-        self.extend_timeout_voted_at: Dict[int, int] = {}
         self.null_retry_count: Dict[int, int] = {}
 
     def initialize(self):
@@ -85,7 +81,6 @@ class SwapTracker:
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
-        self.extend_timeout_voted_at.pop(swap_id, None)
         self.null_retry_count.pop(swap_id, None)
 
     def mark_voted(self, swap_id: int):
@@ -95,21 +90,16 @@ class SwapTracker:
     def is_voted(self, swap_id: int) -> bool:
         return swap_id in self.voted_ids
 
-    def mark_extend_timeout_voted(self, swap_id: int) -> None:
+    def update_timeout_block(self, swap_id: int, timeout_block: int) -> None:
+        """Apply an externally-observed timeout bump (event-driven from
+        ``TimeoutExtensionFinalized``). Skips swaps not currently tracked
+        and never moves the deadline backwards — the next ``poll`` will
+        pick up the contract value either way."""
         swap = self.active.get(swap_id)
-        if swap is not None:
-            self.extend_timeout_voted_at[swap_id] = swap.timeout_block
-
-    def is_extend_timeout_voted(self, swap_id: int) -> bool:
-        voted_at = self.extend_timeout_voted_at.get(swap_id)
-        if voted_at is None:
-            return False
-        swap = self.active.get(swap_id)
-        if swap is not None and swap.timeout_block > voted_at:
-            # contract extended the swap → vote opens again for the next round
-            self.extend_timeout_voted_at.pop(swap_id, None)
-            return False
-        return True
+        if swap is None:
+            return
+        if timeout_block > swap.timeout_block:
+            swap.timeout_block = timeout_block
 
     async def poll(self):
         """Incremental refresh — called every forward step."""
@@ -205,9 +195,6 @@ class SwapTracker:
         active.pop raced by a fixture) can leave orphans."""
         active_ids = set(self.active.keys())
         self.voted_ids -= self.voted_ids - active_ids
-        for sid in list(self.extend_timeout_voted_at.keys()):
-            if sid not in active_ids:
-                del self.extend_timeout_voted_at[sid]
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""
