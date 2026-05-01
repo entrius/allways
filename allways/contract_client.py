@@ -54,12 +54,14 @@ from allways.classes import PendingExtension, Reservation, Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
 from allways.utils.scale import (
     ACCOUNT_ID_BYTES,
+    U16_BYTES,
     U32_BYTES,
     U64_BYTES,
     U128_BYTES,
     compact_encode_len,
     decode_account_id,
     decode_string,
+    decode_u16,
     decode_u32,
     decode_u64,
     decode_u128,
@@ -97,9 +99,9 @@ CONTRACT_SELECTORS = {
     'set_consensus_threshold': bytes.fromhex('c0d8ec47'),
     'set_min_swap_amount': bytes.fromhex('800e1573'),
     'set_max_swap_amount': bytes.fromhex('3e868f32'),
-    'set_recycle_address': bytes.fromhex('50dfe685'),
     'set_reservation_ttl': bytes.fromhex('3143d9e3'),
     'recycle_fees': bytes.fromhex('97756ea1'),
+    'enable_chain_ext': bytes.fromhex('aef4a766'),
     'get_swap': bytes.fromhex('a35f1bbf'),
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
@@ -114,6 +116,9 @@ CONTRACT_SELECTORS = {
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
     'get_recycle_address': bytes.fromhex('3847e06c'),
+    'get_staking_hotkey': bytes.fromhex('47e11891'),
+    'get_netuid': bytes.fromhex('75b98cec'),
+    'get_chain_ext_enabled': bytes.fromhex('06d94687'),
     'get_pending_slash': bytes.fromhex('48c78c4a'),
     'get_min_swap_amount': bytes.fromhex('fca7daa4'),
     'get_max_swap_amount': bytes.fromhex('97826e04'),
@@ -189,9 +194,9 @@ CONTRACT_ARG_TYPES = {
     'set_consensus_threshold': [('percent', 'u8')],
     'set_min_swap_amount': [('amount', 'u128')],
     'set_max_swap_amount': [('amount', 'u128')],
-    'set_recycle_address': [('address', 'AccountId')],
     'set_reservation_ttl': [('blocks', 'u32')],
     'recycle_fees': [],
+    'enable_chain_ext': [],
     'get_swap': [('swap_id', 'u64')],
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
@@ -603,6 +608,11 @@ class AllwaysContractClient:
             return encoded
         raise ValueError(f'Unsupported type: {type_tag}')
 
+    def extract_u16(self, data: bytes) -> Optional[int]:
+        if not data or len(data) < U16_BYTES:
+            return None
+        return decode_u16(data, 0)[0]
+
     def extract_u32(self, data: bytes) -> Optional[int]:
         if not data or len(data) < U32_BYTES:
             return None
@@ -696,6 +706,9 @@ class AllwaysContractClient:
             raise ContractError(f'{method}: no response')
         v = extractor(data)
         return v if v is not None else default
+
+    def read_u16(self, method: str, args: dict = None) -> int:
+        return self._read_typed(method, self.extract_u16, 0, args)
 
     def read_u32(self, method: str, args: dict = None) -> int:
         return self._read_typed(method, self.extract_u32, 0, args)
@@ -876,6 +889,15 @@ class AllwaysContractClient:
 
     def get_recycle_address(self) -> str:
         return self.read_account_id('get_recycle_address')
+
+    def get_staking_hotkey(self) -> str:
+        return self.read_account_id('get_staking_hotkey')
+
+    def get_netuid(self) -> int:
+        return self.read_u16('get_netuid')
+
+    def get_chain_ext_enabled(self) -> bool:
+        return self.read_bool('get_chain_ext_enabled')
 
     def is_validator(self, account: str) -> bool:
         return self.read_bool('is_validator', {'account': account})
@@ -1270,12 +1292,6 @@ class AllwaysContractClient:
         bt.logging.info(f'Min swap amount set to {amount_rao}: {tx_hash}')
         return tx_hash
 
-    def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
-        bt.logging.info(f'Recycle address set to {address}: {tx_hash}')
-        return tx_hash
-
     def set_reservation_ttl(self, wallet: bt.Wallet, blocks: int) -> str:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
@@ -1310,6 +1326,12 @@ class AllwaysContractClient:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('recycle_fees', keypair=wallet.hotkey)
         bt.logging.info(f'Fees recycled: {tx_hash}')
+        return tx_hash
+
+    def enable_chain_ext(self, wallet: bt.Wallet) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('enable_chain_ext', keypair=wallet.hotkey)
+        bt.logging.info(f'Chain extension latched: {tx_hash}')
         return tx_hash
 
     def transfer_ownership(self, wallet: bt.Wallet, new_owner: str) -> str:
