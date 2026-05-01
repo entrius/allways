@@ -16,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
@@ -67,6 +68,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     # so a resume stays pinned to the subnet the original reservation
     # was opened on.
     netuid = int(config.get('netuid', state.netuid))
+    # Hydrate from contract — chains, amounts, miner addresses are pulled
+    # live from get_reservation rather than the local file.
+    hydrate_pending_swap(state, client)
 
     # Check if system is halted
     try:

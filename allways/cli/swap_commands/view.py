@@ -20,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     from_rao,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
     probe_pending_reservation,
@@ -1029,6 +1030,7 @@ def view_reservation():
         console.print('\n[yellow]No active reservation found.[/yellow]')
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
+    hydrate_pending_swap(state, client)
 
     current_block = subtensor.get_current_block()
     with loading('Reading reservation...'):
