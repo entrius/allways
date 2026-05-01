@@ -304,6 +304,9 @@ _PERSISTED_FIELDS = {
     'hotkey_name',
     'from_tx_hash',
     'request_hash',
+    # created_at is local timing — not derivable from the contract
+    # (the on-chain MinerReserved event has a block, not a wall-clock).
+    'created_at',
 }
 
 
