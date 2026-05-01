@@ -863,6 +863,9 @@ def view_contract():
             total_recycled_rao = client.get_total_recycled_fees()
             owner = client.get_owner()
             recycle_address = client.get_recycle_address()
+            staking_hotkey = client.get_staking_hotkey()
+            recycle_netuid = client.get_netuid()
+            chain_ext_enabled = client.get_chain_ext_enabled()
             halted = client.get_halted()
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
@@ -927,8 +930,18 @@ def view_contract():
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
     table.add_row('Owner', owner)
-    if recycle_address:
-        table.add_row('Recycle Address', recycle_address)
+    # Recycle path. Pre-latch (chain_ext_enabled = false): `recycle_fees`
+    # transfers to the immutable custodial fallback. Post-latch: dispatches
+    # via the subtensor `add_stake_recycle` chain extension to
+    # (staking_hotkey, netuid). The latch is one-way; flipped by the owner
+    # via `alw admin enable-chain-ext`.
+    if chain_ext_enabled:
+        table.add_row(
+            'Recycle Path', f'[green]chain ext (latched)[/green] → {staking_hotkey} on netuid {recycle_netuid}'
+        )
+    else:
+        table.add_row('Recycle Path', f'[yellow]custodial (pre-latch)[/yellow] → {recycle_address}')
+        table.add_row('Latch Target', f'{staking_hotkey} on netuid {recycle_netuid}')
     table.add_row('System Status', '[red]HALTED[/red]' if halted else '[green]Running[/green]')
 
     console.print(table)

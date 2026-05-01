@@ -118,10 +118,18 @@ pub struct ConfigUpdated {
     pub value: u128,
 }
 
-/// Event emitted when accumulated fees are recycled (transferred to recycle address)
+/// `via_chain_ext = true` → fees went through `add_stake_recycle`.
+/// `via_chain_ext = false` → fees went to the custodial fallback.
 #[ink::event]
 pub struct FeesRecycled {
     pub tao_amount: u128,
+    pub via_chain_ext: bool,
+}
+
+/// One-way latch flip: custodial fallback is dead after this fires.
+#[ink::event]
+pub struct ChainExtensionLatched {
+    pub at_block: u32,
 }
 
 /// Event emitted when ownership is transferred

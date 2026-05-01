@@ -7,7 +7,50 @@ mod events;
 use types::{PendingExtension, Reservation, SwapData, SwapStatus, VoteType};
 use errors::Error;
 
-#[ink::contract]
+// Subtensor chain extension — opentensor/subtensor PR #2560.
+// extension=0x1000 and function=18 are upstream-frozen.
+#[ink::chain_extension(extension = 0x1000)]
+pub trait SubtensorExtension {
+    type ErrorCode = SubtensorError;
+
+    #[ink(function = 18)]
+    fn add_stake_recycle(
+        hotkey: <CustomEnvironment as ink::env::Environment>::AccountId,
+        netuid: u16,
+        amount: u64,
+    ) -> u64;
+}
+
+#[ink::scale_derive(Encode, Decode, TypeInfo)]
+pub enum SubtensorError {
+    ChainExtensionFailed,
+}
+
+impl ink::env::chain_extension::FromStatusCode for SubtensorError {
+    fn from_status_code(status_code: u32) -> Result<(), Self> {
+        match status_code {
+            0 => Ok(()),
+            _ => Err(Self::ChainExtensionFailed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[ink::scale_derive(TypeInfo)]
+pub enum CustomEnvironment {}
+
+impl ink::env::Environment for CustomEnvironment {
+    const MAX_EVENT_TOPICS: usize =
+        <ink::env::DefaultEnvironment as ink::env::Environment>::MAX_EVENT_TOPICS;
+    type AccountId = <ink::env::DefaultEnvironment as ink::env::Environment>::AccountId;
+    type Balance = <ink::env::DefaultEnvironment as ink::env::Environment>::Balance;
+    type Hash = <ink::env::DefaultEnvironment as ink::env::Environment>::Hash;
+    type Timestamp = <ink::env::DefaultEnvironment as ink::env::Environment>::Timestamp;
+    type BlockNumber = <ink::env::DefaultEnvironment as ink::env::Environment>::BlockNumber;
+    type ChainExtension = SubtensorExtension;
+}
+
+#[ink::contract(env = crate::CustomEnvironment)]
 mod allways_swap_manager {
     use super::*;
     use events::*;
@@ -20,7 +63,17 @@ mod allways_swap_manager {
     pub struct AllwaysSwapManager {
         // Configuration
         owner: AccountId,
+        // All four constructor-only. recycle_address is the pre-latch
+        // custodial sink; staking_hotkey + netuid are the post-latch
+        // add_stake_recycle target. chain_ext_enabled is a one-way latch
+        // flipped by `enable_chain_ext` (owner-only) once subtensor PR
+        // #2560 is live on this network — auto-probe is unsafe because
+        // pallet-contracts traps on chain-ext Err(DispatchError) before
+        // any fallback branch can run.
         recycle_address: AccountId,
+        staking_hotkey: AccountId,
+        netuid: u16,
+        chain_ext_enabled: bool,
         fulfillment_timeout_blocks: u32,
         reservation_ttl: u32,
         min_collateral: Balance,
@@ -357,6 +410,8 @@ mod allways_swap_manager {
         #[ink(constructor)]
         pub fn new(
             recycle_address: AccountId,
+            staking_hotkey: AccountId,
+            netuid: u16,
             fulfillment_timeout_blocks: u32,
             reservation_ttl: u32,
             min_collateral: Balance,
@@ -368,6 +423,9 @@ mod allways_swap_manager {
             Self {
                 owner: Self::env().caller(),
                 recycle_address,
+                staking_hotkey,
+                netuid,
+                chain_ext_enabled: false,
                 fulfillment_timeout_blocks,
                 reservation_ttl,
                 min_collateral,
@@ -1339,13 +1397,6 @@ mod allways_swap_manager {
         }
 
         #[ink(message)]
-        pub fn set_recycle_address(&mut self, address: AccountId) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.recycle_address = address;
-            Ok(())
-        }
-
-        #[ink(message)]
         pub fn set_reservation_ttl(&mut self, blocks: u32) -> Result<(), Error> {
             self.ensure_owner()?;
             self.reservation_ttl = blocks;
@@ -1367,22 +1418,54 @@ mod allways_swap_manager {
             Ok(())
         }
 
+        /// Permissionless. Pre-latch: transfer to recycle_address. Post-latch:
+        /// add_stake_recycle on (staking_hotkey, netuid); reverts on chain-ext
+        /// failure (decode the u32 from the revert trace via subtensor's Output enum).
         #[ink(message)]
         pub fn recycle_fees(&mut self) -> Result<(), Error> {
-            self.ensure_owner()?;
-
             let fees = self.accumulated_fees;
             if fees == 0 {
                 return Err(Error::InvalidAmount);
             }
 
-            self.env().transfer(self.recycle_address, fees)
-                .map_err(|_| Error::TransferFailed)?;
+            if self.chain_ext_enabled {
+                let amount: u64 = fees.try_into().map_err(|_| Error::TransferFailed)?;
+                self.env()
+                    .extension()
+                    .add_stake_recycle(self.staking_hotkey, self.netuid, amount)
+                    .map_err(|_| Error::TransferFailed)?;
+                self.finalize_recycle(fees, true);
+            } else {
+                self.env()
+                    .transfer(self.recycle_address, fees)
+                    .map_err(|_| Error::TransferFailed)?;
+                self.finalize_recycle(fees, false);
+            }
+            Ok(())
+        }
 
+        /// Owner-only one-way latch flip. Call after subtensor PR #2560 is
+        /// live and staking_hotkey is registered on netuid.
+        #[ink(message)]
+        pub fn enable_chain_ext(&mut self) -> Result<(), Error> {
+            self.ensure_owner()?;
+            if self.chain_ext_enabled {
+                return Err(Error::InvalidStatus);
+            }
+            self.chain_ext_enabled = true;
+            self.env().emit_event(ChainExtensionLatched {
+                at_block: self.env().block_number(),
+            });
+            Ok(())
+        }
+
+        fn finalize_recycle(&mut self, fees: Balance, via_chain_ext: bool) {
             self.accumulated_fees = 0;
             self.total_recycled_fees = self.total_recycled_fees.saturating_add(fees);
-            self.env().emit_event(FeesRecycled { tao_amount: fees });
-            Ok(())
+            self.env().emit_event(FeesRecycled {
+                tao_amount: fees,
+                via_chain_ext,
+            });
         }
 
         // =====================================================================
@@ -1465,6 +1548,21 @@ mod allways_swap_manager {
         #[ink(message)]
         pub fn get_recycle_address(&self) -> AccountId {
             self.recycle_address
+        }
+
+        #[ink(message)]
+        pub fn get_staking_hotkey(&self) -> AccountId {
+            self.staking_hotkey
+        }
+
+        #[ink(message)]
+        pub fn get_netuid(&self) -> u16 {
+            self.netuid
+        }
+
+        #[ink(message)]
+        pub fn get_chain_ext_enabled(&self) -> bool {
+            self.chain_ext_enabled
         }
 
         #[ink(message)]
