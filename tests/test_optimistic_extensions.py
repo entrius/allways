@@ -2,7 +2,10 @@
 
 Mocks the contract_client + wallet — no chain, no on-chain state. Each test
 asserts on whether the wrapper called the right contract write (or stayed
-silent) given a specific input.
+silent) given a specific input. ``pending`` is now a caller-supplied
+parameter (forward.py fetches once per row instead of three times); each
+test resolves it via ``w.fetch_pending_reservation`` / ``fetch_pending_timeout``
+so the existing ``make_watcher(pending_*)`` mocks still drive the value.
 """
 
 from unittest.mock import MagicMock
@@ -57,6 +60,7 @@ class TestMaybeProposeReservation:
             reserved_until=1050,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
@@ -75,6 +79,7 @@ class TestMaybeProposeReservation:
             reserved_until=1100,
             observed_confirmations=1,
             extension_count=1,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
         assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1150
@@ -90,6 +95,7 @@ class TestMaybeProposeReservation:
             reserved_until=1100,
             observed_confirmations=0,
             extension_count=1,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -105,6 +111,7 @@ class TestMaybeProposeReservation:
             reserved_until=1100,
             observed_confirmations=1,
             extension_count=2,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -119,6 +126,7 @@ class TestMaybeProposeReservation:
             reserved_until=1100,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -135,6 +143,7 @@ class TestMaybeProposeReservation:
             reserved_until=1100,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
@@ -155,6 +164,7 @@ class TestMaybeProposeReservation:
             reserved_until=1085,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
         target = w.contract_client.propose_extend_reservation.call_args.kwargs['target_block']
@@ -173,6 +183,7 @@ class TestMaybeProposeReservation:
             reserved_until=1050,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False  # rejection means we didn't successfully propose
 
@@ -189,6 +200,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
         w.contract_client.challenge_extend_reservation.assert_called_once()
@@ -204,6 +216,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -215,6 +228,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -229,6 +243,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
         w.contract_client.challenge_extend_reservation.assert_not_called()
@@ -244,6 +259,7 @@ class TestMaybeFinalizeReservation:
             miner_hotkey=MINER,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_reservation(MINER),
         )
         # Returns the applied target so the caller can refresh local caches
         # (e.g. state_store.update_reserved_until) without waiting for the
@@ -260,6 +276,7 @@ class TestMaybeFinalizeReservation:
             miner_hotkey=MINER,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is None
         w.contract_client.finalize_extend_reservation.assert_not_called()
@@ -270,6 +287,7 @@ class TestMaybeFinalizeReservation:
             miner_hotkey=MINER,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is None
         w.contract_client.finalize_extend_reservation.assert_not_called()
@@ -284,8 +302,27 @@ class TestMaybeFinalizeReservation:
             miner_hotkey=MINER,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_reservation(MINER),
         )
         assert result is None
+
+
+class TestFetchPendingReservation:
+    def test_returns_pending_when_cc_has_one(self):
+        pending = PendingExtension(OTHER_HOTKEY, 1180, 990)
+        w = make_watcher(pending_reservation=pending)
+        assert w.fetch_pending_reservation(MINER) is pending
+
+    def test_returns_none_when_cc_has_none(self):
+        w = make_watcher(pending_reservation=None)
+        assert w.fetch_pending_reservation(MINER) is None
+
+    def test_swallows_cc_exception(self):
+        # Forward loop should never see an exception bubble up — a transient
+        # RPC failure means "no pending I can act on this step", same as None.
+        w = make_watcher(pending_reservation=None)
+        w.contract_client.get_pending_reservation_extension.side_effect = RuntimeError('rpc flake')
+        assert w.fetch_pending_reservation(MINER) is None
 
 
 # =============================================================================
@@ -303,6 +340,7 @@ class TestMaybeProposeTimeout:
             timeout_block=1050,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is True
         kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
@@ -318,6 +356,7 @@ class TestMaybeProposeTimeout:
             timeout_block=1100,
             observed_confirmations=0,
             extension_count=1,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is False
 
@@ -330,6 +369,7 @@ class TestMaybeProposeTimeout:
             timeout_block=1100,
             observed_confirmations=1,
             extension_count=2,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is False
 
@@ -342,6 +382,7 @@ class TestMaybeProposeTimeout:
             timeout_block=1050,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is False
 
@@ -358,6 +399,7 @@ class TestMaybeProposeTimeout:
             timeout_block=1085,
             observed_confirmations=0,
             extension_count=0,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is True
         target = w.contract_client.propose_extend_timeout.call_args.kwargs['target_block']
@@ -374,6 +416,7 @@ class TestMaybeChallengeTimeout:
             dest_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is True
 
@@ -386,6 +429,7 @@ class TestMaybeChallengeTimeout:
             dest_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is False
 
@@ -399,6 +443,7 @@ class TestMaybeFinalizeTimeout:
             swap_id=42,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_timeout(42),
         )
         # Returns the applied target so extend_fulfilled_near_timeout can
         # bump swap_tracker before enforce_swap_timeouts reads from it.
@@ -412,6 +457,7 @@ class TestMaybeFinalizeTimeout:
             swap_id=42,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is None
 
@@ -424,5 +470,22 @@ class TestMaybeFinalizeTimeout:
             swap_id=42,
             current_block=1000,
             challenge_window_blocks=8,
+            pending=w.fetch_pending_timeout(42),
         )
         assert result is None
+
+
+class TestFetchPendingTimeout:
+    def test_returns_pending_when_cc_has_one(self):
+        pending = PendingExtension(OTHER_HOTKEY, 1180, 990)
+        w = make_watcher(pending_timeout=pending)
+        assert w.fetch_pending_timeout(42) is pending
+
+    def test_returns_none_when_cc_has_none(self):
+        w = make_watcher(pending_timeout=None)
+        assert w.fetch_pending_timeout(42) is None
+
+    def test_swallows_cc_exception(self):
+        w = make_watcher(pending_timeout=None)
+        w.contract_client.get_pending_timeout_extension.side_effect = RuntimeError('rpc flake')
+        assert w.fetch_pending_timeout(42) is None

@@ -98,16 +98,16 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         return
 
     current_block = self.block
+    # One {hotkey: uid} pass replaces an O(N) list scan per row when sizing
+    # up the per-row log prefix.
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(self.metagraph.hotkeys)}
 
     for item in items:
         swap_label = f'{item.from_chain.upper()}->{item.to_chain.upper()}'
-        try:
-            uid = self.metagraph.hotkeys.index(item.miner_hotkey)
-        except ValueError:
-            uid = '?'
+        uid = hotkey_to_uid.get(item.miner_hotkey, '?')
         miner_short = f'UID {uid} ({item.miner_hotkey[:8]})'
-        chain_def = self.chain_providers.get(item.from_chain)
-        min_confs = chain_def.get_chain().min_confirmations if chain_def else '?'
+        provider = self.chain_providers.get(item.from_chain)
+        min_confs = provider.get_chain().min_confirmations if provider else '?'
 
         try:
             if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
@@ -117,7 +117,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         except Exception as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
 
-        provider = self.chain_providers.get(item.from_chain)
         if provider is None:
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
@@ -249,10 +248,15 @@ def try_extend_reservation(
         bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: reserved_until read failed: {e}')
         reserved_until = item.reserved_until
 
+    # One pending-extension fetch shared across finalize/challenge/propose;
+    # used to be three separate RPCs per row per step.
+    pending = self.optimistic_extensions.fetch_pending_reservation(item.miner_hotkey)
+
     finalized_target = self.optimistic_extensions.maybe_finalize_reservation(
         miner_hotkey=item.miner_hotkey,
         current_block=current_block,
         challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
+        pending=pending,
     )
     if finalized_target is not None:
         # Same-step write so the upstream purge sweep sees the bumped deadline.
@@ -260,6 +264,10 @@ def try_extend_reservation(
         # until the next forward step's event_watcher.sync_to.
         self.state_store.update_reserved_until(item.miner_hotkey, finalized_target)
         reserved_until = finalized_target
+        # The just-finalized proposal is gone from contract storage; refresh
+        # so downstream challenge/propose see the post-finalize state instead
+        # of a stale "still pending" snapshot.
+        pending = None
 
     if tx_info is None:
         return
@@ -277,6 +285,7 @@ def try_extend_reservation(
         from_chain_id=item.from_chain,
         observed_confirmations=tx_info.confirmations,
         current_block=current_block,
+        pending=pending,
     )
 
     try:
@@ -302,6 +311,7 @@ def try_extend_reservation(
         reserved_until=reserved_until,
         observed_confirmations=tx_info.confirmations,
         extension_count=extension_count,
+        pending=pending,
     )
     if proposed:
         bt.logging.info(
@@ -410,16 +420,22 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
 
+        # One pending-extension fetch shared across finalize/challenge/propose.
+        pending = self.optimistic_extensions.fetch_pending_timeout(swap.id)
+
         finalized_target = self.optimistic_extensions.maybe_finalize_timeout(
             swap_id=swap.id,
             current_block=current_block,
             challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
+            pending=pending,
         )
         if finalized_target is not None:
             # Same-step write so enforce_swap_timeouts (which runs immediately
             # after this loop) reads the bumped deadline rather than the
             # pre-finalize value the next event sync would otherwise carry in.
             tracker.update_timeout_block(swap.id, finalized_target)
+            # Just-finalized proposal is gone from contract storage.
+            pending = None
 
         provider = self.chain_providers.get(swap.to_chain)
         if not provider or not swap.to_tx_hash:
@@ -458,6 +474,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             dest_chain_id=swap.to_chain,
             observed_confirmations=tx_info.confirmations,
             current_block=current_block,
+            pending=pending,
         )
         proposed = self.optimistic_extensions.maybe_propose_timeout(
             swap_id=swap.id,
@@ -466,6 +483,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             timeout_block=swap.timeout_block,
             observed_confirmations=tx_info.confirmations,
             extension_count=extension_count,
+            pending=pending,
         )
         if proposed:
             bt.logging.info(
