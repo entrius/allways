@@ -89,11 +89,8 @@ class OptimisticExtensionWatcher:
         min_safe_target = current_block + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
         if target_block < min_safe_target:
             target_block = (
-                (min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1)
-                // EXTENSION_BUCKET_BLOCKS
-                * EXTENSION_BUCKET_BLOCKS
-                + current_block
-            )
+                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
+            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
 
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
