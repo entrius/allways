@@ -50,7 +50,7 @@ from async_substrate_interface.errors import ExtrinsicNotFound
 from bittensor import Keypair
 from websockets.exceptions import ConnectionClosed
 
-from allways.classes import PendingExtension, Swap, SwapStatus
+from allways.classes import PendingExtension, Reservation, Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
 from allways.utils.scale import (
     ACCOUNT_ID_BYTES,
@@ -124,6 +124,7 @@ CONTRACT_SELECTORS = {
     'get_validator_count': bytes.fromhex('a30ab5c4'),
     'get_validators': bytes.fromhex('a28acf8e'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
+    'get_reservation': bytes.fromhex('3690f521'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
     'propose_extend_reservation': bytes.fromhex('9c9a8e8e'),
@@ -206,6 +207,7 @@ CONTRACT_ARG_TYPES = {
     'get_validator_count': [],
     'get_validators': [],
     'get_reservation_data': [('miner', 'AccountId')],
+    'get_reservation': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
     'propose_extend_reservation': [
         ('miner', 'AccountId'),
@@ -723,6 +725,32 @@ class AllwaysContractClient:
             return self.decode_swap_data(data, offset=1)
         return None
 
+    def decode_reservation(self, data: bytes, offset: int = 0) -> Optional[Reservation]:
+        try:
+            o = offset
+            hash_bytes = data[o : o + 32]
+            o += 32
+            from_addr, o = decode_string(data, o)
+            from_chain, o = decode_string(data, o)
+            to_chain, o = decode_string(data, o)
+            tao_amount, o = decode_u128(data, o)
+            from_amount, o = decode_u128(data, o)
+            to_amount, o = decode_u128(data, o)
+            reserved_until, o = decode_u32(data, o)
+            return Reservation(
+                hash='0x' + hash_bytes.hex(),
+                from_addr=from_addr,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                tao_amount=tao_amount,
+                from_amount=from_amount,
+                to_amount=to_amount,
+                reserved_until=reserved_until,
+            )
+        except Exception as e:
+            bt.logging.debug(f'Failed to decode Reservation: {e}')
+            return None
+
     # =========================================================================
     # Query Functions (Read-only)
     # =========================================================================
@@ -916,6 +944,14 @@ class AllwaysContractClient:
         from_amount, o = decode_u128(data, o)
         to_amount, _ = decode_u128(data, o)
         return (tao_amount, from_amount, to_amount)
+
+    def get_reservation(self, miner_hotkey: str) -> Optional[Reservation]:
+        """Full reservation record (hash, from_addr, amounts, reserved_until)."""
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_reservation', {'miner': miner_hotkey})
+        if data is None or len(data) < 1 or data[0] != 0x01:
+            return None
+        return self.decode_reservation(data, offset=1)
 
     # =========================================================================
     # Transaction Functions (Write)

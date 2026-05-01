@@ -34,6 +34,8 @@ pub enum VoteType {
 pub struct Reservation {
     pub hash: Hash,
     pub from_addr: String,
+    pub from_chain: String,
+    pub to_chain: String,
     pub tao_amount: Balance,
     pub from_amount: Balance,
     pub to_amount: Balance,

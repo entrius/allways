@@ -279,6 +279,9 @@ class PendingSwapState:
     # swap is waiting on validator confirm/initiate, not on the user. Lets
     # `alw view reservation` stop instructing the user to send funds again.
     from_tx_hash: str = ''
+    # Contract correlation key, fetched from get_reservation after vote_reserve
+    # quorum lands. Default-empty for backwards compat with older state files.
+    request_hash: str = ''
 
 
 def save_pending_swap(state: PendingSwapState) -> None:
@@ -406,6 +409,21 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
                     return ReservationStatus(kind='our_swap', swap=swap)
     except ContractError:
         return ReservationStatus(kind='rpc_error')
+
+    # Strongest signal: the contract returns the full Reservation including the
+    # request_hash. If our saved hash matches, the row is ours full stop. Saved
+    # state from before request_hash was tracked falls through to the legacy
+    # amount-based reconciliation below.
+    if state.request_hash:
+        try:
+            on_chain = client.get_reservation(state.miner_hotkey)
+        except ContractError:
+            return ReservationStatus(kind='rpc_error')
+        if on_chain is None or on_chain.reserved_until < current_block:
+            return ReservationStatus(kind='expired')
+        if on_chain.hash != state.request_hash:
+            return ReservationStatus(kind='replaced')
+        return ReservationStatus(kind='ours_active', reserved_until=on_chain.reserved_until)
 
     try:
         reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
