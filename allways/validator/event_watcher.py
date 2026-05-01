@@ -195,6 +195,7 @@ class ActiveEvent:
 
 
 MAX_BLOCKS_PER_SYNC = 50
+EVENT_PRUNE_INTERVAL_BLOCKS = 100  # O(events) sweep; window much wider than per-step delta.
 
 
 class ContractEventWatcher:
@@ -217,6 +218,7 @@ class ContractEventWatcher:
         self.swap_tracker = swap_tracker
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
+        self.last_prune_block: int = 0
 
         self.active_miners: Set[str] = set()
         self.open_swap_count: Dict[str, int] = {}
@@ -325,7 +327,9 @@ class ContractEventWatcher:
         for block_num in range(self.cursor + 1, end + 1):
             self.process_block(block_num)
         self.cursor = end
-        self.prune_old_events(current_block)
+        if current_block - self.last_prune_block >= EVENT_PRUNE_INTERVAL_BLOCKS:
+            self.prune_old_events(current_block)
+            self.last_prune_block = current_block
 
     def process_block(self, block_num: int) -> None:
         try:

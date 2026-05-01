@@ -86,9 +86,9 @@ class BaseNeuron(ABC):
 
     def sync(self):
         """Wrapper for synchronizing the state of the network for the given miner or validator."""
-        self.check_registered()
-
+        # Registration only changes at epoch boundaries; cold-start covered by __init__.
         if self.should_sync_metagraph():
+            self.check_registered()
             self.resync_metagraph()
 
         if self.should_set_weights():
