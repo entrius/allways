@@ -369,6 +369,7 @@ async def handle_swap_reserve(
                     )
                     return synapse
 
+            bt.logging.info(f'{ctx} preflight ok, voting')
             contract.vote_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,
