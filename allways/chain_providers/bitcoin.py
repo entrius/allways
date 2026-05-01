@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any, Optional, Tuple
 
 import base58
@@ -616,23 +617,30 @@ class BitcoinProvider(ChainProvider):
         without overpaying for next-block urgency. ``override`` (sat/vB) skips
         estimation, floor, and multiplier — caller is taking explicit
         responsibility for the rate (e.g. CPFP / manual bump).
+
+        One retry with a 3s sleep on API failure — Blockstream's testnet
+        endpoint occasionally returns 5xx; silent fallback to the floor has
+        stranded at least one dest tx at 5 sat/vB.
         """
         if override is not None:
             return max(1, override)
 
         from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
 
-        try:
-            url = f'{self.blockstream_api_url()}/fee-estimates'
-            resp = self.http.get(url, timeout=10)
-            resp.raise_for_status()
-            estimates = resp.json()
-            for target in ('2', '3'):
-                if target in estimates:
-                    padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
-                    return max(BTC_MIN_FEE_RATE, padded)
-        except Exception:
-            pass
+        url = f'{self.blockstream_api_url()}/fee-estimates'
+        for attempt in range(2):
+            try:
+                resp = self.http.get(url, timeout=10)
+                resp.raise_for_status()
+                estimates = resp.json()
+                for target in ('2', '3'):
+                    if target in estimates:
+                        padded = int(round(float(estimates[target]) * BTC_FEE_RATE_SAFETY_MULTIPLIER))
+                        return max(BTC_MIN_FEE_RATE, padded)
+            except Exception as e:
+                bt.logging.debug(f'estimate_fee_rate: attempt {attempt + 1} failed: {e}')
+            if attempt == 0:
+                time.sleep(3)
         return BTC_MIN_FEE_RATE
 
     def send_amount(

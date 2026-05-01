@@ -16,11 +16,9 @@ import bittensor as bt
 from allways.chains import compute_extension_target, get_chain
 from allways.classes import PendingExtension
 from allways.constants import (
-    CHALLENGE_WINDOW_BLOCKS,
     EXTENSION_BUCKET_BLOCKS,
     MAX_EXTENSIONS_PER_RESERVATION,
     MAX_EXTENSIONS_PER_SWAP,
-    VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE,
 )
 from allways.contract_client import (
     AllwaysContractClient,
@@ -98,28 +96,7 @@ class OptimisticExtensionWatcher:
                 return False
             chain = get_chain(from_chain_id)
             remaining = max(0, chain.min_confirmations - observed_confirmations)
-        target_block = compute_extension_target(from_chain_id, remaining, current_block)
-
-        if target_block <= reserved_until:
-            # Bucketed target landed at or before the existing deadline — the
-            # extension is unnecessary, don't waste a tx.
-            return False
-
-        # Defensive floor (applied only after we've decided the propose is
-        # worth doing): the new deadline must clear the *existing*
-        # reserved_until by at least one challenge window plus one
-        # forward-step worth of jitter. Anchoring on reserved_until (not
-        # current_block) is what makes every successful extension land a
-        # meaningful chunk of runway past the old deadline — anchoring on
-        # current_block would let a propose that fires with 25 blocks
-        # remaining land a target only 3-5 blocks past the old deadline,
-        # immediately re-arming the next extension cycle. Round up to an
-        # EXTENSION_BUCKET_BLOCKS boundary so validators converge.
-        min_safe_target = reserved_until + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
-        if target_block < min_safe_target:
-            target_block = (
-                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
-            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
+        target_block = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
 
         return self._try_call(
             'propose_extend_reservation',
@@ -224,24 +201,7 @@ class OptimisticExtensionWatcher:
                 return False
             chain = get_chain(dest_chain_id)
             remaining = max(0, chain.min_confirmations - observed_confirmations)
-        target_block = compute_extension_target(dest_chain_id, remaining, current_block)
-
-        if target_block <= timeout_block:
-            return False
-
-        # Mirror of the floor in maybe_propose_reservation: a propose whose
-        # natural target lands only a few blocks past the existing
-        # timeout_block immediately re-arms the next extension cycle, since
-        # finalize itself eats CHALLENGE_WINDOW_BLOCKS and one forward step
-        # of jitter before the new deadline starts paying. Anchor on
-        # timeout_block (not current_block) so each successful extension
-        # buys a meaningful chunk of runway, then bucket-round so validators
-        # converge on the same target.
-        min_safe_target = timeout_block + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
-        if target_block < min_safe_target:
-            target_block = (
-                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
-            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
+        target_block = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
 
         return self._try_call(
             'propose_extend_timeout',
