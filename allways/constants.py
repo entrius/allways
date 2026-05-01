@@ -100,7 +100,7 @@ FEE_DIVISOR = 100
 # Fallbacks/defaults for CLI display. Live values are written by `alw admin`
 # and read from the contract at runtime.
 MIN_COLLATERAL_TAO = 0.1
-DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min
+DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
-RESERVATION_TTL_BLOCKS = 30  # ~5 min
+RESERVATION_TTL_BLOCKS = 50  # ~10 min
