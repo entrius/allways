@@ -287,6 +287,7 @@ def try_extend_reservation(
         from_chain_id=item.from_chain,
         observed_confirmations=tx_info.confirmations,
         current_block=current_block,
+        reserved_until=reserved_until,
         pending=pending,
     )
 
@@ -476,6 +477,7 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             dest_chain_id=swap.to_chain,
             observed_confirmations=tx_info.confirmations,
             current_block=current_block,
+            timeout_block=swap.timeout_block,
             pending=pending,
         )
         proposed = self.optimistic_extensions.maybe_propose_timeout(

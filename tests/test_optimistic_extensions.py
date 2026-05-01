@@ -150,8 +150,8 @@ class TestMaybeProposeReservation:
 
 class TestMaybeChallengeReservation:
     def test_challenges_when_target_too_far(self):
-        # Local expected target for BTC at 1/3 confs, current=1000 = 1150.
-        # Pending target=2000 is way beyond expected + bucket(30) = 1180.
+        # BTC at 1/3 confs → blocks_needed=150. Anchor=max(1000,1100)=1100,
+        # expected=1250. Pending=2000 is past expected + bucket(30)=1280.
         w = make_watcher(
             pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
@@ -160,22 +160,23 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
         w.contract_client.challenge_extend_reservation.assert_called_once()
 
     def test_skips_when_target_within_one_bucket_tolerance(self):
-        # Expected target = 1150. Bucket = 30. Pending = 1180 (= expected + bucket)
-        # is the boundary — should be accepted (within tolerance).
+        # expected=1250 (see above), pending=1280 is the boundary.
         w = make_watcher(
-            pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1180, proposed_at=995),
+            pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1280, proposed_at=995),
         )
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
@@ -188,6 +189,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
@@ -203,6 +205,7 @@ class TestMaybeChallengeReservation:
             from_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is False
@@ -351,6 +354,8 @@ class TestMaybeProposeTimeout:
 
 class TestMaybeChallengeTimeout:
     def test_challenges_when_target_too_far(self):
+        # Anchor=max(1000,1100)=1100, expected=1250, pending=2000 past
+        # expected + bucket(30)=1280.
         w = make_watcher(
             pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
@@ -359,6 +364,7 @@ class TestMaybeChallengeTimeout:
             dest_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            timeout_block=1100,
             pending=w.fetch_pending_timeout(42),
         )
         assert result is True
@@ -372,6 +378,7 @@ class TestMaybeChallengeTimeout:
             dest_chain_id='btc',
             observed_confirmations=1,
             current_block=1000,
+            timeout_block=1100,
             pending=w.fetch_pending_timeout(42),
         )
         assert result is False

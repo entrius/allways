@@ -114,14 +114,20 @@ class OptimisticExtensionWatcher:
         from_chain_id: str,
         observed_confirmations: int,
         current_block: int,
+        reserved_until: int,
         pending: Optional[PendingExtension],
     ) -> bool:
         """Challenge the pending reservation extension if its target is too far.
 
+        Mirrors the deadline-anchored math used by ``maybe_propose_reservation``
+        so challenger and proposer compute the same expected target. Without
+        this the two sides could drift by up to EXTEND_THRESHOLD_BLOCKS,
+        which the EXTENSION_BUCKET_BLOCKS tolerance currently absorbs but
+        shouldn't have to.
+
         Tolerance is one bucket — proposals within EXTENSION_BUCKET_BLOCKS of
         the locally-computed target are accepted as benign rounding drift.
-        Skips proposals submitted by this validator's own wallet. ``pending``
-        is the caller-supplied snapshot — see ``maybe_propose_reservation``.
+        Skips proposals submitted by this validator's own wallet.
         """
         if pending is None:
             return False
@@ -130,7 +136,7 @@ class OptimisticExtensionWatcher:
 
         chain = get_chain(from_chain_id)
         remaining = max(0, chain.min_confirmations - observed_confirmations)
-        expected = compute_extension_target(from_chain_id, remaining, current_block)
+        expected = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
@@ -218,8 +224,11 @@ class OptimisticExtensionWatcher:
         dest_chain_id: str,
         observed_confirmations: int,
         current_block: int,
+        timeout_block: int,
         pending: Optional[PendingExtension],
     ) -> bool:
+        """Mirror of ``maybe_challenge_reservation``: deadline-anchored expected
+        target so challenger and proposer stay aligned."""
         if pending is None:
             return False
         if self._is_own_proposal(pending):
@@ -227,7 +236,7 @@ class OptimisticExtensionWatcher:
 
         chain = get_chain(dest_chain_id)
         remaining = max(0, chain.min_confirmations - observed_confirmations)
-        expected = compute_extension_target(dest_chain_id, remaining, current_block)
+        expected = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
