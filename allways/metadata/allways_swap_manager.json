@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0x12d321ccabbe169974f3fd88bf7bcff1dfb7c8ba3066895a1fe3fa7162443884",
+    "hash": "0x040793c51138c4ff6d3088f7732f5b4c5f4c9896875742346b00d9d68119480d",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -138,7 +138,7 @@
         "displayName": [
           "ChainExtension"
         ],
-        "type": 98
+        "type": 100
       },
       "hash": {
         "displayName": [
@@ -1107,7 +1107,7 @@
                 "types",
                 "VoteType"
               ],
-              "type": 97
+              "type": 99
             }
           },
           {
@@ -1433,8 +1433,8 @@
         "docs": [
           " Number of finalized extensions on the miner's current reservation.",
           " Used by validators to know which tier of evidence the next propose",
-          " requires (redesign §13). Returns 0 for miners with no reservation",
-          " or no extensions yet."
+          " requires. Returns 0 for miners with no reservation or no extensions",
+          " yet."
         ],
         "label": "get_reservation_extension_count",
         "mutates": false,
@@ -1839,7 +1839,7 @@
         "default": false,
         "docs": [
           " Number of finalized extensions on this swap's fulfillment timeout.",
-          " Used by validators to tier the next propose (redesign §13)."
+          " Used by validators to tier the next propose."
         ],
         "label": "get_swap_extension_count",
         "mutates": false,
@@ -2834,6 +2834,32 @@
         ],
         "default": false,
         "docs": [],
+        "label": "get_reservation",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 96
+        },
+        "selector": "0x3690f521"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
         "label": "get_pending_reserve_vote_count",
         "mutates": false,
         "payable": false,
@@ -2868,7 +2894,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 96
+          "type": 98
         },
         "selector": "0x19a837c6"
       }
@@ -3401,6 +3427,24 @@
                             }
                           },
                           "name": "from_addr"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 8
+                            }
+                          },
+                          "name": "from_chain"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x834add48",
+                              "ty": 8
+                            }
+                          },
+                          "name": "to_chain"
                         },
                         {
                           "layout": {
@@ -4780,6 +4824,16 @@
               },
               {
                 "name": "from_addr",
+                "type": 8,
+                "typeName": "String"
+              },
+              {
+                "name": "from_chain",
+                "type": 8,
+                "typeName": "String"
+              },
+              {
+                "name": "to_chain",
                 "type": 8,
                 "typeName": "String"
               },
@@ -6406,6 +6460,81 @@
               {
                 "fields": [
                   {
+                    "type": 97
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 76
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 97
+          },
+          {
+            "name": "E",
+            "type": 76
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 97,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 0,
+                "name": "None"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 50
+                  }
+                ],
+                "index": 1,
+                "name": "Some"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 50
+          }
+        ],
+        "path": [
+          "Option"
+        ]
+      }
+    },
+    {
+      "id": 98,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
                     "type": 67
                   }
                 ],
@@ -6440,7 +6569,7 @@
       }
     },
     {
-      "id": 97,
+      "id": 99,
       "type": {
         "def": {
           "variant": {
@@ -6464,7 +6593,7 @@
       }
     },
     {
-      "id": 98,
+      "id": 100,
       "type": {
         "def": {
           "variant": {}

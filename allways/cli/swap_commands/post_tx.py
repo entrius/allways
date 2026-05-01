@@ -10,6 +10,7 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
@@ -55,6 +56,9 @@ def post_tx_command(tx_hash: str, tx_block: int):
         console.print('[red]No pending swap found.[/red]')
         console.print('[dim]Run `alw swap now` to initiate a swap first.[/dim]')
         return
+    # Hydrate from contract — local file is the slim user-only set; chains,
+    # amounts, miner addresses are pulled live from get_reservation.
+    hydrate_pending_swap(state, client)
 
     # Validate reservation is still active on-chain
     try:

@@ -959,6 +959,16 @@ def swap_now_command(
 
     reserved_until, validator_axons, ephemeral_wallet = result
 
+    # Pull the contract-side request_hash so the local state can correlate to
+    # active_reservations and the user can deep-link to the dashboard. A
+    # transient RPC failure here must not abort the swap — fall back to the
+    # legacy amount-triple reconciliation in probe_pending_reservation.
+    try:
+        chain_reservation = client.get_reservation(selected_pair.hotkey)
+        request_hash = chain_reservation.hash if chain_reservation else ''
+    except ContractError:
+        request_hash = ''
+
     # Save pending swap state as backup
     state = PendingSwapState(
         miner_hotkey=selected_pair.hotkey,
@@ -978,8 +988,15 @@ def swap_now_command(
         wallet_name=wallet.name,
         hotkey_name=wallet.hotkey_str,
         created_at=time.time(),
+        request_hash=request_hash,
     )
     save_pending_swap(state)
+
+    if request_hash:
+        from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL
+
+        dashboard = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+        console.print(f'  [dim]Reservation:[/dim] [cyan]{dashboard}/reservations/{request_hash}[/cyan]')
 
     # Step 9: Send funds (or use pre-provided tx hash)
     from_tx_block = 0  # Set below so confirm synapse can give validators a ±3 hint.

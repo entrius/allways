@@ -554,6 +554,8 @@ mod allways_swap_manager {
                     &Reservation {
                         hash: request_hash,
                         from_addr: user_from_address,
+                        from_chain,
+                        to_chain,
                         tao_amount,
                         from_amount,
                         to_amount,
@@ -1535,6 +1537,11 @@ mod allways_swap_manager {
             self.reservations
                 .get(miner)
                 .map(|r| (r.tao_amount, r.from_amount, r.to_amount))
+        }
+
+        #[ink(message)]
+        pub fn get_reservation(&self, miner: AccountId) -> Option<Reservation> {
+            self.reservations.get(miner)
         }
 
         #[ink(message)]

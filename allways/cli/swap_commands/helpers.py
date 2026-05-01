@@ -258,33 +258,64 @@ def get_cli_context(
 
 @dataclass
 class PendingSwapState:
+    """In-memory view of a user's pending swap.
+
+    Persisted fields (written to ~/.allways/pending_swap.json) are only those
+    the contract / current_miners table can't tell us:
+      miner_hotkey, request_hash, receive_address, netuid, wallet_name,
+      hotkey_name, from_tx_hash.
+
+    Everything else (chains, amounts, miner addresses, etc.) is hydrated from
+    `client.get_reservation(miner_hotkey)` + the miner commitment in
+    ``hydrate_pending_swap`` so the contract stays the source of truth.
+    """
+
+    # Persisted (user-only — contract can't tell us)
     miner_hotkey: str
-    miner_uid: int
-    from_chain: str
-    to_chain: str
-    from_amount: int
-    to_amount: int
-    tao_amount: int
-    user_receives: int
-    rate_str: str
-    miner_from_address: str
-    user_from_address: str
     receive_address: str
-    reserved_until_block: int
     netuid: int
     wallet_name: str
     hotkey_name: str
-    created_at: float
-    # Empty until the user has broadcast the source-chain tx — once set, the
-    # swap is waiting on validator confirm/initiate, not on the user. Lets
-    # `alw view reservation` stop instructing the user to send funds again.
     from_tx_hash: str = ''
+    # Contract correlation key — keys our reservation lookup. Default-empty
+    # for backwards compat with state files written before this PR.
+    request_hash: str = ''
+    # Hydrated lazily from the contract — see ``hydrate_pending_swap``.
+    miner_uid: int = 0
+    from_chain: str = ''
+    to_chain: str = ''
+    from_amount: int = 0
+    to_amount: int = 0
+    tao_amount: int = 0
+    user_receives: int = 0
+    rate_str: str = ''
+    miner_from_address: str = ''
+    user_from_address: str = ''
+    reserved_until_block: int = 0
+    created_at: float = 0.0
+
+
+# Persisted subset — contract owns the rest.
+_PERSISTED_FIELDS = {
+    'miner_hotkey',
+    'receive_address',
+    'netuid',
+    'wallet_name',
+    'hotkey_name',
+    'from_tx_hash',
+    'request_hash',
+    # created_at is local timing — not derivable from the contract
+    # (the on-chain MinerReserved event has a block, not a wall-clock).
+    'created_at',
+}
 
 
 def save_pending_swap(state: PendingSwapState) -> None:
     """Atomically write pending swap state to ~/.allways/pending_swap.json."""
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(asdict(state), indent=2)
+    full = asdict(state)
+    slim = {k: v for k, v in full.items() if k in _PERSISTED_FIELDS}
+    data = json.dumps(slim, indent=2)
     fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
     try:
         with os.fdopen(fd, 'w') as f:
@@ -297,14 +328,70 @@ def save_pending_swap(state: PendingSwapState) -> None:
 
 
 def load_pending_swap() -> Optional[PendingSwapState]:
-    """Load pending swap state. Returns None if file doesn't exist or is invalid."""
+    """Load pending swap state. Returns None if file doesn't exist or is invalid.
+
+    Only the user-only fields are persisted; call ``hydrate_pending_swap``
+    afterwards with a contract client to populate the contract-derived fields.
+    Older fat state files still load (extra keys are accepted via setattr).
+    """
     if not PENDING_SWAP_FILE.exists():
         return None
     try:
         data = json.loads(PENDING_SWAP_FILE.read_text())
-        return PendingSwapState(**data)
+        # Accept legacy state files with the old fat shape — keep only fields
+        # the dataclass knows about so unknown keys don't crash construction.
+        known = {f.name for f in PendingSwapState.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return PendingSwapState(**filtered)
     except Exception:
         return None
+
+
+def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
+    """Fill contract-derivable fields on ``state`` in place.
+
+    Returns True when the on-chain reservation matches state.request_hash and
+    fields were populated. Returns False if the reservation is gone or the
+    hash doesn't match; caller can still read whatever derivable fields were
+    already populated (legacy state, post-broadcast cache).
+    """
+    if not state.miner_hotkey:
+        return False
+    try:
+        res = client.get_reservation(state.miner_hotkey)
+    except ContractError:
+        return False
+    if not res:
+        return False
+    if state.request_hash and res.hash != state.request_hash:
+        return False
+    state.from_chain = res.from_chain
+    state.to_chain = res.to_chain
+    state.from_amount = res.from_amount
+    state.to_amount = res.to_amount
+    state.tao_amount = res.tao_amount
+    state.user_from_address = res.from_addr
+    state.reserved_until_block = res.reserved_until
+    if not state.request_hash:
+        state.request_hash = res.hash
+    # Miner-commitment fields (rate, miner source addr, uid) live in
+    # current_miners — best-effort fetch, leave defaults on miss.
+    try:
+        from allways.commitments import read_miner_commitment
+
+        miner_pair = read_miner_commitment(getattr(client, 'subtensor', None), state.miner_hotkey, state.netuid)
+        if miner_pair:
+            state.miner_uid = miner_pair.uid
+            state.miner_from_address = miner_pair.from_address
+            state.rate_str = miner_pair.rate_str
+    except Exception:
+        pass
+    # User receives = gross dest amount minus 1% protocol fee.
+    if state.to_amount and not state.user_receives:
+        from allways.constants import FEE_DIVISOR
+
+        state.user_receives = state.to_amount - state.to_amount // FEE_DIVISOR
+    return True
 
 
 def clear_pending_swap() -> None:
@@ -406,6 +493,21 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
                     return ReservationStatus(kind='our_swap', swap=swap)
     except ContractError:
         return ReservationStatus(kind='rpc_error')
+
+    # Strongest signal: the contract returns the full Reservation including the
+    # request_hash. If our saved hash matches, the row is ours full stop. Saved
+    # state from before request_hash was tracked falls through to the legacy
+    # amount-based reconciliation below.
+    if state.request_hash:
+        try:
+            on_chain = client.get_reservation(state.miner_hotkey)
+        except ContractError:
+            return ReservationStatus(kind='rpc_error')
+        if on_chain is None or on_chain.reserved_until < current_block:
+            return ReservationStatus(kind='expired')
+        if on_chain.hash != state.request_hash:
+            return ReservationStatus(kind='replaced')
+        return ReservationStatus(kind='ours_active', reserved_until=on_chain.reserved_until)
 
     try:
         reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
