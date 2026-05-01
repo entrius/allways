@@ -147,6 +147,24 @@ class TestMaybeProposeReservation:
         )
         assert result is False  # rejection means we didn't successfully propose
 
+    def test_skips_when_challenge_window_cannot_close_before_deadline(self):
+        # current=1000, reserved_until=1005 → only 5 blocks runway, less than
+        # CHALLENGE_WINDOW_BLOCKS(=8). Finalize would be eligible at block
+        # 1008 but reservation expires at 1005 — propose is doomed, refuse it.
+        w = make_watcher(pending_reservation=None)
+        result = w.maybe_propose_reservation(
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1005,
+            observed_confirmations=0,
+            extension_count=0,
+            pending=w.fetch_pending_reservation(MINER),
+        )
+        assert result is False
+        w.contract_client.propose_extend_reservation.assert_not_called()
+
 
 class TestMaybeChallengeReservation:
     def test_challenges_when_target_too_far(self):

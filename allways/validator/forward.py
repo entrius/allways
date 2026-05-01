@@ -248,6 +248,15 @@ def try_extend_reservation(
     itself enforces the per-tier evidence rule (tier 0: visibility OK; tier 1:
     confirmations >= 1; tier 2+: refused).
     """
+    # ``current_block`` from the caller was captured at step start; verifying
+    # each pending confirm before this one can burn many blocks. Refresh so
+    # the EXTEND_THRESHOLD_BLOCKS gate matches the height the propose tx will
+    # actually land at, not where the step began.
+    try:
+        current_block = self.subtensor.get_current_block()
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: refresh current_block failed: {e}')
+
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
     except Exception as e:
