@@ -139,6 +139,27 @@ class TestMaybeProposeReservation:
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
 
+    def test_floor_widens_target_when_natural_target_too_close_to_reserved_until(self):
+        # If the natural chain-aware target advances past reserved_until but
+        # only by a few blocks, the floor must push it out so a successful
+        # finalize lands meaningful runway past the old deadline (≥ challenge
+        # window + 1 forward step). With reserved_until=1085 and BTC tier-0
+        # natural=1090 (only +5 past old deadline), the floor anchors at
+        # reserved_until + 8 + 20 = 1113 and bucket-rounds to 1120.
+        w = make_watcher(pending_reservation=None)
+        result = w.maybe_propose_reservation(
+            miner_hotkey=MINER,
+            from_chain_id='btc',
+            from_tx_hash=bytes(32),
+            current_block=1000,
+            reserved_until=1085,
+            observed_confirmations=0,
+            extension_count=0,
+        )
+        assert result is True
+        target = w.contract_client.propose_extend_reservation.call_args.kwargs['target_block']
+        assert target == 1120
+
     def test_swallows_contract_rejection(self):
         w = make_watcher(
             pending_reservation=None,

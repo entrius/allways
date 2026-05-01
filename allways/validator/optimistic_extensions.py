@@ -82,20 +82,26 @@ class OptimisticExtensionWatcher:
             remaining = max(0, chain.min_confirmations - observed_confirmations)
         target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
-        # Defensive floor: target must outlast the challenge window plus one
-        # forward-step worth of jitter so a single missed step still leaves
-        # finalize-eligible time before the new deadline lapses. Round up to
-        # an EXTENSION_BUCKET_BLOCKS boundary so validators converge.
-        min_safe_target = current_block + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
-        if target_block < min_safe_target:
-            target_block = (
-                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
-            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
-
         if target_block <= reserved_until:
             # Bucketed target landed at or before the existing deadline — the
             # extension is unnecessary, don't waste a tx.
             return False
+
+        # Defensive floor (applied only after we've decided the propose is
+        # worth doing): the new deadline must clear the *existing*
+        # reserved_until by at least one challenge window plus one
+        # forward-step worth of jitter. Anchoring on reserved_until (not
+        # current_block) is what makes every successful extension land a
+        # meaningful chunk of runway past the old deadline — anchoring on
+        # current_block would let a propose that fires with 25 blocks
+        # remaining land a target only 3-5 blocks past the old deadline,
+        # immediately re-arming the next extension cycle. Round up to an
+        # EXTENSION_BUCKET_BLOCKS boundary so validators converge.
+        min_safe_target = reserved_until + CHALLENGE_WINDOW_BLOCKS + VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE
+        if target_block < min_safe_target:
+            target_block = (
+                min_safe_target - current_block + EXTENSION_BUCKET_BLOCKS - 1
+            ) // EXTENSION_BUCKET_BLOCKS * EXTENSION_BUCKET_BLOCKS + current_block
 
         return self._try_call(
             'propose_extend_reservation',
