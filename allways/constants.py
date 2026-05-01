@@ -79,11 +79,10 @@ CHALLENGE_WINDOW_BLOCKS = 8
 # sizing extension targets so a single delayed step doesn't strand a propose
 # whose finalize window opens past the original reservation deadline.
 VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
-# Vote to extend when this many blocks remain. Sized for one full forward
-# step to land the propose tx, the challenge window to elapse, and a second
-# forward step to land the finalize — without that runway, the propose is
-# orphaned and the reservation expires anyway.
-EXTEND_THRESHOLD_BLOCKS = 2 * VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
+# Vote to extend when this many blocks remain. Sized for one forward step
+# to land the propose tx and the challenge window to elapse — without that
+# runway the propose is orphaned and the reservation expires anyway.
+EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
 
 # Tiered escalation. First extension fires on tx visibility alone (mempool
 # OK) and buys time for one block; second extension requires ≥1 confirmation
