@@ -43,6 +43,19 @@ class OptimisticExtensionWatcher:
         self.contract_client = contract_client
         self.wallet = wallet
 
+    # ─── Pending-extension fetch helpers ─────────────────────────────────
+    #
+    # Callers (forward.py) fetch once per row and pass the result into the
+    # propose/challenge/finalize methods. Used to be three separate fetches
+    # per row from inside each method — that turned into N pending rows × 3
+    # RPCs per forward step, which dominated step latency on busy validators.
+
+    def fetch_pending_reservation(self, miner_hotkey: str) -> Optional[PendingExtension]:
+        return self._safe_get_pending_reservation(miner_hotkey)
+
+    def fetch_pending_timeout(self, swap_id: int) -> Optional[PendingExtension]:
+        return self._safe_get_pending_timeout(swap_id)
+
     # ─── Reservation side ────────────────────────────────────────────────
 
     def maybe_propose_reservation(
@@ -54,9 +67,15 @@ class OptimisticExtensionWatcher:
         reserved_until: int,
         observed_confirmations: int,
         extension_count: int,
+        pending: Optional[PendingExtension],
     ) -> bool:
         """Submit a propose_extend_reservation if no proposal is pending,
         tiered on ``extension_count``.
+
+        ``pending`` is the contract's current pending entry for this miner
+        (``None`` if no proposal is in-flight). Caller fetches once via
+        ``fetch_pending_reservation`` and passes the same value into all
+        three propose/challenge/finalize methods to avoid redundant RPCs.
 
         - Tier 0 (first extension): caller is responsible for ensuring the tx
           is visible (``tx_info != None``); target sized for one chain block.
@@ -69,8 +88,7 @@ class OptimisticExtensionWatcher:
         if extension_count >= MAX_EXTENSIONS_PER_RESERVATION:
             return False
 
-        existing = self._safe_get_pending_reservation(miner_hotkey)
-        if existing is not None:
+        if pending is not None:
             return False
 
         if extension_count == 0:
@@ -119,14 +137,15 @@ class OptimisticExtensionWatcher:
         from_chain_id: str,
         observed_confirmations: int,
         current_block: int,
+        pending: Optional[PendingExtension],
     ) -> bool:
         """Challenge the pending reservation extension if its target is too far.
 
         Tolerance is one bucket — proposals within EXTENSION_BUCKET_BLOCKS of
         the locally-computed target are accepted as benign rounding drift.
-        Skips proposals submitted by this validator's own wallet.
+        Skips proposals submitted by this validator's own wallet. ``pending``
+        is the caller-supplied snapshot — see ``maybe_propose_reservation``.
         """
-        pending = self._safe_get_pending_reservation(miner_hotkey)
         if pending is None:
             return False
         if self._is_own_proposal(pending):
@@ -151,17 +170,19 @@ class OptimisticExtensionWatcher:
         miner_hotkey: str,
         current_block: int,
         challenge_window_blocks: int,
+        pending: Optional[PendingExtension],
     ) -> Optional[int]:
         """Finalize the pending reservation extension if its window has elapsed.
 
         Returns the applied ``target_block`` on success, ``None`` otherwise.
         Callers use the returned target to refresh local caches (e.g.
         state_store.update_reserved_until) without waiting for the next event
-        sync. The contract's own check is authoritative — we just gate on the
-        local view to avoid known-doomed txs. ``challenge_window_blocks`` is
-        passed in (rather than imported) so tests can vary it cheaply.
+        sync. ``pending`` is the caller-supplied snapshot — see
+        ``maybe_propose_reservation``. The contract's own check is
+        authoritative; the local pending read just lets us avoid a
+        known-doomed tx. ``challenge_window_blocks`` is passed in (rather
+        than imported) so tests can vary it cheaply.
         """
-        pending = self._safe_get_pending_reservation(miner_hotkey)
         if pending is None:
             return None
         if current_block < pending.proposed_at + challenge_window_blocks:
@@ -186,13 +207,14 @@ class OptimisticExtensionWatcher:
         timeout_block: int,
         observed_confirmations: int,
         extension_count: int,
+        pending: Optional[PendingExtension],
     ) -> bool:
-        """Tiered timeout-extension propose. See ``maybe_propose_reservation``."""
+        """Tiered timeout-extension propose. See ``maybe_propose_reservation``
+        for the ``pending`` contract."""
         if extension_count >= MAX_EXTENSIONS_PER_SWAP:
             return False
 
-        existing = self._safe_get_pending_timeout(swap_id)
-        if existing is not None:
+        if pending is not None:
             return False
 
         if extension_count == 0:
@@ -236,8 +258,8 @@ class OptimisticExtensionWatcher:
         dest_chain_id: str,
         observed_confirmations: int,
         current_block: int,
+        pending: Optional[PendingExtension],
     ) -> bool:
-        pending = self._safe_get_pending_timeout(swap_id)
         if pending is None:
             return False
         if self._is_own_proposal(pending):
@@ -262,11 +284,13 @@ class OptimisticExtensionWatcher:
         swap_id: int,
         current_block: int,
         challenge_window_blocks: int,
+        pending: Optional[PendingExtension],
     ) -> Optional[int]:
         """Same shape as ``maybe_finalize_reservation``: returns the applied
         ``target_block`` so the caller can refresh ``swap_tracker`` in-line
-        before the same step's ``enforce_swap_timeouts`` reads from it."""
-        pending = self._safe_get_pending_timeout(swap_id)
+        before the same step's ``enforce_swap_timeouts`` reads from it.
+        ``pending`` is the caller-supplied snapshot — see
+        ``maybe_propose_reservation``."""
         if pending is None:
             return None
         if current_block < pending.proposed_at + challenge_window_blocks:
