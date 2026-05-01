@@ -48,9 +48,8 @@ def make_watcher(pending_reservation=None, pending_timeout=None, propose_raises=
 
 class TestMaybeProposeReservation:
     def test_tier0_proposes_on_visibility_with_short_target(self):
-        # Tier 0 (extension_count=0): caller has already verified tx visibility;
-        # target = current + tier1_blocks. For BTC: (600+300)/12 = 75 → bucket(90).
-        # current=1000, reserved_until=1050 (< 1090) → propose fires with target=1090.
+        # Tier 0: BTC blocks_needed=90, anchor=max(current=1000, reserved=1050)=1050,
+        # target=1140.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -65,11 +64,11 @@ class TestMaybeProposeReservation:
         assert result is True
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
         assert call_kwargs['miner_hotkey'] == MINER
-        assert call_kwargs['target_block'] == 1090
+        assert call_kwargs['target_block'] == 1140
 
     def test_tier1_proposes_with_chain_aware_target(self):
-        # Tier 1 (extension_count=1): require ≥1 conf; target = chain-aware.
-        # BTC at 1/3 confs → remaining=2, seconds=1500, blocks=125 → bucket(150).
+        # Tier 1: BTC remaining=2 → blocks_needed=150, anchor=max(1000,1100)=1100,
+        # target=1250.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -82,7 +81,7 @@ class TestMaybeProposeReservation:
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
-        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1150
+        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1250
 
     def test_tier1_skips_when_below_one_confirmation(self):
         # Tier 1 demands ≥1 confirmation — mempool-only tx is not enough.
@@ -130,45 +129,6 @@ class TestMaybeProposeReservation:
         )
         assert result is False
         w.contract_client.propose_extend_reservation.assert_not_called()
-
-    def test_tier0_skips_when_target_does_not_advance(self):
-        # Tier 0 target = current + 90 = 1090. If reserved_until is already
-        # past 1090, no need to propose.
-        w = make_watcher(pending_reservation=None)
-        result = w.maybe_propose_reservation(
-            miner_hotkey=MINER,
-            from_chain_id='btc',
-            from_tx_hash=bytes(32),
-            current_block=1000,
-            reserved_until=1100,
-            observed_confirmations=0,
-            extension_count=0,
-            pending=w.fetch_pending_reservation(MINER),
-        )
-        assert result is False
-        w.contract_client.propose_extend_reservation.assert_not_called()
-
-    def test_floor_widens_target_when_natural_target_too_close_to_reserved_until(self):
-        # If the natural chain-aware target advances past reserved_until but
-        # only by a few blocks, the floor must push it out so a successful
-        # finalize lands meaningful runway past the old deadline (≥ challenge
-        # window + 1 forward step). With reserved_until=1085 and BTC tier-0
-        # natural=1090 (only +5 past old deadline), the floor anchors at
-        # reserved_until + 8 + 20 = 1113 and bucket-rounds to 1120.
-        w = make_watcher(pending_reservation=None)
-        result = w.maybe_propose_reservation(
-            miner_hotkey=MINER,
-            from_chain_id='btc',
-            from_tx_hash=bytes(32),
-            current_block=1000,
-            reserved_until=1085,
-            observed_confirmations=0,
-            extension_count=0,
-            pending=w.fetch_pending_reservation(MINER),
-        )
-        assert result is True
-        target = w.contract_client.propose_extend_reservation.call_args.kwargs['target_block']
-        assert target == 1120
 
     def test_swallows_contract_rejection(self):
         w = make_watcher(
@@ -332,6 +292,8 @@ class TestFetchPendingReservation:
 
 class TestMaybeProposeTimeout:
     def test_tier0_proposes_on_visibility(self):
+        # BTC tier-0: blocks_needed=90, anchor=max(current=1000, timeout=1050)=1050,
+        # target=1140.
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
             swap_id=42,
@@ -345,7 +307,7 @@ class TestMaybeProposeTimeout:
         assert result is True
         kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
         assert kwargs['swap_id'] == 42
-        assert kwargs['target_block'] == 1090
+        assert kwargs['target_block'] == 1140
 
     def test_tier1_requires_confirmations(self):
         w = make_watcher(pending_timeout=None)
@@ -385,25 +347,6 @@ class TestMaybeProposeTimeout:
             pending=w.fetch_pending_timeout(42),
         )
         assert result is False
-
-    def test_floor_widens_target_when_natural_target_too_close_to_timeout_block(self):
-        # Mirror of the reservation-side floor: BTC tier-0 natural target = 1090,
-        # but timeout_block=1085 means a successful finalize would land only +5
-        # past the old deadline before re-arming. Floor anchors at
-        # timeout_block + 8 + 20 = 1113 and bucket-rounds (current=1000) to 1120.
-        w = make_watcher(pending_timeout=None)
-        result = w.maybe_propose_timeout(
-            swap_id=42,
-            dest_chain_id='btc',
-            current_block=1000,
-            timeout_block=1085,
-            observed_confirmations=0,
-            extension_count=0,
-            pending=w.fetch_pending_timeout(42),
-        )
-        assert result is True
-        target = w.contract_client.propose_extend_timeout.call_args.kwargs['target_block']
-        assert target == 1120
 
 
 class TestMaybeChallengeTimeout:
