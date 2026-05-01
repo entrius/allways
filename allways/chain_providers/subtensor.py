@@ -3,8 +3,8 @@ from hashlib import blake2b
 from typing import Any, Dict, Optional, Tuple
 
 import bittensor as bt
-from substrateinterface import Keypair
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor import Keypair
+from bittensor.utils import ss58_encode
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition

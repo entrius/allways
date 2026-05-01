@@ -12,8 +12,8 @@ to inject the validator context.
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
+from bittensor import Keypair
 from Crypto.Hash import keccak
-from substrateinterface import Keypair
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
@@ -56,14 +56,6 @@ def scale_encode_reserve_hash_input(
         + encode_u128(from_amount)
         + encode_u128(to_amount)
     )
-
-
-def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
-    """SCALE-encode the extend hash input tuple: (AccountId, &str).
-
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
-    """
-    return miner_bytes + encode_str(from_tx_hash)
 
 
 def scale_encode_initiate_hash_input(

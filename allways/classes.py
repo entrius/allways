@@ -71,6 +71,7 @@ class Swap:
     fulfilled_block: int = 0
     completed_block: int = 0
 
+<<<<<<< refactor/swap-status-predicates
     def is_pending(self) -> bool:
         return self.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -79,3 +80,18 @@ class Swap:
 
     def is_fulfilled(self) -> bool:
         return self.status == SwapStatus.FULFILLED
+=======
+
+@dataclass
+class PendingExtension:
+    """One in-flight optimistic extension proposal.
+
+    Same shape for both reservation extensions (keyed by miner) and timeout
+    extensions (keyed by swap_id) — only the on-chain Mapping differs. Maps
+    to Rust types::PendingExtension { submitter, target_block, proposed_at }.
+    """
+
+    submitter: str  # validator hotkey ss58
+    target_block: int
+    proposed_at: int
+>>>>>>> test

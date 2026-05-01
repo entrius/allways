@@ -1,6 +1,6 @@
 {
   "source": {
-    "hash": "0xee113f8633f4db591574cc5c2b021e634f3c19a267e85d33579ebe322099d87e",
+    "hash": "0x12d321ccabbe169974f3fd88bf7bcff1dfb7c8ba3066895a1fe3fa7162443884",
     "language": "ink! 5.1.1",
     "compiler": "rustc 1.91.1",
     "build_info": {
@@ -109,7 +109,7 @@
             "ink_primitives",
             "ConstructorResult"
           ],
-          "type": 62
+          "type": 75
         },
         "selector": "0x9bae9d5e"
       }
@@ -138,7 +138,7 @@
         "displayName": [
           "ChainExtension"
         ],
-        "type": 83
+        "type": 98
       },
       "hash": {
         "displayName": [
@@ -747,70 +747,6 @@
           {
             "docs": [],
             "indexed": true,
-            "label": "miner",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "reserved_until",
-            "type": {
-              "displayName": [
-                "u32"
-              ],
-              "type": 3
-            }
-          }
-        ],
-        "docs": [
-          "Event emitted when a miner reservation is extended (BTC confirmation wait)"
-        ],
-        "label": "ReservationExtended",
-        "module_path": "allways_swap_manager::events",
-        "signature_topic": "0x3e044008bab7edd92011eb60e9c87c0622f34d25c8707eb85936d1030ea2b35b"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "swap_id",
-            "type": {
-              "displayName": [
-                "u64"
-              ],
-              "type": 7
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "new_timeout_block",
-            "type": {
-              "displayName": [
-                "u32"
-              ],
-              "type": 3
-            }
-          }
-        ],
-        "docs": [
-          "Event emitted when a swap timeout is extended (dest tx confirmation wait)"
-        ],
-        "label": "SwapTimeoutExtended",
-        "module_path": "allways_swap_manager::events",
-        "signature_topic": "0x5353130073ef99b23e1584761b7934af50105898e76f688eb63aa8dbc6e22e89"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
             "label": "previous_owner",
             "type": {
               "displayName": [
@@ -874,6 +810,284 @@
           },
           {
             "docs": [],
+            "indexed": false,
+            "label": "target_block",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Fulfillment-timeout extension proposed by a validator."
+        ],
+        "label": "TimeoutExtensionProposed",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0xcb10178ff61622db4b59357dece9c3bd2d44e5fb667ab44b0e0f6c79aa3b9fd9"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "applied_target",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Fulfillment-timeout extension finalized — `timeout_block` is now",
+          "`applied_target`."
+        ],
+        "label": "TimeoutExtensionFinalized",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0x173e91f9a61e1cede4d9d8724dcb3abcb510ec986f6e1d986e1c04d7df69659f"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "voided_target",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Fulfillment-timeout extension challenged within the challenge window."
+        ],
+        "label": "TimeoutExtensionChallenged",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0x0e386b25bb140921dbecf7c45ba0b351ffe8c47618c8f46e890e999f5e30868e"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [
+              "Source-tx hash this proposal correlates to. Lets indexers tie the",
+              "extension activity back to the swap attempt without a join."
+            ],
+            "indexed": false,
+            "label": "from_tx_hash",
+            "type": {
+              "displayName": [
+                "ink",
+                "primitives",
+                "Hash"
+              ],
+              "type": 37
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "target_block",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Reservation extension proposed by a validator (single-validator, optimistic)."
+        ],
+        "label": "ReservationExtensionProposed",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0x958447021bb73ea7abbac7053ba3551a3c8aec41f972adfde12afed2e4bfd66c"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "applied_target",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Reservation extension finalized — `reserved_until` is now `applied_target`."
+        ],
+        "label": "ReservationExtensionFinalized",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0x9f653f039ecaecce684cbd19c331c81efdb5fd48930dcada4ff00d48e4428c5a"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [
+              "What target was being claimed; useful for \"how off?\" analytics."
+            ],
+            "indexed": false,
+            "label": "voided_target",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "by",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "docs": [
+          "Reservation extension challenged within the challenge window. The pending",
+          "entry is deleted; any validator may re-propose immediately."
+        ],
+        "label": "ReservationExtensionChallenged",
+        "module_path": "allways_swap_manager::events",
+        "signature_topic": "0xb90f0c7be3c352d22858c9e5a828872273e88c11a03ab8215e658fcb5012535c"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          },
+          {
+            "docs": [],
             "indexed": true,
             "label": "validator",
             "type": {
@@ -893,7 +1107,7 @@
                 "types",
                 "VoteType"
               ],
-              "type": 82
+              "type": 97
             }
           },
           {
@@ -921,7 +1135,7 @@
         "ink",
         "LangError"
       ],
-      "type": 63
+      "type": 76
     },
     "messages": [
       {
@@ -936,7 +1150,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x31b3f423"
       },
@@ -962,7 +1176,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xe098e62d"
       },
@@ -1051,7 +1265,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xff3b86a0"
       },
@@ -1077,21 +1291,12 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xc4cb59cb"
       },
       {
         "args": [
-          {
-            "label": "request_hash",
-            "type": {
-              "displayName": [
-                "Hash"
-              ],
-              "type": 37
-            }
-          },
           {
             "label": "miner",
             "type": {
@@ -1105,15 +1310,24 @@
             "label": "from_tx_hash",
             "type": {
               "displayName": [
-                "String"
+                "Hash"
               ],
-              "type": 8
+              "type": 37
+            }
+          },
+          {
+            "label": "target_block",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
             }
           }
         ],
         "default": false,
         "docs": [],
-        "label": "vote_extend_reservation",
+        "label": "propose_extend_reservation",
         "mutates": true,
         "payable": false,
         "returnType": {
@@ -1121,9 +1335,118 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
-        "selector": "0xf668d950"
+        "selector": "0x9c9a8e8e"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "challenge_extend_reservation",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 77
+        },
+        "selector": "0x40b77e21"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "finalize_extend_reservation",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 77
+        },
+        "selector": "0xbaf47953"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "get_pending_reservation_extension",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 80
+        },
+        "selector": "0xd79424b8"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Number of finalized extensions on the miner's current reservation.",
+          " Used by validators to know which tier of evidence the next propose",
+          " requires (redesign §13). Returns 0 for miners with no reservation",
+          " or no extensions yet."
+        ],
+        "label": "get_reservation_extension_count",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 82
+        },
+        "selector": "0xc5f9a918"
       },
       {
         "args": [
@@ -1273,7 +1596,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x90c444d8"
       },
@@ -1328,7 +1651,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x2dbeeb8d"
       },
@@ -1356,7 +1679,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xd0065335"
       },
@@ -1384,9 +1707,122 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x5325f39c"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          },
+          {
+            "label": "target_block",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 3
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "propose_extend_timeout",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 77
+        },
+        "selector": "0x94c87a1d"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "challenge_extend_timeout",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 77
+        },
+        "selector": "0x682cf8eb"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "finalize_extend_timeout",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 77
+        },
+        "selector": "0xb23b4d80"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 7
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "get_pending_timeout_extension",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 80
+        },
+        "selector": "0x6bd06828"
       },
       {
         "args": [
@@ -1402,21 +1838,20 @@
         ],
         "default": false,
         "docs": [
-          " Extend swap timeout — validator-only, quorum mechanism.",
-          " Used when a miner has fulfilled (sent dest funds) but the dest tx",
-          " hasn't reached enough confirmations before the timeout expires."
+          " Number of finalized extensions on this swap's fulfillment timeout.",
+          " Used by validators to tier the next propose (redesign §13)."
         ],
-        "label": "vote_extend_timeout",
-        "mutates": true,
+        "label": "get_swap_extension_count",
+        "mutates": false,
         "payable": false,
         "returnType": {
           "displayName": [
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 82
         },
-        "selector": "0x0fb2d2e5"
+        "selector": "0xc2a875b1"
       },
       {
         "args": [
@@ -1442,7 +1877,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xcf3c3dd9"
       },
@@ -1472,7 +1907,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x339db2a5"
       },
@@ -1500,7 +1935,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x00088a2d"
       },
@@ -1539,7 +1974,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xdac13f65"
       },
@@ -1565,7 +2000,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x107e33ea"
       },
@@ -1591,7 +2026,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x82f48fa6"
       },
@@ -1617,7 +2052,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x62135acd"
       },
@@ -1643,7 +2078,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xe9cb777b"
       },
@@ -1669,7 +2104,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xb3f48b5e"
       },
@@ -1695,7 +2130,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xb7fae7fd"
       },
@@ -1721,7 +2156,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0xc0d8ec47"
       },
@@ -1747,7 +2182,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x800e1573"
       },
@@ -1773,7 +2208,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x3e868f32"
       },
@@ -1799,7 +2234,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x50dfe685"
       },
@@ -1825,7 +2260,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x3143d9e3"
       },
@@ -1851,7 +2286,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x8fe1c210"
       },
@@ -1867,7 +2302,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 64
+          "type": 77
         },
         "selector": "0x97756ea1"
       },
@@ -1893,7 +2328,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 67
+          "type": 83
         },
         "selector": "0xa35f1bbf"
       },
@@ -1919,7 +2354,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0xf48343ad"
       },
@@ -1945,7 +2380,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 70
+          "type": 86
         },
         "selector": "0x25652be8"
       },
@@ -1971,7 +2406,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 70
+          "type": 86
         },
         "selector": "0x1d07dec1"
       },
@@ -1997,7 +2432,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 70
+          "type": 86
         },
         "selector": "0xf844fc5f"
       },
@@ -2017,7 +2452,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 71
+          "type": 87
         },
         "selector": "0xa28acf8e"
       },
@@ -2033,7 +2468,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 72
+          "type": 88
         },
         "selector": "0xd80244d2"
       },
@@ -2049,7 +2484,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0xe820174a"
       },
@@ -2065,7 +2500,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0x233a7832"
       },
@@ -2081,7 +2516,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0x54945717"
       },
@@ -2097,7 +2532,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0xbf3b5d4e"
       },
@@ -2113,7 +2548,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0x9910e939"
       },
@@ -2129,7 +2564,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 74
+          "type": 90
         },
         "selector": "0x07fcd0b1"
       },
@@ -2145,7 +2580,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 70
+          "type": 86
         },
         "selector": "0xec540804"
       },
@@ -2161,7 +2596,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 74
+          "type": 90
         },
         "selector": "0x3847e06c"
       },
@@ -2187,7 +2622,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0x48c78c4a"
       },
@@ -2203,7 +2638,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0xfca7daa4"
       },
@@ -2219,7 +2654,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 69
+          "type": 85
         },
         "selector": "0x97826e04"
       },
@@ -2245,7 +2680,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0xd5ed7150"
       },
@@ -2261,7 +2696,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0xf7e24a31"
       },
@@ -2287,7 +2722,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0x361acc31"
       },
@@ -2318,7 +2753,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 75
+          "type": 91
         },
         "selector": "0xffd9e2e6"
       },
@@ -2334,7 +2769,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 77
+          "type": 82
         },
         "selector": "0x2c283460"
       },
@@ -2350,7 +2785,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0xa30ab5c4"
       },
@@ -2381,7 +2816,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 78
+          "type": 93
         },
         "selector": "0x79fe2717"
       },
@@ -2407,7 +2842,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 73
+          "type": 89
         },
         "selector": "0x3781315a"
       },
@@ -2433,7 +2868,7 @@
             "ink",
             "MessageResult"
           ],
-          "type": 81
+          "type": 96
         },
         "selector": "0x19a837c6"
       }
@@ -3022,6 +3457,122 @@
                         {
                           "layout": {
                             "leaf": {
+                              "key": "0x5f12d584",
+                              "ty": 0
+                            }
+                          },
+                          "name": "submitter"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x5f12d584",
+                              "ty": 3
+                            }
+                          },
+                          "name": "target_block"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x5f12d584",
+                              "ty": 3
+                            }
+                          },
+                          "name": "proposed_at"
+                        }
+                      ],
+                      "name": "PendingExtension"
+                    }
+                  },
+                  "root_key": "0x5f12d584",
+                  "ty": 53
+                }
+              },
+              "name": "pending_reservation_extensions"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0xb4e15eb6",
+                              "ty": 0
+                            }
+                          },
+                          "name": "submitter"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0xb4e15eb6",
+                              "ty": 3
+                            }
+                          },
+                          "name": "target_block"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0xb4e15eb6",
+                              "ty": 3
+                            }
+                          },
+                          "name": "proposed_at"
+                        }
+                      ],
+                      "name": "PendingExtension"
+                    }
+                  },
+                  "root_key": "0xb4e15eb6",
+                  "ty": 57
+                }
+              },
+              "name": "pending_timeout_extensions"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x40ba57a5",
+                      "ty": 2
+                    }
+                  },
+                  "root_key": "0x40ba57a5",
+                  "ty": 60
+                }
+              },
+              "name": "reservation_extension_count"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0xda0640a7",
+                      "ty": 2
+                    }
+                  },
+                  "root_key": "0xda0640a7",
+                  "ty": 63
+                }
+              },
+              "name": "swap_extension_count"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
                               "key": "0x049f2f6f",
                               "ty": 2
                             }
@@ -3042,7 +3593,7 @@
                     }
                   },
                   "root_key": "0x049f2f6f",
-                  "ty": 53
+                  "ty": 66
                 }
               },
               "name": "address_cooldown"
@@ -3094,7 +3645,7 @@
                     }
                   },
                   "root_key": "0x0a1285bc",
-                  "ty": 57
+                  "ty": 70
                 }
               },
               "name": "pending_slashes"
@@ -3104,7 +3655,7 @@
         }
       },
       "root_key": "0x00000000",
-      "ty": 61
+      "ty": 74
     }
   },
   "types": [
@@ -4313,7 +4864,7 @@
         "params": [
           {
             "name": "K",
-            "type": 8
+            "type": 0
           },
           {
             "name": "V",
@@ -4336,11 +4887,31 @@
       "id": 54,
       "type": {
         "def": {
-          "tuple": [
-            2,
-            3
-          ]
-        }
+          "composite": {
+            "fields": [
+              {
+                "name": "submitter",
+                "type": 0,
+                "typeName": "AccountId"
+              },
+              {
+                "name": "target_block",
+                "type": 3,
+                "typeName": "u32"
+              },
+              {
+                "name": "proposed_at",
+                "type": 3,
+                "typeName": "u32"
+              }
+            ]
+          }
+        },
+        "path": [
+          "allways_swap_manager",
+          "types",
+          "PendingExtension"
+        ]
       }
     },
     {
@@ -4398,11 +4969,11 @@
           },
           {
             "name": "V",
-            "type": 58
+            "type": 54
           },
           {
             "name": "KeyType",
-            "type": 59
+            "type": 58
           }
         ],
         "path": [
@@ -4417,17 +4988,6 @@
       "id": 58,
       "type": {
         "def": {
-          "tuple": [
-            0,
-            4
-          ]
-        }
-      }
-    },
-    {
-      "id": 59,
-      "type": {
-        "def": {
           "composite": {}
         },
         "params": [
@@ -4437,7 +4997,7 @@
           },
           {
             "name": "R",
-            "type": 60
+            "type": 59
           }
         ],
         "path": [
@@ -4448,7 +5008,7 @@
       }
     },
     {
-      "id": 60,
+      "id": 59,
       "type": {
         "def": {
           "composite": {}
@@ -4467,7 +5027,309 @@
       }
     },
     {
+      "id": 60,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 2
+          },
+          {
+            "name": "KeyType",
+            "type": 61
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
       "id": 61,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 13
+          },
+          {
+            "name": "R",
+            "type": 62
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 62,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 15
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 63,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 7
+          },
+          {
+            "name": "V",
+            "type": 2
+          },
+          {
+            "name": "KeyType",
+            "type": 64
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 64,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 13
+          },
+          {
+            "name": "R",
+            "type": 65
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 65,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 15
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 66,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 8
+          },
+          {
+            "name": "V",
+            "type": 67
+          },
+          {
+            "name": "KeyType",
+            "type": 68
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 67,
+      "type": {
+        "def": {
+          "tuple": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "id": 68,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 13
+          },
+          {
+            "name": "R",
+            "type": 69
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 69,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 15
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 70,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 7
+          },
+          {
+            "name": "V",
+            "type": 71
+          },
+          {
+            "name": "KeyType",
+            "type": 72
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 71,
+      "type": {
+        "def": {
+          "tuple": [
+            0,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "id": 72,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 13
+          },
+          {
+            "name": "R",
+            "type": 73
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 73,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 15
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 74,
       "type": {
         "def": {
           "composite": {
@@ -4598,8 +5460,28 @@
                 "typeName": "<Mapping<AccountId, Reservation> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1222462083u32,\n()>,>>::Type"
               },
               {
-                "name": "address_cooldown",
+                "name": "pending_reservation_extensions",
                 "type": 53,
+                "typeName": "<Mapping<AccountId, PendingExtension> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2228556383u32,\n()>,>>::Type"
+              },
+              {
+                "name": "pending_timeout_extensions",
+                "type": 57,
+                "typeName": "<Mapping<u64, PendingExtension> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3059671476u32,\n()>,>>::Type"
+              },
+              {
+                "name": "reservation_extension_count",
+                "type": 60,
+                "typeName": "<Mapping<AccountId, u8> as::ink::storage::traits::AutoStorableHint\n<::ink::storage::traits::ManualKey<2773989952u32, ()>,>>::Type"
+              },
+              {
+                "name": "swap_extension_count",
+                "type": 63,
+                "typeName": "<Mapping<u64, u8> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<2805991130u32, ()>,>>::Type"
+              },
+              {
+                "name": "address_cooldown",
+                "type": 66,
                 "typeName": "<Mapping<String, (u8, u32)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1865391876u32,\n()>,>>::Type"
               },
               {
@@ -4614,7 +5496,7 @@
               },
               {
                 "name": "pending_slashes",
-                "type": 57,
+                "type": 70,
                 "typeName": "<Mapping<u64, (AccountId, Balance)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3162837514u32,\n()>,>>::Type"
               }
             ]
@@ -4628,7 +5510,7 @@
       }
     },
     {
-      "id": 62,
+      "id": 75,
       "type": {
         "def": {
           "variant": {
@@ -4645,7 +5527,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -4661,7 +5543,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -4670,7 +5552,7 @@
       }
     },
     {
-      "id": 63,
+      "id": 76,
       "type": {
         "def": {
           "variant": {
@@ -4689,7 +5571,7 @@
       }
     },
     {
-      "id": 64,
+      "id": 77,
       "type": {
         "def": {
           "variant": {
@@ -4697,7 +5579,7 @@
               {
                 "fields": [
                   {
-                    "type": 65
+                    "type": 78
                   }
                 ],
                 "index": 0,
@@ -4706,7 +5588,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -4718,11 +5600,11 @@
         "params": [
           {
             "name": "T",
-            "type": 65
+            "type": 78
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -4731,7 +5613,7 @@
       }
     },
     {
-      "id": 65,
+      "id": 78,
       "type": {
         "def": {
           "variant": {
@@ -4748,7 +5630,7 @@
               {
                 "fields": [
                   {
-                    "type": 66
+                    "type": 79
                   }
                 ],
                 "index": 1,
@@ -4764,7 +5646,7 @@
           },
           {
             "name": "E",
-            "type": 66
+            "type": 79
           }
         ],
         "path": [
@@ -4773,7 +5655,7 @@
       }
     },
     {
-      "id": 66,
+      "id": 79,
       "type": {
         "def": {
           "variant": {
@@ -4885,6 +5767,38 @@
               {
                 "index": 26,
                 "name": "SystemHalted"
+              },
+              {
+                "index": 27,
+                "name": "ProposalAlreadyPending"
+              },
+              {
+                "index": 28,
+                "name": "ChallengeWindowOpen"
+              },
+              {
+                "index": 29,
+                "name": "ChallengeWindowClosed"
+              },
+              {
+                "index": 30,
+                "name": "NoProposal"
+              },
+              {
+                "index": 31,
+                "name": "ExtensionTooLong"
+              },
+              {
+                "index": 32,
+                "name": "TargetNotForward"
+              },
+              {
+                "index": 33,
+                "name": "InvalidTarget"
+              },
+              {
+                "index": 34,
+                "name": "MaxExtensionsExceeded"
               }
             ]
           }
@@ -4897,7 +5811,7 @@
       }
     },
     {
-      "id": 67,
+      "id": 80,
       "type": {
         "def": {
           "variant": {
@@ -4905,7 +5819,7 @@
               {
                 "fields": [
                   {
-                    "type": 68
+                    "type": 81
                   }
                 ],
                 "index": 0,
@@ -4914,7 +5828,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -4926,11 +5840,11 @@
         "params": [
           {
             "name": "T",
-            "type": 68
+            "type": 81
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -4939,7 +5853,124 @@
       }
     },
     {
-      "id": 68,
+      "id": 81,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 0,
+                "name": "None"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 54
+                  }
+                ],
+                "index": 1,
+                "name": "Some"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 54
+          }
+        ],
+        "path": [
+          "Option"
+        ]
+      }
+    },
+    {
+      "id": 82,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 2
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 76
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 2
+          },
+          {
+            "name": "E",
+            "type": 76
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 83,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 84
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 76
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 84
+          },
+          {
+            "name": "E",
+            "type": 76
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 84,
       "type": {
         "def": {
           "variant": {
@@ -4972,7 +6003,7 @@
       }
     },
     {
-      "id": 69,
+      "id": 85,
       "type": {
         "def": {
           "variant": {
@@ -4989,7 +6020,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5005,7 +6036,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5014,7 +6045,7 @@
       }
     },
     {
-      "id": 70,
+      "id": 86,
       "type": {
         "def": {
           "variant": {
@@ -5031,7 +6062,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5047,7 +6078,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5056,7 +6087,7 @@
       }
     },
     {
-      "id": 71,
+      "id": 87,
       "type": {
         "def": {
           "variant": {
@@ -5073,7 +6104,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5089,7 +6120,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5098,7 +6129,7 @@
       }
     },
     {
-      "id": 72,
+      "id": 88,
       "type": {
         "def": {
           "variant": {
@@ -5115,7 +6146,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5131,7 +6162,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5140,7 +6171,7 @@
       }
     },
     {
-      "id": 73,
+      "id": 89,
       "type": {
         "def": {
           "variant": {
@@ -5157,7 +6188,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5173,7 +6204,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5182,7 +6213,7 @@
       }
     },
     {
-      "id": 74,
+      "id": 90,
       "type": {
         "def": {
           "variant": {
@@ -5199,7 +6230,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5215,7 +6246,7 @@
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5224,7 +6255,7 @@
       }
     },
     {
-      "id": 75,
+      "id": 91,
       "type": {
         "def": {
           "variant": {
@@ -5232,7 +6263,7 @@
               {
                 "fields": [
                   {
-                    "type": 76
+                    "type": 92
                   }
                 ],
                 "index": 0,
@@ -5241,7 +6272,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5253,11 +6284,11 @@
         "params": [
           {
             "name": "T",
-            "type": 76
+            "type": 92
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5266,7 +6297,7 @@
       }
     },
     {
-      "id": 76,
+      "id": 92,
       "type": {
         "def": {
           "tuple": [
@@ -5280,7 +6311,7 @@
       }
     },
     {
-      "id": 77,
+      "id": 93,
       "type": {
         "def": {
           "variant": {
@@ -5288,7 +6319,7 @@
               {
                 "fields": [
                   {
-                    "type": 2
+                    "type": 94
                   }
                 ],
                 "index": 0,
@@ -5297,7 +6328,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5309,11 +6340,11 @@
         "params": [
           {
             "name": "T",
-            "type": 2
+            "type": 94
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5322,49 +6353,7 @@
       }
     },
     {
-      "id": 78,
-      "type": {
-        "def": {
-          "variant": {
-            "variants": [
-              {
-                "fields": [
-                  {
-                    "type": 79
-                  }
-                ],
-                "index": 0,
-                "name": "Ok"
-              },
-              {
-                "fields": [
-                  {
-                    "type": 63
-                  }
-                ],
-                "index": 1,
-                "name": "Err"
-              }
-            ]
-          }
-        },
-        "params": [
-          {
-            "name": "T",
-            "type": 79
-          },
-          {
-            "name": "E",
-            "type": 63
-          }
-        ],
-        "path": [
-          "Result"
-        ]
-      }
-    },
-    {
-      "id": 79,
+      "id": 94,
       "type": {
         "def": {
           "variant": {
@@ -5376,7 +6365,7 @@
               {
                 "fields": [
                   {
-                    "type": 80
+                    "type": 95
                   }
                 ],
                 "index": 1,
@@ -5388,7 +6377,7 @@
         "params": [
           {
             "name": "T",
-            "type": 80
+            "type": 95
           }
         ],
         "path": [
@@ -5397,7 +6386,7 @@
       }
     },
     {
-      "id": 80,
+      "id": 95,
       "type": {
         "def": {
           "tuple": [
@@ -5409,7 +6398,7 @@
       }
     },
     {
-      "id": 81,
+      "id": 96,
       "type": {
         "def": {
           "variant": {
@@ -5417,7 +6406,7 @@
               {
                 "fields": [
                   {
-                    "type": 54
+                    "type": 67
                   }
                 ],
                 "index": 0,
@@ -5426,7 +6415,7 @@
               {
                 "fields": [
                   {
-                    "type": 63
+                    "type": 76
                   }
                 ],
                 "index": 1,
@@ -5438,11 +6427,11 @@
         "params": [
           {
             "name": "T",
-            "type": 54
+            "type": 67
           },
           {
             "name": "E",
-            "type": 63
+            "type": 76
           }
         ],
         "path": [
@@ -5451,7 +6440,7 @@
       }
     },
     {
-      "id": 82,
+      "id": 97,
       "type": {
         "def": {
           "variant": {
@@ -5463,10 +6452,6 @@
               {
                 "index": 1,
                 "name": "Timeout"
-              },
-              {
-                "index": 2,
-                "name": "ExtendTimeout"
               }
             ]
           }
@@ -5479,7 +6464,7 @@
       }
     },
     {
-      "id": 83,
+      "id": 98,
       "type": {
         "def": {
           "variant": {}

@@ -62,6 +62,26 @@ EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend when this many blocks 
 # "not found" as transient until the same entry has polled null this many times.
 PENDING_CONFIRM_NULL_RETRY_LIMIT = 3
 
+# ─── Optimistic Extensions ───────────────────────────────
+# Tunables for the propose/challenge/finalize extension flow. Per-chain timing
+# (block time, confirmations) lives in allways/chains.py; the contract enforces
+# its own MAX_EXTENSION_BLOCKS independently.
+EXTENSION_PADDING_SECONDS = 300  # safety buffer on top of confirmation time
+EXTENSION_BUCKET_BLOCKS = 30  # round target up so validator views converge
+MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
+# Mirrors the contract's CHALLENGE_WINDOW_BLOCKS — must stay in sync with
+# smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally
+# to avoid known-doomed txs; the contract is authoritative.
+CHALLENGE_WINDOW_BLOCKS = 8
+
+# Tiered escalation. First extension fires on tx visibility alone (mempool
+# OK) and buys time for one block; second extension requires ≥1 confirmation
+# and buys the full chain-aware confirmation window. Hard cap is enforced
+# contract-side via MAX_EXTENSIONS_PER_RESERVATION / _PER_SWAP — these client
+# constants must mirror the contract values.
+MAX_EXTENSIONS_PER_RESERVATION = 2
+MAX_EXTENSIONS_PER_SWAP = 2
+
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.
 FEE_DIVISOR = 100
