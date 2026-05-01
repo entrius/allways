@@ -71,7 +71,9 @@ def collateral_deposit(amount: float | None, yes: bool):
         if free_balance < required:
             console.print(
                 f'[red]Insufficient hotkey balance. Free: {from_rao(free_balance):.4f} TAO, '
-                f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+                f'need: {from_rao(required):.4f} TAO '
+                f'(amount + {from_rao(MIN_BALANCE_FOR_TX_RAO):.2f} TAO gas buffer, pre-checked so the tx does not '
+                'fail on chain and waste fees).[/red]'
             )
             console.print('[dim]Collateral is posted from the hotkey, not the coldkey.[/dim]')
             console.print(

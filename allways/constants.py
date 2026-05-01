@@ -22,7 +22,9 @@ BTC_TO_SAT = 100_000_000
 RATE_PRECISION = 10**18
 
 # ─── Transaction Fees ────────────────────────────────────
-MIN_BALANCE_FOR_TX_RAO = 250_000_000  # 0.25 TAO minimum for extrinsic fees
+# Small headroom kept aside for extrinsic fees so a deposit doesn't burn gas
+# and revert. Real fees are sub-millitao; 0.02 TAO is conservative.
+MIN_BALANCE_FOR_TX_RAO = 20_000_000  # 0.02 TAO buffer for extrinsic fees
 # BTC fee floor (sat/vB). Catches the case where the upstream estimator
 # returns nonsense low. 5 is cheap enough to barely register on mainnet
 # and still clears testnet quickly, so a single floor covers both.
