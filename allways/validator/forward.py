@@ -109,13 +109,15 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         provider = self.chain_providers.get(item.from_chain)
         min_confs = provider.get_chain().min_confirmations if provider else '?'
 
-        try:
-            if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
-                self.state_store.remove(item.miner_hotkey)
-                bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
-                continue
-        except Exception as e:
-            bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
+        # In-memory fast path; only verify with contract before dropping (watcher could be stale).
+        if self.event_watcher.open_swap_count.get(item.miner_hotkey, 0) > 0:
+            try:
+                if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
+                    self.state_store.remove(item.miner_hotkey)
+                    bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
+                    continue
+            except Exception as e:
+                bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
 
         if provider is None:
             self.state_store.remove(item.miner_hotkey)
