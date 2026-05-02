@@ -45,14 +45,13 @@ class TestParseCommitmentData:
         assert pair.counter_rate_str == '340'
 
     def test_fractional_rates(self):
-        # Posted rates exceed RATE_SIG_FIGS; parser normalizes both on read.
         raw = 'v1:btc:bc1qaddr:tao:5Caddr:345.12:350.45'
         pair = parse_commitment_data(raw)
         assert pair is not None
-        assert pair.rate_str == '345.1'
-        assert pair.counter_rate_str == '350.4'
-        assert pair.rate == float(pair.rate_str)
-        assert pair.counter_rate == float(pair.counter_rate_str)
+        assert pair.rate == 345.12
+        assert pair.rate_str == '345.12'
+        assert pair.counter_rate == 350.45
+        assert pair.counter_rate_str == '350.45'
 
     def test_get_rate_for_direction(self):
         raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:350'
@@ -116,8 +115,8 @@ class TestParseCommitmentData:
         raw = 'v1:btc:bc1qaddr:tao:5Caddr:0.0001234567:340.987654'
         pair = parse_commitment_data(raw)
         assert pair is not None
-        assert pair.rate_str == '0.0001235'
-        assert pair.counter_rate_str == '341'
+        assert pair.rate_str == '0.00012346'
+        assert pair.counter_rate_str == '340.99'
 
     def test_normalized_rate_str_round_trips_to_float(self):
         """Scoring uses .rate (float), consensus hash uses .rate_str — they must agree."""
