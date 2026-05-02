@@ -8,6 +8,7 @@ from bittensor.utils import ss58_encode
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.classes import MinerPair
 from allways.constants import COMMITMENT_VERSION
+from allways.utils.rate import normalize_rate
 
 SS58_PREFIX = 42
 
@@ -36,9 +37,13 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         src_addr = parts[2]
         dst_chain = parts[3]
         dst_addr = parts[4]
-        rate_str = parts[5]
+        # Normalize on ingest so a miner posting more precision than RATE_SIG_FIGS
+        # is treated identically by every validator. Rebuild the float from the
+        # normalized string so scoring (uses .rate) and consensus hash (uses
+        # .rate_str) cannot diverge.
+        rate_str = normalize_rate(float(parts[5]))
         rate = float(rate_str)
-        counter_rate_str = parts[6]
+        counter_rate_str = normalize_rate(float(parts[6]))
         counter_rate = float(counter_rate_str)
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:

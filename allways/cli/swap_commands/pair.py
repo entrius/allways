@@ -6,6 +6,7 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
+from allways.utils.rate import normalize_rate
 
 
 def prompt_chain(label: str, exclude: str | None = None) -> str:
@@ -150,8 +151,8 @@ def post_pair(
     config, wallet, subtensor, _ = get_cli_context(need_client=False)
     netuid = config['netuid']
 
-    rate_str = f'{rate:g}'
-    counter_rate_str = f'{counter_rate:g}'
+    rate_str = normalize_rate(rate)
+    counter_rate_str = normalize_rate(counter_rate)
     commitment_data = (
         f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{counter_rate_str}'
     )
