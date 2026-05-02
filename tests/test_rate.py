@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, normalize_rate
 
 # Chain decimals
 TAO_DEC = 9
@@ -228,3 +228,46 @@ class TestFeeDeduction:
 
     def test_apply_fee_deduction_zero_amount(self):
         assert apply_fee_deduction(0, 100) == 0
+
+
+class TestNormalizeRate:
+    """6-sig-fig canonicalization applied at every commitment ingest gate."""
+
+    def test_integer_rate(self):
+        assert normalize_rate(345) == '345'
+
+    def test_already_within_precision(self):
+        assert normalize_rate(345.12) == '345.12'
+        assert normalize_rate(0.5) == '0.5'
+
+    def test_truncates_excess_precision(self):
+        assert normalize_rate(250.123456789) == '250.123'
+        assert normalize_rate(0.0001234567) == '0.000123457'
+
+    def test_strips_trailing_zeros(self):
+        assert normalize_rate(345.000000) == '345'
+        assert normalize_rate(0.500000) == '0.5'
+
+    def test_zero(self):
+        assert normalize_rate(0) == '0'
+        assert normalize_rate(0.0) == '0'
+
+    def test_idempotent(self):
+        """Round-tripping a normalized rate through float→normalize is a no-op."""
+        for raw in (345.12, 0.0001234567, 250.123456789, 1e-6):
+            once = normalize_rate(raw)
+            twice = normalize_rate(float(once))
+            assert once == twice
+
+    def test_round_trip_preserves_float_equality(self):
+        """float(normalize_rate(x)) must equal float(normalize_rate(x)) re-parsed
+        for IEEE-754 stability — scoring (.rate) and consensus hash (.rate_str)
+        share a MinerPair, so any drift would split validators."""
+        for raw in (345.12, 0.0001234567, 250.123, 0.5):
+            s = normalize_rate(raw)
+            assert float(s) == float(normalize_rate(float(s)))
+
+    def test_small_rate_uses_scientific_notation(self):
+        """Pre-existing :g behavior — sub-1e-4 values switch to scientific.
+        Documented so a future change to fixed-point doesn't silently break."""
+        assert normalize_rate(1e-6) == '1e-06'

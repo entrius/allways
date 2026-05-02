@@ -1,5 +1,6 @@
 """Shared commitment parsing logic — used by validator, miner, and CLI."""
 
+import math
 from typing import List, Optional
 
 import bittensor as bt
@@ -37,14 +38,17 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         src_addr = parts[2]
         dst_chain = parts[3]
         dst_addr = parts[4]
-        # Normalize on ingest so a miner posting more precision than RATE_SIG_FIGS
-        # is treated identically by every validator. Rebuild the float from the
-        # normalized string so scoring (uses .rate) and consensus hash (uses
-        # .rate_str) cannot diverge.
+        # Normalize on ingest. Float rebuilt from the normalized string so
+        # scoring (uses .rate) and consensus hash (uses .rate_str) cannot diverge.
         rate_str = normalize_rate(float(parts[5]))
         rate = float(rate_str)
         counter_rate_str = normalize_rate(float(parts[6]))
         counter_rate = float(counter_rate_str)
+        # Reject NaN/Inf (parse cleanly via float() but break every downstream
+        # comparison) and negatives (existing rate <= 0 filters mask 0 as
+        # "opted out", but a negative would slip through some paths).
+        if not (math.isfinite(rate) and math.isfinite(counter_rate)) or rate < 0 or counter_rate < 0:
+            return None
 
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None

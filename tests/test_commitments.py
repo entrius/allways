@@ -111,6 +111,46 @@ class TestParseCommitmentData:
         assert pair.rate == 0.0
         assert pair.counter_rate == 0.0
 
+    def test_high_precision_rate_normalized_to_six_sig_figs(self):
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:0.0001234567:340.987654'
+        pair = parse_commitment_data(raw)
+        assert pair is not None
+        assert pair.rate_str == '0.000123457'
+        assert pair.counter_rate_str == '340.988'
+
+    def test_normalized_rate_str_round_trips_to_float(self):
+        """Scoring uses .rate (float), consensus hash uses .rate_str — they must agree."""
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:0.0001234567:340.987654'
+        pair = parse_commitment_data(raw)
+        assert float(pair.rate_str) == pair.rate
+        assert float(pair.counter_rate_str) == pair.counter_rate
+
+    def test_already_canonical_rate_is_unchanged(self):
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345:0.5'
+        pair = parse_commitment_data(raw)
+        assert pair is not None
+        assert pair.rate_str == '345'
+        assert pair.counter_rate_str == '0.5'
+
+    def test_normalization_strips_trailing_zeros(self):
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:345.000000:0.500000'
+        pair = parse_commitment_data(raw)
+        assert pair.rate_str == '345'
+        assert pair.counter_rate_str == '0.5'
+
+    def test_negative_rate_rejected(self):
+        assert parse_commitment_data('v1:btc:addr:tao:addr:-1:340') is None
+
+    def test_negative_counter_rate_rejected(self):
+        assert parse_commitment_data('v1:btc:addr:tao:addr:340:-1') is None
+
+    def test_nan_rate_rejected(self):
+        assert parse_commitment_data('v1:btc:addr:tao:addr:nan:340') is None
+
+    def test_inf_rate_rejected(self):
+        assert parse_commitment_data('v1:btc:addr:tao:addr:inf:340') is None
+        assert parse_commitment_data('v1:btc:addr:tao:addr:340:-inf') is None
+
     def test_disabled_direction_produces_zero_dest_amount(self):
         """Full guard chain: disabled direction → rate=0 → to_amount=0 → contract rejects."""
         from allways.utils.rate import calculate_to_amount
