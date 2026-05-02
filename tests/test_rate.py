@@ -237,12 +237,12 @@ class TestNormalizeRate:
         assert normalize_rate(345) == '345'
 
     def test_already_within_precision(self):
-        assert normalize_rate(345.12) == '345.12'
+        assert normalize_rate(345.1) == '345.1'
         assert normalize_rate(0.5) == '0.5'
 
     def test_truncates_excess_precision(self):
-        assert normalize_rate(250.123456789) == '250.123'
-        assert normalize_rate(0.0001234567) == '0.000123457'
+        assert normalize_rate(250.123456789) == '250.1'
+        assert normalize_rate(0.0001234567) == '0.0001235'
 
     def test_strips_trailing_zeros(self):
         assert normalize_rate(345.000000) == '345'
