@@ -729,7 +729,10 @@ def swap_now_command(
                     console.print('[yellow]Cancelled[/yellow]')
                     return
 
-    available_miners.sort(key=lambda x: x[0].rate, reverse=True)
+    # Rate is TAO/BTC: highest is best when receiving TAO, lowest when sending TAO.
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    canon_is_reverse = from_chain != canon_from
+    available_miners.sort(key=lambda x: x[0].rate, reverse=not canon_is_reverse)
 
     # Show miners table
     table = Table(title='Available Miners', show_header=True)
@@ -744,9 +747,7 @@ def swap_now_command(
     console.print(table)
 
     # Step 3: Select miner (default to best rate)
-    canon_from, canon_to = canonical_pair(from_chain, to_chain)
     best_pair = available_miners[0][0]
-    canon_is_reverse = from_chain != canon_from
     if canon_is_reverse:
         best_rate_line = (
             f'send {best_pair.rate:g} {from_chain.upper()} to get 1 {to_chain.upper()} (Miner UID {best_pair.uid})'
