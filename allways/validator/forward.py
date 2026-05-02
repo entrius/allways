@@ -46,6 +46,7 @@ async def forward(self: Validator) -> None:
     # reads them.
     try:
         self.event_watcher.sync_to(self.block)
+        bt.logging.info('forward: events synced')
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
@@ -64,17 +65,20 @@ async def forward(self: Validator) -> None:
 
     # Pull newly-initiated and resolved swaps off the contract.
     await tracker.poll()
+    bt.logging.info('forward: tracker polled')
 
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
     # set is swap IDs where the provider was unreachable this cycle, so the
     # timeout phase knows to skip them (transient outage shouldn't slash).
     uncertain_swaps = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
+    bt.logging.info('forward: fulfillments verified')
 
     extend_fulfilled_near_timeout(self)
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
     if self.step % SCORING_WINDOW_BLOCKS == 0:
         score_and_reward_miners(self)
+        bt.logging.info('forward: scoring done')
 
 
 def clear_provider_caches(self: Validator) -> None:
@@ -244,6 +248,15 @@ def try_extend_reservation(
     itself enforces the per-tier evidence rule (tier 0: visibility OK; tier 1:
     confirmations >= 1; tier 2+: refused).
     """
+    # ``current_block`` from the caller was captured at step start; verifying
+    # each pending confirm before this one can burn many blocks. Refresh so
+    # the EXTEND_THRESHOLD_BLOCKS gate matches the height the propose tx will
+    # actually land at, not where the step began.
+    try:
+        current_block = self.subtensor.get_current_block()
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: refresh current_block failed: {e}')
+
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
     except Exception as e:

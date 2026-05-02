@@ -16,6 +16,7 @@ import bittensor as bt
 from allways.chains import compute_extension_target, get_chain
 from allways.classes import PendingExtension
 from allways.constants import (
+    CHALLENGE_WINDOW_BLOCKS,
     EXTENSION_BUCKET_BLOCKS,
     MAX_EXTENSIONS_PER_RESERVATION,
     MAX_EXTENSIONS_PER_SWAP,
@@ -87,6 +88,14 @@ class OptimisticExtensionWatcher:
             return False
 
         if pending is not None:
+            return False
+
+        # Refuse a doomed propose: if the challenge window can't close before
+        # the existing deadline, finalize will only become eligible after
+        # expiry. Anchoring the target on ``reserved_until`` sizes the *new*
+        # deadline safely past the old one, but it can't rescue a propose
+        # whose challenge window outlives the original reservation.
+        if current_block + CHALLENGE_WINDOW_BLOCKS >= reserved_until:
             return False
 
         if extension_count == 0:

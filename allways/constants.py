@@ -58,7 +58,6 @@ RECYCLE_UID = 53  # Subnet owner UID
 RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
 RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
 MAX_RESERVATIONS_PER_ADDRESS = 1
-EXTEND_THRESHOLD_BLOCKS = 20  # ~4 min — vote to extend when this many blocks remain
 # A user's tx is often invisible to a validator's RPC for the first few seconds
 # after submission (mempool propagation lag, regional RPC differences). Treat
 # "not found" as transient until the same entry has polled null this many times.
@@ -80,6 +79,10 @@ CHALLENGE_WINDOW_BLOCKS = 8
 # sizing extension targets so a single delayed step doesn't strand a propose
 # whose finalize window opens past the original reservation deadline.
 VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
+# Vote to extend when this many blocks remain. Sized for one forward step
+# to land the propose tx and the challenge window to elapse — without that
+# runway the propose is orphaned and the reservation expires anyway.
+EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
 
 # Tiered escalation. First extension fires on tx visibility alone (mempool
 # OK) and buys time for one block; second extension requires ≥1 confirmation
@@ -97,7 +100,7 @@ FEE_DIVISOR = 100
 # Fallbacks/defaults for CLI display. Live values are written by `alw admin`
 # and read from the contract at runtime.
 MIN_COLLATERAL_TAO = 0.1
-DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 30  # ~5 min
+DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
-RESERVATION_TTL_BLOCKS = 30  # ~5 min
+RESERVATION_TTL_BLOCKS = 50  # ~10 min
