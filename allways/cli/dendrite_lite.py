@@ -93,13 +93,28 @@ def broadcast_synapse(
 
 
 def resolve_dendrite_timeout(default: float) -> float:
-    """Honor ALW_DENDRITE_TIMEOUT as an override for slow chains (e.g. testnet)."""
+    """Honor ALW_DENDRITE_TIMEOUT as an override for slow chains (e.g. testnet).
+
+    Rejects ``nan``, ``inf``, and non-positive values so a typo in the env
+    var doesn't silently break dendrite calls (issue #240). ``float()`` alone
+    accepts all three, and the dendrite call would either hang on ``nan``,
+    bypass the override on ``inf``, or fail every send instantly on ``0``/
+    negative — none of which are useful, so we fall back to ``default``.
+    """
+    import math
     import os
 
     override = os.environ.get('ALW_DENDRITE_TIMEOUT')
     if not override:
         return default
     try:
-        return float(override)
+        value = float(override)
     except ValueError:
+        bt.logging.warning(f'ALW_DENDRITE_TIMEOUT={override!r} is not a number, using default {default}')
         return default
+    if not math.isfinite(value) or value <= 0:
+        bt.logging.warning(
+            f'ALW_DENDRITE_TIMEOUT={override!r} must be a finite positive float, using default {default}'
+        )
+        return default
+    return value
