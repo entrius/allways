@@ -223,6 +223,9 @@ class ContractEventWatcher:
         self.active_miners: Set[str] = set()
         self.open_swap_count: Dict[str, int] = {}
         self.busy_events: List[BusyEvent] = []
+        # Swap IDs already counted as +1 by bootstrap. SwapInitiated events
+        # for these IDs replayed by sync_to are skipped so we don't double-count.
+        self._bootstrap_initiated_ids: Set[int] = set()
         self.active_events: List[ActiveEvent] = []
         self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
 
@@ -303,6 +306,9 @@ class ContractEventWatcher:
                     seen_hotkeys.add(hk)
                     self.open_swap_count[hk] = self.open_swap_count.get(hk, 0) + 1
                     self.busy_events.append(BusyEvent(hotkey=hk, delta=+1, block=init_block))
+                    swap_id = getattr(swap, 'id', None)
+                    if isinstance(swap_id, int):
+                        self._bootstrap_initiated_ids.add(swap_id)
                 if seen_hotkeys:
                     self.busy_events.sort(key=lambda ev: ev.block)
                     bt.logging.info(f'EventWatcher bootstrap: seeded {len(seen_hotkeys)} miners as busy from contract')
@@ -403,6 +409,11 @@ class ContractEventWatcher:
             self.record_active_transition(block_num, hotkey, active)
         elif name == 'SwapInitiated':
             miner = values.get('miner', '')
+            swap_id = values.get('swap_id')
+            if isinstance(swap_id, int) and swap_id in self._bootstrap_initiated_ids:
+                # Already +1'd by bootstrap from contract state; skip replay.
+                self._bootstrap_initiated_ids.discard(swap_id)
+                return
             if miner:
                 self.apply_busy_delta(block_num, miner, +1)
         elif name == 'SwapCompleted':
