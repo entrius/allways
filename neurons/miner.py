@@ -6,6 +6,7 @@ Usage:
     python neurons/miner.py --netuid 7 --wallet.name default --wallet.hotkey default
 """
 
+import json
 import os
 import time
 from pathlib import Path
@@ -67,7 +68,34 @@ class Miner(BaseMinerNeuron):
 
         self.consecutive_poll_failures = 0
 
+        self.load_state()
+
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
+
+    def _state_path(self) -> Path:
+        hotkey = self.wallet.hotkey.ss58_address
+        return Path.home() / '.allways' / 'miner' / f'state_{hotkey[:12]}.json'
+
+    def save_state(self) -> None:
+        """Persist the swap poller cursor so restarts resume from the last scanned swap ID."""
+        try:
+            path = self._state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'last_scanned_id': self.swap_poller.last_scanned_id}))
+        except Exception as e:
+            bt.logging.warning(f'Miner save_state failed: {e}')
+
+    def load_state(self) -> None:
+        """Restore the swap poller cursor from the last saved state."""
+        path = self._state_path()
+        try:
+            state = json.loads(path.read_text())
+            self.swap_poller.last_scanned_id = int(state.get('last_scanned_id', 0))
+            bt.logging.info(f'Miner state loaded: last_scanned_id={self.swap_poller.last_scanned_id}')
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            bt.logging.warning(f'Miner load_state failed, starting fresh: {e}')
 
     def unlock_coldkey(self) -> None:
         """Cache the coldkey password through bittensor's keyfile so every
