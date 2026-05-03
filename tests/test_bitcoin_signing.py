@@ -12,7 +12,10 @@ from allways.chain_providers.bitcoin import (
     ADDR_TYPE_P2WPKH,
     BitcoinProvider,
     detect_address_type,
+    to_mainnet_address,
+    to_mainnet_wif,
 )
+from allways.chains import CHAIN_BTC
 
 # Known test WIF (compressed)
 TEST_WIF = 'L1RrrnXkcKut5DEMwtDthjwRcTTwED36thyL1DebVrKuwvohjMNi'
@@ -223,3 +226,61 @@ class TestBitcoinProviderVerifyFromProof:
         # not crash, because no valid signature binds to it.
         result = provider.verify_from_proof('bcrt1qtestnettestaddresstestaddresstestaddr', TEST_MESSAGE, 'AAAA')
         assert result is False
+
+
+class TestToMainnetWif:
+    def test_mainnet_wif_unchanged(self):
+        assert to_mainnet_wif(TEST_WIF) == TEST_WIF
+
+    def test_testnet_wif_converted(self):
+        import base58
+
+        decoded = base58.b58decode_check(TEST_WIF)
+        testnet_wif = base58.b58encode_check(bytes([0xEF]) + decoded[1:]).decode()
+        assert to_mainnet_wif(testnet_wif) == TEST_WIF
+
+
+class TestToMainnetAddress:
+    def test_mainnet_address_unchanged(self):
+        addr = 'bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc'
+        assert to_mainnet_address(addr) == addr
+
+    def test_regtest_bech32_converted_to_bc_prefix(self):
+        converted = to_mainnet_address('bcrt1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvtest9j')
+        assert converted.startswith('bc1') or converted.startswith('bcrt1')
+
+    def test_unknown_prefix_unchanged(self):
+        assert to_mainnet_address('4unknownprefix') == '4unknownprefix'
+
+
+class TestBitcoinProviderInit:
+    def test_rejects_invalid_mode(self):
+        import pytest
+
+        with patch.dict(os.environ, {'BTC_MODE': 'bogus'}, clear=False):
+            with pytest.raises(ValueError, match='BTC_MODE'):
+                BitcoinProvider()
+
+    def test_node_mode_infers_testnet_from_port(self):
+        env = {'BTC_MODE': 'node', 'BTC_RPC_URL': 'http://localhost:18332'}
+        with patch.dict(os.environ, env, clear=True):
+            provider = BitcoinProvider()
+        assert provider.network == 'testnet'
+        assert provider.mode == 'node'
+
+    def test_node_mode_defaults_to_mainnet(self):
+        env = {'BTC_MODE': 'node', 'BTC_RPC_URL': 'http://localhost:8332'}
+        with patch.dict(os.environ, env, clear=True):
+            provider = BitcoinProvider()
+        assert provider.network == 'mainnet'
+
+    def test_lightweight_mode_defaults_to_mainnet(self):
+        with patch.dict(os.environ, {'BTC_MODE': 'lightweight'}, clear=True):
+            provider = BitcoinProvider()
+        assert provider.network == 'mainnet'
+        assert provider.rpc_url == ''
+
+    def test_get_chain_returns_btc(self):
+        with patch.dict(os.environ, {'BTC_MODE': 'lightweight'}, clear=True):
+            provider = BitcoinProvider()
+        assert provider.get_chain() is CHAIN_BTC
