@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -23,6 +24,7 @@ PENDING_CONFIRM_SAMPLE1 = PendingConfirm(
     rate_str='350',
     reserved_until=100,
     queued_at=1.0,
+    from_tx_block=42,
 )
 
 
@@ -41,6 +43,7 @@ PENDING_CONFIRM_SAMPLE2 = PendingConfirm(
     rate_str='350',
     reserved_until=100,
     queued_at=2.0,
+    from_tx_block=43,
 )
 
 
@@ -59,8 +62,61 @@ class TestPendingConfirmQueue:
         assert len(items) == 2
         assert items[0].miner_hotkey == 'miner-1'
         assert items[0].from_tx_hash == 'tx-1'
+        assert items[0].from_tx_block == 42
         assert items[1].miner_hotkey == 'miner-2'
         assert items[1].from_tx_hash == 'tx-2'
+        assert items[1].from_tx_block == 43
+
+    def test_migrates_legacy_schema(self, tmp_path: Path):
+        """Legacy DBs are altered in place; pre-migration rows surface as NULL."""
+        db_path = tmp_path / 'state.db'
+        legacy_conn = sqlite3.connect(db_path)
+        legacy_conn.executescript(
+            """
+            CREATE TABLE pending_confirms (
+                miner_hotkey          TEXT PRIMARY KEY,
+                from_tx_hash          TEXT NOT NULL,
+                from_chain            TEXT NOT NULL,
+                to_chain              TEXT NOT NULL,
+                from_address          TEXT NOT NULL,
+                to_address            TEXT NOT NULL,
+                tao_amount            INTEGER NOT NULL,
+                from_amount           INTEGER NOT NULL,
+                to_amount             INTEGER NOT NULL,
+                miner_from_address    TEXT NOT NULL,
+                miner_to_address      TEXT NOT NULL,
+                rate_str              TEXT NOT NULL,
+                reserved_until        INTEGER NOT NULL,
+                queued_at             REAL NOT NULL
+            );
+            """
+        )
+        legacy_conn.execute(
+            'INSERT INTO pending_confirms VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                'legacy-miner',
+                'legacy-tx',
+                'btc',
+                'tao',
+                'bc1-user',
+                '5user',
+                1,
+                2,
+                3,
+                'bc1-miner',
+                '5miner',
+                '350',
+                100,
+                1.0,
+            ),
+        )
+        legacy_conn.commit()
+        legacy_conn.close()
+
+        items = ValidatorStateStore(db_path=db_path).get_all()
+        assert len(items) == 1
+        assert items[0].miner_hotkey == 'legacy-miner'
+        assert items[0].from_tx_block == 0
 
     def test_overwrite_keeps_single_row(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'
