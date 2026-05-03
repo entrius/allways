@@ -209,6 +209,9 @@ class OptimisticExtensionWatcher:
         if pending is not None:
             return False
 
+        if current_block + CHALLENGE_WINDOW_BLOCKS >= timeout_block:
+            return False
+
         if extension_count == 0:
             remaining = 1
         else:

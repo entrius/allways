@@ -369,6 +369,23 @@ class TestMaybeProposeTimeout:
         )
         assert result is False
 
+    def test_skips_when_challenge_window_cannot_close_before_deadline(self):
+        # current=1000, timeout_block=1005 → only 5 blocks runway, less than
+        # CHALLENGE_WINDOW_BLOCKS(=8). Finalize would be eligible at block
+        # 1008 but the swap times out at 1005 — propose is doomed, refuse it.
+        w = make_watcher(pending_timeout=None)
+        result = w.maybe_propose_timeout(
+            swap_id=42,
+            dest_chain_id='btc',
+            current_block=1000,
+            timeout_block=1005,
+            observed_confirmations=0,
+            extension_count=0,
+            pending=w.fetch_pending_timeout(42),
+        )
+        assert result is False
+        w.contract_client.propose_extend_timeout.assert_not_called()
+
 
 class TestMaybeChallengeTimeout:
     def test_challenges_when_target_too_far(self):
