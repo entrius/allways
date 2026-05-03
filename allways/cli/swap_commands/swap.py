@@ -497,14 +497,33 @@ def send_btc(
             console.print(f'[green]BTC sent (tx: {result[0]})[/green]')
             return result
 
-        # Drain async log output so the reason lands above the Retry prompt
-        # rather than after it.
-        sys.stderr.flush()
-        time.sleep(0.2)
-
-        reason = getattr(provider, 'last_send_error', None)
-        if reason:
-            console.print(f'[yellow]BTC send failed:[/yellow] {reason}')
+        # Retry or fall through to manual
+        if attempt < max_retries:
+            console.print('[yellow]BTC send failed.[/yellow]')
+            console.print(
+                '[dim]If the first broadcast actually landed but the RPC response was lost,[/dim]\n'
+                '[dim]retrying may either fail with insufficient funds (UTXOs locked) or pick a[/dim]\n'
+                '[dim]different UTXO set and produce a second send. Check your wallet before retrying.[/dim]'
+            )
+            existing = click.prompt(
+                'Already-sent tx hash (paste if found in wallet/mempool), or blank to retry',
+                default='',
+                show_default=False,
+            ).strip()
+            if existing:
+                tx_info = provider.verify_transaction(
+                    tx_hash=existing,
+                    expected_recipient=to_address,
+                    expected_amount=amount_sat,
+                )
+                if tx_info is None:
+                    console.print('[red]No matching tx found for that hash — not using it.[/red]')
+                else:
+                    console.print(f'[green]Using existing tx: {existing[:16]}...[/green]')
+                    return (existing, tx_info.block_number or 0)
+            if not click.confirm('Retry?', default=True):
+                break
+            console.print('[dim]Retrying...[/dim]')
         else:
             console.print('[yellow]BTC send failed.[/yellow]')
 
