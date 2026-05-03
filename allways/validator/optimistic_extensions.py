@@ -209,9 +209,6 @@ class OptimisticExtensionWatcher:
         if pending is not None:
             return False
 
-        # Mirror of the reservation-side guard: refuse a doomed propose. If the
-        # challenge window can't close before the existing timeout, finalize
-        # only becomes eligible after the swap has already timed out.
         if current_block + CHALLENGE_WINDOW_BLOCKS >= timeout_block:
             return False
 
