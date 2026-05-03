@@ -677,7 +677,11 @@ class AllwaysContractClient:
             to_tx_block, o = decode_u32(data, o)
             status_byte = data[o]
             o += 1
-            status = SwapStatus(status_byte) if status_byte <= 3 else SwapStatus.ACTIVE
+            try:
+                status = SwapStatus(status_byte)
+            except ValueError:
+                bt.logging.error(f'SwapData decode: unknown status byte {status_byte}')
+                return None
             initiated_block, o = decode_u32(data, o)
             timeout_block, o = decode_u32(data, o)
             fulfilled_block, o = decode_u32(data, o)
