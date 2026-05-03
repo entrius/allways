@@ -89,6 +89,16 @@ class Swap:
     fulfilled_block: int = 0
     completed_block: int = 0
 
+<<<<<<< refactor/swap-status-predicates
+    def is_pending(self) -> bool:
+        return self.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
+
+    def is_active(self) -> bool:
+        return self.status == SwapStatus.ACTIVE
+
+    def is_fulfilled(self) -> bool:
+        return self.status == SwapStatus.FULFILLED
+=======
 
 @dataclass
 class PendingExtension:
@@ -102,3 +112,4 @@ class PendingExtension:
     submitter: str  # validator hotkey ss58
     target_block: int
     proposed_at: int
+>>>>>>> test
