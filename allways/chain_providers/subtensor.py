@@ -274,11 +274,14 @@ class SubtensorProvider(ChainProvider):
             return 0
 
     def is_valid_address(self, address: str) -> bool:
-        """Validate an SS58 address."""
+        """Validate an SS58 address (length, charset, and checksum)."""
+        if not address:
+            return False
         try:
-            if not address or len(address) != 48:
-                return False
-            return bool(re.match(r'^[1-9A-HJ-NP-Za-km-z]{48}$', address))
+            from scalecodec.utils.ss58 import ss58_decode
+
+            ss58_decode(address)
+            return True
         except Exception:
             return False
 
