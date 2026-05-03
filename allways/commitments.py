@@ -50,6 +50,11 @@ def parse_commitment_data(raw: str, uid: int = 0, hotkey: str = '') -> Optional[
         if not (math.isfinite(rate) and math.isfinite(counter_rate)) or rate < 0 or counter_rate < 0:
             return None
 
+        if not (math.isfinite(rate) and rate > 0):
+            return None
+        if not (math.isfinite(counter_rate) and counter_rate > 0):
+            return None
+
         if src_chain not in SUPPORTED_CHAINS or dst_chain not in SUPPORTED_CHAINS:
             return None
 
