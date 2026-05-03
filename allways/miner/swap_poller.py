@@ -7,11 +7,6 @@ import bittensor as bt
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
 
-# Recent IDs re-checked every poll so a transient get_swap failure on a
-# freshly-created swap doesn't leave it permanently skipped. get_swap
-# returns None indistinguishably for "not found", "completed/pruned",
-# and "RPC/decode error" — the cursor advance can't tell them apart, so
-# the overlap window gives the third case another chance.
 RESCAN_WINDOW = 16
 
 
