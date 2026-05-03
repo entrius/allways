@@ -538,7 +538,7 @@ def view_rates(
     '--status',
     default=None,
     type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
-    help='Filter by status (active, fulfilled, completed, timed_out)',
+    help='Filter by status (active, fulfilled, completed, timed_out — last two link to dashboard)',
 )
 def view_active_swaps(status: str):
     """View active swaps on the contract.
@@ -547,9 +547,23 @@ def view_active_swaps(status: str):
         $ alw view active-swaps
         $ alw view active-swaps --status active[/dim]
     """
-    _, _, _, client = get_cli_context(need_wallet=False)
-
     console.print('\n[bold]Active Swaps[/bold]\n')
+
+    # COMPLETED and TIMED_OUT swaps are pruned from on-chain storage on
+    # finalization (lib.rs:804, 861). Filtering get_active_swaps() by
+    # those statuses is mathematically guaranteed to return [], so the
+    # old code printed a misleading "No swaps found" no matter how many
+    # resolved swaps actually exist. Short-circuit with the same dashboard
+    # fallback view_swap uses (issue #246).
+    if status and status.lower() in ('completed', 'timed_out'):
+        dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+        console.print(
+            '[green]Resolved swaps are pruned from on-chain storage.[/green]\n'
+            f'[dim]View history at:[/dim] {dashboard_url}'
+        )
+        return
+
+    _, _, _, client = get_cli_context(need_wallet=False)
 
     try:
         with loading('Reading swaps...'):
