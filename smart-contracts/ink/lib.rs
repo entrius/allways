@@ -92,7 +92,11 @@ mod allways_swap_manager {
         // Swap state
         next_swap_id: u64,
         swaps: Mapping<u64, SwapData>,
-        used_from_tx: Mapping<String, bool>,
+        // Permanent ledger of consumed source tx hashes. Cannot be cleared on
+        // swap completion: `swaps.remove(swap_id)` runs in confirm/timeout, so
+        // this map is the only on-chain record preventing a second initiate
+        // from reusing the same user payment. Uses `()` values (set semantics).
+        used_from_tx: Mapping<String, ()>,
 
         // Miner state
         collateral: Mapping<AccountId, Balance>,
@@ -838,7 +842,7 @@ mod allways_swap_manager {
             if from_tx_hash.len() > 128 {
                 return Err(Error::InputTooLong);
             }
-            if self.used_from_tx.get(&from_tx_hash).unwrap_or(false) {
+            if self.used_from_tx.contains(&from_tx_hash) {
                 return Err(Error::DuplicateSourceTx);
             }
 
@@ -901,7 +905,7 @@ mod allways_swap_manager {
                     completed_block: 0,
                 };
 
-                this.used_from_tx.insert(from_tx_hash, &true);
+                this.used_from_tx.insert(from_tx_hash, &());
                 this.miner_has_active_swap.insert(miner, &true);
                 this.swaps.insert(swap_id, &swap);
 
