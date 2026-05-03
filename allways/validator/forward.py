@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Set
+from typing import TYPE_CHECKING, Set, Tuple, Type, Union
 
 import bittensor as bt
 
@@ -389,6 +389,34 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
 
 
+RECOVERABLE_VERIFY_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
+    ProviderUnreachableError,
+    asyncio.TimeoutError,
+)
+
+
+async def _verify_swallowing_only_recoverable(
+    verifier: SwapVerifier,
+    swap,
+) -> Union[bool, ProviderUnreachableError, asyncio.TimeoutError]:
+    """Run ``verifier.verify_miner_fulfillment`` and convert recoverable
+    transport exceptions into return values. Programming errors
+    (``AttributeError``, ``KeyError``, ``TypeError``, …) and any other
+    unexpected exception types intentionally propagate so the forward
+    step fails loud instead of being silently logged as a generic
+    "verification error" forever (#178).
+
+    The previous shape — ``asyncio.gather(..., return_exceptions=True)``
+    paired with ``isinstance(result, Exception)`` — caught literally
+    every exception type and reduced them all to a logged warning,
+    which masked real bugs as flaky network conditions.
+    """
+    try:
+        return await verifier.verify_miner_fulfillment(swap)
+    except RECOVERABLE_VERIFY_EXCEPTIONS as exc:
+        return exc
+
+
 async def confirm_miner_fulfillments(
     self: Validator,
     tracker: SwapTracker,
@@ -402,17 +430,20 @@ async def confirm_miner_fulfillments(
     if not fulfilled:
         return uncertain
 
+    # Note: no `return_exceptions=True` — only the explicitly-recoverable
+    # exception types are caught (in the wrapper above) and returned as
+    # values; anything else propagates so it's not silently masked (#178).
     results = await asyncio.gather(
-        *[verifier.verify_miner_fulfillment(swap) for swap in fulfilled],
-        return_exceptions=True,
+        *[_verify_swallowing_only_recoverable(verifier, swap) for swap in fulfilled],
     )
     for swap, result in zip(fulfilled, results):
         if isinstance(result, ProviderUnreachableError):
             bt.logging.warning(f'Swap {swap.id}: provider unreachable, deferring verification')
             uncertain.add(swap.id)
             continue
-        if isinstance(result, Exception):
-            bt.logging.error(f'Swap {swap.id}: verification error: {result}')
+        if isinstance(result, asyncio.TimeoutError):
+            bt.logging.warning(f'Swap {swap.id}: verification timed out, deferring')
+            uncertain.add(swap.id)
             continue
         if result:
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
