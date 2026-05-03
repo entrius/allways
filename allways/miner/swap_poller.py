@@ -7,6 +7,13 @@ import bittensor as bt
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
 
+# Recent IDs re-checked every poll so a transient get_swap failure on a
+# freshly-created swap doesn't leave it permanently skipped. get_swap
+# returns None indistinguishably for "not found", "completed/pruned",
+# and "RPC/decode error" — the cursor advance can't tell them apart, so
+# the overlap window gives the third case another chance.
+RESCAN_WINDOW = 16
+
 
 class SwapPoller:
     """Incrementally polls the contract for swaps assigned to this miner.
@@ -39,7 +46,8 @@ class SwapPoller:
         # 1. Discover new swaps since last scan
         fresh: Set[int] = set()
         next_id = self.client.get_next_swap_id()
-        for swap_id in range(self.last_scanned_id + 1, next_id):
+        start = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
+        for swap_id in range(start, next_id):
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
                 if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
