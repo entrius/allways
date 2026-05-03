@@ -1,4 +1,5 @@
 import copy
+import signal
 import time
 from abc import ABC, abstractmethod
 
@@ -67,6 +68,11 @@ class BaseNeuron(ABC):
             f'using network: {self.subtensor.chain_endpoint}'
         )
         self.step = 0
+
+        try:
+            signal.signal(signal.SIGTERM, signal.default_int_handler)
+        except ValueError:
+            pass
 
     def reconnect_subtensor(self):
         """Recreate subtensor connection when WebSocket goes stale."""
