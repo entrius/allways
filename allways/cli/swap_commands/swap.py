@@ -154,24 +154,6 @@ def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
     return active[0].id if active else None
 
 
-def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
-    """Poll contract until miner has an active swap. Returns swap_id or None."""
-    with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
-        errors = 0
-        for _ in range(60):
-            time.sleep(3)
-            try:
-                swap_id = resolve_recent_swap_id(client, miner_hotkey)
-                if swap_id is not None:
-                    return swap_id
-                errors = 0
-            except ContractError:
-                errors += 1
-                if errors >= 5:
-                    console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
-                    errors = 0
-    return None
-
 
 def broadcast_reserve_with_retry(
     subtensor,
@@ -432,7 +414,13 @@ def display_receipt(swap):
     console.print()
 
 
-def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
+def poll_for_swap_with_progress(
+    client,
+    miner_hotkey: str,
+    from_chain: str,
+    max_polls: int = 60,
+    message: str = 'Waiting for validators to confirm and initiate swap...',
+):
     """Poll for swap creation with a live progress display."""
     with console.status('') as status:
         errors = 0
@@ -440,9 +428,7 @@ def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_
             elapsed = i * 3
             mins = elapsed // 60
             secs = elapsed % 60
-            status.update(
-                f'[dim]Waiting for validators to confirm and initiate swap... {mins}:{secs:02d} elapsed[/dim]'
-            )
+            status.update(f'[dim]{message} {mins}:{secs:02d} elapsed[/dim]')
 
             time.sleep(3)
             try:
