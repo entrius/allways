@@ -313,8 +313,13 @@ mod allways_swap_manager {
             };
             let votes = self.record_vote(id, caller)?;
             if votes >= self.get_required_votes() {
-                on_quorum(self)?;
+                // Clear the request whether on_quorum succeeds or fails.
+                // Without this, a closure that returns Err leaves the vote
+                // persisted on a request that won't be cleared until expiry,
+                // blocking the validator from re-voting (AlreadyVoted).
+                let result = on_quorum(self);
                 self.clear_request(miner, req_type);
+                result?;
             }
             Ok(())
         }
@@ -364,9 +369,13 @@ mod allways_swap_manager {
             });
 
             if votes >= self.get_required_votes() {
-                on_quorum(self)?;
+                // Clear on success or failure so a failed quorum doesn't
+                // strand the vote (AlreadyVoted blocks the validator from
+                // retrying until the request expires).
+                let result = on_quorum(self);
                 self.clear_request_data(id);
                 self.pending_swap_votes.remove((swap_id, req_type));
+                result?;
             }
             Ok(())
         }
