@@ -15,6 +15,7 @@ import os  # noqa: E402
 # Prevent bittensor from hijacking --help via its argparse config.
 # Must happen before any bittensor import.
 import sys as _sys
+import tempfile  # noqa: E402
 
 _saved_argv = _sys.argv[:]
 _sys.argv = [_sys.argv[0]]
@@ -156,7 +157,20 @@ def config_set(key: str, value: str):
     old_value = config.get(key)
     config[key] = value
 
-    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    # Atomic write — Ctrl+C, OOM, or container kill mid-write used to
+    # truncate the file, which load_cli_config then silently treated as
+    # empty, reverting every key (network, contract-address, etc.) to
+    # mainnet defaults (issue #244). tempfile + os.replace either lands
+    # the new file fully or leaves the old one untouched.
+    fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(json.dumps(config, indent=2))
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
     display = value
     if key == 'network' and value in KNOWN_NETWORKS:

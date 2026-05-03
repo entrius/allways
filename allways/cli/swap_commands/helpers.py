@@ -166,12 +166,23 @@ def from_rao(amount_rao: int) -> float:
 
 
 def load_cli_config() -> dict:
-    """Load CLI configuration from ~/.allways/config.json."""
+    """Load CLI configuration from ~/.allways/config.json.
+
+    Returns ``{}`` on a missing or unreadable file so callers don't crash,
+    but surfaces a Rich warning when the file exists and fails to parse —
+    silently swallowing corruption used to hide a partial-write recovery
+    that reverted ``network``/``contract-address`` to mainnet defaults
+    (issue #244).
+    """
     if not CONFIG_FILE.exists():
         return {}
     try:
         return json.loads(CONFIG_FILE.read_text())
-    except Exception:
+    except Exception as e:
+        console.print(
+            f'[yellow]Warning: {CONFIG_FILE} is unreadable ({e}); using defaults. '
+            f'Run `alw config set ...` to repair.[/yellow]'
+        )
         return {}
 
 
