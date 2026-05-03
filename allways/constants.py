@@ -20,6 +20,10 @@ BTC_TO_SAT = 100_000_000
 
 # ─── Rate Encoding ───────────────────────────────────────
 RATE_PRECISION = 10**18
+# Significant digits enforced on every committed rate. Normalized at the CLI
+# (post) and again at the validator (parse) so scoring buckets, consensus
+# hashes, and contract storage all agree on the same canonical string.
+RATE_SIG_FIGS = 5
 
 # ─── Transaction Fees ────────────────────────────────────
 # Small headroom kept aside for extrinsic fees so a deposit doesn't burn gas
