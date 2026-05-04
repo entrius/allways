@@ -1,11 +1,13 @@
 import copy
 import time
 from abc import ABC, abstractmethod
+from typing import Callable
 
 import bittensor as bt
 from websockets.exceptions import ConnectionClosedError
 
 from allways import __spec_version__ as spec_version
+from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
 
@@ -67,6 +69,29 @@ class BaseNeuron(ABC):
             f'using network: {self.subtensor.chain_endpoint}'
         )
         self.step = 0
+        self.last_seen_block = 0
+        self.stale_block_polls = 0
+
+    def check_block_progress(self, reconnect: Callable[[], None]) -> None:
+        """Reconnect if the substrate WS appears wedged — chain head frozen across many polls."""
+        try:
+            current_block = self.subtensor.get_current_block()
+        except Exception as e:
+            bt.logging.debug(f'block-progress watchdog: get_current_block failed: {e}')
+            return
+
+        if current_block == self.last_seen_block:
+            self.stale_block_polls += 1
+        else:
+            self.stale_block_polls = 0
+            self.last_seen_block = current_block
+
+        if self.stale_block_polls >= STALE_BLOCK_POLL_THRESHOLD:
+            bt.logging.warning(
+                f'chain head frozen at {current_block} for {self.stale_block_polls} polls, reconnecting subtensor'
+            )
+            reconnect()
+            self.stale_block_polls = 0
 
     def reconnect_subtensor(self):
         """Recreate subtensor connection when WebSocket goes stale."""
