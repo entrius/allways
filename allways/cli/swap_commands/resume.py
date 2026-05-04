@@ -167,13 +167,20 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
 
     ephemeral_wallet = get_ephemeral_wallet()
 
-    # Prompt for source tx hash if not provided
+    # Prompt for source tx hash if not provided. If `swap now` already
+    # broadcast and persisted the source tx, skip the "Send X to Y" prompt
+    # — re-asking risks a double-send.
     if not from_tx_hash_opt:
-        console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
-        from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
-        if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
-            console.print('[yellow]Swap paused. Resume later with: alw swap resume-reservation[/yellow]')
-            return
+        saved_tx = (state.from_tx_hash or '').strip()
+        if saved_tx:
+            console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{saved_tx}[/cyan]')
+            from_tx_hash_opt = saved_tx
+        else:
+            console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
+            from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
+            if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
+                console.print('[yellow]Swap paused. Resume later with: alw swap resume-reservation[/yellow]')
+                return
 
     from_tx_hash = from_tx_hash_opt.strip()
     # The user has asserted they've sent funds — persist the tx hash so
