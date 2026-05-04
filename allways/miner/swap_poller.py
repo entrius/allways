@@ -7,6 +7,8 @@ import bittensor as bt
 from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
 
+RESCAN_WINDOW = 16
+
 
 class SwapPoller:
     """Incrementally polls the contract for swaps assigned to this miner.
@@ -39,7 +41,8 @@ class SwapPoller:
         # 1. Discover new swaps since last scan
         fresh: Set[int] = set()
         next_id = self.client.get_next_swap_id()
-        for swap_id in range(self.last_scanned_id + 1, next_id):
+        start = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
+        for swap_id in range(start, next_id):
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
                 if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
