@@ -46,23 +46,30 @@ class SwapPoller:
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
                 if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+                    if swap.id not in self.active:
+                        bt.logging.info(
+                            f'Discovered swap {swap.id}: {swap.from_chain} -> {swap.to_chain}, '
+                            f'tao_amount={swap.tao_amount}, status={swap.status.name}'
+                        )
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
         if next_id > 1:
             self.last_scanned_id = next_id - 1
 
         # 2. Refresh active set — skip freshly discovered swaps, remove resolved
-        resolved = []
+        resolved: list[tuple[int, str]] = []
         for swap_id in list(self.active):
             if swap_id in fresh:
                 continue
             swap = self.client.get_swap(swap_id)
             if swap is None or swap.status not in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
-                resolved.append(swap_id)
+                terminal = swap.status.name if swap is not None else 'GONE'
+                resolved.append((swap_id, terminal))
             else:
                 self.active[swap_id] = swap
-        for sid in resolved:
+        for sid, terminal in resolved:
             self.active.pop(sid, None)
+            bt.logging.debug(f'Swap {sid}: dropped from active (status={terminal})')
 
         # 3. Return categorized by contract status
         active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]

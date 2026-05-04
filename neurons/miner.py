@@ -107,6 +107,10 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(f'Could not read own commitment at startup: {e}')
             return {}
         if pair is None:
+            bt.logging.warning(
+                f'No on-chain commitment found for hotkey {hotkey}; miner will not be able to fulfill swaps '
+                'until `alw miner post` is run'
+            )
             return {}
         return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
 
@@ -120,6 +124,10 @@ class Miner(BaseMinerNeuron):
                 self.my_addresses.clear()
                 self.my_addresses.update(fresh)
                 bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
+            else:
+                bt.logging.warning(
+                    'Rate-posted flag set but no commitment readable on chain yet; address cache left untouched'
+                )
             self.rate_flag_path.unlink(missing_ok=True)
         except Exception as e:
             bt.logging.debug(f'Rate-posted flag check failed: {e}')
