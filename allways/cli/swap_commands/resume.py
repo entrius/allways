@@ -170,11 +170,13 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     # Prompt for source tx hash if not provided. If `swap now` already
     # broadcast and persisted the source tx, skip the "Send X to Y" prompt
     # — re-asking risks a double-send.
+    used_saved_tx = False
     if not from_tx_hash_opt:
         saved_tx = (state.from_tx_hash or '').strip()
         if saved_tx:
             console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{saved_tx}[/cyan]')
             from_tx_hash_opt = saved_tx
+            used_saved_tx = True
         else:
             console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
             from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
@@ -188,16 +190,22 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     mark_pending_swap_tx_sent(from_tx_hash)
 
     # Reservation-wide block lookup so a resumed tx still ±3-hints the
-    # validator. 0 = miss (falls back to validator-side scan).
-    from_tx_block = resolve_source_tx_block(
-        provider=provider,
-        tx_hash=from_tx_hash,
-        expected_recipient=state.miner_from_address,
-        expected_amount=state.from_amount,
-        subtensor=subtensor,
-        client=client,
-        reserved_until_block=reserved_until,
-    )
+    # validator. 0 = miss (falls back to validator-side scan). Skip the
+    # lookup when we're reusing a freshly-broadcast hash from `swap now`
+    # — the tx is almost certainly still in mempool, so the scan would
+    # just print "not found" noise right after we said "already broadcast".
+    if used_saved_tx:
+        from_tx_block = 0
+    else:
+        from_tx_block = resolve_source_tx_block(
+            provider=provider,
+            tx_hash=from_tx_hash,
+            expected_recipient=state.miner_from_address,
+            expected_amount=state.from_amount,
+            subtensor=subtensor,
+            client=client,
+            reserved_until_block=reserved_until,
+        )
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued, info = sign_and_broadcast_confirm(
