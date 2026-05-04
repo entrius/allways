@@ -107,6 +107,10 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(f'Could not read own commitment at startup: {e}')
             return {}
         if pair is None:
+            bt.logging.warning(
+                f'No on-chain commitment found for hotkey {hotkey}; miner will not be able to fulfill swaps '
+                'until `alw miner post` is run'
+            )
             return {}
         return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
 
