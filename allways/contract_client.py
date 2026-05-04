@@ -536,13 +536,15 @@ class AllwaysContractClient:
         signer_address = keypair.ss58_address
         try:
             account_info = self.substrate_call(lambda s: s.query('System', 'Account', [signer_address]))
+            account_data = account_info.value if hasattr(account_info, 'value') else account_info
+            free_balance = account_data.get('data', {}).get('free', 0)
+            if free_balance < MIN_BALANCE_FOR_TX_RAO:
+                bt.logging.warning(
+                    f'{method}: low free balance on {signer_address} ({free_balance} rao); '
+                    f'submitting anyway — chain will reject if truly insufficient'
+                )
         except Exception as e:
-            raise ContractError(f'{method}: balance query failed: {e}') from e
-
-        account_data = account_info.value if hasattr(account_info, 'value') else account_info
-        free_balance = account_data.get('data', {}).get('free', 0)
-        if free_balance < MIN_BALANCE_FOR_TX_RAO:
-            raise ContractError(f'{method}: free={free_balance}')
+            bt.logging.debug(f'{method}: pre-flight balance probe failed, proceeding: {e}')
 
         def submit_extrinsic(s):
             call = s.compose_call(

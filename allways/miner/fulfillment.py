@@ -207,6 +207,10 @@ class SwapFulfiller:
         # credentials live on the provider itself.
         from_address = None if swap.to_chain == 'tao' else self.my_addresses.get(swap.to_chain)
 
+        bt.logging.info(
+            f'Swap {swap.id}: initiating dest send of {user_receives_amount} to {swap.user_to_address} '
+            f'on {swap.to_chain}'
+        )
         result = provider.send_amount(swap.user_to_address, user_receives_amount, from_address=from_address)
         if result:
             tx_hash, block_num = result
@@ -239,6 +243,7 @@ class SwapFulfiller:
         if sent and sent.marked_fulfilled:
             # Already finished on a previous pass. Contract state catches up
             # when validators confirm — nothing to retry here.
+            bt.logging.debug(f'Swap {swap.id}: already marked fulfilled locally, awaiting validator confirm')
             return True
 
         bt.logging.info(f'Processing swap {swap.id}: {swap.from_chain} -> {swap.to_chain}')

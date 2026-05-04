@@ -120,6 +120,10 @@ class Miner(BaseMinerNeuron):
                 self.my_addresses.clear()
                 self.my_addresses.update(fresh)
                 bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
+            else:
+                bt.logging.warning(
+                    'Rate-posted flag set but no commitment readable on chain yet; address cache left untouched'
+                )
             self.rate_flag_path.unlink(missing_ok=True)
         except Exception as e:
             bt.logging.debug(f'Rate-posted flag check failed: {e}')

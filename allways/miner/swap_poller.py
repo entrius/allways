@@ -46,6 +46,11 @@ class SwapPoller:
             swap = self.client.get_swap(swap_id)
             if swap and swap.miner_hotkey == self.miner_hotkey:
                 if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+                    if swap.id not in self.active:
+                        bt.logging.info(
+                            f'Discovered swap {swap.id}: {swap.from_chain} -> {swap.to_chain}, '
+                            f'tao_amount={swap.tao_amount}, status={swap.status.name}'
+                        )
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
         if next_id > 1:
