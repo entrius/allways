@@ -167,9 +167,6 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
 
     ephemeral_wallet = get_ephemeral_wallet()
 
-    # Prompt for source tx hash if not provided. If `swap now` already
-    # broadcast and persisted the source tx, skip the "Send X to Y" prompt
-    # — re-asking risks a double-send.
     used_saved_tx = False
     if not from_tx_hash_opt:
         saved_tx = (state.from_tx_hash or '').strip()
@@ -185,15 +182,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
                 return
 
     from_tx_hash = from_tx_hash_opt.strip()
-    # The user has asserted they've sent funds — persist the tx hash so
-    # `alw view reservation` reflects that, even if validators reject below.
     mark_pending_swap_tx_sent(from_tx_hash)
 
-    # Reservation-wide block lookup so a resumed tx still ±3-hints the
-    # validator. 0 = miss (falls back to validator-side scan). Skip the
-    # lookup when we're reusing a freshly-broadcast hash from `swap now`
-    # — the tx is almost certainly still in mempool, so the scan would
-    # just print "not found" noise right after we said "already broadcast".
+    # Saved hash is fresh from swap now — still in mempool, lookup would just print noise.
     if used_saved_tx:
         from_tx_block = 0
     else:
