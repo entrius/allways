@@ -69,7 +69,7 @@ class BitcoinProvider(ChainProvider):
     """Bitcoin chain provider. Supports two modes:
 
     - node: Uses a local Bitcoin Core JSON-RPC node (default)
-    - lightweight: Uses embit + Blockstream API (no local node required)
+    - lightweight: Uses embit + Esplora API (no local node required)
 
     Set BTC_MODE=lightweight to run without a local node.
     """
@@ -349,17 +349,18 @@ class BitcoinProvider(ChainProvider):
             return False
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Return tx hash if a recent (mempool or last 2 min) tx from from_addr pays exactly amount sat to to_addr.
+        """Return tx hash if a recent (mempool or last 5 min) tx from from_addr pays exactly amount sat to to_addr.
 
-        The 2-minute window is sized to catch a same-session retry after a broadcast timeout while
-        excluding human-paced repeat sends to the same miner for the same amount.
+        Window catches a same-session retry after a broadcast timeout while staying short of the
+        ~10 min reservation expiry, so a deliberate human-paced repeat send to the same miner for
+        the same amount is unlikely to be inside it.
         """
         try:
             resp = self.btc_api_get(f'/address/{from_addr}/txs', timeout=10)
             resp.raise_for_status()
         except Exception:
             return None
-        cutoff = int(time.time()) - 120
+        cutoff = int(time.time()) - 300
         for tx in resp.json() or []:
             status = tx.get('status') or {}
             if status.get('confirmed') and status.get('block_time', 0) < cutoff:
