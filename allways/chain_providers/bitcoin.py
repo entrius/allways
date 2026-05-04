@@ -123,12 +123,12 @@ class BitcoinProvider(ChainProvider):
             except ImportError as e:
                 raise ConnectionError('BTC_MODE=lightweight requires embit (pip install embit)') from e
             try:
-                resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+                resp = self.btc_api_get('/blocks/tip/height', timeout=10)
                 resp.raise_for_status()
                 tip = int(resp.text.strip())
-                bt.logging.success(f'BTC lightweight mode: network={self.network}, Blockstream tip={tip}')
+                bt.logging.success(f'BTC lightweight mode: network={self.network}, Esplora tip={tip}')
             except Exception as e:
-                raise ConnectionError(f'Cannot reach Blockstream API: {e}') from e
+                raise ConnectionError(f'Cannot reach Esplora API: {e}') from e
             return
 
         result = self.rpc_call('getblockchaininfo', [])
@@ -167,11 +167,11 @@ class BitcoinProvider(ChainProvider):
         block_hint: int = 0,
         max_scan_blocks: int = 150,  # unused — BTC backends index by tx hash
     ) -> Optional[TransactionInfo]:
-        """Look up a Bitcoin tx via RPC with Blockstream fallback."""
+        """Look up a Bitcoin tx via RPC with Esplora fallback."""
         result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
         if result is not None:
             return result
-        return self.blockstream_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
 
     def rpc_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
@@ -234,13 +234,13 @@ class BitcoinProvider(ChainProvider):
                 prev_addrs = [prev_addr]
         return prev_addrs[0] if prev_addrs else ''
 
-    # --- Blockstream API methods ---
+    # --- Esplora API methods (blockstream.info + mempool.space fallback) ---
     # Used as primary data source in lightweight mode, and as fallback in node mode.
 
-    def blockstream_calc_confirmations(self, block_number: int) -> int:
-        """Fetch the chain tip from Blockstream and calculate confirmations for a block."""
+    def api_calc_confirmations(self, block_number: int) -> int:
+        """Fetch the chain tip from Esplora and calculate confirmations for a block."""
         try:
-            tip_resp = self.http.get(f'{self.blockstream_api_url()}/blocks/tip/height', timeout=10)
+            tip_resp = self.btc_api_get('/blocks/tip/height', timeout=10)
             if tip_resp.ok:
                 tip_height = int(tip_resp.text.strip())
                 return tip_height - block_number + 1
@@ -248,13 +248,12 @@ class BitcoinProvider(ChainProvider):
             pass
         return 0
 
-    def blockstream_verify_transaction(
+    def api_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
-        """Verify via Blockstream API; raises ProviderUnreachableError if unreachable."""
+        """Verify via Esplora API; raises ProviderUnreachableError if unreachable."""
         try:
-            url = f'{self.blockstream_api_url()}/tx/{tx_hash}'
-            resp = self.http.get(url, timeout=15)
+            resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -265,7 +264,7 @@ class BitcoinProvider(ChainProvider):
             confirmations = 0
 
             if confirmed and block_number:
-                confirmations = self.blockstream_calc_confirmations(block_number)
+                confirmations = self.api_calc_confirmations(block_number)
 
             min_confs = self.get_chain().min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
@@ -291,25 +290,19 @@ class BitcoinProvider(ChainProvider):
 
             return None
         except (requests.ConnectionError, requests.Timeout) as e:
-            raise ProviderUnreachableError(f'Blockstream API unreachable: {e}') from e
+            raise ProviderUnreachableError(f'Esplora API unreachable: {e}') from e
         except requests.HTTPError as e:
-            raise ProviderUnreachableError(f'Blockstream API error: {e}') from e
+            raise ProviderUnreachableError(f'Esplora API error: {e}') from e
         except Exception as e:
-            bt.logging.error(f'Blockstream tx lookup failed for {tx_hash}: {e}')
+            bt.logging.error(f'Esplora tx lookup failed for {tx_hash}: {e}')
             return None
 
     def get_balance(self, address: str) -> int:
-        """Get balance for a Bitcoin address in satoshis via RPC with Blockstream fallback."""
+        """Get balance for a Bitcoin address in satoshis via RPC with Esplora fallback."""
         result = self.rpc_call('getreceivedbyaddress', [address, 0])
         if result is not None:
             return int(round(result * BTC_TO_SAT))
-        return self.blockstream_get_balance(address)
-
-    def blockstream_api_url(self) -> str:
-        """Return the appropriate Blockstream API base URL based on network."""
-        if self.network == 'testnet':
-            return 'https://blockstream.info/testnet/api'
-        return 'https://blockstream.info/api'
+        return self.api_get_balance(address)
 
     def btc_api_bases(self) -> Tuple[str, ...]:
         """Esplora-compatible bases tried in order; mempool.space is the fallback when blockstream is flaky."""
@@ -329,7 +322,7 @@ class BitcoinProvider(ChainProvider):
             try:
                 resp = self.http.get(f'{base}{path}', timeout=timeout)
                 if resp.status_code >= 500:
-                    last_err = Exception(f'{base}{path}: {resp.status_code}')
+                    last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
                     continue
                 return resp
             except Exception as e:
@@ -342,7 +335,7 @@ class BitcoinProvider(ChainProvider):
             try:
                 resp = self.http.post(f'{base}{path}', data=data, timeout=timeout)
                 if resp.status_code >= 500:
-                    last_err = Exception(f'{base}{path}: {resp.status_code}')
+                    last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
                     continue
                 return resp
             except Exception as e:
@@ -376,11 +369,10 @@ class BitcoinProvider(ChainProvider):
                     return tx.get('txid')
         return None
 
-    def blockstream_get_balance(self, address: str) -> int:
-        """Get balance via Blockstream API. Returns satoshis."""
+    def api_get_balance(self, address: str) -> int:
+        """Get balance via Esplora API. Returns satoshis."""
         try:
-            url = f'{self.blockstream_api_url()}/address/{address}'
-            resp = self.http.get(url, timeout=15)
+            resp = self.btc_api_get(f'/address/{address}', timeout=15)
             resp.raise_for_status()
             data = resp.json()
             funded = data.get('chain_stats', {}).get('funded_txo_sum', 0)
@@ -389,7 +381,7 @@ class BitcoinProvider(ChainProvider):
             mempool_spent = data.get('mempool_stats', {}).get('spent_txo_sum', 0)
             return (funded - spent) + (mempool_funded - mempool_spent)
         except Exception as e:
-            bt.logging.error(f'Blockstream balance lookup failed for {address}: {e}')
+            bt.logging.error(f'Esplora balance lookup failed for {address}: {e}')
             return 0
 
     def is_valid_address(self, address: str) -> bool:
