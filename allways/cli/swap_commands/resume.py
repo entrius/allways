@@ -167,30 +167,36 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
 
     ephemeral_wallet = get_ephemeral_wallet()
 
-    # Prompt for source tx hash if not provided
+    used_saved_tx = False
     if not from_tx_hash_opt:
-        console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
-        from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
-        if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
-            console.print('[yellow]Swap paused. Resume later with: alw swap resume-reservation[/yellow]')
-            return
+        saved_tx = (state.from_tx_hash or '').strip()
+        if saved_tx:
+            console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{saved_tx}[/cyan]')
+            from_tx_hash_opt = saved_tx
+            used_saved_tx = True
+        else:
+            console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
+            from_tx_hash_opt = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
+            if not from_tx_hash_opt or from_tx_hash_opt.lower() == 'skip':
+                console.print('[yellow]Swap paused. Resume later with: alw swap resume-reservation[/yellow]')
+                return
 
     from_tx_hash = from_tx_hash_opt.strip()
-    # The user has asserted they've sent funds — persist the tx hash so
-    # `alw view reservation` reflects that, even if validators reject below.
     mark_pending_swap_tx_sent(from_tx_hash)
 
-    # Reservation-wide block lookup so a resumed tx still ±3-hints the
-    # validator. 0 = miss (falls back to validator-side scan).
-    from_tx_block = resolve_source_tx_block(
-        provider=provider,
-        tx_hash=from_tx_hash,
-        expected_recipient=state.miner_from_address,
-        expected_amount=state.from_amount,
-        subtensor=subtensor,
-        client=client,
-        reserved_until_block=reserved_until,
-    )
+    # Saved hash is fresh from swap now — still in mempool, lookup would just print noise.
+    if used_saved_tx:
+        from_tx_block = 0
+    else:
+        from_tx_block = resolve_source_tx_block(
+            provider=provider,
+            tx_hash=from_tx_hash,
+            expected_recipient=state.miner_from_address,
+            expected_amount=state.from_amount,
+            subtensor=subtensor,
+            client=client,
+            reserved_until_block=reserved_until,
+        )
 
     console.print('\n[dim]Confirming with validators...[/dim]')
     accepted, queued, info = sign_and_broadcast_confirm(
