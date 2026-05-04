@@ -349,13 +349,17 @@ class BitcoinProvider(ChainProvider):
             return False
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Return tx hash if a recent (mempool or last 10 min) tx from from_addr pays exactly amount sat to to_addr."""
+        """Return tx hash if a recent (mempool or last 2 min) tx from from_addr pays exactly amount sat to to_addr.
+
+        The 2-minute window is sized to catch a same-session retry after a broadcast timeout while
+        excluding human-paced repeat sends to the same miner for the same amount.
+        """
         try:
             resp = self.btc_api_get(f'/address/{from_addr}/txs', timeout=10)
             resp.raise_for_status()
         except Exception:
             return None
-        cutoff = int(time.time()) - 600
+        cutoff = int(time.time()) - 120
         for tx in resp.json() or []:
             status = tx.get('status') or {}
             if status.get('confirmed') and status.get('block_time', 0) < cutoff:
