@@ -379,7 +379,9 @@ def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
     try:
         from allways.commitments import read_miner_commitment
 
-        miner_pair = read_miner_commitment(getattr(client, 'subtensor', None), state.miner_hotkey, state.netuid)
+        subtensor = getattr(client, 'subtensor', None)
+        metagraph = subtensor.metagraph(state.netuid) if subtensor is not None else None
+        miner_pair = read_miner_commitment(subtensor, state.netuid, state.miner_hotkey, metagraph=metagraph)
         if miner_pair:
             state.miner_uid = miner_pair.uid
             state.miner_from_address = miner_pair.from_address
