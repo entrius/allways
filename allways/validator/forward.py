@@ -39,6 +39,8 @@ async def forward(self: Validator) -> None:
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
 
+    self.check_block_progress(self.reconnect_and_propagate)
+
     clear_provider_caches(self)
 
     # Sync events first so ReservationExtensionFinalized writes from the

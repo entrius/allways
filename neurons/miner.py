@@ -135,6 +135,7 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self):
         """Main miner forward pass — polls for swaps and processes each one."""
+        self.check_block_progress(self.reconnect_and_propagate)
         self.maybe_reload_my_addresses()
 
         active_swaps, _fulfilled = self.swap_poller.poll()

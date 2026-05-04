@@ -10,6 +10,8 @@ CONTRACT_ADDRESS = '5FTkUEhRmLPsALn4b7bJpVFhDQqohGbc6khnmA2aiYFLMZYP'
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.
 MINER_POLL_INTERVAL_SECONDS = 12
 VALIDATOR_POLL_INTERVAL_SECONDS = 12
+# Consecutive polls of zero block progress before we force a substrate reconnect.
+STALE_BLOCK_POLL_THRESHOLD = 30
 
 # ─── Commitment Format ────────────────────────────────────
 COMMITMENT_VERSION = 1
