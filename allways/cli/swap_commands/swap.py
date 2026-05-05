@@ -610,6 +610,16 @@ def swap_now_command(
         console.print('[red]Source and destination chains must be different[/red]')
         return
 
+    # Non-interactive (--yes) mode silently dropped into a click.prompt for
+    # --from-address on non-TAO source chains, which then aborted with no
+    # actionable error. Fail fast with a clear message instead.
+    if skip_confirm and from_chain_opt and from_chain_opt != 'tao' and not from_address_opt:
+        console.print(
+            f'[red]--from-address is required for {from_chain_opt.upper()} source in non-interactive mode (--yes).[/red]\n'
+            f'[dim]Pass your {from_chain_opt.upper()} source address explicitly, e.g. --from-address bc1q...[/dim]'
+        )
+        return
+
     console.print('\n[bold]Allways Swap[/bold]\n')
 
     # Check for pending reservation
