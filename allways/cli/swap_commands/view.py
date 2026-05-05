@@ -1043,7 +1043,7 @@ def view_reservation():
         console.print('\n[yellow]No active reservation found.[/yellow]')
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
-    hydrate_pending_swap(state, client)
+    hydrated = hydrate_pending_swap(state, client)
 
     current_block = subtensor.get_current_block()
     with loading('Reading reservation...'):
@@ -1051,6 +1051,14 @@ def view_reservation():
 
     if status.kind == 'rpc_error':
         console.print('[red]Failed to read reservation status from contract.[/red]')
+        return
+
+    # No matching on-chain reservation — local file is stale; clearing it
+    # also avoids a `get_chain('')` crash in the table renderer below.
+    if not hydrated:
+        console.print('\n[yellow]No active reservation.[/yellow]')
+        console.print('[dim]Local state referenced a reservation that is no longer on-chain — cleared.[/dim]\n')
+        clear_pending_swap()
         return
 
     console.print('\n[bold]Swap Reservation[/bold]\n')
