@@ -225,11 +225,13 @@ class TestRPCResilience:
 
         asyncio.run(tracker.poll_inner())
 
+        # Transient RPC error must not bump null-retry — that's how a flaky WS
+        # ends up dropping a still-active swap (see commit history for #11).
         assert 60 in tracker.active
-        assert tracker.null_retry_count.get(60) == 1
+        assert 60 not in tracker.null_retry_count
         assert tracker.active[61].status == SwapStatus.FULFILLED
 
-    def test_exception_counts_toward_retry_limit(self):
+    def test_exception_does_not_drop_swap(self):
         tracker = make_tracker()
         tracker.active[70] = make_swap(swap_id=70)
         tracker.last_scanned_id = 70
@@ -237,10 +239,11 @@ class TestRPCResilience:
         tracker.client.get_next_swap_id.return_value = 71
         tracker.client.get_swap.side_effect = RuntimeError('rpc down')
 
-        for _ in range(NULL_SWAP_RETRY_LIMIT):
+        for _ in range(NULL_SWAP_RETRY_LIMIT + 2):
             asyncio.run(tracker.poll_inner())
 
-        assert 70 not in tracker.active
+        assert 70 in tracker.active
+        assert 70 not in tracker.null_retry_count
 
     def test_discovery_exception_does_not_break_pass(self):
         """Flaky get_swap during new-ID discovery is skipped, not fatal."""

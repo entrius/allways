@@ -121,27 +121,25 @@ class SwapTracker:
         next_id = await asyncio.to_thread(self.client.get_next_swap_id)
 
         # --- Discovery phase: scan new swap IDs ---
+        # Sequential — substrate WS isn't thread-safe (see contract_client mutex);
+        # parallel fanout used to surface as silent get_swap Nones. RESCAN_WINDOW
+        # re-checks recent IDs so a transient skip self-heals next poll.
         fresh: Set[int] = set()
         start_id = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
-        new_ids = list(range(start_id, next_id))
-        if new_ids:
-            # return_exceptions=True keeps one flaky get_swap from killing the step.
-            swaps = await asyncio.gather(
-                *[asyncio.to_thread(self.client.get_swap, sid) for sid in new_ids],
-                return_exceptions=True,
-            )
-            for sid, result in zip(new_ids, swaps):
-                if isinstance(result, Exception):
-                    bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during discovery: {result}')
-                    continue
-                swap = result
-                if swap is None:
-                    continue
-                if swap.status in ACTIVE_STATUSES:
-                    if swap.id not in self.active:
-                        bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
-                    self.active[swap.id] = swap
-                    fresh.add(swap.id)
+        for sid in range(start_id, next_id):
+            try:
+                swap = await asyncio.to_thread(self.client.get_swap, sid)
+            except Exception as e:
+                bt.logging.debug(f'SwapTracker discovery({sid}) failed, will retry: {e}')
+                continue
+            if swap is None:
+                continue
+            if swap.status in ACTIVE_STATUSES:
+                if swap.id not in self.active:
+                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
+                self.active[swap.id] = swap
+                fresh.add(swap.id)
+                self.null_retry_count.pop(swap.id, None)
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -152,19 +150,18 @@ class SwapTracker:
             self.prune_stale_voted_ids()
             return
 
-        swaps = await asyncio.gather(
-            *[asyncio.to_thread(self.client.get_swap, sid) for sid in stale_ids],
-            return_exceptions=True,
-        )
-
         # Null and transient errors share one retry policy — a missing swap
         # is either an RPC flake or a freshly-resolved entry the event
         # watcher will record. Retry a few times, then drop.
         resolved_ids: List[int] = []
-        for sid, result in zip(stale_ids, swaps):
-            if isinstance(result, Exception):
-                bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during refresh: {result}')
-                result = None
+        for sid in stale_ids:
+            try:
+                result = await asyncio.to_thread(self.client.get_swap, sid)
+            except Exception as e:
+                # Transient RPC error — leave the swap in active and don't
+                # advance null-retry. Retried next poll.
+                bt.logging.debug(f'SwapTracker refresh({sid}) failed, will retry: {e}')
+                continue
 
             if result is None:
                 if self.bump_null_retry(sid):
