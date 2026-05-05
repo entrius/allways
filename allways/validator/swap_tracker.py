@@ -24,6 +24,12 @@ NULL_SWAP_RETRY_LIMIT = 3
 # current volume — bump if the gap between contiguous active swap IDs grows.
 MAX_INIT_GAP = 20
 
+# Re-fetch the last N swap IDs each poll regardless of last_scanned_id so a
+# silent get_swap None during discovery self-heals next poll. Mirrors the
+# miner's RESCAN_WINDOW (#264). Bounded by subnet-wide swap creation rate
+# per forward step, not by the validator's tracked-set size.
+RESCAN_WINDOW = 16
+
 
 def _swap_label(swap: Swap) -> str:
     return f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
@@ -116,7 +122,8 @@ class SwapTracker:
 
         # --- Discovery phase: scan new swap IDs ---
         fresh: Set[int] = set()
-        new_ids = list(range(self.last_scanned_id + 1, next_id))
+        start_id = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
+        new_ids = list(range(start_id, next_id))
         if new_ids:
             # return_exceptions=True keeps one flaky get_swap from killing the step.
             swaps = await asyncio.gather(
@@ -131,9 +138,10 @@ class SwapTracker:
                 if swap is None:
                     continue
                 if swap.status in ACTIVE_STATUSES:
+                    if swap.id not in self.active:
+                        bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
                     self.active[swap.id] = swap
                     fresh.add(swap.id)
-                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
