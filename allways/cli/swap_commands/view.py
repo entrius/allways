@@ -1053,11 +1053,8 @@ def view_reservation():
         console.print('[red]Failed to read reservation status from contract.[/red]')
         return
 
-    # Without hydration the chain/amount fields are empty defaults — the table
-    # renderer below would crash on `get_chain('')`. Hydrate failure means the
-    # on-chain reservation is gone (expired, replaced, or resolved-and-pruned),
-    # so the local file is stale. Clear it and report no active reservation
-    # rather than dump a traceback.
+    # No matching on-chain reservation — local file is stale; clearing it
+    # also avoids a `get_chain('')` crash in the table renderer below.
     if not hydrated:
         console.print('\n[yellow]No active reservation.[/yellow]')
         console.print('[dim]Local state referenced a reservation that is no longer on-chain — cleared.[/dim]\n')

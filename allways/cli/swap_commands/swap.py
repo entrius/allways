@@ -610,9 +610,7 @@ def swap_now_command(
         console.print('[red]Source and destination chains must be different[/red]')
         return
 
-    # Non-interactive (--yes) mode silently dropped into a click.prompt for
-    # --from-address on non-TAO source chains, which then aborted with no
-    # actionable error. Fail fast with a clear message instead.
+    # Non-TAO source needs --from-address up front; otherwise the later prompt aborts under --yes.
     if skip_confirm and from_chain_opt and from_chain_opt != 'tao' and not from_address_opt:
         console.print(
             f'[red]--from-address is required for {from_chain_opt.upper()} source in non-interactive mode (--yes).[/red]\n'
