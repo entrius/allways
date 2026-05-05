@@ -43,6 +43,7 @@ Layout
 
 import os
 import struct
+import threading
 from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 import bittensor as bt
@@ -360,6 +361,9 @@ class AllwaysContractClient:
         self.reconnect_subtensor = reconnect_subtensor
         self.readonly_keypair = Keypair.create_from_uri('//Alice')
         self.initialized = False
+        # substrate-interface's WebSocketProvider isn't thread-safe; serialize
+        # access so concurrent threads can't both land in recv at the same time.
+        self._substrate_lock = threading.Lock()
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
@@ -377,18 +381,19 @@ class AllwaysContractClient:
         receipt returned, the retry composes a fresh nonce and submits a
         second extrinsic that can also land.
         """
-        try:
-            return fn(self.subtensor.substrate)
-        except RECONNECT_EXCEPTIONS as e:
-            if self.reconnect_subtensor is None:
-                raise
-            bt.logging.warning(f'Substrate WS error ({e!s}); reconnecting and retrying once')
+        with self._substrate_lock:
             try:
-                self.reconnect_subtensor()
-            except Exception as reconnect_err:
-                bt.logging.error(f'Substrate reconnect callback failed: {reconnect_err}')
-                raise e from reconnect_err
-            return fn(self.subtensor.substrate)
+                return fn(self.subtensor.substrate)
+            except RECONNECT_EXCEPTIONS as e:
+                if self.reconnect_subtensor is None:
+                    raise
+                bt.logging.warning(f'Substrate WS error ({e!s}); reconnecting and retrying once')
+                try:
+                    self.reconnect_subtensor()
+                except Exception as reconnect_err:
+                    bt.logging.error(f'Substrate reconnect callback failed: {reconnect_err}')
+                    raise e from reconnect_err
+                return fn(self.subtensor.substrate)
 
     def ensure_initialized(self):
         if not self.contract_address:
@@ -484,6 +489,10 @@ class AllwaysContractClient:
             return r[data_start + 1 : data_start + data_len]
 
         except ContractError:
+            raise
+        except RECONNECT_EXCEPTIONS:
+            # Don't mask transient WS failures as "no result" — callers need
+            # to distinguish "RPC blip, retry me" from "contract returned None".
             raise
         except Exception as e:
             bt.logging.debug(f'Raw contract read {method} failed: {e}')

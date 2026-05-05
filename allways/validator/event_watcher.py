@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
+from allways.classes import SwapStatus
 from allways.constants import SCORING_WINDOW_BLOCKS
 from allways.utils.scale import (
     decode_account_id,
@@ -416,6 +417,8 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                if self.swap_tracker is not None:
+                    self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
         elif name == 'SwapTimedOut':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -427,6 +430,8 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                if self.swap_tracker is not None:
+                    self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
         elif name == 'ReservationExtensionFinalized':
             # Event-driven cache update for the local pending_confirms row —
             # replaces the polling refresh that the legacy vote-extend flow

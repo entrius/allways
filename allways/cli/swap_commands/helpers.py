@@ -422,7 +422,7 @@ def mark_pending_swap_tx_sent(tx_hash: str) -> None:
 # Fallback when the contract's reservation TTL can't be read. Mirrors the
 # contract default (see ``reservation_ttl`` init in
 # allways/smart-contracts/ink/lib.rs); update both together.
-_DEFAULT_RESERVATION_TTL_BLOCKS = 4032
+_DEFAULT_RESERVATION_TTL_BLOCKS = 50  # ~10 min
 
 
 @dataclass

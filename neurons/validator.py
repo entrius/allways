@@ -63,7 +63,11 @@ class Validator(BaseValidatorNeuron):
         )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
-        timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        try:
+            timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        except Exception as e:
+            bt.logging.warning(f'fulfillment_timeout read failed at init, using default: {e}')
+            timeout_blocks = DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
         # Single store owning every validator-local table. Must be created
