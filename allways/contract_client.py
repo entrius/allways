@@ -490,6 +490,10 @@ class AllwaysContractClient:
 
         except ContractError:
             raise
+        except RECONNECT_EXCEPTIONS:
+            # Don't mask transient WS failures as "no result" — callers need
+            # to distinguish "RPC blip, retry me" from "contract returned None".
+            raise
         except Exception as e:
             bt.logging.debug(f'Raw contract read {method} failed: {e}')
             return None
