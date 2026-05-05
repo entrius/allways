@@ -38,6 +38,10 @@ from allways.contract_client import ContractError
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
 
 
+def _dashboard_url() -> str:
+    return os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+
+
 @click.group('view', cls=StyledGroup)
 def view_group():
     """View swaps, miners, and rates."""
@@ -742,11 +746,10 @@ def view_swap(swap_id: int, watch: bool):
             next_id = None
 
         if next_id is not None and swap_id < next_id:
-            dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
             console.print(
                 f'[green]Swap {swap_id} has been resolved (completed or timed out).[/green]\n'
                 f'[dim]Resolved swaps are removed from on-chain storage. '
-                f'View history at:[/dim] {dashboard_url}/swap/{swap_id}'
+                f'View history at:[/dim] {_dashboard_url()}/swap/{swap_id}'
             )
         elif next_id is not None:
             console.print(f'[red]Swap {swap_id} does not exist. Next swap ID: {next_id}.[/red]')
@@ -1057,7 +1060,10 @@ def view_reservation():
     # also avoids a `get_chain('')` crash in the table renderer below.
     if not hydrated:
         console.print('\n[yellow]No active reservation.[/yellow]')
-        console.print('[dim]Local state referenced a reservation that is no longer on-chain — cleared.[/dim]\n')
+        console.print(
+            '[dim]Local state referenced a reservation that is no longer on-chain — cleared. '
+            'If your reservation already advanced into a swap, check: [cyan]alw view active-swaps[/cyan][/dim]\n'
+        )
         clear_pending_swap()
         return
 
@@ -1128,6 +1134,7 @@ def view_reservation():
         table.add_row('Time Remaining', '—')
 
     console.print(table)
+    console.print(f'\n[dim]Dashboard: {_dashboard_url()}/reservations/by-source/{state.user_from_address}[/dim]')
 
     if status.kind == 'ours_active':
         if sent_tx_hash:
