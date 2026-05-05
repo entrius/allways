@@ -13,10 +13,6 @@ from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
-# Consecutive None polls tolerated before treating a swap as resolved. Smooths
-# RPC flakes without the fragile timeout-block inference the V1 tracker used.
-NULL_SWAP_RETRY_LIMIT = 3
-
 # Cold-start backward scan halts after this many consecutive None lookups.
 # Resolved swaps are pruned from contract storage (`swaps.remove`), so a long
 # run of Nones means we've passed the live-swap region. Block-age cutoffs
@@ -44,7 +40,6 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
-        self.null_retry_count: Dict[int, int] = {}
 
     def initialize(self):
         """Cold start: scan backward from latest swap to seed active set.
@@ -80,14 +75,16 @@ class SwapTracker:
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
-        """Drop a swap from tracking after our vote reached quorum."""
+        """Drop a swap from tracking after our vote reached quorum or after
+        the watcher observed a SwapCompleted/SwapTimedOut event. Idempotent
+        — no-op when the swap isn't tracked."""
         swap = self.active.pop(swap_id, None)
         if swap is None:
             return
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
-        self.null_retry_count.pop(swap_id, None)
+        bt.logging.info(f'Swap {swap_id}: dropped from active ({status.name} at block {block})')
 
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant confirm/timeout extrinsics."""
@@ -139,7 +136,6 @@ class SwapTracker:
                     bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
                 self.active[swap.id] = swap
                 fresh.add(swap.id)
-                self.null_retry_count.pop(swap.id, None)
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -150,49 +146,27 @@ class SwapTracker:
             self.prune_stale_voted_ids()
             return
 
-        # Null and transient errors share one retry policy — a missing swap
-        # is either an RPC flake or a freshly-resolved entry the event
-        # watcher will record. Retry a few times, then drop.
-        resolved_ids: List[int] = []
+        # Refresh: update active swaps, drop on terminal status. A None or
+        # transient RPC error leaves the swap in active — resolution is owned
+        # by the event watcher (SwapCompleted/SwapTimedOut → tracker.resolve).
         for sid in stale_ids:
             try:
                 result = await asyncio.to_thread(self.client.get_swap, sid)
             except Exception as e:
-                # Transient RPC error — leave the swap in active and don't
-                # advance null-retry. Retried next poll.
                 bt.logging.debug(f'SwapTracker refresh({sid}) failed, will retry: {e}')
                 continue
-
             if result is None:
-                if self.bump_null_retry(sid):
-                    resolved_ids.append(sid)
-            elif result.status in ACTIVE_STATUSES:
+                continue
+            if result.status in ACTIVE_STATUSES:
                 prev = self.active.get(sid)
                 if prev is not None and prev.status != result.status:
                     bt.logging.info(f'Swap {sid} [{_swap_label(result)}]: {prev.status.name} -> {result.status.name}')
                 self.active[sid] = result
-                self.null_retry_count.pop(sid, None)
             else:
-                resolved_ids.append(sid)
-
-        for sid in resolved_ids:
-            self.active.pop(sid, None)
-            self.voted_ids.discard(sid)
-            self.null_retry_count.pop(sid, None)
-
-        if resolved_ids:
-            bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
+                # Terminal status from chain — drop with reason for observability.
+                self.resolve(sid, result.status, result.completed_block or 0)
 
         self.prune_stale_voted_ids()
-
-    def bump_null_retry(self, swap_id: int) -> bool:
-        """Returns True when the retry limit is hit and the caller should
-        treat the swap as resolved."""
-        retries = self.null_retry_count.get(swap_id, 0) + 1
-        if retries >= NULL_SWAP_RETRY_LIMIT:
-            return True
-        self.null_retry_count[swap_id] = retries
-        return False
 
     def prune_stale_voted_ids(self) -> None:
         """Drop any voted state for swaps no longer being tracked. Normally
