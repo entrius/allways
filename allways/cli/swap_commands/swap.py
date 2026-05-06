@@ -905,7 +905,13 @@ def swap_now_command(
     ):
         try:
             pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
-            origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
+            if btc_fee_rate_opt is not None:
+                origin = 'override via --btc-fee-rate'
+            else:
+                # estimate_fee_rate targets 2-3 block confirmation. Surface that
+                # so the user knows the auto-estimate is not next-block urgent
+                # and won't compare it against a "too low" mempool reading.
+                origin = 'auto-estimated · targets 2-3 block confirmation (~20-30 min on mainnet)'
             btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
         except Exception:
             pass  # display-only; send path will fall back to estimating itself

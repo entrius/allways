@@ -4,6 +4,7 @@ import os
 import time
 from typing import Optional
 
+import bittensor as bt
 import click
 from rich.panel import Panel
 
@@ -33,8 +34,14 @@ from allways.contract_client import ContractError
 
 @click.command('resume-reservation')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
+@click.option(
+    '--send',
+    'auto_send',
+    is_flag=True,
+    help='Broadcast source funds automatically (TAO via wallet, BTC via BTC_PRIVATE_KEY); fails fast if no tx is on file and signing creds are missing',
+)
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
-def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
+def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool, skip_confirm: bool):
     """Resume an interrupted pre-initiate reservation.
 
     \b
@@ -55,7 +62,10 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     \b
     Non-interactive mode (for scripting/agents):
         alw swap resume-reservation --from-tx-hash abc123... --yes
+        alw swap resume-reservation --send --yes
     """
+    if from_tx_hash_opt and auto_send:
+        raise click.UsageError('--from-tx-hash and --send are mutually exclusive')
     state = load_pending_swap()
     if not state:
         console.print('[yellow]No pending swap found.[/yellow]')
@@ -168,11 +178,24 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     ephemeral_wallet = get_ephemeral_wallet()
 
     used_saved_tx = False
+    just_broadcast_block = 0
     if not from_tx_hash_opt:
         saved_tx = (state.from_tx_hash or '').strip()
         if saved_tx:
             console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{saved_tx}[/cyan]')
             from_tx_hash_opt = saved_tx
+            used_saved_tx = True
+        elif auto_send:
+            send_result = _auto_send_source_funds(
+                state=state,
+                wallet=wallet,
+                subtensor=subtensor,
+                chain_providers=chain_providers,
+                send_label=send_label,
+            )
+            if send_result is None:
+                return
+            from_tx_hash_opt, just_broadcast_block = send_result
             used_saved_tx = True
         else:
             console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
@@ -184,9 +207,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     from_tx_hash = from_tx_hash_opt.strip()
     mark_pending_swap_tx_sent(from_tx_hash)
 
-    # Saved hash is fresh from swap now — still in mempool, lookup would just print noise.
+    # Saved/auto-sent hash is fresh — still in mempool, lookup would just print noise.
     if used_saved_tx:
-        from_tx_block = 0
+        from_tx_block = just_broadcast_block
     else:
         from_tx_block = resolve_source_tx_block(
             provider=provider,
@@ -273,3 +296,75 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
         from allways.cli.swap_commands.swap import display_receipt
 
         display_receipt(final_swap)
+
+
+def _auto_send_source_funds(*, state, wallet, subtensor, chain_providers, send_label: str):
+    """Broadcast the source-chain payment for an open reservation.
+
+    Returns ``(tx_hash, broadcast_block)`` on success, ``None`` on failure.
+    Block is best-effort — 0 is acceptable since a fresh tx is still in
+    mempool and validators fall back to scanning by hash.
+    """
+    console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
+
+    if state.from_chain == 'tao':
+        try:
+            with loading('Submitting TAO transfer to chain...'):
+                response = subtensor.transfer(
+                    wallet=wallet,
+                    destination_ss58=state.miner_from_address,
+                    amount=bt.Balance.from_rao(state.from_amount),
+                    wait_for_inclusion=True,
+                    wait_for_finalization=False,
+                )
+        except Exception as e:
+            console.print(f'[red]TAO transfer failed: {type(e).__name__}: {e}[/red]')
+            return None
+        if not response.success:
+            console.print(f'[red]TAO transfer failed: {response.message}[/red]')
+            return None
+        try:
+            receipt = response.extrinsic_receipt
+            tx_hash = receipt.extrinsic_hash
+            block = 0
+            if getattr(receipt, 'block_hash', None):
+                block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
+        except Exception:
+            tx_hash = response.extrinsic
+            block = 0
+        if not tx_hash:
+            console.print('[red]TAO transfer returned no tx hash.[/red]')
+            return None
+        console.print(f'[green]TAO sent (tx: {tx_hash})[/green]')
+        return (tx_hash, int(block))
+
+    # BTC path: route through send_btc, but bypass its interactive
+    # tx-hash fallback — failed sends in --send mode should error out so
+    # the calling agent sees a non-zero exit instead of a hung prompt.
+    provider = chain_providers.get('btc')
+    is_lightweight = getattr(provider, 'mode', None) == 'lightweight'
+    if is_lightweight and not (os.environ.get('BTC_PRIVATE_KEY') or '').strip():
+        console.print(
+            '[red]--send needs BTC_PRIVATE_KEY in env (lightweight mode) — none found. '
+            'Set it in .env or shell env, or rerun without --send and broadcast manually.[/red]'
+        )
+        return None
+
+    try:
+        result = provider.send_amount(
+            state.miner_from_address,
+            state.from_amount,
+            from_address=state.user_from_address,
+        )
+    except Exception as e:
+        console.print(f'[red]BTC send failed: {type(e).__name__}: {e}[/red]')
+        return None
+
+    if not result:
+        reason = getattr(provider, 'last_send_error', None) or 'unknown error'
+        console.print(f'[red]BTC send failed: {reason}[/red]')
+        return None
+
+    tx_hash, block = result[0], (result[1] if len(result) > 1 else 0)
+    console.print(f'[green]BTC sent (tx: {tx_hash})[/green]')
+    return (tx_hash, int(block))
