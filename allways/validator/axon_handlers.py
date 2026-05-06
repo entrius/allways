@@ -18,7 +18,7 @@ from Crypto.Hash import keccak
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
@@ -414,6 +414,12 @@ async def handle_swap_reserve(
             synapse.accepted = True
             bt.logging.info(f'Voted to reserve miner {miner}')
 
+<<<<<<< refactor/share-axon-handler-helpers
+=======
+    except ContractError as e:
+        bt.logging.error(f'{ctx} failed: {e}')
+        reject_synapse(synapse, str(e))
+>>>>>>> test
     except Exception as e:
         reject_from_exception(synapse, e, ctx, 'Contract rejected the reservation')
 
@@ -607,6 +613,12 @@ async def handle_swap_confirm(
             synapse.accepted = True
             bt.logging.info(f'Voted to initiate swap for miner {miner}')
 
+<<<<<<< refactor/share-axon-handler-helpers
+=======
+    except ContractError as e:
+        bt.logging.error(f'{ctx} failed: {e}')
+        reject_synapse(synapse, str(e))
+>>>>>>> test
     except Exception as e:
         reject_from_exception(synapse, e, ctx, 'Contract rejected the swap initiation')
 
