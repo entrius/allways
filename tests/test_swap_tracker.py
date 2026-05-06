@@ -281,35 +281,20 @@ class TestGetFulfilled:
         result = tracker.get_fulfilled(current_block=100)
         assert [s.id for s in result] == [2]
 
-    def test_includes_past_deadline_when_fulfilled_in_window(self):
-        """Cat 2 — honest miner claimed in-window, validator missed the
-        confirm window (e.g., outage). Late confirm is allowed."""
+    def test_excludes_past_timeout(self):
         tracker = make_tracker()
-        late_but_honest = make_swap(swap_id=3, timeout_block=100)
-        late_but_honest.status = SwapStatus.FULFILLED
-        late_but_honest.fulfilled_block = 90  # in-window claim
-        tracker.active[3] = late_but_honest
+        expired = make_swap(swap_id=3, timeout_block=100)
+        expired.status = SwapStatus.FULFILLED
+        tracker.active[3] = expired
 
-        # Both before and after deadline, the swap stays eligible.
-        assert tracker.get_fulfilled(current_block=99) == [late_but_honest]
-        assert tracker.get_fulfilled(current_block=500) == [late_but_honest]
-
-    def test_excludes_when_fulfilled_past_deadline(self):
-        """Cat 3 — miner raced mark_fulfilled past deadline. No late confirm;
-        falls to enforce_swap_timeouts."""
-        tracker = make_tracker()
-        late_claim = make_swap(swap_id=4, timeout_block=100)
-        late_claim.status = SwapStatus.FULFILLED
-        late_claim.fulfilled_block = 105  # claimed past deadline
-        tracker.active[4] = late_claim
-
-        assert tracker.get_fulfilled(current_block=200) == []
+        assert tracker.get_fulfilled(current_block=101) == []
+        assert tracker.get_fulfilled(current_block=100) == [expired]
 
     def test_timeout_zero_treated_as_unbounded(self):
         tracker = make_tracker()
-        swap = make_swap(swap_id=5, timeout_block=0)
+        swap = make_swap(swap_id=4, timeout_block=0)
         swap.status = SwapStatus.FULFILLED
-        tracker.active[5] = swap
+        tracker.active[4] = swap
 
         assert tracker.get_fulfilled(current_block=999_999) == [swap]
 
