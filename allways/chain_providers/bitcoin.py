@@ -40,21 +40,6 @@ def detect_address_type(address: str) -> str:
     return 'unknown'
 
 
-def _network_from_address(address: str) -> str:
-    """Return 'mainnet', 'testnet', 'regtest', or '' if unknown."""
-    if address.startswith(('bc1q', 'bc1p')):
-        return 'mainnet'
-    if address.startswith(('tb1q', 'tb1p')):
-        return 'testnet'
-    if address.startswith(('bcrt1q', 'bcrt1p')):
-        return 'regtest'
-    if address.startswith(('1', '3')):
-        return 'mainnet'
-    if address.startswith(('m', 'n', '2')):
-        return 'testnet'
-    return ''
-
-
 def to_mainnet_wif(wif: str) -> str:
     """Convert a testnet/regtest WIF (0xef) to mainnet (0x80) for signing libraries."""
     decoded = base58.b58decode_check(wif)
@@ -636,23 +621,7 @@ class BitcoinProvider(ChainProvider):
                 return None
             atype, script, addr = type_to_script[detected]
             if addr != from_address:
-                # A network mismatch (WIF derives bc1q… but committed is tb1q…
-                # or vice-versa) is indistinguishable from a true key mismatch
-                # at the address level — both fail equality. The most common
-                # cause in practice is BTC_NETWORK not being loaded in the
-                # caller's env (e.g. invoking the provider directly without
-                # going through the CLI's dotenv loader), so surface that hint
-                # instead of leaving the user chasing a wrong-key red herring.
-                derived_net = _network_from_address(addr)
-                committed_net = _network_from_address(from_address)
-                if derived_net and committed_net and derived_net != committed_net:
-                    self._send_error(
-                        f'WIF key derives {addr} ({derived_net}) but committed address is '
-                        f'{from_address} ({committed_net}) — BTC_NETWORK mismatch '
-                        f"(provider sees network='{self.network}'; check BTC_NETWORK env / .env loading)"
-                    )
-                else:
-                    self._send_error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
+                self._send_error(f'WIF key derives {addr} but committed address is {from_address} — key mismatch')
                 return None
             resp = self.btc_api_get(f'/address/{addr}/utxo', timeout=15)
             resp.raise_for_status()
