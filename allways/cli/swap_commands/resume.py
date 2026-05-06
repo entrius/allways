@@ -39,7 +39,7 @@ from allways.contract_client import ContractError
     '--send',
     'auto_send',
     is_flag=True,
-    help='Broadcast source funds automatically (TAO via wallet, BTC via BTC_PRIVATE_KEY); fails fast if no tx is on file and signing creds are missing',
+    help='Broadcast source funds automatically (TAO via wallet, BTC via BTC_PRIVATE_KEY)',
 )
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool, skip_confirm: bool):
@@ -191,12 +191,6 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
             if state.from_chain == 'tao':
                 send_result = send_tao_transfer(wallet, subtensor, state.miner_from_address, state.from_amount)
             else:
-                if not (os.environ.get('BTC_PRIVATE_KEY') or '').strip():
-                    console.print(
-                        '[red]--send needs BTC_PRIVATE_KEY in env (lightweight mode) — none found. '
-                        'Set it in .env or shell env, or rerun without --send and broadcast manually.[/red]'
-                    )
-                    return
                 send_result = send_btc(
                     chain_providers,
                     config,
