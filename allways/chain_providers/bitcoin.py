@@ -107,6 +107,10 @@ class BitcoinProvider(ChainProvider):
         # callers can surface a useful message without scraping logs.
         self.last_send_error: Optional[str] = None
 
+        # Scopes find_recent_outgoing reuse to this process — a fresh `alw swap`
+        # run can't return a tx hash already consumed by an earlier swap.
+        self.broadcasted_txids: set[str] = set()
+
     def _send_error(self, msg: str) -> None:
         self.last_send_error = msg
         bt.logging.error(msg)
@@ -525,8 +529,10 @@ class BitcoinProvider(ChainProvider):
                 return None
             my_script, my_address, utxos, addr_type = result
 
+            # Reuse only txids this process broadcast — otherwise (from, to, amount)
+            # would match a prior-swap tx that the contract has already consumed.
             existing = self.find_recent_outgoing(my_address, to_address, amount)
-            if existing:
+            if existing and existing in self.broadcasted_txids:
                 bt.logging.info(f'Reusing prior tx {existing} from {my_address} → {to_address} ({amount} sat)')
                 return (existing, 0)
 
@@ -690,16 +696,20 @@ class BitcoinProvider(ChainProvider):
             resp = self.btc_api_post('/tx', data=raw_hex, timeout=30)
         except Exception as e:
             if expected_txid and self.tx_exists(expected_txid):
+                self.broadcasted_txids.add(expected_txid)
                 return expected_txid
             self._send_error(f'Broadcast failed: {e}')
             return None
 
         if resp.status_code != 200:
             if expected_txid and self.tx_exists(expected_txid):
+                self.broadcasted_txids.add(expected_txid)
                 return expected_txid
             self._send_error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
             return None
-        return resp.text.strip()
+        txid = resp.text.strip()
+        self.broadcasted_txids.add(txid)
+        return txid
 
     def estimate_fee_rate(self, override: Optional[int] = None) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream.

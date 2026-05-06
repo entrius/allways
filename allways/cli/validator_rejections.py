@@ -281,6 +281,16 @@ _RULES: list[_Rule] = [
         lambda ctx: 'Internal: missing chain fields in the request.',
     ),
     (
+        'duplicate_source_tx',
+        'vote_initiate: duplicatesourcetx',
+        True,
+        lambda ctx: (
+            'Source transaction was already used in a prior swap, so the contract rejected '
+            'the new initiation. Start a fresh swap with [bold]alw swap[/bold] so a new '
+            'source transaction is broadcast.'
+        ),
+    ),
+    (
         'contract_rejected',
         'contract rejected',
         False,
