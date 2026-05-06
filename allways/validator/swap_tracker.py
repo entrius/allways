@@ -176,23 +176,11 @@ class SwapTracker:
         self.voted_ids -= self.voted_ids - active_ids
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
-        """Active FULFILLED swaps eligible for confirm.
-
-        Past-deadline confirms are allowed iff the miner's mark_fulfilled
-        landed in-window (``fulfilled_block <= timeout_block``). That keeps
-        the deadline as a hard cutoff for the miner's *claim* while letting
-        an honest miner who delivered on time get late credit when the
-        validator was absent (e.g., post-restart). A miner who raced
-        mark_fulfilled past deadline falls through to enforce_swap_timeouts.
-
-        ``current_block`` is unused but kept for API compatibility with the
-        adjacent ``get_near_timeout_fulfilled`` / ``get_timed_out`` helpers.
-        """
-        del current_block
+        """Active FULFILLED swaps not yet past timeout (ready for verification)."""
         return [
             s
             for s in self.active.values()
-            if s.status == SwapStatus.FULFILLED and (s.timeout_block == 0 or s.fulfilled_block <= s.timeout_block)
+            if s.status == SwapStatus.FULFILLED and (s.timeout_block == 0 or current_block <= s.timeout_block)
         ]
 
     def get_near_timeout_fulfilled(self, current_block: int) -> List[Swap]:
