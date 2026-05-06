@@ -69,10 +69,6 @@ class SwapPoller:
                 self.active[swap_id] = swap
         for sid, terminal in resolved:
             self.active.pop(sid, None)
-            # Every entry in ``self.active`` is one of OUR swaps (poller
-            # filters by miner_hotkey at insert), so a drop is a real
-            # outcome — COMPLETED, TIMED_OUT, or unexpectedly GONE from
-            # contract storage. Operator needs this at info, not debug.
             bt.logging.info(f'Swap {sid}: dropped from active (status={terminal})')
 
         # 3. Return categorized by contract status

@@ -80,10 +80,6 @@ class SwapFulfiller:
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         self.sent: Dict[int, SentSwap] = {}
         self.mark_fulfilled_attempts: Dict[int, int] = {}
-        # Swap IDs we've already warned about being inside the cushion window.
-        # Without this, the same warning fires every poll for the entire
-        # cushion duration (often 30+ identical lines), drowning out other
-        # signals while the swap stays stuck.
         self.cushion_warned: Set[int] = set()
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
@@ -121,9 +117,6 @@ class SwapFulfiller:
     def cleanup_stale_sends(self, active_swap_ids: Set[int]):
         """Remove cached send results for swaps no longer active."""
         stale = [sid for sid in self.sent if sid not in active_swap_ids]
-        # Sent dest funds but never confirmed mark_fulfilled landed = the
-        # most expensive failure mode the miner has (paid out, didn't get
-        # crown credit). Surface separately so operators can grep for it.
         unmarked = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
         for sid in stale:
             self.sent.pop(sid)
@@ -313,11 +306,6 @@ class SwapFulfiller:
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True
         except ContractError as e:
-            # Contract rejections (e.g. swap already resolved by validators,
-            # status no longer FULFILLABLE) are terminal — retrying just
-            # logs the same error every poll. Surface them once at info so
-            # the noise floor stays low and the operator can see the
-            # actual transient-RPC vs contract-state distinction.
             if is_contract_rejection(e):
                 bt.logging.info(f'Swap {swap.id}: mark_fulfilled rejected by contract (likely already resolved): {e}')
                 return False

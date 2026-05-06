@@ -146,11 +146,6 @@ class SwapVerifier:
             swap.miner_to_address,
         )
 
-        # Partial-pass tells operators which side is gating confirm. The
-        # underlying verify_tx logs are rate-limited by-confirmation-count
-        # and don't name source vs dest from the outside; this synthesis
-        # line does. log_on_change keys per-swap state so it fires once
-        # per transition, not every forward step.
         if source_ok != dest_ok:
             log_on_change(
                 f'partial:{swap.id}',
