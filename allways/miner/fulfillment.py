@@ -11,7 +11,7 @@ import bittensor as bt
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError
+from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -80,6 +80,11 @@ class SwapFulfiller:
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         self.sent: Dict[int, SentSwap] = {}
         self.mark_fulfilled_attempts: Dict[int, int] = {}
+        # Swap IDs we've already warned about being inside the cushion window.
+        # Without this, the same warning fires every poll for the entire
+        # cushion duration (often 30+ identical lines), drowning out other
+        # signals while the swap stays stuck.
+        self.cushion_warned: Set[int] = set()
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
 
@@ -116,11 +121,21 @@ class SwapFulfiller:
     def cleanup_stale_sends(self, active_swap_ids: Set[int]):
         """Remove cached send results for swaps no longer active."""
         stale = [sid for sid in self.sent if sid not in active_swap_ids]
+        # Sent dest funds but never confirmed mark_fulfilled landed = the
+        # most expensive failure mode the miner has (paid out, didn't get
+        # crown credit). Surface separately so operators can grep for it.
+        unmarked = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
         for sid in stale:
             self.sent.pop(sid)
             self.mark_fulfilled_attempts.pop(sid, None)
+        self.cushion_warned -= self.cushion_warned - active_swap_ids
         if stale:
             bt.logging.info(f'Cleaned up stale send cache for {len(stale)} swap(s): {stale}')
+            if unmarked:
+                bt.logging.warning(
+                    f'Stale send(s) without confirmed mark_fulfilled — funds may have been sent without '
+                    f'on-chain credit: {unmarked}'
+                )
             self.save_sent_cache()
 
     def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
@@ -142,10 +157,12 @@ class SwapFulfiller:
         current_block = self.subtensor.get_current_block()
         effective_deadline = swap.timeout_block - self.timeout_cushion_blocks
         if current_block >= effective_deadline:
-            bt.logging.warning(
-                f'Swap {swap.id}: inside cushion window '
-                f'(block {current_block} >= {swap.timeout_block} - {self.timeout_cushion_blocks})'
-            )
+            if swap.id not in self.cushion_warned:
+                bt.logging.warning(
+                    f'Swap {swap.id}: inside cushion window '
+                    f'(block {current_block} >= {swap.timeout_block} - {self.timeout_cushion_blocks})'
+                )
+                self.cushion_warned.add(swap.id)
             return None
 
         # Rate and address from swap struct (snapshotted at initiation)
@@ -296,6 +313,14 @@ class SwapFulfiller:
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True
         except ContractError as e:
+            # Contract rejections (e.g. swap already resolved by validators,
+            # status no longer FULFILLABLE) are terminal — retrying just
+            # logs the same error every poll. Surface them once at info so
+            # the noise floor stays low and the operator can see the
+            # actual transient-RPC vs contract-state distinction.
+            if is_contract_rejection(e):
+                bt.logging.info(f'Swap {swap.id}: mark_fulfilled rejected by contract (likely already resolved): {e}')
+                return False
             attempts = self.mark_fulfilled_attempts.get(swap.id, 0) + 1
             self.mark_fulfilled_attempts[swap.id] = attempts
             try:

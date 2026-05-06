@@ -473,6 +473,14 @@ class ContractEventWatcher:
         current = self.open_swap_count.get(hotkey, 0)
         new_count = current + delta
         if new_count < 0:
+            # Implies a missed SwapInitiated (cold-start bootstrap gap or
+            # event-decoder regression). Silent drop is what we want for
+            # safety, but it skews crown-time scoring without a trace —
+            # warn so an unexpected discrepancy is investigable.
+            bt.logging.warning(
+                f'EventWatcher: dropping busy delta {delta} for {hotkey[:8]} at block {block_num} '
+                f'(current count={current}, would go negative — missed SwapInitiated?)'
+            )
             return
         self.open_swap_count[hotkey] = new_count
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))

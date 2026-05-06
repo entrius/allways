@@ -157,6 +157,11 @@ class Miner(BaseMinerNeuron):
                 self.reconnect_and_propagate()
                 self.consecutive_poll_failures = 0
             return
+        # Recovery from a streak of failures was previously silent — the only
+        # signal was the absence of the next warning, leaving the prior
+        # ``consecutive poll failures`` line as the most recent state.
+        if self.consecutive_poll_failures > 0:
+            bt.logging.info(f'Poll recovered after {self.consecutive_poll_failures} consecutive failure(s)')
         self.consecutive_poll_failures = 0
 
         active_count = len(self.swap_poller.active)

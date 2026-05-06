@@ -61,7 +61,11 @@ async def forward(self: Validator) -> None:
     # would be silently lost to the purge before init ever sees the row.
     initialize_pending_user_reservations(self)
 
-    self.state_store.purge_expired_pending_confirms()
+    purged = self.state_store.purge_expired_pending_confirms()
+    if purged:
+        bt.logging.info(
+            f'forward: purged {purged} expired pending_confirms (reservations elapsed without tx confirmation)'
+        )
 
     poll_commitments(self)
 
@@ -389,6 +393,10 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     for hk in stale:
         self.state_store.delete_hotkey(hk)
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
+    # Wiping rate_events + swap_outcomes for a hotkey alters scoring inputs
+    # silently otherwise — surface the dereg-driven cleanup at info so an
+    # unexpected drop in distributed share has a paper trail.
+    bt.logging.info(f'forward: dropped state for {len(stale)} deregistered miner(s)')
 
 
 async def confirm_miner_fulfillments(
@@ -422,6 +430,12 @@ async def confirm_miner_fulfillments(
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
             # On vote failure, voting.confirm_swap already logs the error;
             # the entry stays in tracker and retries next step.
+        else:
+            # Synthesis-level breadcrumb at DEBUG — sits one layer above
+            # ``verify_tx``'s per-side rate-limited logs so an operator
+            # tracing a stuck FULFILLED swap can confirm we hit this cycle
+            # without inferring it from the absence of a confirm.
+            bt.logging.debug(f'Swap {swap.id}: verification incomplete this cycle, deferring confirm')
     return uncertain
 
 
