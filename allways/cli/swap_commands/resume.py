@@ -4,7 +4,6 @@ import os
 import time
 from typing import Optional
 
-import bittensor as bt
 import click
 from rich.panel import Panel
 
@@ -27,6 +26,8 @@ from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
     resolve_recent_swap_id,
+    send_btc,
+    send_tao_transfer,
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
@@ -186,13 +187,24 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
             from_tx_hash_opt = saved_tx
             used_saved_tx = True
         elif auto_send:
-            send_result = _auto_send_source_funds(
-                state=state,
-                wallet=wallet,
-                subtensor=subtensor,
-                chain_providers=chain_providers,
-                send_label=send_label,
-            )
+            console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
+            if state.from_chain == 'tao':
+                send_result = send_tao_transfer(wallet, subtensor, state.miner_from_address, state.from_amount)
+            else:
+                if not (os.environ.get('BTC_PRIVATE_KEY') or '').strip():
+                    console.print(
+                        '[red]--send needs BTC_PRIVATE_KEY in env (lightweight mode) — none found. '
+                        'Set it in .env or shell env, or rerun without --send and broadcast manually.[/red]'
+                    )
+                    return
+                send_result = send_btc(
+                    chain_providers,
+                    config,
+                    state.miner_from_address,
+                    state.from_amount,
+                    from_address=state.user_from_address,
+                    interactive=False,
+                )
             if send_result is None:
                 return
             from_tx_hash_opt, just_broadcast_block = send_result
@@ -296,75 +308,3 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
         from allways.cli.swap_commands.swap import display_receipt
 
         display_receipt(final_swap)
-
-
-def _auto_send_source_funds(*, state, wallet, subtensor, chain_providers, send_label: str):
-    """Broadcast the source-chain payment for an open reservation.
-
-    Returns ``(tx_hash, broadcast_block)`` on success, ``None`` on failure.
-    Block is best-effort — 0 is acceptable since a fresh tx is still in
-    mempool and validators fall back to scanning by hash.
-    """
-    console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
-
-    if state.from_chain == 'tao':
-        try:
-            with loading('Submitting TAO transfer to chain...'):
-                response = subtensor.transfer(
-                    wallet=wallet,
-                    destination_ss58=state.miner_from_address,
-                    amount=bt.Balance.from_rao(state.from_amount),
-                    wait_for_inclusion=True,
-                    wait_for_finalization=False,
-                )
-        except Exception as e:
-            console.print(f'[red]TAO transfer failed: {type(e).__name__}: {e}[/red]')
-            return None
-        if not response.success:
-            console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-            return None
-        try:
-            receipt = response.extrinsic_receipt
-            tx_hash = receipt.extrinsic_hash
-            block = 0
-            if getattr(receipt, 'block_hash', None):
-                block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-        except Exception:
-            tx_hash = response.extrinsic
-            block = 0
-        if not tx_hash:
-            console.print('[red]TAO transfer returned no tx hash.[/red]')
-            return None
-        console.print(f'[green]TAO sent (tx: {tx_hash})[/green]')
-        return (tx_hash, int(block))
-
-    # BTC path: route through send_btc, but bypass its interactive
-    # tx-hash fallback — failed sends in --send mode should error out so
-    # the calling agent sees a non-zero exit instead of a hung prompt.
-    provider = chain_providers.get('btc')
-    is_lightweight = getattr(provider, 'mode', None) == 'lightweight'
-    if is_lightweight and not (os.environ.get('BTC_PRIVATE_KEY') or '').strip():
-        console.print(
-            '[red]--send needs BTC_PRIVATE_KEY in env (lightweight mode) — none found. '
-            'Set it in .env or shell env, or rerun without --send and broadcast manually.[/red]'
-        )
-        return None
-
-    try:
-        result = provider.send_amount(
-            state.miner_from_address,
-            state.from_amount,
-            from_address=state.user_from_address,
-        )
-    except Exception as e:
-        console.print(f'[red]BTC send failed: {type(e).__name__}: {e}[/red]')
-        return None
-
-    if not result:
-        reason = getattr(provider, 'last_send_error', None) or 'unknown error'
-        console.print(f'[red]BTC send failed: {reason}[/red]')
-        return None
-
-    tx_hash, block = result[0], (result[1] if len(result) > 1 else 0)
-    console.print(f'[green]BTC sent (tx: {tx_hash})[/green]')
-    return (tx_hash, int(block))
