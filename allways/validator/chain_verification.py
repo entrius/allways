@@ -7,6 +7,7 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.classes import Swap
+from allways.utils.logging import log_on_change
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -144,5 +145,13 @@ class SwapVerifier:
             swap.to_tx_block,
             swap.miner_to_address,
         )
+
+        if source_ok != dest_ok:
+            log_on_change(
+                f'partial:{swap.id}',
+                (source_ok, dest_ok),
+                f'Swap {swap.id}: partial verification (source={source_ok}, dest={dest_ok}) — '
+                f'{"dest" if source_ok else "source"} side blocking confirm',
+            )
 
         return source_ok and dest_ok

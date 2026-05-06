@@ -69,7 +69,7 @@ class SwapPoller:
                 self.active[swap_id] = swap
         for sid, terminal in resolved:
             self.active.pop(sid, None)
-            bt.logging.debug(f'Swap {sid}: dropped from active (status={terminal})')
+            bt.logging.info(f'Swap {sid}: dropped from active (status={terminal})')
 
         # 3. Return categorized by contract status
         active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]
