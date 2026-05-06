@@ -118,6 +118,15 @@ def test_unmatched_falls_back_to_raw():
     assert info.deterministic is False  # unknown → safer to allow retry
 
 
+def test_duplicate_source_tx_translates_with_deterministic_flag():
+    raw = 'vote_initiate: DuplicateSourceTx — Source transaction hash already used in another swap'
+    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=raw)])
+    assert info.category == 'duplicate_source_tx'
+    assert info.deterministic is True
+    assert 'already used' in info.headline.lower()
+    assert 'alw swap' in info.headline
+
+
 def test_swap_confirm_tx_not_found_is_transient():
     info = render_and_aggregate(
         _silent_console(),
