@@ -539,8 +539,9 @@ class BitcoinProvider(ChainProvider):
             selected, total_in, fee = coin_selection
             change = total_in - amount - fee
 
-            # Build transaction
-            tx = Transaction(version=2, locktime=0)
+            # Build transaction. embit's Transaction.__init__ has mutable default
+            # args (vin=[], vout=[]) — passing fresh lists avoids cross-call leakage.
+            tx = Transaction(version=2, vin=[], vout=[], locktime=0)
             for utxo in selected:
                 txid_bytes = bytes.fromhex(utxo['txid'])
                 tx.vin.append(TransactionInput(txid_bytes, utxo['vout']))
@@ -553,7 +554,8 @@ class BitcoinProvider(ChainProvider):
             if change > 546:  # dust threshold
                 tx.vout.append(TransactionOutput(change, my_script))
 
-            # Sign transaction
+            # Sign transaction. Do NOT write to psbt.unknown — embit's PSBT.__init__
+            # has a shared mutable default (unknown={}) that would leak across calls.
             psbt = PSBT(tx)
             if is_segwit:
                 for i, utxo in enumerate(selected):
