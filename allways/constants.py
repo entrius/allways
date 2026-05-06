@@ -6,7 +6,7 @@ NETUID_LOCAL = 2
 
 # ─── Contract ──────────────────────────────────────────────
 # Mainnet default; override via CONTRACT_ADDRESS env var.
-CONTRACT_ADDRESS = '5FTkUEhRmLPsALn4b7bJpVFhDQqohGbc6khnmA2aiYFLMZYP'
+CONTRACT_ADDRESS = '5DjJmTpcHZvF3aZZEafKBdo3ksmdUSZ8bBBUSFhW3Ce3xf1J'
 
 # ─── Polling ──────────────────────────────────────────────
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.
