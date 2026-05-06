@@ -172,9 +172,7 @@ class Miner(BaseMinerNeuron):
 
         for swap in active_swaps:
             try:
-                success = self.swap_fulfiller.process_swap(swap)
-                if not success:
-                    bt.logging.debug(f'Swap {swap.id} not ready for fulfillment yet')
+                self.swap_fulfiller.process_swap(swap)
             except Exception as e:
                 bt.logging.error(f'Error processing swap {swap.id}: {type(e).__name__}: {e}')
 
