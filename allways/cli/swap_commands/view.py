@@ -619,7 +619,16 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0, client=None):
     aborting the swap render.
     """
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
-    parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
+    parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]']
+
+    # In-flight status hint — answers "what's being waited on" so the
+    # `○ Completed —` row in the timeline below has context. Mirrors the
+    # per-status copy on the dashboard's swap detail page.
+    if swap.status == SwapStatus.ACTIVE:
+        parts.append('  [dim]Awaiting miner fulfillment — destination tx incoming.[/dim]')
+    elif swap.status == SwapStatus.FULFILLED:
+        parts.append('  [dim]Awaiting validator quorum — destination delivered, votes pending.[/dim]')
+    parts.append('')
 
     src = swap.from_chain.upper()
     dst = swap.to_chain.upper()
