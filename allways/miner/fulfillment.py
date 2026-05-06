@@ -191,7 +191,7 @@ class SwapFulfiller:
             bt.logging.warning(f'Swap {swap.id}: provider unreachable, will retry: {e}')
             return False
         except Exception as e:
-            bt.logging.error(f'Swap {swap.id}: verification error: {e}')
+            bt.logging.error(f'Swap {swap.id}: verification error: {type(e).__name__}: {e}')
             return False
 
     def send_dest_funds(self, swap: Swap, user_receives_amount: int) -> Optional[Tuple[str, int]]:
@@ -221,9 +221,10 @@ class SwapFulfiller:
                 f'on {swap.to_chain} (tx: {tx_hash}, block: {block_num})'
             )
         else:
+            reason = getattr(provider, 'last_send_error', None) or 'no provider error captured'
             bt.logging.error(
                 f'Swap {swap.id}: failed to send {user_receives_amount} to {swap.user_to_address} '
-                f'on {swap.to_chain} — check wallet balance and node connectivity'
+                f'on {swap.to_chain}: {reason}'
             )
         return result
 

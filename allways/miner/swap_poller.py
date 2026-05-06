@@ -33,7 +33,7 @@ class SwapPoller:
             self.last_poll_ok = True
             return result
         except Exception as e:
-            bt.logging.error(f'SwapPoller poll error: {e}')
+            bt.logging.error(f'SwapPoller poll error: {type(e).__name__}: {e}')
             self.last_poll_ok = False
             return [], []
 

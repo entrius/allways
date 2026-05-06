@@ -571,8 +571,12 @@ class BitcoinProvider(ChainProvider):
 
             for i, inp in enumerate(psbt.inputs):
                 if inp.witness_utxo is None and inp.non_witness_utxo is None:
-                    sel = selected[i]
-                    self._send_error(f'PSBT input {i} missing utxo (txid={sel.get("txid")}, vout={sel.get("vout")})')
+                    sel = selected[i] if i < len(selected) else None
+                    utxo_repr = f'txid={sel["txid"]}, vout={sel["vout"]}' if sel else f'no selected[{i}]'
+                    self._send_error(
+                        f'PSBT input {i} missing utxo '
+                        f'(psbt.inputs={len(psbt.inputs)}, selected={len(selected)}, {utxo_repr})'
+                    )
                     return None
 
             num_sigs = psbt.sign_with(privkey)
