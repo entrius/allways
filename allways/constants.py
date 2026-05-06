@@ -1,3 +1,5 @@
+import os
+
 # ─── Network ───────────────────────────────────────────────
 NETUID_FINNEY = 7
 NETUID_LOCAL = 2
@@ -84,7 +86,18 @@ CHALLENGE_WINDOW_BLOCKS = 8
 # step (base poll + per-step work + jitter). Used as a safety margin when
 # sizing extension targets so a single delayed step doesn't strand a propose
 # whose finalize window opens past the original reservation deadline.
-VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
+# Default sized for mainnet; testnet validators with slower/jankier RPC can
+# override via VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE env var.
+DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
+VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
+    1,
+    int(
+        os.environ.get(
+            'VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE',
+            DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE,
+        )
+    ),
+)
 # Vote to extend when this many blocks remain. Sized for one forward step
 # to land the propose tx and the challenge window to elapse — without that
 # runway the propose is orphaned and the reservation expires anyway.
