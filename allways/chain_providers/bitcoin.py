@@ -692,24 +692,27 @@ class BitcoinProvider(ChainProvider):
         except Exception:
             pass
 
+        # Record the txid before broadcasting so a same-session retry can
+        # reclaim it via find_recent_outgoing even if the response is lost
+        # before tx_exists has caught up. A truly-rejected broadcast leaves
+        # the entry harmlessly — Esplora won't surface it for matching.
+        if expected_txid:
+            self.broadcasted_txids.add(expected_txid)
+
         try:
             resp = self.btc_api_post('/tx', data=raw_hex, timeout=30)
         except Exception as e:
             if expected_txid and self.tx_exists(expected_txid):
-                self.broadcasted_txids.add(expected_txid)
                 return expected_txid
             self._send_error(f'Broadcast failed: {e}')
             return None
 
         if resp.status_code != 200:
             if expected_txid and self.tx_exists(expected_txid):
-                self.broadcasted_txids.add(expected_txid)
                 return expected_txid
             self._send_error(f'Broadcast rejected ({resp.status_code}): {resp.text.strip()}')
             return None
-        txid = resp.text.strip()
-        self.broadcasted_txids.add(txid)
-        return txid
+        return resp.text.strip()
 
     def estimate_fee_rate(self, override: Optional[int] = None) -> int:
         """Estimate fee rate (sat/vbyte) from Blockstream.
