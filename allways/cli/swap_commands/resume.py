@@ -26,6 +26,8 @@ from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
     resolve_recent_swap_id,
+    send_btc,
+    send_tao_transfer,
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
@@ -33,8 +35,14 @@ from allways.contract_client import ContractError
 
 @click.command('resume-reservation')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
+@click.option(
+    '--send',
+    'auto_send',
+    is_flag=True,
+    help='Broadcast source funds automatically (TAO via wallet, BTC via BTC_PRIVATE_KEY)',
+)
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
-def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bool):
+def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool, skip_confirm: bool):
     """Resume an interrupted pre-initiate reservation.
 
     \b
@@ -55,7 +63,10 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     \b
     Non-interactive mode (for scripting/agents):
         alw swap resume-reservation --from-tx-hash abc123... --yes
+        alw swap resume-reservation --send --yes
     """
+    if from_tx_hash_opt and auto_send:
+        raise click.UsageError('--from-tx-hash and --send are mutually exclusive')
     state = load_pending_swap()
     if not state:
         console.print('[yellow]No pending swap found.[/yellow]')
@@ -168,11 +179,29 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     ephemeral_wallet = get_ephemeral_wallet()
 
     used_saved_tx = False
+    just_broadcast_block = 0
     if not from_tx_hash_opt:
         saved_tx = (state.from_tx_hash or '').strip()
         if saved_tx:
             console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{saved_tx}[/cyan]')
             from_tx_hash_opt = saved_tx
+            used_saved_tx = True
+        elif auto_send:
+            console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
+            if state.from_chain == 'tao':
+                send_result = send_tao_transfer(wallet, subtensor, state.miner_from_address, state.from_amount)
+            else:
+                send_result = send_btc(
+                    chain_providers,
+                    config,
+                    state.miner_from_address,
+                    state.from_amount,
+                    from_address=state.user_from_address,
+                    interactive=False,
+                )
+            if send_result is None:
+                return
+            from_tx_hash_opt, just_broadcast_block = send_result
             used_saved_tx = True
         else:
             console.print(f'\n  Send [green]{send_label}[/green] to: [cyan]{state.miner_from_address}[/cyan]\n')
@@ -184,9 +213,9 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], skip_confirm: bo
     from_tx_hash = from_tx_hash_opt.strip()
     mark_pending_swap_tx_sent(from_tx_hash)
 
-    # Saved hash is fresh from swap now — still in mempool, lookup would just print noise.
+    # Saved/auto-sent hash is fresh — still in mempool, lookup would just print noise.
     if used_saved_tx:
-        from_tx_block = 0
+        from_tx_block = just_broadcast_block
     else:
         from_tx_block = resolve_source_tx_block(
             provider=provider,
