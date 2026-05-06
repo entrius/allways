@@ -79,6 +79,7 @@ class SwapFulfiller:
         # neuron's reload mutates what we read here.
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         self.sent: Dict[int, SentSwap] = {}
+        self.mark_fulfilled_attempts: Dict[int, int] = {}
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
 
@@ -117,8 +118,9 @@ class SwapFulfiller:
         stale = [sid for sid in self.sent if sid not in active_swap_ids]
         for sid in stale:
             self.sent.pop(sid)
-            bt.logging.debug(f'Cleaned up stale send cache for swap {sid}')
+            self.mark_fulfilled_attempts.pop(sid, None)
         if stale:
+            bt.logging.info(f'Cleaned up stale send cache for {len(stale)} swap(s): {stale}')
             self.save_sent_cache()
 
     def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
@@ -189,7 +191,7 @@ class SwapFulfiller:
             bt.logging.warning(f'Swap {swap.id}: provider unreachable, will retry: {e}')
             return False
         except Exception as e:
-            bt.logging.error(f'Swap {swap.id}: verification error: {e}')
+            bt.logging.error(f'Swap {swap.id}: verification error: {type(e).__name__}: {e}')
             return False
 
     def send_dest_funds(self, swap: Swap, user_receives_amount: int) -> Optional[Tuple[str, int]]:
@@ -207,6 +209,10 @@ class SwapFulfiller:
         # credentials live on the provider itself.
         from_address = None if swap.to_chain == 'tao' else self.my_addresses.get(swap.to_chain)
 
+        bt.logging.info(
+            f'Swap {swap.id}: initiating dest send of {user_receives_amount} to {swap.user_to_address} '
+            f'on {swap.to_chain}'
+        )
         result = provider.send_amount(swap.user_to_address, user_receives_amount, from_address=from_address)
         if result:
             tx_hash, block_num = result
@@ -215,9 +221,10 @@ class SwapFulfiller:
                 f'on {swap.to_chain} (tx: {tx_hash}, block: {block_num})'
             )
         else:
+            reason = getattr(provider, 'last_send_error', None) or 'no provider error captured'
             bt.logging.error(
                 f'Swap {swap.id}: failed to send {user_receives_amount} to {swap.user_to_address} '
-                f'on {swap.to_chain} — check wallet balance and node connectivity'
+                f'on {swap.to_chain}: {reason}'
             )
         return result
 
@@ -239,6 +246,7 @@ class SwapFulfiller:
         if sent and sent.marked_fulfilled:
             # Already finished on a previous pass. Contract state catches up
             # when validators confirm — nothing to retry here.
+            bt.logging.debug(f'Swap {swap.id}: already marked fulfilled locally, awaiting validator confirm')
             return True
 
         bt.logging.info(f'Processing swap {swap.id}: {swap.from_chain} -> {swap.to_chain}')
@@ -284,8 +292,17 @@ class SwapFulfiller:
             )
             sent.marked_fulfilled = True
             self.save_sent_cache()
+            self.mark_fulfilled_attempts.pop(swap.id, None)
             bt.logging.success(f'Swap {swap.id}: marked as fulfilled')
             return True
         except ContractError as e:
-            bt.logging.error(f'Swap {swap.id}: failed to mark fulfilled on contract: {e}')
+            attempts = self.mark_fulfilled_attempts.get(swap.id, 0) + 1
+            self.mark_fulfilled_attempts[swap.id] = attempts
+            try:
+                blocks_to_deadline = swap.timeout_block - self.subtensor.get_current_block()
+                deadline_str = f'{blocks_to_deadline} blocks to deadline'
+            except Exception:
+                deadline_str = 'deadline unknown'
+            log = bt.logging.warning if attempts >= 3 else bt.logging.error
+            log(f'Swap {swap.id}: mark_fulfilled failed (attempt {attempts}, {deadline_str}): {e}')
             return False

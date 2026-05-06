@@ -43,6 +43,7 @@ Layout
 
 import os
 import struct
+import threading
 from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 import bittensor as bt
@@ -50,16 +51,18 @@ from async_substrate_interface.errors import ExtrinsicNotFound
 from bittensor import Keypair
 from websockets.exceptions import ConnectionClosed
 
-from allways.classes import Swap, SwapStatus
+from allways.classes import PendingExtension, Reservation, Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS, MIN_BALANCE_FOR_TX_RAO
 from allways.utils.scale import (
     ACCOUNT_ID_BYTES,
+    U16_BYTES,
     U32_BYTES,
     U64_BYTES,
     U128_BYTES,
     compact_encode_len,
     decode_account_id,
     decode_string,
+    decode_u16,
     decode_u32,
     decode_u64,
     decode_u128,
@@ -97,9 +100,9 @@ CONTRACT_SELECTORS = {
     'set_consensus_threshold': bytes.fromhex('c0d8ec47'),
     'set_min_swap_amount': bytes.fromhex('800e1573'),
     'set_max_swap_amount': bytes.fromhex('3e868f32'),
-    'set_recycle_address': bytes.fromhex('50dfe685'),
     'set_reservation_ttl': bytes.fromhex('3143d9e3'),
     'recycle_fees': bytes.fromhex('97756ea1'),
+    'enable_chain_ext': bytes.fromhex('aef4a766'),
     'get_swap': bytes.fromhex('a35f1bbf'),
     'get_collateral': bytes.fromhex('f48343ad'),
     'get_miner_active': bytes.fromhex('25652be8'),
@@ -114,6 +117,9 @@ CONTRACT_SELECTORS = {
     'get_total_recycled_fees': bytes.fromhex('9910e939'),
     'get_owner': bytes.fromhex('07fcd0b1'),
     'get_recycle_address': bytes.fromhex('3847e06c'),
+    'get_staking_hotkey': bytes.fromhex('47e11891'),
+    'get_netuid': bytes.fromhex('75b98cec'),
+    'get_chain_ext_enabled': bytes.fromhex('06d94687'),
     'get_pending_slash': bytes.fromhex('48c78c4a'),
     'get_min_swap_amount': bytes.fromhex('fca7daa4'),
     'get_max_swap_amount': bytes.fromhex('97826e04'),
@@ -124,10 +130,19 @@ CONTRACT_SELECTORS = {
     'get_validator_count': bytes.fromhex('a30ab5c4'),
     'get_validators': bytes.fromhex('a28acf8e'),
     'get_reservation_data': bytes.fromhex('79fe2717'),
+    'get_reservation': bytes.fromhex('3690f521'),
     'get_pending_reserve_vote_count': bytes.fromhex('3781315a'),
     'get_cooldown': bytes.fromhex('19a837c6'),
-    'vote_extend_reservation': bytes.fromhex('f668d950'),
-    'vote_extend_timeout': bytes.fromhex('0fb2d2e5'),
+    'propose_extend_reservation': bytes.fromhex('9c9a8e8e'),
+    'challenge_extend_reservation': bytes.fromhex('40b77e21'),
+    'finalize_extend_reservation': bytes.fromhex('baf47953'),
+    'get_pending_reservation_extension': bytes.fromhex('d79424b8'),
+    'get_reservation_extension_count': bytes.fromhex('c5f9a918'),
+    'propose_extend_timeout': bytes.fromhex('94c87a1d'),
+    'challenge_extend_timeout': bytes.fromhex('682cf8eb'),
+    'finalize_extend_timeout': bytes.fromhex('b23b4d80'),
+    'get_pending_timeout_extension': bytes.fromhex('6bd06828'),
+    'get_swap_extension_count': bytes.fromhex('c2a875b1'),
     'set_halted': bytes.fromhex('8fe1c210'),
     'get_halted': bytes.fromhex('ec540804'),
 }
@@ -180,9 +195,9 @@ CONTRACT_ARG_TYPES = {
     'set_consensus_threshold': [('percent', 'u8')],
     'set_min_swap_amount': [('amount', 'u128')],
     'set_max_swap_amount': [('amount', 'u128')],
-    'set_recycle_address': [('address', 'AccountId')],
     'set_reservation_ttl': [('blocks', 'u32')],
     'recycle_fees': [],
+    'enable_chain_ext': [],
     'get_swap': [('swap_id', 'u64')],
     'get_collateral': [('hotkey', 'AccountId')],
     'get_miner_active': [('hotkey', 'AccountId')],
@@ -198,13 +213,25 @@ CONTRACT_ARG_TYPES = {
     'get_validator_count': [],
     'get_validators': [],
     'get_reservation_data': [('miner', 'AccountId')],
+    'get_reservation': [('miner', 'AccountId')],
     'get_pending_reserve_vote_count': [('miner', 'AccountId')],
-    'vote_extend_reservation': [
-        ('request_hash', 'hash'),
+    'propose_extend_reservation': [
         ('miner', 'AccountId'),
-        ('from_tx_hash', 'str'),
+        ('from_tx_hash', 'hash'),
+        ('target_block', 'u32'),
     ],
-    'vote_extend_timeout': [('swap_id', 'u64')],
+    'challenge_extend_reservation': [('miner', 'AccountId')],
+    'finalize_extend_reservation': [('miner', 'AccountId')],
+    'get_pending_reservation_extension': [('miner', 'AccountId')],
+    'get_reservation_extension_count': [('miner', 'AccountId')],
+    'propose_extend_timeout': [
+        ('swap_id', 'u64'),
+        ('target_block', 'u32'),
+    ],
+    'challenge_extend_timeout': [('swap_id', 'u64')],
+    'finalize_extend_timeout': [('swap_id', 'u64')],
+    'get_pending_timeout_extension': [('swap_id', 'u64')],
+    'get_swap_extension_count': [('swap_id', 'u64')],
     'get_cooldown': [('from_address', 'str')],
     'set_halted': [('halted', 'bool')],
     'get_halted': [],
@@ -263,6 +290,14 @@ CONTRACT_ERROR_VARIANTS = {
     24: ('PendingConflict', 'A pending vote exists for a different request'),
     25: ('SameChain', 'Source and destination chains must be different'),
     26: ('SystemHalted', 'System is halted — no new activity allowed'),
+    27: ('ProposalAlreadyPending', 'An optimistic extension proposal already exists for this entity'),
+    28: ('ChallengeWindowOpen', 'Cannot finalize: challenge window has not yet elapsed'),
+    29: ('ChallengeWindowClosed', 'Cannot challenge: challenge window has already elapsed'),
+    30: ('NoProposal', 'No pending optimistic extension exists for this entity'),
+    31: ('ExtensionTooLong', 'Proposed extension target exceeds MAX_EXTENSION_BLOCKS'),
+    32: ('TargetNotForward', 'Proposed target must be strictly greater than the current deadline'),
+    33: ('InvalidTarget', 'Proposed target is invalid (e.g. not strictly in the future)'),
+    34: ('MaxExtensionsExceeded', 'Cumulative extension cap reached for this reservation/swap'),
 }
 
 
@@ -326,6 +361,9 @@ class AllwaysContractClient:
         self.reconnect_subtensor = reconnect_subtensor
         self.readonly_keypair = Keypair.create_from_uri('//Alice')
         self.initialized = False
+        # substrate-interface's WebSocketProvider isn't thread-safe; serialize
+        # access so concurrent threads can't both land in recv at the same time.
+        self._substrate_lock = threading.Lock()
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
@@ -343,18 +381,19 @@ class AllwaysContractClient:
         receipt returned, the retry composes a fresh nonce and submits a
         second extrinsic that can also land.
         """
-        try:
-            return fn(self.subtensor.substrate)
-        except RECONNECT_EXCEPTIONS as e:
-            if self.reconnect_subtensor is None:
-                raise
-            bt.logging.warning(f'Substrate WS error ({e!s}); reconnecting and retrying once')
+        with self._substrate_lock:
             try:
-                self.reconnect_subtensor()
-            except Exception as reconnect_err:
-                bt.logging.error(f'Substrate reconnect callback failed: {reconnect_err}')
-                raise e from reconnect_err
-            return fn(self.subtensor.substrate)
+                return fn(self.subtensor.substrate)
+            except RECONNECT_EXCEPTIONS as e:
+                if self.reconnect_subtensor is None:
+                    raise
+                bt.logging.warning(f'Substrate WS error ({e!s}); reconnecting and retrying once')
+                try:
+                    self.reconnect_subtensor()
+                except Exception as reconnect_err:
+                    bt.logging.error(f'Substrate reconnect callback failed: {reconnect_err}')
+                    raise e from reconnect_err
+                return fn(self.subtensor.substrate)
 
     def ensure_initialized(self):
         if not self.contract_address:
@@ -451,6 +490,10 @@ class AllwaysContractClient:
 
         except ContractError:
             raise
+        except RECONNECT_EXCEPTIONS:
+            # Don't mask transient WS failures as "no result" — callers need
+            # to distinguish "RPC blip, retry me" from "contract returned None".
+            raise
         except Exception as e:
             bt.logging.debug(f'Raw contract read {method} failed: {e}')
             return None
@@ -479,8 +522,18 @@ class AllwaysContractClient:
         keypair: Optional[Keypair] = None,
         value: int = 0,
         gas_limit: dict = None,
+        wait_for_inclusion: bool = True,
     ) -> str:
-        """Execute a contract method via raw extrinsic submission. Returns tx hash."""
+        """Execute a contract method via raw extrinsic submission. Returns tx hash.
+
+        ``wait_for_inclusion=False`` returns immediately after submission and
+        skips the receipt-success check, so contract reverts can't be detected
+        in-band. Use only for idempotent calls whose dedup is contract-side
+        (e.g. propose/challenge extension flows that the contract rejects via
+        ProposalAlreadyPending / ChallengeWindow* if our local snapshot is
+        stale). The forward step gets back a step-time worth of latency that
+        a synchronous inclusion wait would otherwise burn.
+        """
         gas_limit = gas_limit or DEFAULT_GAS_LIMIT
         selector = CONTRACT_SELECTORS.get(method)
         if not selector:
@@ -492,13 +545,15 @@ class AllwaysContractClient:
         signer_address = keypair.ss58_address
         try:
             account_info = self.substrate_call(lambda s: s.query('System', 'Account', [signer_address]))
+            account_data = account_info.value if hasattr(account_info, 'value') else account_info
+            free_balance = account_data.get('data', {}).get('free', 0)
+            if free_balance < MIN_BALANCE_FOR_TX_RAO:
+                bt.logging.warning(
+                    f'{method}: low free balance on {signer_address} ({free_balance} rao); '
+                    f'submitting anyway — chain will reject if truly insufficient'
+                )
         except Exception as e:
-            raise ContractError(f'{method}: balance query failed: {e}') from e
-
-        account_data = account_info.value if hasattr(account_info, 'value') else account_info
-        free_balance = account_data.get('data', {}).get('free', 0)
-        if free_balance < MIN_BALANCE_FOR_TX_RAO:
-            raise ContractError(f'{method}: free={free_balance}')
+            bt.logging.debug(f'{method}: pre-flight balance probe failed, proceeding: {e}')
 
         def submit_extrinsic(s):
             call = s.compose_call(
@@ -513,12 +568,18 @@ class AllwaysContractClient:
                 },
             )
             extrinsic = s.create_signed_extrinsic(call=call, keypair=keypair)
-            return s.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=False)
+            return s.submit_extrinsic(extrinsic, wait_for_inclusion=wait_for_inclusion, wait_for_finalization=False)
 
         try:
             receipt = self.substrate_call(submit_extrinsic)
         except Exception as e:
             raise ContractError(f'{method}: exec failed: {e}') from e
+
+        if not wait_for_inclusion:
+            # No block to inspect; trust the submission and let the next event
+            # sync surface the actual outcome. Caller relies on contract-side
+            # idempotency to absorb stale-view duplicates.
+            return receipt.extrinsic_hash
 
         try:
             if receipt.is_success:
@@ -573,6 +634,11 @@ class AllwaysContractClient:
                 encoded += struct.pack('<Q', int(item))
             return encoded
         raise ValueError(f'Unsupported type: {type_tag}')
+
+    def extract_u16(self, data: bytes) -> Optional[int]:
+        if not data or len(data) < U16_BYTES:
+            return None
+        return decode_u16(data, 0)[0]
 
     def extract_u32(self, data: bytes) -> Optional[int]:
         if not data or len(data) < U32_BYTES:
@@ -668,6 +734,9 @@ class AllwaysContractClient:
         v = extractor(data)
         return v if v is not None else default
 
+    def read_u16(self, method: str, args: dict = None) -> int:
+        return self._read_typed(method, self.extract_u16, 0, args)
+
     def read_u32(self, method: str, args: dict = None) -> int:
         return self._read_typed(method, self.extract_u32, 0, args)
 
@@ -695,6 +764,32 @@ class AllwaysContractClient:
         if data[0] == 0x01:
             return self.decode_swap_data(data, offset=1)
         return None
+
+    def decode_reservation(self, data: bytes, offset: int = 0) -> Optional[Reservation]:
+        try:
+            o = offset
+            hash_bytes = data[o : o + 32]
+            o += 32
+            from_addr, o = decode_string(data, o)
+            from_chain, o = decode_string(data, o)
+            to_chain, o = decode_string(data, o)
+            tao_amount, o = decode_u128(data, o)
+            from_amount, o = decode_u128(data, o)
+            to_amount, o = decode_u128(data, o)
+            reserved_until, o = decode_u32(data, o)
+            return Reservation(
+                hash='0x' + hash_bytes.hex(),
+                from_addr=from_addr,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                tao_amount=tao_amount,
+                from_amount=from_amount,
+                to_amount=to_amount,
+                reserved_until=reserved_until,
+            )
+        except Exception as e:
+            bt.logging.debug(f'Failed to decode Reservation: {e}')
+            return None
 
     # =========================================================================
     # Query Functions (Read-only)
@@ -822,6 +917,15 @@ class AllwaysContractClient:
     def get_recycle_address(self) -> str:
         return self.read_account_id('get_recycle_address')
 
+    def get_staking_hotkey(self) -> str:
+        return self.read_account_id('get_staking_hotkey')
+
+    def get_netuid(self) -> int:
+        return self.read_u16('get_netuid')
+
+    def get_chain_ext_enabled(self) -> bool:
+        return self.read_bool('get_chain_ext_enabled')
+
     def is_validator(self, account: str) -> bool:
         return self.read_bool('is_validator', {'account': account})
 
@@ -890,6 +994,14 @@ class AllwaysContractClient:
         to_amount, _ = decode_u128(data, o)
         return (tao_amount, from_amount, to_amount)
 
+    def get_reservation(self, miner_hotkey: str) -> Optional[Reservation]:
+        """Full reservation record (hash, from_addr, amounts, reserved_until)."""
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_reservation', {'miner': miner_hotkey})
+        if data is None or len(data) < 1 or data[0] != 0x01:
+            return None
+        return self.decode_reservation(data, offset=1)
+
     # =========================================================================
     # Transaction Functions (Write)
     # =========================================================================
@@ -937,35 +1049,131 @@ class AllwaysContractClient:
         bt.logging.info(f'Vote reserve for miner {miner_hotkey}: {tx_hash}')
         return tx_hash
 
-    def vote_extend_reservation(
+    # ─── Optimistic extensions ────────────────────────────────────────────
+    # Single-validator propose/challenge/finalize with tiered evidence + cap.
+
+    def propose_extend_reservation(
         self,
         wallet: bt.Wallet,
-        request_hash: bytes,
         miner_hotkey: str,
-        from_tx_hash: str,
+        from_tx_hash: bytes,
+        target_block: int,
     ) -> str:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw(
-            'vote_extend_reservation',
-            args={
-                'request_hash': request_hash,
-                'miner': miner_hotkey,
-                'from_tx_hash': from_tx_hash,
-            },
+            'propose_extend_reservation',
+            args={'miner': miner_hotkey, 'from_tx_hash': from_tx_hash, 'target_block': target_block},
             keypair=wallet.hotkey,
+            wait_for_inclusion=False,
         )
-        bt.logging.info(f'Vote extend reservation for miner {miner_hotkey}: {tx_hash}')
+        bt.logging.info(f'Propose extend reservation miner={miner_hotkey} target={target_block}: {tx_hash}')
         return tx_hash
 
-    def vote_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
+    def challenge_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw(
-            'vote_extend_timeout',
+            'challenge_extend_reservation',
+            args={'miner': miner_hotkey},
+            keypair=wallet.hotkey,
+            wait_for_inclusion=False,
+        )
+        bt.logging.info(f'Challenge extend reservation miner={miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def finalize_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'finalize_extend_reservation',
+            args={'miner': miner_hotkey},
+            keypair=wallet.hotkey,
+        )
+        bt.logging.info(f'Finalize extend reservation miner={miner_hotkey}: {tx_hash}')
+        return tx_hash
+
+    def propose_extend_timeout(
+        self,
+        wallet: bt.Wallet,
+        swap_id: int,
+        target_block: int,
+    ) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'propose_extend_timeout',
+            args={'swap_id': swap_id, 'target_block': target_block},
+            keypair=wallet.hotkey,
+            wait_for_inclusion=False,
+        )
+        bt.logging.info(f'Propose extend timeout swap={swap_id} target={target_block}: {tx_hash}')
+        return tx_hash
+
+    def challenge_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'challenge_extend_timeout',
+            args={'swap_id': swap_id},
+            keypair=wallet.hotkey,
+            wait_for_inclusion=False,
+        )
+        bt.logging.info(f'Challenge extend timeout swap={swap_id}: {tx_hash}')
+        return tx_hash
+
+    def finalize_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw(
+            'finalize_extend_timeout',
             args={'swap_id': swap_id},
             keypair=wallet.hotkey,
         )
-        bt.logging.info(f'Vote extend timeout for swap {swap_id}: {tx_hash}')
+        bt.logging.info(f'Finalize extend timeout swap={swap_id}: {tx_hash}')
         return tx_hash
+
+    def _decode_pending_extension(self, data: bytes) -> Optional[PendingExtension]:
+        """Decode an Option<PendingExtension> SCALE payload."""
+        if not data:
+            return None
+        # Option discriminant: 0x00 = None, 0x01 = Some
+        if data[0] == 0x00:
+            return None
+        if data[0] != 0x01:
+            return None
+        o = 1
+        submitter, o = decode_account_id(data, o)
+        target_block, o = decode_u32(data, o)
+        proposed_at, _ = decode_u32(data, o)
+        return PendingExtension(submitter=submitter, target_block=target_block, proposed_at=proposed_at)
+
+    def get_pending_reservation_extension(self, miner_hotkey: str) -> Optional[PendingExtension]:
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_pending_reservation_extension', {'miner': miner_hotkey})
+        if data is None:
+            return None
+        return self._decode_pending_extension(data)
+
+    def get_pending_timeout_extension(self, swap_id: int) -> Optional[PendingExtension]:
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_pending_timeout_extension', {'swap_id': swap_id})
+        if data is None:
+            return None
+        return self._decode_pending_extension(data)
+
+    def get_reservation_extension_count(self, miner_hotkey: str) -> int:
+        """How many extensions have been finalized on this miner's current
+        reservation. Drives tier selection. Returns 0 on read failure or for
+        miners with no extensions yet — both are equivalent for tier-1
+        eligibility."""
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_reservation_extension_count', {'miner': miner_hotkey})
+        if not data:
+            return 0
+        return int(data[0])
+
+    def get_swap_extension_count(self, swap_id: int) -> int:
+        """Counterpart for the timeout side."""
+        self.ensure_initialized()
+        data = self.raw_contract_read('get_swap_extension_count', {'swap_id': swap_id})
+        if not data:
+            return 0
+        return int(data[0])
 
     def cancel_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
         self.ensure_initialized()
@@ -1115,12 +1323,6 @@ class AllwaysContractClient:
         bt.logging.info(f'Min swap amount set to {amount_rao}: {tx_hash}')
         return tx_hash
 
-    def set_recycle_address(self, wallet: bt.Wallet, address: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw('set_recycle_address', args={'address': address}, keypair=wallet.hotkey)
-        bt.logging.info(f'Recycle address set to {address}: {tx_hash}')
-        return tx_hash
-
     def set_reservation_ttl(self, wallet: bt.Wallet, blocks: int) -> str:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('set_reservation_ttl', args={'blocks': blocks}, keypair=wallet.hotkey)
@@ -1155,6 +1357,12 @@ class AllwaysContractClient:
         self.ensure_initialized()
         tx_hash = self.exec_contract_raw('recycle_fees', keypair=wallet.hotkey)
         bt.logging.info(f'Fees recycled: {tx_hash}')
+        return tx_hash
+
+    def enable_chain_ext(self, wallet: bt.Wallet) -> str:
+        self.ensure_initialized()
+        tx_hash = self.exec_contract_raw('enable_chain_ext', keypair=wallet.hotkey)
+        bt.logging.info(f'Chain extension latched: {tx_hash}')
         return tx_hash
 
     def transfer_ownership(self, wallet: bt.Wallet, new_owner: str) -> str:

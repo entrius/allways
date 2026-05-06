@@ -9,6 +9,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     from_rao,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
     probe_pending_reservation,
@@ -80,6 +81,7 @@ def status_command():
         # Pending reservation
         pending = load_pending_swap()
         if pending:
+            hydrate_pending_swap(pending, client)
             current_block = subtensor.get_current_block()
             res_status = probe_pending_reservation(client, pending, current_block)
             if res_status.kind == 'ours_active':

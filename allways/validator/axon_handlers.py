@@ -68,14 +68,6 @@ def scale_encode_reserve_hash_input(
     )
 
 
-def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
-    """SCALE-encode the extend hash input tuple: (AccountId, &str).
-
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
-    """
-    return miner_bytes + encode_str(from_tx_hash)
-
-
 def scale_encode_initiate_hash_input(
     miner_bytes: bytes,
     from_tx_hash: str,
@@ -321,6 +313,13 @@ async def handle_swap_reserve(
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse
 
+        # Source-chain RPC — separate connection from substrate, so it doesn't
+        # need axon_lock and shouldn't block the substrate websocket.
+        balance = provider.get_balance(synapse.from_address)
+        if balance < synapse.from_amount:
+            reject_synapse(synapse, 'Insufficient source balance', ctx)
+            return synapse
+
         # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
         from_addr_bytes = synapse.from_address.encode('utf-8')
         miner_bytes = miner_public_key_bytes(miner)
@@ -353,11 +352,6 @@ async def handle_swap_reserve(
             reserve_rate, _ = commitment.get_rate_for_direction(synapse.from_chain)
             if reserve_rate <= 0:
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
-                return synapse
-
-            balance = provider.get_balance(synapse.from_address)
-            if balance < synapse.from_amount:
-                reject_synapse(synapse, 'Insufficient source balance', ctx)
                 return synapse
 
             collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
@@ -405,6 +399,7 @@ async def handle_swap_reserve(
                     )
                     return synapse
 
+            bt.logging.info(f'{ctx} preflight ok, voting')
             contract.vote_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,

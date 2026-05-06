@@ -38,13 +38,16 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
 from click.shell_completion import get_completion_class  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
+from dotenv import find_dotenv, load_dotenv  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-load_dotenv()
+# Precedence: shell env > project .env (CWD walk-up) > ~/.allways/.env. override=False makes earlier loads win.
+load_dotenv(find_dotenv(usecwd=True), override=False)
+load_dotenv(Path.home() / '.allways' / '.env', override=False)
 
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
 from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402

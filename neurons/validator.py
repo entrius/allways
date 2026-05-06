@@ -37,6 +37,7 @@ from allways.validator.bounds_cache import BoundsCache
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
+from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
@@ -62,7 +63,11 @@ class Validator(BaseValidatorNeuron):
         )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
-        timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        try:
+            timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        except Exception as e:
+            bt.logging.warning(f'fulfillment_timeout read failed at init, using default: {e}')
+            timeout_blocks = DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
         # Single store owning every validator-local table. Must be created
@@ -78,14 +83,17 @@ class Validator(BaseValidatorNeuron):
             current_block_fn=lambda: self.block,
         )
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
-        # (miner_hotkey, from_tx_hash) → reserved_until at vote time. Skips
-        # redundant vote_extend_reservation extrinsics — auto-clears once the
-        # contract bumps reserved_until past the voted value, so the next
-        # extension round is open.
-        self.extend_reservation_voted_at: dict[tuple[str, str], int] = {}
         # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
         # Used to absorb mempool propagation lag before dropping a pending entry.
         self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
+
+        # Optimistic propose/challenge/finalize for reservation + timeout
+        # extensions. Stateless decision class — the forward loop drives it
+        # per-iteration with the state it already has in hand.
+        self.optimistic_extensions = OptimisticExtensionWatcher(
+            contract_client=self.contract_client,
+            wallet=self.wallet,
+        )
 
         # Event-sourced miner state. ``sync_to(current_block)`` runs each
         # forward step; scoring reads the active set from the watcher's
@@ -106,6 +114,9 @@ class Validator(BaseValidatorNeuron):
 
         self.swap_tracker = SwapTracker(client=self.contract_client)
         self.swap_tracker.initialize()
+        # Late-bind the tracker so TimeoutExtensionFinalized events can write
+        # the new timeout_block straight into the in-memory active swap.
+        self.event_watcher.swap_tracker = self.swap_tracker
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
 
         self.swap_verifier = SwapVerifier(

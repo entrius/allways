@@ -70,20 +70,25 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
 
     def unlock_coldkey(self) -> None:
-        """Decrypt and cache the bittensor coldkey at startup so per-swap TAO
-        transfers don't re-prompt for a password each time. Without this, every
-        ``send_amount`` call hits ``wallet.coldkey`` which re-reads the keyfile;
-        when the miner runs detached from a TTY, ``getpass`` returns garbage
-        and every fulfillment fails with "password invalid".
+        """Cache the coldkey password through bittensor's keyfile so every
+        later ``unlock_coldkey()`` call is non-interactive. As of bittensor
+        10.3.0, ``subtensor.transfer`` re-runs ``unlock_coldkey()`` on every
+        extrinsic; without a cached password, each transfer re-prompts and a
+        detached miner reads garbage from stdin, producing spurious
+        "password invalid" errors mid-swap.
 
-        If ``MINER_BITTENSOR_COLDKEY_PASSWORD`` is set in the environment, it
-        is forwarded into bittensor's per-keyfile env var so unlocking is
-        non-interactive. Otherwise this prompts once at startup (when the
-        operator is present).
+        Reads ``MINER_BITTENSOR_COLDKEY_PASSWORD`` if set, otherwise prompts
+        once at startup. Uses ``save_password_to_env`` (not direct
+        ``os.environ`` assignment) because bittensor-wallet 4.0.1 stores the
+        password via its own encoding — a plaintext value in the
+        ``BT_PW__...`` env var is rejected as malformed base64.
         """
+        from getpass import getpass
+
         password = os.environ.get('MINER_BITTENSOR_COLDKEY_PASSWORD')
-        if password:
-            os.environ[self.wallet.coldkey_file.env_var_name()] = password
+        if not password:
+            password = getpass(f'Enter password to unlock coldkey ({self.wallet.name}): ')
+        self.wallet.coldkey_file.save_password_to_env(password)
         self.wallet.unlock_coldkey()
         bt.logging.info('Bittensor coldkey unlocked')
 
@@ -102,6 +107,10 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(f'Could not read own commitment at startup: {e}')
             return {}
         if pair is None:
+            bt.logging.warning(
+                f'No on-chain commitment found for hotkey {hotkey}; miner will not be able to fulfill swaps '
+                'until `alw miner post` is run'
+            )
             return {}
         return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
 
@@ -115,6 +124,10 @@ class Miner(BaseMinerNeuron):
                 self.my_addresses.clear()
                 self.my_addresses.update(fresh)
                 bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
+            else:
+                bt.logging.warning(
+                    'Rate-posted flag set but no commitment readable on chain yet; address cache left untouched'
+                )
             self.rate_flag_path.unlink(missing_ok=True)
         except Exception as e:
             bt.logging.debug(f'Rate-posted flag check failed: {e}')
@@ -130,6 +143,7 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self):
         """Main miner forward pass — polls for swaps and processes each one."""
+        self.check_block_progress(self.reconnect_and_propagate)
         self.maybe_reload_my_addresses()
 
         active_swaps, _fulfilled = self.swap_poller.poll()
@@ -158,11 +172,9 @@ class Miner(BaseMinerNeuron):
 
         for swap in active_swaps:
             try:
-                success = self.swap_fulfiller.process_swap(swap)
-                if not success:
-                    bt.logging.debug(f'Swap {swap.id} not ready for fulfillment yet')
+                self.swap_fulfiller.process_swap(swap)
             except Exception as e:
-                bt.logging.error(f'Error processing swap {swap.id}: {e}')
+                bt.logging.error(f'Error processing swap {swap.id}: {type(e).__name__}: {e}')
 
 
 # Main entry point

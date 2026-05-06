@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
+from allways.classes import SwapStatus
 from allways.constants import SCORING_WINDOW_BLOCKS
 from allways.utils.scale import (
     decode_account_id,
@@ -31,6 +32,7 @@ from allways.utils.scale import (
     strip_hex_prefix,
 )
 from allways.validator.state_store import ValidatorStateStore
+from allways.validator.swap_tracker import SwapTracker
 
 DATA_DECODERS = {
     'u32': decode_u32,
@@ -194,6 +196,7 @@ class ActiveEvent:
 
 
 MAX_BLOCKS_PER_SYNC = 50
+EVENT_PRUNE_INTERVAL_BLOCKS = 100  # O(events) sweep; window much wider than per-step delta.
 
 
 class ContractEventWatcher:
@@ -205,12 +208,18 @@ class ContractEventWatcher:
         contract_address: str,
         metadata_path: Path,
         state_store: ValidatorStateStore,
+        swap_tracker: Optional[SwapTracker] = None,
     ):
         self.substrate = substrate
         self.contract_address = contract_address
         self.state_store = state_store
+        # Late-bindable so the validator can construct the tracker after the
+        # watcher (cycle in current init order). Timeout extension finalize
+        # writes are skipped until this is set.
+        self.swap_tracker = swap_tracker
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
+        self.last_prune_block: int = 0
 
         self.active_miners: Set[str] = set()
         self.open_swap_count: Dict[str, int] = {}
@@ -319,7 +328,9 @@ class ContractEventWatcher:
         for block_num in range(self.cursor + 1, end + 1):
             self.process_block(block_num)
         self.cursor = end
-        self.prune_old_events(current_block)
+        if current_block - self.last_prune_block >= EVENT_PRUNE_INTERVAL_BLOCKS:
+            self.prune_old_events(current_block)
+            self.last_prune_block = current_block
 
     def process_block(self, block_num: int) -> None:
         try:
@@ -336,7 +347,13 @@ class ContractEventWatcher:
             if decoded is None:
                 continue
             name, values = decoded
-            self.apply_event(block_num, name, values)
+            try:
+                self.apply_event(block_num, name, values)
+            except Exception as e:
+                # Don't propagate — sync_to wouldn't advance the cursor,
+                # which would re-replay every successful apply_event in the
+                # same block on the next pass and double-apply busy deltas.
+                bt.logging.warning(f'EventWatcher: apply_event {name}@{block_num} failed: {e}')
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
@@ -400,6 +417,8 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                if self.swap_tracker is not None:
+                    self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
         elif name == 'SwapTimedOut':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -411,6 +430,23 @@ class ContractEventWatcher:
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
+                if self.swap_tracker is not None:
+                    self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
+        elif name == 'ReservationExtensionFinalized':
+            # Event-driven cache update for the local pending_confirms row —
+            # replaces the polling refresh that the legacy vote-extend flow
+            # needed (commit 1b942e8). Without this write the upstream
+            # purge_expired sweep would delete a still-live entry at its
+            # stale reserved_until.
+            miner = values.get('miner', '')
+            applied_target = values.get('applied_target')
+            if miner and isinstance(applied_target, int):
+                self.state_store.update_reserved_until(miner, applied_target)
+        elif name == 'TimeoutExtensionFinalized':
+            swap_id = values.get('swap_id')
+            applied_target = values.get('applied_target')
+            if self.swap_tracker is not None and isinstance(swap_id, int) and isinstance(applied_target, int):
+                self.swap_tracker.update_timeout_block(swap_id, applied_target)
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
