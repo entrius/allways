@@ -176,7 +176,7 @@ class Miner(BaseMinerNeuron):
                 if not success:
                     bt.logging.debug(f'Swap {swap.id} not ready for fulfillment yet')
             except Exception as e:
-                bt.logging.error(f'Error processing swap {swap.id}: {e}')
+                bt.logging.error(f'Error processing swap {swap.id}: {type(e).__name__}: {e}')
 
 
 # Main entry point
