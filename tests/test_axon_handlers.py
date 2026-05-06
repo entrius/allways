@@ -376,6 +376,7 @@ def make_validator(
     """
     validator = MagicMock()
     validator.block = block
+    validator.axon_subtensor.get_current_block.return_value = block
     validator.config.netuid = 2
     validator.axon_lock = threading.Lock()
 

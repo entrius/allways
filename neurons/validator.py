@@ -33,6 +33,7 @@ from allways.validator.axon_handlers import (
     priority_swap_confirm,
     priority_swap_reserve,
 )
+from allways.validator.bounds_cache import BoundsCache
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
@@ -119,6 +120,14 @@ class Validator(BaseValidatorNeuron):
         self.axon_subtensor = bt.Subtensor(config=self.config)
         self.axon_contract_client = AllwaysContractClient(subtensor=self.axon_subtensor)
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
+        # Must read the current block via axon_subtensor — the block getter on
+        # self (self.block) goes through self.subtensor, which the forward loop
+        # is already using; concurrent axon + forward reads collide on the same
+        # websocket and raise ConcurrencyError.
+        self.bounds_cache = BoundsCache(
+            self.axon_contract_client,
+            self.axon_subtensor.get_current_block,
+        )
 
         # Attach synapse handlers to axon
         self.attach_axon_handlers()

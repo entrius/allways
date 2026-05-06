@@ -69,8 +69,13 @@ def collateral_deposit(amount: float | None, yes: bool):
         required = amount_rao + MIN_BALANCE_FOR_TX_RAO
         if free_balance < required:
             console.print(
-                f'[red]Insufficient balance. Free: {from_rao(free_balance):.4f} TAO, '
+                f'[red]Insufficient hotkey balance. Free: {from_rao(free_balance):.4f} TAO, '
                 f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+            )
+            console.print('[dim]Collateral is posted from the hotkey, not the coldkey.[/dim]')
+            console.print(
+                f'[dim]Transfer TAO with: btcli wallet transfer --destination {wallet.hotkey.ss58_address} '
+                '--amount <tao>[/dim]'
             )
             return
     except ContractError as e:
