@@ -384,8 +384,16 @@ def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
         miner_pair = read_miner_commitment(subtensor, state.netuid, state.miner_hotkey, metagraph=metagraph)
         if miner_pair:
             state.miner_uid = miner_pair.uid
-            state.miner_from_address = miner_pair.from_address
-            state.rate_str = miner_pair.rate_str
+            # Commitment is stored canonical (alphabetical chains). For a
+            # reverse-direction swap the miner's receiving address lives in
+            # ``to_address``, not ``from_address`` — keep the side that
+            # matches state.from_chain so view-reservation labels line up.
+            if state.from_chain == miner_pair.from_chain:
+                state.miner_from_address = miner_pair.from_address
+                state.rate_str = miner_pair.rate_str
+            else:
+                state.miner_from_address = miner_pair.to_address
+                state.rate_str = miner_pair.counter_rate_str
     except Exception:
         pass
     # User receives = gross dest amount minus 1% protocol fee.

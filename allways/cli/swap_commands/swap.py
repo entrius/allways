@@ -3,7 +3,7 @@
 import os
 import sys
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import bittensor as bt
 import click
@@ -465,12 +465,19 @@ def send_btc(
     amount_sat: int,
     from_address: str = None,
     fee_rate_override: Optional[int] = None,
+    interactive: bool = True,
 ):
     """Send BTC, retry on failure, fall back to manual tx-hash entry.
 
     In lightweight mode there is no Bitcoin Core fallback — both paths route
     through the same Blockstream API — so we don't pretend otherwise.
-    Returns (tx_hash, block_number) or None (manual fallback failed/skipped).
+
+    ``interactive`` controls the failure path: when False (e.g. ``alw swap
+    resume-reservation --send``), broadcast errors return None instead of
+    prompting for a retry or a manual tx hash, so scripted callers get a
+    deterministic exit instead of a hung prompt.
+
+    Returns (tx_hash, block_number) or None.
     """
     provider = chain_providers.get('btc')
     is_local = is_local_network(config.get('network', 'finney'))
@@ -490,7 +497,7 @@ def send_btc(
         console.print('[dim]Sending BTC via Bitcoin Core RPC...[/dim]')
         return provider.send_amount(to_address, amount_sat)
 
-    max_retries = 2
+    max_retries = 2 if interactive else 0
     for attempt in range(max_retries + 1):
         result = attempt_send()
         if result:
@@ -508,6 +515,8 @@ def send_btc(
         else:
             console.print('[yellow]BTC send failed.[/yellow]')
 
+        if not interactive:
+            return None
         if attempt >= max_retries:
             console.print('[yellow]Giving up after retries.[/yellow]')
             break
@@ -528,6 +537,44 @@ def send_btc(
         )
         return None
     return (tx_hash.strip(), 0)
+
+
+def send_tao_transfer(wallet, subtensor, to_address: str, amount_rao: int) -> Optional[Tuple[str, int]]:
+    """Single attempt at a TAO coldkey transfer.
+
+    Returns ``(tx_hash, block_number)`` on success, ``None`` on failure
+    (caller decides whether to retry / surface the error).
+    """
+    try:
+        with loading('Submitting TAO transfer to chain...'):
+            response = subtensor.transfer(
+                wallet=wallet,
+                destination_ss58=to_address,
+                amount=bt.Balance.from_rao(amount_rao),
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+    except Exception as e:
+        console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
+        return None
+
+    if not response.success:
+        # Extrinsic may have been submitted but rejected on-chain;
+        # post-tx is a valid recovery if the user has the hash.
+        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
+        return None
+
+    try:
+        receipt = response.extrinsic_receipt
+        tx_hash = receipt.extrinsic_hash
+        block = 0
+        if getattr(receipt, 'block_hash', None):
+            block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
+    except Exception:
+        tx_hash = getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
+        block = 0
+    console.print(f'[green]TAO sent (tx: {tx_hash})[/green]')
+    return (tx_hash, int(block))
 
 
 # =========================================================================
@@ -905,7 +952,13 @@ def swap_now_command(
     ):
         try:
             pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
-            origin = 'override via --btc-fee-rate' if btc_fee_rate_opt is not None else 'auto-estimated'
+            if btc_fee_rate_opt is not None:
+                origin = 'override via --btc-fee-rate'
+            else:
+                # estimate_fee_rate targets 2-3 block confirmation. Surface that
+                # so the user knows the auto-estimate is not next-block urgent
+                # and won't compare it against a "too low" mempool reading.
+                origin = 'auto-estimated · targets 2-3 block confirmation (~20-30 min on mainnet)'
             btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
         except Exception:
             pass  # display-only; send path will fall back to estimating itself
@@ -1037,45 +1090,22 @@ def swap_now_command(
         from_tx_hash = None
         if from_chain == 'tao':
             for attempt in range(2):
-                try:
-                    with loading('Submitting TAO transfer to chain...'):
-                        response = subtensor.transfer(
-                            wallet=wallet,
-                            destination_ss58=selected_pair.from_address,
-                            amount=bt.Balance.from_rao(from_amount),
-                            wait_for_inclusion=True,
-                            wait_for_finalization=False,
-                        )
-                    if not response.success:
-                        # Extrinsic may have been submitted but rejected on-chain;
-                        # post-tx is a valid recovery if the user has the hash.
-                        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-                        console.print(
-                            '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>[/yellow]'
-                        )
-                        return
-                    try:
-                        receipt = response.extrinsic_receipt
-                        from_tx_hash = receipt.extrinsic_hash
-                        if getattr(receipt, 'block_hash', None):
-                            from_tx_block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-                    except Exception:
-                        from_tx_hash = (
-                            getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '')
-                            or 'tao_transfer'
-                        )
-                    console.print(f'[green]TAO sent (tx: {from_tx_hash})[/green]')
+                send_result = send_tao_transfer(wallet, subtensor, selected_pair.from_address, from_amount)
+                if send_result is not None:
+                    from_tx_hash, from_tx_block = send_result
                     mark_pending_swap_tx_sent(from_tx_hash)
                     break
-                except Exception as e:
-                    console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
-                    if attempt == 0 and click.confirm('Retry?', default=True):
-                        time.sleep(1)
-                        continue
-                    # Pre-broadcast failure: no tx hash exists, so post-tx
-                    # recovery isn't applicable. Just let the reservation lapse.
-                    console.print('[yellow]Reservation will expire on its own — start a new swap when ready.[/yellow]')
-                    return
+                if attempt == 0 and click.confirm('Retry?', default=True):
+                    time.sleep(1)
+                    continue
+                # Either the transfer landed but was rejected (post-tx recovery
+                # would apply if the user has the hash) or the broadcast itself
+                # failed (no hash — just let the reservation lapse).
+                console.print(
+                    '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>. '
+                    'Otherwise the reservation will expire on its own — start a new swap when ready.[/yellow]'
+                )
+                return
         else:
             send_result = send_btc(
                 chain_providers,
