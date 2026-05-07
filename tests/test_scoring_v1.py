@@ -117,6 +117,15 @@ class TestCrownHoldersHelper:
         holders = crown_holders_at_instant(rates, {'a', 'b'}, busy={'a', 'b'})
         assert holders == []
 
+    def test_lower_rate_wins_flips_sort(self):
+        """For tao→btc the rate is TAO per BTC and lower = better. The
+        helper picks the smallest qualifying rate, falling through to the
+        next-smallest when the smallest is busy."""
+        rates = {'a': 250.0, 'b': 251.0}
+        assert crown_holders_at_instant(rates, {'a', 'b'}, lower_rate_wins=True) == ['a']
+        # Smallest miner is busy → next-smallest takes the crown.
+        assert crown_holders_at_instant(rates, {'a', 'b'}, busy={'a'}, lower_rate_wins=True) == ['b']
+
 
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
@@ -146,8 +155,8 @@ class TestReplayCrownTime:
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'tao', 'btc', 0.00010, 0),
-            ('hk_b', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'tao', 100.0, 0),
+            ('hk_b', 'btc', 'tao', 200.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -156,15 +165,15 @@ class TestReplayCrownTime:
         # Mid-window, A jumps to the top.
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00030, 600),
+            ('hk_a', 'btc', 'tao', 300.0, 600),
         )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -226,8 +235,8 @@ class TestReplayCrownTime:
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'tao', 'btc', 0.00030, 0),  # A is best
-            ('hk_b', 'tao', 'btc', 0.00020, 0),  # B is runner-up
+            ('hk_a', 'btc', 'tao', 300.0, 0),  # A is best
+            ('hk_b', 'btc', 'tao', 200.0, 0),  # B is runner-up
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -242,8 +251,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -290,8 +299,8 @@ class TestReplayCrownTime:
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'tao', 'btc', 0.00030, 0),
-            ('hk_b', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'tao', 300.0, 0),
+            ('hk_b', 'btc', 'tao', 200.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -306,8 +315,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -377,17 +386,17 @@ class TestCalculateMinerRewards:
         # Ensure hk_a is still marked active on the watcher even if out of metagraph
         v.event_watcher.active_miners.add('hk_a')
         conn = v.state_store.require_connection()
-        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+        for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', rate, 0),
+                (hk, 'btc', 'tao', rate, 0),
             )
         conn.commit()
 
         rewards, _ = calculate_miner_rewards(v)
 
         # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         v.state_store.close()
 
     def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
@@ -557,10 +566,10 @@ class TestHistoricalActiveState:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
-        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+        for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', rate, 0),
+                (hk, 'btc', 'tao', rate, 0),
             )
         conn.commit()
         watcher.apply_event(500, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -568,8 +577,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -662,12 +671,12 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_b', 'tao', 'btc', 0.00020, 0),
+            ('hk_b', 'btc', 'tao', 200.0, 0),
         )
         # A's rate posted at block 500 — same block as their activation.
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00030, 500),
+            ('hk_a', 'btc', 'tao', 300.0, 500),
         )
         conn.commit()
         watcher.apply_event(500, 'MinerActivated', {'miner': 'hk_a', 'active': True})
@@ -675,8 +684,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -714,10 +723,10 @@ class TestHistoricalActiveState:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
-        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+        for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', rate, 0),
+                (hk, 'btc', 'tao', rate, 0),
             )
         conn.commit()
         # At block 500: A both deactivates and picks up a swap. Both events
@@ -730,8 +739,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='tao',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -753,18 +762,18 @@ class TestHistoricalActiveState:
         v.event_watcher.active_miners.add('hk_a')
         seed_active(v.event_watcher, 'hk_a', active=True, block=0)
         conn = v.state_store.require_connection()
-        for hk, rate in (('hk_a', 0.00030), ('hk_b', 0.00020)):
+        for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', rate, 0),
+                (hk, 'btc', 'tao', rate, 0),
             )
         conn.commit()
         v.event_watcher.apply_event(9_000, 'MinerActivated', {'miner': 'hk_a', 'active': False})
 
         rewards, _ = calculate_miner_rewards(v)
 
-        # hk_b (uid 0) is the only rewardable + active miner, earns tao→btc.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        # hk_b (uid 0) is the only rewardable + active miner, earns btc→tao.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 

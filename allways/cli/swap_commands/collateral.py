@@ -49,7 +49,8 @@ def collateral_deposit(amount: float | None, yes: bool):
     console.print('\n[bold]Depositing Collateral[/bold]\n')
     console.print(f'  Amount:  [green]{amount} TAO[/green] ({amount_rao} rao)')
     console.print(f'  Wallet:  {wallet.name}')
-    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}')
+    console.print('  [dim]Funds are debited from the hotkey balance (not the coldkey).[/dim]\n')
 
     try:
         max_collateral_rao = client.get_max_collateral()
@@ -70,7 +71,9 @@ def collateral_deposit(amount: float | None, yes: bool):
         if free_balance < required:
             console.print(
                 f'[red]Insufficient hotkey balance. Free: {from_rao(free_balance):.4f} TAO, '
-                f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+                f'need: {from_rao(required):.4f} TAO '
+                f'(amount + {from_rao(MIN_BALANCE_FOR_TX_RAO):.2f} TAO gas buffer, pre-checked so the tx does not '
+                'fail on chain and waste fees).[/red]'
             )
             console.print('[dim]Collateral is posted from the hotkey, not the coldkey.[/dim]')
             console.print(

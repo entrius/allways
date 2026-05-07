@@ -11,16 +11,17 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import SwapStatus
 from allways.commitments import read_miner_commitments
 from allways.constants import (
+    CHALLENGE_WINDOW_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
     PENDING_CONFIRM_NULL_RETRY_LIMIT,
     SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
+from allways.utils.scale import strip_hex_prefix
 from allways.validator import voting
 from allways.validator.axon_handlers import (
     keccak256,
-    scale_encode_extend_hash_input,
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
@@ -35,36 +36,55 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step. Phase order matters — each phase may depend
     on state mutated by the previous one."""
-    bt.logging.info(f'Forward step {self.step}')
-
     tracker: SwapTracker = self.swap_tracker
     verifier: SwapVerifier = self.swap_verifier
 
+    self.check_block_progress(self.reconnect_and_propagate)
+
     clear_provider_caches(self)
-    self.state_store.purge_expired_pending_confirms()
 
-    initialize_pending_user_reservations(self)
-
-    poll_commitments(self)
-
+    # Sync events first so ReservationExtensionFinalized writes from the
+    # previous block reach state_store before the per-row finalize/init loop
+    # reads them.
     try:
         self.event_watcher.sync_to(self.block)
+        bt.logging.info('forward: events synced')
     except Exception as e:
         bt.logging.warning(f'Event watcher sync failed: {e}')
 
+    # Init runs *before* purge so maybe_finalize_reservation gets a chance to
+    # fire on rows whose original reserved_until has just lapsed. A successful
+    # finalize bumps state_store.reserved_until in-line (see
+    # try_extend_reservation), so the subsequent purge sees the fresh deadline
+    # and leaves the row alone. Without this ordering, any propose whose
+    # finalize-eligible step lands at-or-after the original reserved_until
+    # would be silently lost to the purge before init ever sees the row.
+    initialize_pending_user_reservations(self)
+
+    purged = self.state_store.purge_expired_pending_confirms()
+    if purged:
+        bt.logging.info(
+            f'forward: purged {purged} expired pending_confirms (reservations elapsed without tx confirmation)'
+        )
+
+    poll_commitments(self)
+
     # Pull newly-initiated and resolved swaps off the contract.
     await tracker.poll()
+    bt.logging.info('forward: tracker polled')
 
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
     # set is swap IDs where the provider was unreachable this cycle, so the
     # timeout phase knows to skip them (transient outage shouldn't slash).
     uncertain_swaps = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
+    bt.logging.info('forward: fulfillments verified')
 
     extend_fulfilled_near_timeout(self)
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
     if self.step % SCORING_WINDOW_BLOCKS == 0:
         score_and_reward_miners(self)
+        bt.logging.info('forward: scoring done')
 
 
 def clear_provider_caches(self: Validator) -> None:
@@ -75,14 +95,12 @@ def clear_provider_caches(self: Validator) -> None:
 
 def initialize_pending_user_reservations(self: Validator) -> None:
     """Check queued unconfirmed txs and vote_initiate when confirmations are met."""
-    from substrateinterface import Keypair
+    from bittensor import Keypair
 
     items = self.state_store.get_all()
     # Drop per-entry receipts whose pending_confirm has been removed
     # (vote_initiate landed, tx not found, expired, etc.).
     live_keys = {(item.miner_hotkey, item.from_tx_hash) for item in items}
-    for stale_key in [k for k in self.extend_reservation_voted_at if k not in live_keys]:
-        del self.extend_reservation_voted_at[stale_key]
     for stale_key in [k for k in self.pending_confirm_null_polls if k not in live_keys]:
         del self.pending_confirm_null_polls[stale_key]
 
@@ -90,26 +108,27 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         return
 
     current_block = self.block
+    # One {hotkey: uid} pass replaces an O(N) list scan per row when sizing
+    # up the per-row log prefix.
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(self.metagraph.hotkeys)}
 
     for item in items:
         swap_label = f'{item.from_chain.upper()}->{item.to_chain.upper()}'
-        try:
-            uid = self.metagraph.hotkeys.index(item.miner_hotkey)
-        except ValueError:
-            uid = '?'
+        uid = hotkey_to_uid.get(item.miner_hotkey, '?')
         miner_short = f'UID {uid} ({item.miner_hotkey[:8]})'
-        chain_def = self.chain_providers.get(item.from_chain)
-        min_confs = chain_def.get_chain().min_confirmations if chain_def else '?'
-
-        try:
-            if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
-                self.state_store.remove(item.miner_hotkey)
-                bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
-                continue
-        except Exception as e:
-            bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
-
         provider = self.chain_providers.get(item.from_chain)
+        min_confs = provider.get_chain().min_confirmations if provider else '?'
+
+        # In-memory fast path; only verify with contract before dropping (watcher could be stale).
+        if self.event_watcher.open_swap_count.get(item.miner_hotkey, 0) > 0:
+            try:
+                if self.contract_client.get_miner_has_active_swap(item.miner_hotkey):
+                    self.state_store.remove(item.miner_hotkey)
+                    bt.logging.info(f'PendingConfirm [{swap_label} {miner_short}]: already has active swap, dropping')
+                    continue
+            except Exception as e:
+                bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: active swap check failed: {e}')
+
         if provider is None:
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
@@ -127,7 +146,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             )
         except ProviderUnreachableError as e:
             bt.logging.warning(f'PendingConfirm [{swap_label} {miner_short}]: provider unreachable, will retry: {e}')
-            try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(self, item, current_block, swap_label, miner_short, tx_info=None)
             continue
         except Exception as e:
             bt.logging.error(f'PendingConfirm [{swap_label} {miner_short}]: verify_transaction error: {e}')
@@ -142,7 +161,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
                     f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... '
                     f'not found (attempt {attempts}/{PENDING_CONFIRM_NULL_RETRY_LIMIT}), retrying'
                 )
-                try_extend_reservation(self, item, current_block, swap_label, miner_short)
+                try_extend_reservation(self, item, current_block, swap_label, miner_short, tx_info=None)
                 continue
             self.state_store.remove(item.miner_hotkey)
             bt.logging.warning(
@@ -161,7 +180,7 @@ def initialize_pending_user_reservations(self: Validator) -> None:
         )
 
         if not tx_info.confirmed:
-            try_extend_reservation(self, item, current_block, swap_label, miner_short)
+            try_extend_reservation(self, item, current_block, swap_label, miner_short, tx_info=tx_info)
             continue
 
         # Only drop the queued entry once the vote is accepted (or the contract
@@ -225,42 +244,103 @@ def try_extend_reservation(
     current_block: int,
     swap_label: str,
     miner_short: str,
+    tx_info,
 ) -> None:
-    """Vote to extend reservation if nearing expiry, protecting users during provider outages."""
-    from substrateinterface import Keypair
+    """Drive the tiered optimistic-extension decisions for one pending confirm.
+
+    Finalize is unconditional — another validator may have proposed while we
+    couldn't see the tx, and we should still help close its window. Propose
+    and challenge require *visibility* (``tx_info != None``); the watcher
+    itself enforces the per-tier evidence rule (tier 0: visibility OK; tier 1:
+    confirmations >= 1; tier 2+: refused).
+    """
+    # ``current_block`` from the caller was captured at step start; verifying
+    # each pending confirm before this one can burn many blocks. Refresh so
+    # the EXTEND_THRESHOLD_BLOCKS gate matches the height the propose tx will
+    # actually land at, not where the step began.
+    try:
+        current_block = self.subtensor.get_current_block()
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: refresh current_block failed: {e}')
 
     try:
         reserved_until = self.contract_client.get_miner_reserved_until(item.miner_hotkey)
-        if reserved_until >= current_block + EXTEND_THRESHOLD_BLOCKS:
-            return
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: reserved_until read failed: {e}')
+        reserved_until = item.reserved_until
 
-        vote_key = (item.miner_hotkey, item.from_tx_hash)
-        voted_at = self.extend_reservation_voted_at.get(vote_key)
-        if voted_at is not None and reserved_until <= voted_at:
-            return  # already voted under this reservation; contract hasn't extended yet
+    # One pending-extension fetch shared across finalize/challenge/propose;
+    # used to be three separate RPCs per row per step.
+    pending = self.optimistic_extensions.fetch_pending_reservation(item.miner_hotkey)
 
-        miner_bytes = bytes.fromhex(Keypair(ss58_address=item.miner_hotkey).public_key.hex())
-        extend_hash = keccak256(scale_encode_extend_hash_input(miner_bytes, item.from_tx_hash))
-        self.contract_client.vote_extend_reservation(
-            wallet=self.wallet,
-            request_hash=extend_hash,
-            miner_hotkey=item.miner_hotkey,
-            from_tx_hash=item.from_tx_hash,
+    finalized_target = self.optimistic_extensions.maybe_finalize_reservation(
+        miner_hotkey=item.miner_hotkey,
+        current_block=current_block,
+        challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
+        pending=pending,
+    )
+    if finalized_target is not None:
+        # Same-step write so the upstream purge sweep sees the bumped deadline.
+        # The matching ReservationExtensionFinalized event won't be picked up
+        # until the next forward step's event_watcher.sync_to.
+        self.state_store.update_reserved_until(item.miner_hotkey, finalized_target)
+        reserved_until = finalized_target
+        # The just-finalized proposal is gone from contract storage; refresh
+        # so downstream challenge/propose see the post-finalize state instead
+        # of a stale "still pending" snapshot.
+        pending = None
+
+    if tx_info is None:
+        return
+    if reserved_until >= current_block + EXTEND_THRESHOLD_BLOCKS:
+        return
+
+    try:
+        extension_count = self.contract_client.get_reservation_extension_count(item.miner_hotkey)
+    except Exception as e:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extension_count read failed: {e}')
+        return
+
+    self.optimistic_extensions.maybe_challenge_reservation(
+        miner_hotkey=item.miner_hotkey,
+        from_chain_id=item.from_chain,
+        observed_confirmations=tx_info.confirmations,
+        current_block=current_block,
+        reserved_until=reserved_until,
+        pending=pending,
+    )
+
+    try:
+        from_tx_hash_bytes = bytes.fromhex(strip_hex_prefix(item.from_tx_hash))
+    except ValueError:
+        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: malformed from_tx_hash, skipping propose')
+        return
+    if len(from_tx_hash_bytes) != 32:
+        # The contract's `Hash` parameter is fixed at 32 bytes and the SCALE
+        # encoder silently pads/truncates anything else, which would emit an
+        # event topic that doesn't match the user's actual tx_hash. Bail.
+        bt.logging.debug(
+            f'PendingConfirm [{swap_label} {miner_short}]: from_tx_hash is '
+            f'{len(from_tx_hash_bytes)}B, expected 32; skipping propose'
         )
-        self.extend_reservation_voted_at[vote_key] = reserved_until
+        return
+
+    proposed = self.optimistic_extensions.maybe_propose_reservation(
+        miner_hotkey=item.miner_hotkey,
+        from_chain_id=item.from_chain,
+        from_tx_hash=from_tx_hash_bytes,
+        current_block=current_block,
+        reserved_until=reserved_until,
+        observed_confirmations=tx_info.confirmations,
+        extension_count=extension_count,
+        pending=pending,
+    )
+    if proposed:
         bt.logging.info(
             f'PendingConfirm [{swap_label} {miner_short}]: '
-            f'voted to extend reservation ({reserved_until - current_block} blocks remaining)'
+            f'proposed reservation extension (tier {extension_count}, '
+            f'{reserved_until - current_block} blocks remaining, {tx_info.confirmations} confs)'
         )
-    except ContractError as e:
-        if 'AlreadyVoted' in str(e):
-            self.extend_reservation_voted_at[(item.miner_hotkey, item.from_tx_hash)] = (
-                self.contract_client.get_miner_reserved_until(item.miner_hotkey)
-            )
-        else:
-            bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend vote: {e}')
-    except Exception as e:
-        bt.logging.debug(f'PendingConfirm [{swap_label} {miner_short}]: extend check failed: {e}')
 
 
 def poll_commitments(self: Validator) -> None:
@@ -313,6 +393,7 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     for hk in stale:
         self.state_store.delete_hotkey(hk)
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
+    bt.logging.info(f'forward: dropped state for {len(stale)} deregistered miner(s)')
 
 
 async def confirm_miner_fulfillments(
@@ -344,21 +425,42 @@ async def confirm_miner_fulfillments(
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+            # On vote failure, voting.confirm_swap already logs the error;
+            # the entry stays in tracker and retries next step.
+        else:
+            bt.logging.debug(f'Swap {swap.id}: verification incomplete this cycle, deferring confirm')
     return uncertain
 
 
 def extend_fulfilled_near_timeout(self: Validator) -> None:
-    """Vote to extend timeout for FULFILLED swaps whose dest tx is visible
-    on-chain but not yet at min confirmations."""
+    """Drive tiered optimistic timeout extensions for FULFILLED swaps near
+    deadline. Same dispatch shape as ``try_extend_reservation``: finalize
+    always; propose/challenge fire on visibility, with the watcher enforcing
+    per-tier evidence rules.
+    """
     tracker: SwapTracker = self.swap_tracker
     current_block = self.block
 
     for swap in tracker.get_near_timeout_fulfilled(current_block):
-        if tracker.is_extend_timeout_voted(swap.id):
-            continue
-
         swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
         ctx = f'Swap #{swap.id} [{swap_label}]'
+
+        # One pending-extension fetch shared across finalize/challenge/propose.
+        pending = self.optimistic_extensions.fetch_pending_timeout(swap.id)
+
+        finalized_target = self.optimistic_extensions.maybe_finalize_timeout(
+            swap_id=swap.id,
+            current_block=current_block,
+            challenge_window_blocks=CHALLENGE_WINDOW_BLOCKS,
+            pending=pending,
+        )
+        if finalized_target is not None:
+            # Same-step write so enforce_swap_timeouts (which runs immediately
+            # after this loop) reads the bumped deadline rather than the
+            # pre-finalize value the next event sync would otherwise carry in.
+            tracker.update_timeout_block(swap.id, finalized_target)
+            # Just-finalized proposal is gone from contract storage.
+            pending = None
 
         provider = self.chain_providers.get(swap.to_chain)
         if not provider or not swap.to_tx_hash:
@@ -376,7 +478,13 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             continue
 
         if tx_info is None:
-            continue  # dest tx not found — let it time out
+            continue  # dest tx invisible — neither tier qualifies
+
+        try:
+            extension_count = self.contract_client.get_swap_extension_count(swap.id)
+        except Exception as e:
+            bt.logging.debug(f'{ctx}: extension_count read failed: {e}')
+            continue
 
         chain_def = provider.get_chain()
         log_on_change(
@@ -386,20 +494,28 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             f'{swap.timeout_block - current_block} blocks until timeout',
         )
 
-        try:
-            voting.extend_swap_timeout(self.contract_client, self.wallet, swap.id)
-            tracker.mark_extend_timeout_voted(swap.id)
+        self.optimistic_extensions.maybe_challenge_timeout(
+            swap_id=swap.id,
+            dest_chain_id=swap.to_chain,
+            observed_confirmations=tx_info.confirmations,
+            current_block=current_block,
+            timeout_block=swap.timeout_block,
+            pending=pending,
+        )
+        proposed = self.optimistic_extensions.maybe_propose_timeout(
+            swap_id=swap.id,
+            dest_chain_id=swap.to_chain,
+            current_block=current_block,
+            timeout_block=swap.timeout_block,
+            observed_confirmations=tx_info.confirmations,
+            extension_count=extension_count,
+            pending=pending,
+        )
+        if proposed:
             bt.logging.info(
-                f'{ctx}: voted to extend timeout '
-                f'({tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
+                f'{ctx}: proposed timeout extension (tier {extension_count}, '
+                f'{tx_info.confirmations}/{chain_def.min_confirmations} dest confirmations)'
             )
-        except ContractError as e:
-            if 'AlreadyVoted' in str(e):
-                tracker.mark_extend_timeout_voted(swap.id)
-            elif not is_contract_rejection(e):
-                bt.logging.debug(f'{ctx}: extend timeout vote: {e}')
-        except Exception as e:
-            bt.logging.debug(f'{ctx}: extend timeout failed: {e}')
 
 
 def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps: Set[int]) -> None:
@@ -414,3 +530,4 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
         if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
             bt.logging.warning(f'Swap {swap.id}: timed out')
+        # On vote failure, voting.timeout_swap already logs the error.

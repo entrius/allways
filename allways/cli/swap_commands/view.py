@@ -20,14 +20,26 @@ from allways.cli.swap_commands.helpers import (
     console,
     from_rao,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
+    probe_pending_reservation,
     read_miner_commitments,
 )
-from allways.constants import FEE_DIVISOR
+from allways.constants import (
+    CHALLENGE_WINDOW_BLOCKS,
+    FEE_DIVISOR,
+    MAX_EXTENSION_BLOCKS,
+    MAX_EXTENSIONS_PER_RESERVATION,
+    MAX_EXTENSIONS_PER_SWAP,
+)
 from allways.contract_client import ContractError
 
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
+
+
+def _dashboard_url() -> str:
+    return os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
 
 
 @click.group('view', cls=StyledGroup)
@@ -593,16 +605,30 @@ def view_active_swaps(status: str):
     console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def build_swap_text(swap, chain_info=True, current_block: int = 0):
+def build_swap_text(swap, chain_info=True, current_block: int = 0, client=None):
     """Build swap display as a Rich markup string.
 
     ``current_block`` — when > 0 and the swap is still in-flight, a "Now"
     row is added to the timeline showing how many blocks remain until
     timeout. Gives the reader a frame of reference without having to
     cross-check against ``alw status``.
+
+    ``client`` — when provided and the swap is in-flight, the optimistic-
+    extension state (count + any pending proposal) is fetched and rendered.
+    Best-effort: read failures fall back to no extension info rather than
+    aborting the swap render.
     """
     color = SWAP_STATUS_COLORS.get(swap.status, 'white')
-    parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]\n']
+    parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]']
+
+    # In-flight status hint — answers "what's being waited on" so the
+    # `○ Completed —` row in the timeline below has context. Mirrors the
+    # per-status copy on the dashboard's swap detail page.
+    if swap.status == SwapStatus.ACTIVE:
+        parts.append('  [dim]Awaiting miner fulfillment — destination tx incoming.[/dim]')
+    elif swap.status == SwapStatus.FULFILLED:
+        parts.append('  [dim]Awaiting validator quorum — destination delivered, votes pending.[/dim]')
+    parts.append('')
 
     src = swap.from_chain.upper()
     dst = swap.to_chain.upper()
@@ -648,6 +674,34 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0):
         else:
             parts.append(f'    [cyan]⏲ Now            Block {current_block}[/cyan]  [red](past timeout)[/red]')
 
+    if client is not None and in_flight:
+        try:
+            ext_count = client.get_swap_extension_count(swap.id)
+        except ContractError:
+            ext_count = None
+        try:
+            pending = client.get_pending_timeout_extension(swap.id)
+        except ContractError:
+            pending = None
+        if ext_count is not None or pending is not None:
+            parts.append('')
+            parts.append('  [bold]Extensions:[/bold]')
+            if ext_count is not None:
+                parts.append(f'    Used: {ext_count}/{MAX_EXTENSIONS_PER_SWAP}')
+            if pending is not None and current_block > 0:
+                finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
+                blocks_until_finalize = max(0, finalize_at - current_block)
+                target_blocks = max(0, pending.target_block - current_block)
+                target_min = target_blocks * SECONDS_PER_BLOCK / 60
+                if blocks_until_finalize > 0:
+                    finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
+                else:
+                    finalize_hint = 'finalize window open'
+                parts.append(
+                    f'    Pending: target block {pending.target_block} (~{target_min:.0f} min) · '
+                    f'{finalize_hint} · by {pending.submitter[:16]}...'
+                )
+
     parts.append('')
     parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
     parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
@@ -667,9 +721,9 @@ def build_swap_text(swap, chain_info=True, current_block: int = 0):
     return '\n'.join(parts)
 
 
-def display_swap(swap, chain_info=True, current_block: int = 0):
+def display_swap(swap, chain_info=True, current_block: int = 0, client=None):
     """Render a single swap with timeline view."""
-    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block))
+    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block, client=client))
 
 
 @view_group.command('swap')
@@ -701,11 +755,10 @@ def view_swap(swap_id: int, watch: bool):
             next_id = None
 
         if next_id is not None and swap_id < next_id:
-            dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
             console.print(
                 f'[green]Swap {swap_id} has been resolved (completed or timed out).[/green]\n'
                 f'[dim]Resolved swaps are removed from on-chain storage. '
-                f'View history at:[/dim] {dashboard_url}/swap/{swap_id}'
+                f'View history at:[/dim] {_dashboard_url()}/swap/{swap_id}'
             )
         elif next_id is not None:
             console.print(f'[red]Swap {swap_id} does not exist. Next swap ID: {next_id}.[/red]')
@@ -718,7 +771,7 @@ def view_swap(swap_id: int, watch: bool):
             current_block = subtensor.get_current_block()
         except Exception:
             current_block = 0
-        display_swap(swap, current_block=current_block)
+        display_swap(swap, current_block=current_block, client=client)
         return
 
     watch_swap(client, swap_id, swap)
@@ -752,7 +805,7 @@ def watch_swap(client, swap_id: int, swap=None):
             return 0
 
     def render(s, chain_info=True, watching=True, current_block=0):
-        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block)
+        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block, client=client)
         if watching:
             markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
         return Text.from_markup(markup)
@@ -822,6 +875,9 @@ def view_contract():
             total_recycled_rao = client.get_total_recycled_fees()
             owner = client.get_owner()
             recycle_address = client.get_recycle_address()
+            staking_hotkey = client.get_staking_hotkey()
+            recycle_netuid = client.get_netuid()
+            chain_ext_enabled = client.get_chain_ext_enabled()
             halted = client.get_halted()
     except ContractError as e:
         console.print(f'[red]Failed to read contract parameters: {e}[/red]')
@@ -838,8 +894,11 @@ def view_contract():
     # Collapsed: the threshold is the knob, required_votes is what it resolves
     # to at current validator_count — showing both on separate rows read as
     # redundant (especially on small validator sets where they coincide).
+    # Consensus quorum applies to vote_reserve / vote_initiate / vote_confirm /
+    # vote_timeout — extensions follow the optimistic propose/challenge/finalize
+    # path instead, so this row deliberately does not cover them.
     table.add_row(
-        'Consensus',
+        'Consensus (reserve/initiate/confirm/timeout)',
         f'{consensus_threshold}% → {required_votes} of {validator_count} validators needed',
     )
     # Contract treats 0 as "bound disabled" (see lib.rs::vote_reserve — the
@@ -862,12 +921,39 @@ def view_contract():
         'Max Swap Amount',
         f'{from_rao(max_swap_rao):.4f} TAO' if max_swap_rao > 0 else 'Unlimited',
     )
+    # Optimistic extension parameters. These are contract constants (no
+    # on-chain getter), mirrored from allways/constants.py and held in lock-
+    # step with smart-contracts/ink/lib.rs — a redeploy is the only way to
+    # change them. Surfaced here so users can predict how long their swap
+    # can be held alive before forced timeout.
+    challenge_window_minutes = CHALLENGE_WINDOW_BLOCKS * SECONDS_PER_BLOCK / 60
+    max_ext_minutes = MAX_EXTENSION_BLOCKS * SECONDS_PER_BLOCK / 60
+    table.add_row(
+        'Extension Challenge Window',
+        f'{CHALLENGE_WINDOW_BLOCKS} blocks (~{challenge_window_minutes:.0f} min)',
+    )
+    table.add_row(
+        'Max Extension Length',
+        f'{MAX_EXTENSION_BLOCKS} blocks (~{max_ext_minutes:.0f} min) per finalize',
+    )
+    table.add_row('Max Extensions / Reservation', str(MAX_EXTENSIONS_PER_RESERVATION))
+    table.add_row('Max Extensions / Swap', str(MAX_EXTENSIONS_PER_SWAP))
     table.add_row('Next Swap ID', str(next_swap_id))
     table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
     table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
     table.add_row('Owner', owner)
-    if recycle_address:
-        table.add_row('Recycle Address', recycle_address)
+    # Recycle path. Pre-latch (chain_ext_enabled = false): `recycle_fees`
+    # transfers to the immutable custodial fallback. Post-latch: dispatches
+    # via the subtensor `add_stake_recycle` chain extension to
+    # (staking_hotkey, netuid). The latch is one-way; flipped by the owner
+    # via `alw admin enable-chain-ext`.
+    if chain_ext_enabled:
+        table.add_row(
+            'Recycle Path', f'[green]chain ext (latched)[/green] → {staking_hotkey} on netuid {recycle_netuid}'
+        )
+    else:
+        table.add_row('Recycle Path', f'[yellow]custodial (pre-latch)[/yellow] → {recycle_address}')
+        table.add_row('Latch Target', f'{staking_hotkey} on netuid {recycle_netuid}')
     table.add_row('System Status', '[red]HALTED[/red]' if halted else '[green]Running[/green]')
 
     console.print(table)
@@ -948,7 +1034,8 @@ def view_validators():
     console.print(table)
     console.print(
         f'\n[dim]Total: {len(validators)} validators · '
-        f'consensus {consensus_threshold}% → {required} votes needed for quorum.[/dim]\n'
+        f'consensus {consensus_threshold}% → {required} votes needed for quorum on '
+        f'reserve/initiate/confirm/timeout. Optimistic extensions use propose+challenge instead.[/dim]\n'
     )
 
 
@@ -968,30 +1055,26 @@ def view_reservation():
         console.print('\n[yellow]No active reservation found.[/yellow]')
         console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
         return
+    hydrated = hydrate_pending_swap(state, client)
 
-    # Validate against on-chain state. When the reservation struct is gone,
-    # disambiguate expired-by-TTL from consumed-by-vote_initiate by probing
-    # the miner for an active swap we can match back to this reservation.
-    consumed_swap = None
-    try:
-        with loading('Reading reservation...'):
-            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-            current_block = subtensor.get_current_block()
-            on_chain_reservation = client.get_reservation_data(state.miner_hotkey)
-            if reserved_until == 0 and on_chain_reservation is None:
-                if client.get_miner_has_active_swap(state.miner_hotkey):
-                    for swap in client.get_miner_active_swaps(state.miner_hotkey):
-                        if (
-                            swap.user_from_address == state.user_from_address
-                            or swap.user_to_address == state.receive_address
-                        ):
-                            consumed_swap = swap
-                            break
-    except ContractError as e:
-        console.print(f'[red]Failed to read reservation status: {e}[/red]')
+    current_block = subtensor.get_current_block()
+    with loading('Reading reservation...'):
+        status = probe_pending_reservation(client, state, current_block)
+
+    if status.kind == 'rpc_error':
+        console.print('[red]Failed to read reservation status from contract.[/red]')
         return
 
-    is_active = reserved_until > current_block
+    # No matching on-chain reservation — local file is stale; clearing it
+    # also avoids a `get_chain('')` crash in the table renderer below.
+    if not hydrated:
+        console.print('\n[yellow]No active reservation.[/yellow]')
+        console.print(
+            '[dim]Local state referenced a reservation that is no longer on-chain — cleared. '
+            'If your reservation already advanced into a swap, check: [cyan]alw view active-swaps[/cyan][/dim]\n'
+        )
+        clear_pending_swap()
+        return
 
     console.print('\n[bold]Swap Reservation[/bold]\n')
 
@@ -1014,42 +1097,78 @@ def view_reservation():
     table.add_row(f'  to (your {dst_up})', state.receive_address)
     table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
 
-    if on_chain_reservation:
-        chain_tao, chain_from, chain_to = on_chain_reservation
-        mismatch = chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount
-        if mismatch:
-            table.add_row('Chain Amounts', '[red]mismatch with local state[/red]')
-        else:
-            table.add_row('Chain Amounts', f'[green]✓ locked {from_rao(chain_tao):.4f} TAO[/green]')
+    if status.kind == 'ours_active':
+        table.add_row('Chain Amounts', f'[green]✓ locked {from_rao(state.tao_amount):.4f} TAO[/green]')
 
-    if is_active:
-        remaining = reserved_until - current_block
+    sent_tx_hash = (state.from_tx_hash or '').strip()
+
+    if status.kind == 'ours_active':
+        remaining = max(0, status.reserved_until - current_block)
         remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
         table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
-    elif consumed_swap is not None:
-        table.add_row('Status', f'[green]INITIATED (swap #{consumed_swap.id})[/green]')
-        table.add_row('Swap Status', consumed_swap.status.name)
-    else:
+        # Optimistic-extension visibility — silent on read failure: best-effort
+        # signal, not core to the reservation status.
+        try:
+            ext_count = client.get_reservation_extension_count(state.miner_hotkey)
+            table.add_row('Extensions', f'{ext_count}/{MAX_EXTENSIONS_PER_RESERVATION}')
+        except ContractError:
+            pass
+        try:
+            pending = client.get_pending_reservation_extension(state.miner_hotkey)
+        except ContractError:
+            pending = None
+        if pending is not None:
+            finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
+            blocks_until_finalize = max(0, finalize_at - current_block)
+            target_blocks = max(0, pending.target_block - current_block)
+            target_min = target_blocks * SECONDS_PER_BLOCK / 60
+            if blocks_until_finalize > 0:
+                finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
+            else:
+                finalize_hint = 'finalize window open'
+            table.add_row(
+                'Pending Extension',
+                f'target block {pending.target_block} (~{target_min:.0f} min) · {finalize_hint} · '
+                f'by {pending.submitter[:16]}...',
+            )
+        if sent_tx_hash:
+            tx_display = sent_tx_hash if len(sent_tx_hash) <= 24 else sent_tx_hash[:24] + '...'
+            table.add_row(f'Source TX ({src_up})', tx_display)
+    elif status.kind == 'our_swap':
+        table.add_row('Status', f'[green]INITIATED (swap #{status.swap.id})[/green]')
+        table.add_row('Swap Status', status.swap.status.name)
+    else:  # 'replaced' or 'expired'
         table.add_row('Status', '[yellow]NO LONGER ACTIVE[/yellow]')
         table.add_row('Time Remaining', '—')
 
     console.print(table)
+    console.print(f'\n[dim]Dashboard: {_dashboard_url()}/reservations/by-source/{state.user_from_address}[/dim]')
 
-    if is_active:
+    if status.kind == 'ours_active':
+        if sent_tx_hash:
+            console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{sent_tx_hash}[/cyan]')
+            console.print(
+                '[dim]Validators are waiting on source-chain confirmations before initiating the swap '
+                'on-chain. Nothing more to do — leave this reservation alone until it either initiates '
+                'or expires.[/dim]'
+            )
+            console.print('\n[dim]If validators never picked up your confirm, re-broadcast it with:[/dim]')
+            console.print(f'  [bold cyan]alw swap post-tx {sent_tx_hash}[/bold cyan]\n')
+        else:
+            console.print(
+                f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
+                f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
+            )
+            console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
+    elif status.kind == 'our_swap':
         console.print(
-            f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
-            f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
+            f'\n[green]Reservation was consumed into swap #{status.swap.id} — it is in progress on-chain.[/green]'
         )
-        console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
-    elif consumed_swap is not None:
-        console.print(
-            f'\n[green]Reservation was consumed into swap #{consumed_swap.id} — it is in progress on-chain.[/green]'
-        )
-        console.print(f'[dim]Watch with: alw view swap {consumed_swap.id} --watch[/dim]')
+        console.print(f'[dim]Watch with: alw view swap {status.swap.id} --watch[/dim]')
         clear_pending_swap()
         console.print('[dim]Local reservation state cleared.[/dim]\n')
-    else:
+    else:  # 'replaced' or 'expired'
         console.print(
             '\n[yellow]Reservation is no longer active on-chain.[/yellow]\n'
             '[dim]Either the reservation expired before you sent funds, or your swap already '

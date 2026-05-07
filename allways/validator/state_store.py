@@ -114,6 +114,21 @@ class ValidatorStateStore:
             conn.commit()
         return self.row_to_pending(row)
 
+    def update_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
+        """Refresh the cached reserved_until on an existing pending_confirms row.
+
+        Called after the contract's reservation has been extended on-chain — without
+        this, the row's stale value causes ``purge_expired_pending_confirms`` to
+        delete a still-live entry the moment the original TTL elapses.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
+                (reserved_until, miner_hotkey),
+            )
+            conn.commit()
+
     def has(self, miner_hotkey: str) -> bool:
         with self.lock:
             conn = self.require_connection()

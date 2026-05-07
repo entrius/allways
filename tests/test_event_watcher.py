@@ -11,7 +11,7 @@ import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from substrateinterface.utils.ss58 import ss58_decode
+from bittensor.utils import ss58_decode
 
 from allways.validator.event_watcher import (
     ContractEventWatcher,
@@ -105,6 +105,63 @@ class TestSwapOutcomePersistence:
         w.apply_event(102, 'SwapTimedOut', {'swap_id': 3, 'miner': 'hk_a'})
         stats = w.state_store.get_success_rates_since(0)
         assert stats['hk_a'] == (2, 1)
+        w.state_store.close()
+
+    def test_completed_event_resolves_tracker(self, tmp_path: Path):
+        from allways.validator.swap_tracker import SwapTracker
+
+        w = make_watcher(tmp_path)
+        tracker = SwapTracker(client=MagicMock())
+        from allways.classes import Swap, SwapStatus
+
+        tracker.active[42] = Swap(
+            id=42,
+            user_hotkey='u',
+            miner_hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=1,
+            to_amount=1,
+            tao_amount=1,
+            user_from_address='u',
+            user_to_address='u',
+            status=SwapStatus.FULFILLED,
+            initiated_block=1,
+            timeout_block=100,
+        )
+        w.swap_tracker = tracker
+
+        w.apply_event(150, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
+
+        assert 42 not in tracker.active
+        w.state_store.close()
+
+    def test_timed_out_event_resolves_tracker(self, tmp_path: Path):
+        from allways.classes import Swap, SwapStatus
+        from allways.validator.swap_tracker import SwapTracker
+
+        w = make_watcher(tmp_path)
+        tracker = SwapTracker(client=MagicMock())
+        tracker.active[43] = Swap(
+            id=43,
+            user_hotkey='u',
+            miner_hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=1,
+            to_amount=1,
+            tao_amount=1,
+            user_from_address='u',
+            user_to_address='u',
+            status=SwapStatus.FULFILLED,
+            initiated_block=1,
+            timeout_block=100,
+        )
+        w.swap_tracker = tracker
+
+        w.apply_event(200, 'SwapTimedOut', {'swap_id': 43, 'miner': 'hk_a'})
+
+        assert 43 not in tracker.active
         w.state_store.close()
 
 

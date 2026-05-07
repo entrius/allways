@@ -1,17 +1,16 @@
-"""SwapTracker: active-set management, null-swap retries, RPC resilience.
+"""SwapTracker: active-set management and RPC resilience.
 
-Outcome persistence moved to ``ContractEventWatcher`` in C14 — SwapTracker
-no longer writes to ``swap_outcomes``. These tests cover what the tracker
-actually owns: maintaining the active set as swaps move through their
-lifecycle and tolerating per-swap RPC flakes without aborting the forward
-step.
+Outcome persistence is owned by ``ContractEventWatcher``, and resolution
+is event-driven: SwapCompleted/SwapTimedOut → tracker.resolve(). The
+tracker holds an authoritative active set; transient None / RPC errors
+during refresh are treated as "no information", never as resolution.
 """
 
 import asyncio
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.swap_tracker import NULL_SWAP_RETRY_LIMIT, SwapTracker
+from allways.validator.swap_tracker import MAX_INIT_GAP, SwapTracker
 
 
 def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500) -> Swap:
@@ -34,7 +33,7 @@ def make_swap(swap_id: int, miner_hotkey: str = 'hk_a', timeout_block: int = 500
 
 def make_tracker() -> SwapTracker:
     client = MagicMock()
-    return SwapTracker(client=client, fulfillment_timeout_blocks=30)
+    return SwapTracker(client=client)
 
 
 class TestResolve:
@@ -47,17 +46,15 @@ class TestResolve:
 
         assert 45 not in tracker.active
 
-    def test_resolve_clears_voted_and_retry_state(self):
+    def test_resolve_clears_voted_state(self):
         tracker = make_tracker()
         swap = make_swap(swap_id=46)
         tracker.active[swap.id] = swap
         tracker.mark_voted(46)
-        tracker.null_retry_count[46] = 2
 
         tracker.resolve(swap_id=46, status=SwapStatus.COMPLETED, block=300)
 
         assert not tracker.is_voted(46)
-        assert 46 not in tracker.null_retry_count
 
     def test_resolve_unknown_swap_is_noop(self):
         tracker = make_tracker()
@@ -70,7 +67,7 @@ class TestInitialize:
         tracker = make_tracker()
         tracker.client.get_next_swap_id.return_value = 1  # next_id=1 means no swaps exist
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert tracker.last_scanned_id == 0
         assert tracker.active == {}
@@ -78,52 +75,68 @@ class TestInitialize:
     def test_initialize_picks_up_active_swaps_from_backward_scan(self):
         tracker = make_tracker()
         swap_active = make_swap(swap_id=10)
-        swap_active.initiated_block = 990
         swap_fulfilled = make_swap(swap_id=11)
         swap_fulfilled.status = SwapStatus.FULFILLED
-        swap_fulfilled.initiated_block = 995
 
         tracker.client.get_next_swap_id.return_value = 12
         tracker.client.get_swap.side_effect = lambda sid: {10: swap_active, 11: swap_fulfilled}.get(sid)
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert 10 in tracker.active
         assert 11 in tracker.active
         assert tracker.last_scanned_id == 11
 
-    def test_initialize_stops_at_cutoff_block(self):
-        """Backward scan halts when it reaches a swap older than the cutoff."""
+    def test_initialize_recovers_old_orphaned_active_swap(self):
+        """An ACTIVE swap older than any cold-start time window must be picked
+        up — it is the exact case (validator outage long enough that no one
+        voted timeout) the recovery scan exists for.
+        """
         tracker = make_tracker()
-        stale = make_swap(swap_id=5)
-        stale.initiated_block = 900  # below 1000 - 30 = 970 cutoff
-        active = make_swap(swap_id=6)
-        active.initiated_block = 980
+        ancient = make_swap(swap_id=1)
+        ancient.initiated_block = 100  # arbitrarily old vs current_block
 
-        tracker.client.get_next_swap_id.return_value = 7
-        tracker.client.get_swap.side_effect = lambda sid: {5: stale, 6: active}.get(sid)
+        tracker.client.get_next_swap_id.return_value = 2
+        tracker.client.get_swap.side_effect = lambda sid: {1: ancient}.get(sid)
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
-        assert 5 not in tracker.active
-        assert 6 in tracker.active
+        assert 1 in tracker.active
+        assert tracker.last_scanned_id == 1
+
+    def test_initialize_halts_after_consecutive_pruned_swaps(self):
+        """A long run of pruned (None) swap IDs short-circuits the scan so
+        cold start stays bounded on contracts with millions of resolved swaps.
+        """
+        tracker = make_tracker()
+        recent = make_swap(swap_id=1000)
+        # swaps 1..999 all return None (pruned). The active swap at 1000 is
+        # found, then the scan walks 999..(1000 - MAX_INIT_GAP) Nones and stops.
+        tracker.client.get_next_swap_id.return_value = 1001
+        tracker.client.get_swap.side_effect = lambda sid: recent if sid == 1000 else None
+
+        tracker.initialize()
+
+        assert 1000 in tracker.active
+        # call_count == the active swap + MAX_INIT_GAP Nones before halting
+        assert tracker.client.get_swap.call_count == 1 + MAX_INIT_GAP
 
     def test_initialize_skips_terminal_swaps(self):
         tracker = make_tracker()
         completed = make_swap(swap_id=20)
         completed.status = SwapStatus.COMPLETED
-        completed.initiated_block = 990
 
         tracker.client.get_next_swap_id.return_value = 21
         tracker.client.get_swap.return_value = completed
 
-        tracker.initialize(current_block=1000)
+        tracker.initialize()
 
         assert 20 not in tracker.active
 
 
-class TestNullSwapRetry:
-    def test_transient_null_does_not_drop_immediately(self):
+class TestRefreshNullHandling:
+    def test_null_leaves_swap_in_active(self):
+        """Resolution is event-driven; refresh-time None is no-op."""
         tracker = make_tracker()
         swap = make_swap(swap_id=50)
         tracker.active[swap.id] = swap
@@ -132,43 +145,20 @@ class TestNullSwapRetry:
         tracker.client.get_next_swap_id.return_value = 51
         tracker.client.get_swap.return_value = None
 
-        asyncio.run(tracker.poll_inner())
+        for _ in range(5):
+            asyncio.run(tracker.poll_inner())
 
         assert 50 in tracker.active
-        assert tracker.null_retry_count.get(50) == 1
 
-    def test_null_drops_after_retry_limit(self):
+    def test_event_driven_resolve_drops_swap(self):
+        """The watcher's SwapCompleted/SwapTimedOut path drives resolution."""
         tracker = make_tracker()
         swap = make_swap(swap_id=51)
         tracker.active[swap.id] = swap
-        tracker.last_scanned_id = 51
 
-        tracker.client.get_next_swap_id.return_value = 52
-        tracker.client.get_swap.return_value = None
-
-        for _ in range(NULL_SWAP_RETRY_LIMIT):
-            asyncio.run(tracker.poll_inner())
+        tracker.resolve(swap_id=51, status=SwapStatus.COMPLETED, block=600)
 
         assert 51 not in tracker.active
-        assert 51 not in tracker.null_retry_count
-
-    def test_successful_refetch_resets_retry_count(self):
-        tracker = make_tracker()
-        swap = make_swap(swap_id=52)
-        tracker.active[swap.id] = swap
-        tracker.last_scanned_id = 52
-        tracker.null_retry_count[52] = 1
-
-        refreshed = make_swap(swap_id=52)
-        refreshed.status = SwapStatus.FULFILLED
-        tracker.client.get_next_swap_id.return_value = 53
-        tracker.client.get_swap.return_value = refreshed
-
-        asyncio.run(tracker.poll_inner())
-
-        assert 52 in tracker.active
-        assert tracker.active[52].status == SwapStatus.FULFILLED
-        assert 52 not in tracker.null_retry_count
 
     def test_terminal_status_drops_without_retry(self):
         tracker = make_tracker()
@@ -210,11 +200,12 @@ class TestRPCResilience:
 
         asyncio.run(tracker.poll_inner())
 
+        # Transient RPC error must not drop the swap — that's how a flaky WS
+        # used to silently strand still-active swaps.
         assert 60 in tracker.active
-        assert tracker.null_retry_count.get(60) == 1
         assert tracker.active[61].status == SwapStatus.FULFILLED
 
-    def test_exception_counts_toward_retry_limit(self):
+    def test_exception_does_not_drop_swap(self):
         tracker = make_tracker()
         tracker.active[70] = make_swap(swap_id=70)
         tracker.last_scanned_id = 70
@@ -222,10 +213,10 @@ class TestRPCResilience:
         tracker.client.get_next_swap_id.return_value = 71
         tracker.client.get_swap.side_effect = RuntimeError('rpc down')
 
-        for _ in range(NULL_SWAP_RETRY_LIMIT):
+        for _ in range(5):
             asyncio.run(tracker.poll_inner())
 
-        assert 70 not in tracker.active
+        assert 70 in tracker.active
 
     def test_discovery_exception_does_not_break_pass(self):
         """Flaky get_swap during new-ID discovery is skipped, not fatal."""

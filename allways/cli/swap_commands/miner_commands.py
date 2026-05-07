@@ -20,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     read_miner_commitment,
 )
+from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 
@@ -138,24 +139,6 @@ def miner_status(hotkey: str):
     console.print(f'\n[dim]Total: {len(swaps)} active swaps[/dim]\n')
 
 
-def friendly_rejection(reason: str) -> str:
-    """Convert raw validator rejection reasons into human-readable messages."""
-    if not reason:
-        return ''
-    r = reason.lower()
-    if 'already active' in r:
-        return 'miner is already active'
-    if 'ContractReverted' in reason or 'contractreverted' in r:
-        return 'contract reverted (collateral/validator issue)'
-    if 'insufficient collateral' in r:
-        return reason
-    if 'no commitment found' in r:
-        return 'no pair commitment found — run: alw pair set'
-    if 'not registered' in r:
-        return 'hotkey not registered on subnet'
-    return reason
-
-
 @miner_group.command('activate')
 def miner_activate():
     """Activate miner via dendrite broadcast to all validators.
@@ -203,26 +186,16 @@ def miner_activate():
 
     # Broadcast
     timeout = resolve_dendrite_timeout(60.0)
-    with loading(f'Broadcasting to {len(validator_axons)} validators...'):
+    with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
         responses = asyncio.get_event_loop().run_until_complete(
             dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
         )
 
-    # Show per-validator results
-    accepted = 0
-    no_response = 0
-    for i, resp in enumerate(responses):
-        if getattr(resp, 'accepted', None):
-            console.print(f'  Validator {i + 1}: [green]accepted[/green]')
-            accepted += 1
-            continue
-        raw_reason = getattr(resp, 'rejection_reason', '') or ''
-        if not raw_reason:
-            console.print(f'  Validator {i + 1}: [yellow]no response — timeout or validator down[/yellow]')
-            no_response += 1
-        else:
-            console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly_rejection(raw_reason)}')
-
+    info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
+    accepted = info.accepted
+    no_response = info.no_response
+    if accepted == 0 and info.headline:
+        console.print(f'\n[red]{info.headline}[/red]')
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')
 
     # Poll chain — the on-chain flag is authoritative. A validator can
@@ -244,18 +217,17 @@ def miner_activate():
         return
 
     if accepted == 0 and no_response == len(validator_axons):
-        console.print('[yellow]No validators responded within the dendrite timeout.[/yellow]')
         console.print('[dim]The chain may be slow — the vote could still land after this check.[/dim]')
         console.print('[dim]Retry with a longer timeout: ALW_DENDRITE_TIMEOUT=90 alw miner activate[/dim]')
         console.print('[dim]Or re-run `alw miner status` in a minute to see if activation completed.[/dim]\n')
-    elif accepted == 0:
-        console.print('[red]Activation failed — no validators accepted the request.[/red]')
-        console.print('[dim]Prerequisites:[/dim]')
+    elif accepted == 0 and info.category in ('', 'mixed', 'unmatched'):
+        # Translator couldn't pin down a single cause — fall back to the prerequisites checklist.
+        console.print('[dim]Prerequisites for activation:[/dim]')
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
         console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
         console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
         console.print('[dim]Run `alw miner status` to see which are missing.[/dim]\n')
-    else:
+    elif accepted > 0:
         console.print(
             '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
         )
