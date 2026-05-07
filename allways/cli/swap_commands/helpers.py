@@ -580,7 +580,10 @@ def resolve_source_tx_block(
         # If we can't reach subtensor the lookup can't proceed anyway — bail
         # honestly rather than fake a current-block guess and crash on the
         # first verify_transaction RPC.
-        console.print(f'[yellow]Skipping client-side tx lookup — subtensor unreachable ({type(e).__name__}).[/yellow]')
+        console.print(
+            f'[yellow]Skipping client-side tx lookup — '
+            f'subtensor unreachable ({type(e).__name__}).[/yellow]'
+        )
         return 0
     try:
         reservation_ttl = int(client.get_reservation_ttl())
