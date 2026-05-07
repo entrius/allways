@@ -647,6 +647,10 @@ def swap_now_command(
         pass
 
     # Validate provided chain options early
+    if from_chain_opt:
+        from_chain_opt = from_chain_opt.lower()
+    if to_chain_opt:
+        to_chain_opt = to_chain_opt.lower()
     if from_chain_opt and from_chain_opt not in SUPPORTED_CHAINS:
         console.print(f'[red]Unknown source chain: {from_chain_opt}[/red]')
         return
