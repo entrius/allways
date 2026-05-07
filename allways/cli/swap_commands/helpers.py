@@ -28,6 +28,21 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 
 console = Console()
 
+
+def parse_non_negative_int(value: str, param: str = 'netuid') -> int:
+    """Validate and convert a string to a non-negative integer.
+
+    Raises click.UsageError with a clear message on invalid input.
+    """
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value:
+        raise click.UsageError(f'{param} must not be empty')
+    if not value.isdigit():
+        raise click.UsageError(f'{param} must be a non-negative integer, got: {value!r}')
+    return int(value)
+
 SECONDS_PER_BLOCK = 12
 
 SWAP_STATUS_COLORS = {
@@ -247,7 +262,10 @@ def get_cli_context(
     if 'netuid' not in config:
         config['netuid'] = NETUID_FINNEY
     else:
-        config['netuid'] = int(config['netuid'])
+        try:
+            config['netuid'] = parse_non_negative_int(config['netuid'], param='netuid')
+        except click.UsageError as e:
+            raise click.UsageError(str(e)) from None
     return config, wallet, subtensor, client
 
 
