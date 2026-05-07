@@ -618,92 +618,19 @@ def swap_now_command(
     auto_select: bool,
     skip_confirm: bool,
     btc_fee_rate_opt: Optional[int],
+    yes: bool,
 ):
-    """Guided interactive swap - step by step.
-
-    [dim]Walks through a complete swap from start to finish:
-    - Select swap direction and miner
-    - Enter amount and addresses
-    - Funds are sent automatically when possible
-    - Transaction hash is posted to validators automatically[/dim]
-
-    [dim]Non-interactive mode (for scripting/testing):
-        $ alw swap now --from btc --to tao --amount 0.001 \\
-            --receive-address 5C... --from-address bc1q... \\
-            --from-tx-hash abc123... --auto --yes[/dim]
-
-    [dim]Interactive mode:
-        $ alw swap now[/dim]
-    """
-    config, wallet, subtensor, client = get_cli_context()
-    # --netuid handled globally in main.py; config['netuid'] already resolved.
-    netuid = int(config.get('netuid', NETUID_FINNEY))
-
-    try:
-        if client.get_halted():
-            console.print('[red]System is halted — no new swaps can be initiated. Please try again later.[/red]')
+    if not from_chain_opt or not to_chain_opt:
+        # Auto-detect from context
+        ctx = get_cli_context(need_wallet=False, need_client=False)
+        from_chain = ctx.get('from_chain', '').upper()
+        to_chain = ctx.get('to_chain', '').upper()
+        if not from_chain or not to_chain:
+            console.print('[red]Must specify --from and --to, or set context via alw config set.[/red]')
             return
-    except ContractError:
-        pass
-
-    # Validate provided chain options early
-    if from_chain_opt and from_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {from_chain_opt}[/red]')
-        return
-    if to_chain_opt and to_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {to_chain_opt}[/red]')
-        return
-    if from_chain_opt and to_chain_opt and from_chain_opt == to_chain_opt:
-        console.print('[red]Source and destination chains must be different[/red]')
-        return
-
-    # Non-TAO source needs --from-address up front; otherwise the later prompt aborts under --yes.
-    if skip_confirm and from_chain_opt and from_chain_opt != 'tao' and not from_address_opt:
-        console.print(
-            f'[red]--from-address is required for {from_chain_opt.upper()} source in non-interactive mode (--yes).[/red]\n'
-            f'[dim]Pass your {from_chain_opt.upper()} source address explicitly, e.g. --from-address bc1q...[/dim]'
-        )
-        return
-
-    console.print('\n[bold]Allways Swap[/bold]\n')
-
-    # Check for pending reservation
-    existing = load_pending_swap()
-    if existing:
-        current_block = subtensor.get_current_block()
-        status = probe_pending_reservation(client, existing, current_block)
-        if status.kind == 'rpc_error':
-            console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
-        elif status.kind == 'ours_active':
-            remaining = max(0, status.reserved_until - current_block)
-            remaining_min = remaining * SECONDS_PER_BLOCK / 60
-            console.print(
-                f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
-            )
-            console.print('  Complete it with: [cyan]alw swap post-tx <tx_hash>[/cyan]\n')
-            if not skip_confirm and not click.confirm('Start a new swap instead?'):
-                return
-        elif status.kind == 'our_swap':
-            console.print(
-                f'[dim]Previous reservation is now swap #{status.swap.id} ({status.swap.status.name}) — '
-                f'cleared local state. Watch with: alw view swap {status.swap.id} --watch[/dim]\n'
-            )
-            clear_pending_swap()
-        else:  # 'replaced' or 'expired'
-            console.print('[dim]Previous reservation is no longer active — cleared local state.[/dim]\n')
-            clear_pending_swap()
-
-    # Interactive mode: force lightweight BTC (no local Bitcoin node needed).
-    # Non-interactive mode: respect environment config (local dev uses node mode for RPC signing).
-    # Always respect an explicitly-set BTC_MODE.
-    if 'BTC_MODE' not in os.environ and not skip_confirm:
-        os.environ['BTC_MODE'] = 'lightweight'
-    chain_providers = create_chain_providers(subtensor=subtensor)
-
-    # Step 1: Select swap direction
-    if from_chain_opt and to_chain_opt:
-        from_chain = from_chain_opt
-        to_chain = to_chain_opt
+    else:
+        from_chain = from_chain_opt.upper()
+        to_chain = to_chain_opt.upper()
     else:
         chain_ids = list(SUPPORTED_CHAINS.keys())
         directions = [(s, d) for s in chain_ids for d in chain_ids if s != d]
