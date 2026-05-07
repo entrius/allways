@@ -195,10 +195,16 @@ def parse_global_flags() -> dict:
                 continue
         # Handle --flag value form
         if arg in _GLOBAL_FLAGS:
-            if i + 1 < len(sys.argv):
-                overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
+            if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('--'):
+                flag_name = _GLOBAL_FLAGS[arg]
+                if flag_name in overrides:
+                    console.print(f'[yellow]Warning: {arg} specified multiple times. Using last value.[/yellow]')
+                overrides[flag_name] = sys.argv[i + 1]
                 i += 2
                 continue
+            else:
+                console.print(f'[red]Error: {arg} requires a value[/red]')
+                sys.exit(1)
         new_argv.append(arg)
         i += 1
     sys.argv[:] = new_argv
