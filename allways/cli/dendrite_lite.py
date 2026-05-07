@@ -94,12 +94,14 @@ def broadcast_synapse(
 
 def resolve_dendrite_timeout(default: float) -> float:
     """Honor ALW_DENDRITE_TIMEOUT as an override for slow chains (e.g. testnet)."""
+    import math
     import os
 
     override = os.environ.get('ALW_DENDRITE_TIMEOUT')
     if not override:
         return default
     try:
-        return float(override)
+        parsed = float(override)
+        return parsed if math.isfinite(parsed) and parsed > 0 else default
     except ValueError:
         return default
