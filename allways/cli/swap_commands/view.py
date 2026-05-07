@@ -576,6 +576,13 @@ def view_active_swaps(status: str):
         swaps = [s for s in swaps if s.status == target_status]
 
     if not swaps:
+        if status and status.lower() in ('completed', 'timed_out'):
+            console.print(
+                f'[green]No {status} swaps found.[/green]\n'
+                f'[dim]Resolved swaps are removed from on-chain storage. '
+                f'View history at:[/dim] {_dashboard_url()}'
+            )
+            return
         console.print('[yellow]No swaps found[/yellow]\n')
         return
 
