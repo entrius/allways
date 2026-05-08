@@ -38,6 +38,8 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
+import os as _os  # noqa: E402
+import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
@@ -159,7 +161,16 @@ def config_set(key: str, value: str):
     old_value = config.get(key)
     config[key] = value
 
-    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    data = json.dumps(config, indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
+    try:
+        with _os.fdopen(fd, 'w') as f:
+            f.write(data)
+        _os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        if _os.path.exists(tmp_path):
+            _os.unlink(tmp_path)
+        raise
 
     display = value
     if key == 'network' and value in KNOWN_NETWORKS:
