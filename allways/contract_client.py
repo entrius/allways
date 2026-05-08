@@ -688,7 +688,11 @@ class AllwaysContractClient:
             to_tx_block, o = decode_u32(data, o)
             status_byte = data[o]
             o += 1
-            status = SwapStatus(status_byte) if status_byte <= 3 else SwapStatus.ACTIVE
+            if status_byte <= 3:
+                status = SwapStatus(status_byte)
+            else:
+                bt.logging.warning(f'Unknown SwapStatus variant {status_byte} — coercing to ACTIVE')
+                status = SwapStatus.ACTIVE
             initiated_block, o = decode_u32(data, o)
             timeout_block, o = decode_u32(data, o)
             fulfilled_block, o = decode_u32(data, o)

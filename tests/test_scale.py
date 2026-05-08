@@ -4,6 +4,7 @@ import struct
 from unittest.mock import MagicMock
 
 from allways.chain_providers.subtensor import SubtensorProvider
+from allways.classes import SwapStatus
 from allways.contract_client import AllwaysContractClient
 from allways.utils.scale import compact_encode_len, decode_string
 
@@ -356,10 +357,19 @@ class TestDecodeSwapData:
         swap = c.decode_swap_data(b'')
         assert swap is None
 
+    def test_decode_unknown_status_coerces_to_active(self):
+        c = make_client()
+        data = self.encode_swap_bytes(c, status=99)
+        swap = c.decode_swap_data(data)
+        assert swap is not None
+        assert swap.status == SwapStatus.ACTIVE
+
 
 # =========================================================================
 # SubtensorProvider.decode_compact tests
 # =========================================================================
+
+
 
 
 class TestDecodeCompact:
