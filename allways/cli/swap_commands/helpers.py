@@ -221,6 +221,13 @@ def get_effective_config() -> dict:
     return config
 
 
+_KNOWN_NETWORKS = {
+    'finney': 'wss://entrypoint-finney.opentensor.ai:443',
+    'test': 'wss://test.finney.opentensor.ai:443',
+    'local': 'ws://127.0.0.1:9944',
+}
+
+
 def get_cli_context(
     need_wallet: bool = True,
     need_client: bool = True,
@@ -231,6 +238,10 @@ def get_cli_context(
     """
     config = get_effective_config()
     network = config.get('network', 'finney')
+    if network not in _KNOWN_NETWORKS and not network.startswith(('ws://', 'wss://')):
+        raise click.UsageError(
+            f"Invalid network '{network}'. Valid values: {', '.join(_KNOWN_NETWORKS)} or a ws:///wss:// URL."
+        )
     with console.status(
         f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'
     ):
