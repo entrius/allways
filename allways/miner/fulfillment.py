@@ -85,7 +85,15 @@ class SwapFulfiller:
         self.load_sent_cache()
 
     def load_sent_cache(self):
-        """Load persisted send results from disk to prevent double-sends after restart."""
+        """Load persisted send results from disk to prevent double-sends after restart.
+
+        v2 (#296): a SentSwap with empty ``to_tx_hash`` is a pending sentinel —
+        intent persisted before broadcast but never updated with the real hash,
+        which means the process crashed between ``send_dest_funds`` returning
+        and the post-broadcast cache update. Surface these loudly and refuse
+        to re-broadcast on restart; operator must reconcile manually by
+        scanning chain for any tx the miner address sent for that swap.
+        """
         if not self.sent_cache_path or not self.sent_cache_path.exists():
             return
         try:
@@ -98,6 +106,16 @@ class SwapFulfiller:
                 )
             if self.sent:
                 bt.logging.info(f'Restored {len(self.sent)} cached send(s) from disk')
+            pending = [sid for sid, s in self.sent.items() if not s.to_tx_hash]
+            if pending:
+                bt.logging.critical(
+                    f'PENDING SEND MARKERS FOUND on startup: {pending}. The miner crashed '
+                    f'between broadcasting the destination tx and persisting its hash. '
+                    f'Manual reconciliation required: scan the destination chain for any '
+                    f'tx FROM this miner address matching each swap, and either update the '
+                    f'cache with the real tx hash or remove the entry. These swap IDs will '
+                    f'be SKIPPED until the cache is corrected — this prevents double-broadcast.'
+                )
         except Exception as e:
             bt.logging.warning(f'Failed to load sent cache: {e}')
 
@@ -276,9 +294,33 @@ class SwapFulfiller:
 
         # Step 3: Send destination funds — unless we already did on a previous
         # pass, in which case we skip straight to the mark_fulfilled retry.
+        # v2 (#296): a cached SentSwap with empty ``to_tx_hash`` is a pending
+        # sentinel from a prior crash mid-broadcast (load_sent_cache logs the
+        # critical warning). Refuse to process — operator must reconcile.
+        if sent is not None and not sent.to_tx_hash:
+            bt.logging.warning(
+                f'Swap {swap.id}: cached as pending mid-broadcast (empty tx_hash) — '
+                f'skipping to prevent double-broadcast. Operator must reconcile cache.'
+            )
+            return False
         if sent is None:
+            # v2 (#296): persist a pending sentinel BEFORE broadcasting so a
+            # crash between the send_dest_funds call returning and the
+            # post-broadcast cache update is detectable on restart and we
+            # refuse to re-broadcast. Without this sentinel, the prior cache
+            # would be silently empty and the next process_swap pass would
+            # broadcast a SECOND destination tx for the same swap.
+            pending = SentSwap(to_tx_hash='', to_tx_block=0, marked_fulfilled=False)
+            self.sent[swap.id] = pending
+            self.save_sent_cache()
+
             send_result = self.send_dest_funds(swap, user_receives_amount)
             if not send_result:
+                # Broadcast attempt failed cleanly — drop the sentinel so a
+                # subsequent retry can re-attempt. This is safe because no
+                # tx left this process.
+                self.sent.pop(swap.id, None)
+                self.save_sent_cache()
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
             to_tx_hash, to_tx_block = send_result
