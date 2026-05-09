@@ -47,9 +47,7 @@ class SwapTracker:
         for swap in self.client.get_active_swaps(max_gap=None):
             self.active[swap.id] = swap
         self.last_scanned_id = next_id - 1
-        bt.logging.info(
-            f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}'
-        )
+        bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
         """Drop a swap from tracking after our vote reached quorum or after
