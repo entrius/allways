@@ -570,9 +570,26 @@ def send_tao_transfer(wallet, subtensor, to_address: str, amount_rao: int) -> Op
         block = 0
         if getattr(receipt, 'block_hash', None):
             block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-    except Exception:
-        tx_hash = getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-        block = 0
+    except Exception as e:
+        # Previously this fell back to the literal string 'tao_transfer' as the
+        # tx hash. That string then propagated through pending_swap.json, the
+        # SwapConfirmSynapse, and the proof_message — validators searched for a
+        # TAO tx with that decoded hash, found nothing, and the user's funds
+        # stranded with no recovery path. Surface the parse failure to the
+        # caller (which already handles None via `if send_result is not None`)
+        # so the broadcast/parse split-brain doesn't persist a bogus tx hash
+        # to pending_swap.json.
+        console.print(
+            f'[red]TAO transfer broadcast succeeded but receipt parse failed: {e}[/red]\n'
+            '[red]Aborting swap; rerun once the node is responsive.[/red]'
+        )
+        return None
+    if not tx_hash:
+        console.print(
+            '[red]extrinsic_hash missing from receipt despite successful broadcast.[/red]\n'
+            '[red]Aborting swap to avoid stranding funds with a bogus pending entry.[/red]'
+        )
+        return None
     console.print(f'[green]TAO sent (tx: {tx_hash})[/green]')
     return (tx_hash, int(block))
 
