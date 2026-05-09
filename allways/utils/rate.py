@@ -5,7 +5,12 @@ from typing import Tuple
 
 from allways.chains import canonical_pair, get_chain
 from allways.classes import Swap
-from allways.constants import RATE_PRECISION
+from allways.constants import RATE_PRECISION, RATE_SIG_FIGS
+
+
+def normalize_rate(rate: float) -> str:
+    """Canonical RATE_SIG_FIGS-precision string for any committed rate."""
+    return f'{rate:.{RATE_SIG_FIGS}g}'
 
 
 def calculate_to_amount(

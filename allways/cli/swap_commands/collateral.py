@@ -5,7 +5,7 @@ from rich.table import Table
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -49,7 +49,8 @@ def collateral_deposit(amount: float | None, yes: bool):
     console.print('\n[bold]Depositing Collateral[/bold]\n')
     console.print(f'  Amount:  [green]{amount} TAO[/green] ({amount_rao} rao)')
     console.print(f'  Wallet:  {wallet.name}')
-    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}\n')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}')
+    console.print('  [dim]Funds are debited from the hotkey balance (not the coldkey).[/dim]\n')
 
     try:
         max_collateral_rao = client.get_max_collateral()
@@ -69,8 +70,15 @@ def collateral_deposit(amount: float | None, yes: bool):
         required = amount_rao + MIN_BALANCE_FOR_TX_RAO
         if free_balance < required:
             console.print(
-                f'[red]Insufficient balance. Free: {from_rao(free_balance):.4f} TAO, '
-                f'need: {from_rao(required):.4f} TAO (amount + tx fees).[/red]'
+                f'[red]Insufficient hotkey balance. Free: {from_rao(free_balance):.4f} TAO, '
+                f'need: {from_rao(required):.4f} TAO '
+                f'(amount + {from_rao(MIN_BALANCE_FOR_TX_RAO):.2f} TAO gas buffer, pre-checked so the tx does not '
+                'fail on chain and waste fees).[/red]'
+            )
+            console.print('[dim]Collateral is posted from the hotkey, not the coldkey.[/dim]')
+            console.print(
+                f'[dim]Transfer TAO with: btcli wallet transfer --destination {wallet.hotkey.ss58_address} '
+                '--amount <tao>[/dim]'
             )
             return
     except ContractError as e:
@@ -134,7 +142,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         )
 
         if is_active:
-            console.print('[red]Cannot withdraw while miner is active. Run `alw deactivate` first.[/red]')
+            console.print('[red]Cannot withdraw while miner is active. Run `alw miner deactivate` first.[/red]')
             return
 
         if deactivation_block > 0:
@@ -142,9 +150,8 @@ def collateral_withdraw(amount: float | None, yes: bool):
             cooldown_end = deactivation_block + (timeout_blocks * 2)
             if current_block < cooldown_end:
                 remaining = cooldown_end - current_block
-                remaining_min = remaining * SECONDS_PER_BLOCK / 60
                 console.print(
-                    f'[red]Withdrawal cooldown active. ~{remaining} blocks (~{remaining_min:.0f} min) remaining.[/red]'
+                    f'[red]Withdrawal cooldown active. ~{remaining} blocks ({blocks_to_minutes_str(remaining)}) remaining.[/red]'
                 )
                 return
 

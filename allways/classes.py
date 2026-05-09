@@ -37,6 +37,24 @@ class MinerPair:
 
 
 @dataclass
+class Reservation:
+    """On-chain reservation record returned by `get_reservation`.
+
+    Mirrors smart-contracts/ink/types.rs::Reservation. `hash` is the
+    contract-side request_hash (keccak of miner + from_addr + chains + amounts).
+    """
+
+    hash: str
+    from_addr: str
+    from_chain: str
+    to_chain: str
+    tao_amount: int
+    from_amount: int
+    to_amount: int
+    reserved_until: int
+
+
+@dataclass
 class Swap:
     """Full swap lifecycle data from the smart contract.
 
@@ -70,3 +88,17 @@ class Swap:
     timeout_block: int = 0
     fulfilled_block: int = 0
     completed_block: int = 0
+
+
+@dataclass
+class PendingExtension:
+    """One in-flight optimistic extension proposal.
+
+    Same shape for both reservation extensions (keyed by miner) and timeout
+    extensions (keyed by swap_id) — only the on-chain Mapping differs. Maps
+    to Rust types::PendingExtension { submitter, target_block, proposed_at }.
+    """
+
+    submitter: str  # validator hotkey ss58
+    target_block: int
+    proposed_at: int

@@ -1,12 +1,13 @@
 """Verifies both sides of a swap using chain providers and on-chain swap data."""
 
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, Set
 
 import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.classes import Swap
+from allways.utils.logging import log_on_change
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -20,17 +21,12 @@ class SwapVerifier:
     def __init__(
         self,
         chain_providers: Dict[str, ChainProvider],
-        subtensor: bt.Subtensor,
-        netuid: int,
-        metagraph: Optional['bt.Metagraph'] = None,
         fee_divisor: int = 100,
     ):
         self.providers = chain_providers
-        self.subtensor = subtensor
-        self.netuid = netuid
-        self.metagraph = metagraph
         self.fee_divisor = fee_divisor
         self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
+        self.source_verified_ids: Set[int] = set()  # source tx is final once confirmed
 
     def verify_tx(
         self,
@@ -123,17 +119,22 @@ class SwapVerifier:
             )
             return False
 
-        # Verify sequentially — parallel threads cause WebSocket contention
-        # with the API server thread sharing the same substrate connection
-        source_ok = await asyncio.to_thread(
-            self.verify_tx,
-            swap,
-            swap.from_chain,
-            swap.from_tx_hash,
-            swap.miner_from_address,
-            swap.from_amount,
-            swap.from_tx_block,
-        )
+        # Sequential — parallel threads contend on the shared substrate WS.
+        if swap.id in self.source_verified_ids:
+            source_ok = True
+        else:
+            source_ok = await asyncio.to_thread(
+                self.verify_tx,
+                swap,
+                swap.from_chain,
+                swap.from_tx_hash,
+                swap.miner_from_address,
+                swap.from_amount,
+                swap.from_tx_block,
+            )
+            if source_ok:
+                self.source_verified_ids.add(swap.id)
+
         dest_ok = await asyncio.to_thread(
             self.verify_tx,
             swap,
@@ -144,5 +145,13 @@ class SwapVerifier:
             swap.to_tx_block,
             swap.miner_to_address,
         )
+
+        if source_ok != dest_ok:
+            log_on_change(
+                f'partial:{swap.id}',
+                (source_ok, dest_ok),
+                f'Swap {swap.id}: partial verification (source={source_ok}, dest={dest_ok}) — '
+                f'{"dest" if source_ok else "source"} side blocking confirm',
+            )
 
         return source_ok and dest_ok

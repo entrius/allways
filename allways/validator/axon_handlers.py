@@ -12,14 +12,15 @@ to inject the validator context.
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
+from bittensor import Keypair
 from Crypto.Hash import keccak
-from substrateinterface import Keypair
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -56,14 +57,6 @@ def scale_encode_reserve_hash_input(
         + encode_u128(from_amount)
         + encode_u128(to_amount)
     )
-
-
-def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
-    """SCALE-encode the extend hash input tuple: (AccountId, &str).
-
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
-    """
-    return miner_bytes + encode_str(from_tx_hash)
 
 
 def scale_encode_initiate_hash_input(
@@ -125,11 +118,17 @@ def resolve_swap_direction(
 
 
 def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
-    """Read miner commitment and validate chains differ. Returns commitment or None."""
+    """Read miner commitment and validate chains differ. Returns commitment or None.
+
+    Passes the validator's cached metagraph so read_miner_commitment skips the
+    full subnet metagraph download — that sync takes 30s+ on testnet finney and
+    was the real source of axon handler timeouts.
+    """
     commitment = read_miner_commitment(
         subtensor=validator.axon_subtensor,
         netuid=validator.config.netuid,
         hotkey=miner_hotkey,
+        metagraph=validator.metagraph,
     )
     if commitment is None or commitment.from_chain == commitment.to_chain:
         return None
@@ -137,11 +136,11 @@ def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[
 
 
 def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
-    """Mark a synapse as rejected with a reason and debug log."""
+    """Mark a synapse as rejected with a reason and log it."""
     synapse.accepted = False
     synapse.rejection_reason = reason
     if context:
-        bt.logging.debug(f'{context}: {reason}')
+        bt.logging.info(f'{context}: {reason}')
 
 
 # =============================================================================
@@ -157,7 +156,7 @@ async def blacklist_miner_activate(
     if synapse.dendrite is None or synapse.dendrite.hotkey is None:
         return True, 'Missing dendrite or hotkey'
     if synapse.dendrite.hotkey not in validator.metagraph.hotkeys:
-        bt.logging.debug(f'Blacklisted unregistered hotkey: {synapse.dendrite.hotkey}')
+        bt.logging.info(f'Blacklisted unregistered hotkey: {synapse.dendrite.hotkey}')
         return True, 'Unregistered hotkey'
     return False, 'Hotkey recognized'
 
@@ -199,17 +198,18 @@ async def handle_miner_activate(
                 subtensor=validator.axon_subtensor,
                 netuid=validator.config.netuid,
                 hotkey=miner_hotkey,
+                metagraph=validator.metagraph,
             )
             if commitment is None:
                 reject_synapse(synapse, 'No commitment found', ctx)
                 return synapse
 
-            if contract.get_miner_active_flag(miner_hotkey):
+            collateral, active, _, _, _ = contract.get_miner_snapshot(miner_hotkey)
+            if active:
                 reject_synapse(synapse, 'Miner is already active', ctx)
                 return synapse
 
-            collateral = contract.get_miner_collateral(miner_hotkey)
-            min_collateral = contract.get_min_collateral()
+            min_collateral = validator.bounds_cache.min_collateral()
             if collateral < min_collateral:
                 reject_synapse(synapse, f'Insufficient collateral: {collateral} < {min_collateral}', ctx)
                 return synapse
@@ -279,9 +279,16 @@ async def handle_swap_reserve(
         if provider is None:
             reject_synapse(synapse, f'Unsupported chain: {synapse.from_chain}', ctx)
             return synapse
-        proof_message = f'allways-reserve:{synapse.from_address}:{synapse.block_anchor}'
+        proof_message = reserve_proof_message(synapse.from_address, synapse.block_anchor)
         if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_address_proof):
             reject_synapse(synapse, 'Invalid source address proof', ctx)
+            return synapse
+
+        # Source-chain RPC — separate connection from substrate, so it doesn't
+        # need axon_lock and shouldn't block the substrate websocket.
+        balance = provider.get_balance(synapse.from_address)
+        if balance < synapse.from_amount:
+            reject_synapse(synapse, 'Insufficient source balance', ctx)
             return synapse
 
         # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
@@ -318,36 +325,31 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
 
-            balance = provider.get_balance(synapse.from_address)
-            if balance < synapse.from_amount:
-                reject_synapse(synapse, 'Insufficient source balance', ctx)
-                return synapse
-
-            if not contract.get_miner_active_flag(miner):
+            collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
+            if not active:
                 reject_synapse(synapse, 'Miner not active', ctx)
                 return synapse
-
-            if contract.get_miner_has_active_swap(miner):
+            if has_swap:
                 reject_synapse(synapse, 'Miner has an active swap', ctx)
                 return synapse
-
-            reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until >= validator.block:
+            # Read the current block via axon_subtensor — validator.block goes
+            # through self.subtensor, which the forward loop already uses;
+            # concurrent reads collide on the same websocket.
+            cur_block = validator.axon_subtensor.get_current_block()
+            if reserved_until >= cur_block:
                 reject_synapse(synapse, 'Miner already reserved', ctx)
                 return synapse
-
-            collateral = contract.get_miner_collateral(miner)
             if synapse.tao_amount > collateral:
                 reject_synapse(synapse, 'Insufficient miner collateral', ctx)
                 return synapse
 
-            min_collateral = contract.get_min_collateral()
+            min_collateral = validator.bounds_cache.min_collateral()
             if min_collateral > 0 and collateral < min_collateral:
                 reject_synapse(synapse, 'Miner collateral below minimum', ctx)
                 return synapse
 
-            min_swap = contract.get_min_swap_amount()
-            max_swap = contract.get_max_swap_amount()
+            min_swap = validator.bounds_cache.min_swap_amount()
+            max_swap = validator.bounds_cache.max_swap_amount()
             if min_swap > 0 and synapse.tao_amount < min_swap:
                 reject_synapse(synapse, f'Swap amount below minimum ({synapse.tao_amount} < {min_swap} rao)', ctx)
                 return synapse
@@ -358,10 +360,17 @@ async def handle_swap_reserve(
             strike_count, last_expired = contract.get_cooldown(synapse.from_address)
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
-                if validator.block < last_expired + cooldown:
-                    reject_synapse(synapse, f'Address on cooldown ({cooldown} blocks remaining)', ctx)
+                if cur_block < last_expired + cooldown:
+                    remaining = (last_expired + cooldown) - cur_block
+                    reject_synapse(
+                        synapse,
+                        f'Address on cooldown: ~{remaining} blocks remaining '
+                        f'(strike {strike_count}, {cooldown}-block window)',
+                        ctx,
+                    )
                     return synapse
 
+            bt.logging.info(f'{ctx} preflight ok, voting')
             contract.vote_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,
@@ -378,8 +387,7 @@ async def handle_swap_reserve(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the reservation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
+        reject_synapse(synapse, str(e))
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
@@ -432,7 +440,8 @@ async def handle_swap_confirm(
 
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
-            if reserved_until < validator.block:
+            # Read the current block via axon_subtensor — see handle_swap_reserve.
+            if reserved_until < validator.axon_subtensor.get_current_block():
                 reject_synapse(synapse, 'No active reservation for this miner', ctx)
                 return synapse
 
@@ -471,7 +480,7 @@ async def handle_swap_confirm(
             # tx could submit a confirm with their own to_address and redirect the
             # miner's fulfillment — the on-chain sender check alone doesn't bind
             # the confirm caller to the source address.
-            proof_message = f'allways-swap:{synapse.from_tx_hash}'
+            proof_message = swap_proof_message(synapse.from_tx_hash)
             if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_tx_proof):
                 reject_synapse(synapse, 'Invalid source tx proof', ctx)
                 return synapse
@@ -495,11 +504,17 @@ async def handle_swap_confirm(
                 tx_hash=synapse.from_tx_hash,
                 expected_recipient=miner_from_address,
                 expected_amount=res_source_amount,
+                block_hint=synapse.from_tx_block,
                 expected_sender=synapse.from_address,
             )
             if tx_info is None:
                 reject_synapse(synapse, 'Source transaction not found, amount or sender mismatch', ctx)
                 return synapse
+
+            # Persist the discovered block even if the user didn't supply
+            # one — the queue drain can then re-verify with O(1) lookup
+            # instead of re-scanning the sliding window.
+            found_tx_block = tx_info.block_number or synapse.from_tx_block
 
             if not tx_info.confirmed:
                 chain_def = provider.get_chain()
@@ -517,6 +532,7 @@ async def handle_swap_confirm(
                     miner_to_address=miner_fulfillment_address,
                     rate_str=selected_rate_str,
                     reserved_until=reserved_until,
+                    from_tx_block=found_tx_block,
                 )
                 validator.state_store.enqueue(pending)
                 synapse.accepted = True
@@ -568,8 +584,7 @@ async def handle_swap_confirm(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the swap initiation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
+        reject_synapse(synapse, str(e))
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
