@@ -5,7 +5,7 @@ from rich.table import Table
 
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -86,11 +86,10 @@ def status_command():
             res_status = probe_pending_reservation(client, pending, current_block)
             if res_status.kind == 'ours_active':
                 remaining = max(0, res_status.reserved_until - current_block)
-                remaining_min = remaining * SECONDS_PER_BLOCK / 60
                 table.add_row(
                     'Pending Reservation',
                     f'send {pending.from_chain.upper()} → receive {pending.to_chain.upper()} '
-                    f'(~{remaining_min:.0f} min left)',
+                    f'({blocks_to_minutes_str(remaining)} left)',
                 )
             elif res_status.kind == 'our_swap':
                 table.add_row(

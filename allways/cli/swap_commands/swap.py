@@ -16,8 +16,8 @@ from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
     PendingSwapState,
+    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     find_matching_miners,
@@ -331,9 +331,8 @@ def broadcast_reserve_with_retry(
             return None
         if reserved:
             ttl_remaining = reserved_until - subtensor.get_current_block()
-            minutes_remaining = ttl_remaining * 12 // 60
             console.print(
-                f'[green]Miner reserved! You have ~{minutes_remaining} minutes to send your funds '
+                f'[green]Miner reserved! You have {blocks_to_minutes_str(ttl_remaining)} to send your funds '
                 f'before the reservation expires.[/green]'
             )
             console.print(
@@ -676,9 +675,8 @@ def swap_now_command(
             console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
         elif status.kind == 'ours_active':
             remaining = max(0, status.reserved_until - current_block)
-            remaining_min = remaining * SECONDS_PER_BLOCK / 60
             console.print(
-                f'[yellow]You have a pending reservation (~{remaining} blocks, ~{remaining_min:.0f} min left).[/yellow]'
+                f'[yellow]You have a pending reservation (~{remaining} blocks, {blocks_to_minutes_str(remaining)} left).[/yellow]'
             )
             console.print('  Complete it with: [cyan]alw swap post-tx <tx_hash>[/cyan]\n')
             if not skip_confirm and not click.confirm('Start a new swap instead?'):

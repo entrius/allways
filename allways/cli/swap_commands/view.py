@@ -16,6 +16,7 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SECONDS_PER_BLOCK,
     SWAP_STATUS_COLORS,
+    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     from_rao,
@@ -860,9 +861,7 @@ def view_contract():
     try:
         with loading('Reading contract parameters...'):
             timeout_blocks = client.get_fulfillment_timeout()
-            timeout_minutes = timeout_blocks * SECONDS_PER_BLOCK / 60
             reservation_ttl_blocks = client.get_reservation_ttl()
-            reservation_ttl_minutes = reservation_ttl_blocks * SECONDS_PER_BLOCK / 60
             consensus_threshold = client.get_consensus_threshold()
             min_collateral_rao = client.get_min_collateral()
             max_collateral_rao = client.get_max_collateral()
@@ -887,8 +886,10 @@ def view_contract():
     table.add_column('Parameter', style='cyan')
     table.add_column('Value', style='green')
 
-    table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks (~{timeout_minutes:.0f} min)')
-    table.add_row('Reservation TTL', f'{reservation_ttl_blocks} blocks (~{reservation_ttl_minutes:.0f} min)')
+    table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks ({blocks_to_minutes_str(timeout_blocks)})')
+    table.add_row(
+        'Reservation TTL', f'{reservation_ttl_blocks} blocks ({blocks_to_minutes_str(reservation_ttl_blocks)})'
+    )
     fee_pct = 100 / FEE_DIVISOR
     table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
     # Collapsed: the threshold is the knob, required_votes is what it resolves
@@ -1104,9 +1105,8 @@ def view_reservation():
 
     if status.kind == 'ours_active':
         remaining = max(0, status.reserved_until - current_block)
-        remaining_min = remaining * SECONDS_PER_BLOCK / 60
         table.add_row('Status', '[green]ACTIVE[/green]')
-        table.add_row('Time Remaining', f'~{remaining} blocks (~{remaining_min:.0f} min)')
+        table.add_row('Time Remaining', f'~{remaining} blocks ({blocks_to_minutes_str(remaining)})')
         # Optimistic-extension visibility — silent on read failure: best-effort
         # signal, not core to the reservation status.
         try:
@@ -1122,14 +1122,13 @@ def view_reservation():
             finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
             blocks_until_finalize = max(0, finalize_at - current_block)
             target_blocks = max(0, pending.target_block - current_block)
-            target_min = target_blocks * SECONDS_PER_BLOCK / 60
             if blocks_until_finalize > 0:
                 finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
             else:
                 finalize_hint = 'finalize window open'
             table.add_row(
                 'Pending Extension',
-                f'target block {pending.target_block} (~{target_min:.0f} min) · {finalize_hint} · '
+                f'target block {pending.target_block} ({blocks_to_minutes_str(target_blocks)}) · {finalize_hint} · '
                 f'by {pending.submitter[:16]}...',
             )
         if sent_tx_hash:
