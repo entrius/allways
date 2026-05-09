@@ -61,8 +61,17 @@ def discover_validators(
             try:
                 if not contract_client.is_validator(metagraph.hotkeys[uid]):
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                # #168: skip on RPC failure rather than silently including the
+                # axon. Mirrors the validator-side fix from #73/#92 — falling
+                # through to axons.append on an unverified hotkey leaks
+                # non-validators into the broadcast list and produces
+                # confusing rejections downstream.
+                bt.logging.debug(
+                    f'Skipping uid={uid} hotkey={metagraph.hotkeys[uid][:12]}...: '
+                    f'is_validator RPC failed: {e}'
+                )
+                continue
         axons.append(axon)
 
     return axons
