@@ -9,10 +9,11 @@ from rich.table import Table
 
 from allways.chains import get_chain
 from allways.classes import SwapStatus
-from allways.cli.dendrite_lite import discover_validators
+from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -20,6 +21,7 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     read_miner_commitment,
 )
+from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
 from allways.utils.misc import is_reserved
@@ -74,7 +76,8 @@ def miner_status(hotkey: str):
     console.print()
 
     # Section 2: Committed Pair
-    pair = read_miner_commitment(subtensor, netuid, hotkey)
+    with loading('Reading committed pair...'):
+        pair = read_miner_commitment(subtensor, netuid, hotkey)
 
     if pair:
         console.print('[bold]Committed Pair[/bold]\n')
@@ -104,7 +107,8 @@ def miner_status(hotkey: str):
 
     # Section 3: Active Swaps
     try:
-        swaps = client.get_miner_active_swaps(hotkey)
+        with loading('Reading active swaps...'):
+            swaps = client.get_miner_active_swaps(hotkey)
     except ContractError as e:
         console.print(f'[yellow]Could not read active swaps: {e}[/yellow]')
         swaps = []
@@ -135,24 +139,6 @@ def miner_status(hotkey: str):
 
     console.print(swap_table)
     console.print(f'\n[dim]Total: {len(swaps)} active swaps[/dim]\n')
-
-
-def friendly_rejection(reason: str) -> str:
-    """Convert raw validator rejection reasons into human-readable messages."""
-    if not reason:
-        return ''
-    r = reason.lower()
-    if 'already active' in r:
-        return 'miner is already active'
-    if 'ContractReverted' in reason or 'contractreverted' in r:
-        return 'contract reverted (collateral/validator issue)'
-    if 'insufficient collateral' in r:
-        return reason
-    if 'no commitment found' in r:
-        return 'no pair commitment found — run: alw pair set'
-    if 'not registered' in r:
-        return 'hotkey not registered on subnet'
-    return reason
 
 
 @miner_group.command('activate')
@@ -193,53 +179,60 @@ def miner_activate():
 
     # Discover whitelisted validators from metagraph
     dendrite = bt.Dendrite(wallet=wallet)
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
 
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]\n')
         return
 
-    console.print(f'Broadcasting to {len(validator_axons)} validators...')
-
     # Broadcast
-    responses = asyncio.get_event_loop().run_until_complete(
-        dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=30.0)
-    )
+    timeout = resolve_dendrite_timeout(60.0)
+    with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
+        responses = asyncio.get_event_loop().run_until_complete(
+            dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
+        )
 
-    # Show per-validator results
-    accepted = 0
-    for i, resp in enumerate(responses):
-        if getattr(resp, 'accepted', None):
-            console.print(f'  Validator {i + 1}: [green]accepted[/green]')
-            accepted += 1
-        else:
-            raw_reason = getattr(resp, 'rejection_reason', '') or ''
-            friendly = friendly_rejection(raw_reason)
-            console.print(f'  Validator {i + 1}: [red]rejected[/red] — {friendly}')
-
+    info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
+    accepted = info.accepted
+    no_response = info.no_response
+    if accepted == 0 and info.headline:
+        console.print(f'\n[red]{info.headline}[/red]')
     console.print(f'\n{accepted}/{len(validator_axons)} validators accepted')
 
-    if accepted == 0:
-        console.print('[red]Activation failed — no validators accepted the request.[/red]')
-        console.print('[dim]Check prerequisites: alw miner status[/dim]\n')
-        return
-
-    # Poll contract for activation
-    with loading('Waiting for quorum...'):
+    # Poll chain — the on-chain flag is authoritative. A validator can
+    # finalize vote_activate after the dendrite response times out, so
+    # synapse accepted counts aren't reliable on their own.
+    activated = False
+    with loading('Checking on-chain activation...'):
         for _ in range(15):
             time.sleep(2)
             try:
                 if client.get_miner_active_flag(hotkey):
+                    activated = True
                     break
             except ContractError:
                 pass
-        else:
-            console.print(
-                '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
-            )
-            return
 
-    console.print('[green]Miner activated successfully[/green]\n')
+    if activated:
+        console.print('[green]Miner activated successfully[/green]\n')
+        return
+
+    if accepted == 0 and no_response == len(validator_axons):
+        console.print('[dim]The chain may be slow — the vote could still land after this check.[/dim]')
+        console.print('[dim]Retry with a longer timeout: ALW_DENDRITE_TIMEOUT=90 alw miner activate[/dim]')
+        console.print('[dim]Or re-run `alw miner status` in a minute to see if activation completed.[/dim]\n')
+    elif accepted == 0 and info.category in ('', 'mixed', 'unmatched'):
+        # Translator couldn't pin down a single cause — fall back to the prerequisites checklist.
+        console.print('[dim]Prerequisites for activation:[/dim]')
+        console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
+        console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
+        console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
+        console.print('[dim]Run `alw miner status` to see which are missing.[/dim]\n')
+    elif accepted > 0:
+        console.print(
+            '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
+        )
 
 
 @miner_group.command('deactivate')
@@ -289,7 +282,7 @@ def miner_deactivate():
         console.print(f'[green]Deactivated successfully[/green] (tx: {tx_hash[:16]}...)')
         timeout = client.get_fulfillment_timeout()
         console.print(
-            f'[dim]Collateral withdrawal available after {timeout * 2} blocks (~{timeout * 2 * 12 // 60} min)[/dim]\n'
+            f'[dim]Collateral withdrawal available after {timeout * 2} blocks ({blocks_to_minutes_str(timeout * 2)})[/dim]\n'
         )
     except ContractError as e:
         print_contract_error('Failed to deactivate', e)

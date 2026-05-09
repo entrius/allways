@@ -6,6 +6,7 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, loading
 from allways.constants import COMMITMENT_VERSION
+from allways.utils.rate import normalize_rate
 
 
 def prompt_chain(label: str, exclude: str | None = None) -> str:
@@ -150,8 +151,8 @@ def post_pair(
     config, wallet, subtensor, _ = get_cli_context(need_client=False)
     netuid = config['netuid']
 
-    rate_str = f'{rate:g}'
-    counter_rate_str = f'{counter_rate:g}'
+    rate_str = normalize_rate(rate)
+    counter_rate_str = normalize_rate(counter_rate)
     commitment_data = (
         f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{counter_rate_str}'
     )
@@ -183,6 +184,17 @@ def post_pair(
             console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
     console.print(f'  Netuid:     {netuid}')
     console.print(f'  Data:       [dim]{commitment_data}[/dim]\n')
+
+    if dst_chain == 'tao' and dst_addr == wallet.hotkey.ss58_address:
+        console.print(
+            f'[yellow]Warning: TAO send address is your hotkey. Standard miners sign TAO transfers '
+            f'with the coldkey ({wallet.coldkey.ss58_address}); validators reject fulfillments whose '
+            f'sender does not match the committed address. Commit the coldkey unless you run a '
+            f'customized miner that signs from the hotkey.[/yellow]\n'
+        )
+        if not yes and not click.confirm('Post with hotkey as TAO send address anyway?', default=False):
+            console.print('[yellow]Cancelled[/yellow]')
+            return
 
     if not yes and not click.confirm('Confirm posting this pair?'):
         console.print('[yellow]Cancelled[/yellow]')

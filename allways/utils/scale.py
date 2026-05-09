@@ -8,12 +8,13 @@ so compound structs can chain reads without manual offset bookkeeping.
 import struct
 from typing import Tuple
 
-from substrateinterface.utils.ss58 import ss58_encode
+from bittensor.utils import ss58_encode
 
 # SS58 prefix for Bittensor (matches substrate.ss58_format on all configured networks).
 SS58_PREFIX = 42
 
 # Byte widths of fixed-size SCALE primitives.
+U16_BYTES = 2
 U32_BYTES = 4
 U64_BYTES = 8
 U128_BYTES = 16
@@ -57,6 +58,10 @@ def encode_u128(value: int) -> bytes:
 
 
 # ─── Streaming decoders ────────────────────────────────────────────────────
+
+
+def decode_u16(data: bytes, offset: int) -> Tuple[int, int]:
+    return struct.unpack_from('<H', data, offset)[0], offset + U16_BYTES
 
 
 def decode_u32(data: bytes, offset: int) -> Tuple[int, int]:

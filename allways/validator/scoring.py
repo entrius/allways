@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
+from allways.chains import canonical_pair
 from allways.constants import (
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
@@ -249,6 +250,12 @@ def replay_crown_time_window(
     )
     replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
 
+    # Rates are stored as canonical_dest per canonical_source (TAO per BTC).
+    # In the canonical direction (btc→tao) higher = better; in the reverse
+    # direction (tao→btc) lower = better.
+    canon_from, _ = canonical_pair(from_chain, to_chain)
+    lower_rate_wins = from_chain != canon_from
+
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
 
@@ -262,6 +269,7 @@ def replay_crown_time_window(
             rewardable_hotkeys,
             busy=busy_set,
             active=active_set,
+            lower_rate_wins=lower_rate_wins,
         )
         if not holders:
             return
@@ -298,10 +306,17 @@ def crown_holders_at_instant(
     rewardable: Set[str],
     busy: Optional[Set[str]] = None,
     active: Optional[Set[str]] = None,
+    lower_rate_wins: bool = False,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
     other condition (rewardable, active, not busy, rate > 0). If the best
     rate has no qualified miner, fall through to the next-best rate.
+
+    ``lower_rate_wins`` flips the sort: rates are stored as canonical_dest
+    per canonical_source (TAO per BTC), so higher-is-better only holds in
+    the canonical direction (btc→tao). In the reverse direction (tao→btc)
+    a smaller TAO/BTC quote means the miner is asking less TAO for 1 BTC —
+    a better deal for the swapper, which earns them the crown.
 
     Collateral-floor gating is trusted to the contract's active flag —
     miners who drop below the floor get auto-deactivated on-chain (fee /
@@ -323,7 +338,7 @@ def crown_holders_at_instant(
         if rate > 0:
             by_rate.setdefault(rate, []).append(hotkey)
 
-    for rate in sorted(by_rate, reverse=True):
+    for rate in sorted(by_rate, reverse=not lower_rate_wins):
         winners = [hk for hk in by_rate[rate] if qualifies(hk)]
         if winners:
             return winners
