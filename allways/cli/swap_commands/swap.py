@@ -37,6 +37,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
@@ -85,11 +86,10 @@ def sign_and_broadcast_confirm(
     """
     # Signing is fast for the internal path and may prompt interactively for
     # the external (paste-a-signature) path — never wrap it in a spinner.
-    proof_message = f'allways-swap:{from_tx_hash}'
     from_proof = sign_or_prompt_external(
         provider,
         user_from_address,
-        proof_message,
+        swap_proof_message(from_tx_hash),
         key=from_key,
         chain=from_chain,
         skip_confirm=skip_confirm,
@@ -216,13 +216,12 @@ def broadcast_reserve_with_retry(
     reserved_until = 0
     for attempt in range(max_retries + 1):
         current_block = subtensor.get_current_block()
-        reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
         # Signing is fast internally and may prompt interactively for external
         # signers — never wrap it in a spinner.
         from_address_proof = sign_or_prompt_external(
             provider,
             user_from_address,
-            reserve_proof_message,
+            reserve_proof_message(user_from_address, current_block),
             key=from_key,
             chain=from_chain,
             skip_confirm=skip_confirm,
