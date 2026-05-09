@@ -193,34 +193,6 @@ def broadcast_reserve_with_retry(
 
     Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
     """
-    current_block = subtensor.get_current_block()
-    reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
-    # Signing is fast internally and may prompt interactively for external
-    # signers — never wrap it in a spinner.
-    from_address_proof = sign_or_prompt_external(
-        provider,
-        user_from_address,
-        reserve_proof_message,
-        key=from_key,
-        chain=from_chain,
-        skip_confirm=skip_confirm,
-    )
-    if not from_address_proof:
-        console.print('[red]Could not obtain reserve signature — cannot reserve miner.[/red]')
-        return None
-
-    synapse = SwapReserveSynapse(
-        miner_hotkey=selected_pair.hotkey,
-        tao_amount=tao_amount,
-        from_amount=from_amount,
-        to_amount=to_amount,
-        from_address=user_from_address,
-        from_address_proof=from_address_proof,
-        block_anchor=current_block,
-        from_chain=from_chain,
-        to_chain=to_chain,
-    )
-
     ephemeral_wallet = get_ephemeral_wallet()
     with loading('Discovering validators...'):
         validator_axons = discover_validators(subtensor, netuid, contract_client=client)
@@ -243,31 +215,32 @@ def broadcast_reserve_with_retry(
     reserved = False
     reserved_until = 0
     for attempt in range(max_retries + 1):
-        if attempt > 0:
-            current_block = subtensor.get_current_block()
-            reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
-            from_address_proof = sign_or_prompt_external(
-                provider,
-                user_from_address,
-                reserve_proof_message,
-                key=from_key,
-                chain=from_chain,
-                skip_confirm=skip_confirm,
-            )
-            if not from_address_proof:
-                console.print('[red]Could not obtain reserve signature on retry.[/red]')
-                return None
-            synapse = SwapReserveSynapse(
-                miner_hotkey=selected_pair.hotkey,
-                tao_amount=tao_amount,
-                from_amount=from_amount,
-                to_amount=to_amount,
-                from_address=user_from_address,
-                from_address_proof=from_address_proof,
-                block_anchor=current_block,
-                from_chain=from_chain,
-                to_chain=to_chain,
-            )
+        current_block = subtensor.get_current_block()
+        reserve_proof_message = f'allways-reserve:{user_from_address}:{current_block}'
+        # Signing is fast internally and may prompt interactively for external
+        # signers — never wrap it in a spinner.
+        from_address_proof = sign_or_prompt_external(
+            provider,
+            user_from_address,
+            reserve_proof_message,
+            key=from_key,
+            chain=from_chain,
+            skip_confirm=skip_confirm,
+        )
+        if not from_address_proof:
+            console.print('[red]Could not obtain reserve signature — cannot reserve miner.[/red]')
+            return None
+        synapse = SwapReserveSynapse(
+            miner_hotkey=selected_pair.hotkey,
+            tao_amount=tao_amount,
+            from_amount=from_amount,
+            to_amount=to_amount,
+            from_address=user_from_address,
+            from_address_proof=from_address_proof,
+            block_anchor=current_block,
+            from_chain=from_chain,
+            to_chain=to_chain,
+        )
 
         with loading(f'Broadcasting reservation to {len(validator_axons)} validators...'):
             responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=60.0)
