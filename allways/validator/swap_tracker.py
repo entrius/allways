@@ -13,71 +13,78 @@ from allways.contract_client import AllwaysContractClient
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
-# Consecutive None polls tolerated before treating a swap as resolved. Smooths
-# RPC flakes without the fragile timeout-block inference the V1 tracker used.
-NULL_SWAP_RETRY_LIMIT = 3
+# Cold-start backward scan halts after this many consecutive None lookups.
+# Resolved swaps are pruned from contract storage (`swaps.remove`), so a long
+# run of Nones means we've passed the live-swap region. Block-age cutoffs
+# silently dropped long-stuck ACTIVE swaps; this does not. Tuned low for
+# current volume — bump if the gap between contiguous active swap IDs grows.
+MAX_INIT_GAP = 20
+
+# Re-fetch the last N swap IDs each poll regardless of last_scanned_id so a
+# silent get_swap None during discovery self-heals next poll. Mirrors the
+# miner's RESCAN_WINDOW (#264). Bounded by subnet-wide swap creation rate
+# per forward step, not by the validator's tracked-set size.
+RESCAN_WINDOW = 16
+
+
+def _swap_label(swap: Swap) -> str:
+    return f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
 
 
 class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
 
-    def __init__(
-        self,
-        client: AllwaysContractClient,
-        fulfillment_timeout_blocks: int,
-    ):
+    def __init__(self, client: AllwaysContractClient):
         self.client = client
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
-        # swap_id → timeout_block at vote time. ``is_extend_timeout_voted``
-        # auto-clears the entry once the contract has bumped the swap past
-        # the voted value so the next extension round can vote again.
-        self.extend_timeout_voted_at: Dict[int, int] = {}
-        self.null_retry_count: Dict[int, int] = {}
-        self.fulfillment_timeout_blocks = fulfillment_timeout_blocks
 
-    def initialize(self, current_block: int):
-        """Cold start: scan backward from latest swap to seed active set."""
+    def initialize(self):
+        """Cold start: scan backward from latest swap to seed active set.
+
+        Halts on consecutive Nones (resolved/pruned region) rather than on
+        block age — an ACTIVE swap orphaned by a prior validator outage can be
+        arbitrarily old, and a block-based cutoff would let it fall through.
+        """
         next_id = self.client.get_next_swap_id()
         if next_id <= 1:
             self.last_scanned_id = 0
             bt.logging.info('SwapTracker initialized: no swaps exist')
             return
 
-        cutoff_block = current_block - self.fulfillment_timeout_blocks
-        latest_id = next_id - 1
-
-        for swap_id in reversed(range(1, next_id)):
+        consecutive_none = 0
+        for swap_id in range(next_id - 1, 0, -1):
             swap = self.client.get_swap(swap_id)
             if swap is None:
+                consecutive_none += 1
+                if consecutive_none >= MAX_INIT_GAP:
+                    bt.logging.debug(
+                        f'SwapTracker init: stopping at swap {swap_id} '
+                        f'after {consecutive_none} consecutive resolved/pruned swaps'
+                    )
+                    break
                 continue
-
-            if swap.initiated_block < cutoff_block:
-                bt.logging.debug(
-                    f'SwapTracker init: stopping at swap {swap_id} '
-                    f'(initiated_block={swap.initiated_block} < cutoff={cutoff_block})'
-                )
-                break
-
+            consecutive_none = 0
             if swap.status in ACTIVE_STATUSES:
                 self.active[swap.id] = swap
 
-        self.last_scanned_id = latest_id
+        self.last_scanned_id = next_id - 1
 
         bt.logging.info(f'SwapTracker initialized: active={len(self.active)}, last_scanned_id={self.last_scanned_id}')
 
     def resolve(self, swap_id: int, status: SwapStatus, block: int):
-        """Drop a swap from tracking after our vote reached quorum."""
+        """Drop a swap from tracking after our vote reached quorum or after
+        the watcher observed a SwapCompleted/SwapTimedOut event. Idempotent
+        — no-op when the swap isn't tracked."""
         swap = self.active.pop(swap_id, None)
         if swap is None:
             return
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
-        self.extend_timeout_voted_at.pop(swap_id, None)
-        self.null_retry_count.pop(swap_id, None)
+        bt.logging.info(f'Swap {swap_id}: dropped from active ({status.name} at block {block})')
 
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant confirm/timeout extrinsics."""
@@ -86,23 +93,18 @@ class SwapTracker:
     def is_voted(self, swap_id: int) -> bool:
         return swap_id in self.voted_ids
 
-    def mark_extend_timeout_voted(self, swap_id: int) -> None:
+    def update_timeout_block(self, swap_id: int, timeout_block: int) -> None:
+        """Apply an externally-observed timeout bump (event-driven from
+        ``TimeoutExtensionFinalized``). Skips swaps not currently tracked
+        and never moves the deadline backwards — the next ``poll`` will
+        pick up the contract value either way."""
         swap = self.active.get(swap_id)
-        if swap is not None:
-            self.extend_timeout_voted_at[swap_id] = swap.timeout_block
+        if swap is None:
+            return
+        if timeout_block > swap.timeout_block:
+            swap.timeout_block = timeout_block
 
-    def is_extend_timeout_voted(self, swap_id: int) -> bool:
-        voted_at = self.extend_timeout_voted_at.get(swap_id)
-        if voted_at is None:
-            return False
-        swap = self.active.get(swap_id)
-        if swap is not None and swap.timeout_block > voted_at:
-            # contract extended the swap → vote opens again for the next round
-            self.extend_timeout_voted_at.pop(swap_id, None)
-            return False
-        return True
-
-    async def poll(self, current_block: int = 0):
+    async def poll(self):
         """Incremental refresh — called every forward step."""
         try:
             await self.poll_inner()
@@ -116,27 +118,24 @@ class SwapTracker:
         next_id = await asyncio.to_thread(self.client.get_next_swap_id)
 
         # --- Discovery phase: scan new swap IDs ---
+        # Sequential — substrate WS isn't thread-safe (see contract_client mutex);
+        # parallel fanout used to surface as silent get_swap Nones. RESCAN_WINDOW
+        # re-checks recent IDs so a transient skip self-heals next poll.
         fresh: Set[int] = set()
-        new_ids = list(range(self.last_scanned_id + 1, next_id))
-        if new_ids:
-            # return_exceptions=True keeps one flaky get_swap from killing the step.
-            swaps = await asyncio.gather(
-                *[asyncio.to_thread(self.client.get_swap, sid) for sid in new_ids],
-                return_exceptions=True,
-            )
-            for sid, result in zip(new_ids, swaps):
-                if isinstance(result, Exception):
-                    bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during discovery: {result}')
-                    continue
-                swap = result
-                if swap is None:
-                    continue
-                if swap.status in ACTIVE_STATUSES:
-                    self.active[swap.id] = swap
-                    fresh.add(swap.id)
-
-        if new_ids:
-            bt.logging.debug(f'SwapTracker: discovered {len(fresh)} active from {len(new_ids)} new IDs')
+        start_id = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
+        for sid in range(start_id, next_id):
+            try:
+                swap = await asyncio.to_thread(self.client.get_swap, sid)
+            except Exception as e:
+                bt.logging.debug(f'SwapTracker discovery({sid}) failed, will retry: {e}')
+                continue
+            if swap is None:
+                continue
+            if swap.status in ACTIVE_STATUSES:
+                if swap.id not in self.active:
+                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
+                self.active[swap.id] = swap
+                fresh.add(swap.id)
 
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -147,47 +146,27 @@ class SwapTracker:
             self.prune_stale_voted_ids()
             return
 
-        swaps = await asyncio.gather(
-            *[asyncio.to_thread(self.client.get_swap, sid) for sid in stale_ids],
-            return_exceptions=True,
-        )
-
-        # Null and transient errors share one retry policy — a missing swap
-        # is either an RPC flake or a freshly-resolved entry the event
-        # watcher will record. Retry a few times, then drop.
-        resolved_ids: List[int] = []
-        for sid, result in zip(stale_ids, swaps):
-            if isinstance(result, Exception):
-                bt.logging.debug(f'SwapTracker: get_swap({sid}) failed during refresh: {result}')
-                result = None
-
+        # Refresh: update active swaps, drop on terminal status. A None or
+        # transient RPC error leaves the swap in active — resolution is owned
+        # by the event watcher (SwapCompleted/SwapTimedOut → tracker.resolve).
+        for sid in stale_ids:
+            try:
+                result = await asyncio.to_thread(self.client.get_swap, sid)
+            except Exception as e:
+                bt.logging.debug(f'SwapTracker refresh({sid}) failed, will retry: {e}')
+                continue
             if result is None:
-                if self.bump_null_retry(sid):
-                    resolved_ids.append(sid)
-            elif result.status in ACTIVE_STATUSES:
+                continue
+            if result.status in ACTIVE_STATUSES:
+                prev = self.active.get(sid)
+                if prev is not None and prev.status != result.status:
+                    bt.logging.info(f'Swap {sid} [{_swap_label(result)}]: {prev.status.name} -> {result.status.name}')
                 self.active[sid] = result
-                self.null_retry_count.pop(sid, None)
             else:
-                resolved_ids.append(sid)
-
-        for sid in resolved_ids:
-            self.active.pop(sid, None)
-            self.voted_ids.discard(sid)
-            self.null_retry_count.pop(sid, None)
-
-        if resolved_ids:
-            bt.logging.debug(f'SwapTracker: resolved {len(resolved_ids)}, {len(self.active)} still active')
+                # Terminal status from chain — drop with reason for observability.
+                self.resolve(sid, result.status, result.completed_block or 0)
 
         self.prune_stale_voted_ids()
-
-    def bump_null_retry(self, swap_id: int) -> bool:
-        """Returns True when the retry limit is hit and the caller should
-        treat the swap as resolved."""
-        retries = self.null_retry_count.get(swap_id, 0) + 1
-        if retries >= NULL_SWAP_RETRY_LIMIT:
-            return True
-        self.null_retry_count[swap_id] = retries
-        return False
 
     def prune_stale_voted_ids(self) -> None:
         """Drop any voted state for swaps no longer being tracked. Normally
@@ -195,9 +174,6 @@ class SwapTracker:
         active.pop raced by a fixture) can leave orphans."""
         active_ids = set(self.active.keys())
         self.voted_ids -= self.voted_ids - active_ids
-        for sid in list(self.extend_timeout_voted_at.keys()):
-            if sid not in active_ids:
-                del self.extend_timeout_voted_at[sid]
 
     def get_fulfilled(self, current_block: int) -> List[Swap]:
         """Active FULFILLED swaps not yet past timeout (ready for verification)."""

@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-import rich_click as click
+import click
 from rich.table import Table
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
@@ -36,31 +36,32 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         alw swap quote --from btc --to tao --amount 0.1
         alw swap quote --from tao --to btc --amount 50
     """
-    supported = sorted(SUPPORTED_CHAINS.keys())
-    chain_choices = click.Choice(supported, case_sensitive=False)
+    if from_chain and to_chain:
+        from_chain = from_chain.lower()
+        to_chain = to_chain.lower()
+        if from_chain not in SUPPORTED_CHAINS:
+            console.print(f'[red]Unknown source chain: {from_chain}[/red]')
+            return
+        if to_chain not in SUPPORTED_CHAINS:
+            console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
+            return
+        if from_chain == to_chain:
+            console.print('[red]Source and destination chains must be different[/red]')
+            return
+    else:
+        chain_ids = list(SUPPORTED_CHAINS.keys())
+        directions = [(s, d) for s in chain_ids for d in chain_ids if s != d]
 
-    if not from_chain:
-        from_chain = click.prompt(f'Source chain ({"/".join(supported)})', type=chain_choices)
-    from_chain = from_chain.lower()
-    if from_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {from_chain}[/red]')
-        return
+        console.print('\n[bold]Allways Swap Quote[/bold]\n')
+        console.print('[bold]What would you like to swap?[/bold]\n')
+        for idx, (src, dst) in enumerate(directions, 1):
+            console.print(f'  {idx}. {SUPPORTED_CHAINS[src].name} -> {SUPPORTED_CHAINS[dst].name}')
 
-    if not to_chain:
-        remaining = [c for c in supported if c != from_chain]
-        default_to = remaining[0] if remaining else None
-        to_chain = click.prompt(
-            f'Destination chain ({"/".join(remaining) if remaining else ""})',
-            type=click.Choice(remaining, case_sensitive=False) if remaining else chain_choices,
-            default=default_to,
-        )
-    to_chain = to_chain.lower()
-    if to_chain not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {to_chain}[/red]')
-        return
-    if from_chain == to_chain:
-        console.print('[red]Source and destination chains must be different[/red]')
-        return
+        choice = click.prompt('\nSelect', type=int, default=1)
+        if choice < 1 or choice > len(directions):
+            console.print('[red]Invalid selection[/red]')
+            return
+        from_chain, to_chain = directions[choice - 1]
 
     if amount is None:
         amount = click.prompt(f'Amount to send ({from_chain.upper()})', type=float)
@@ -83,19 +84,24 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         all_pairs = read_miner_commitments(subtensor, netuid)
         matching = find_matching_miners(all_pairs, from_chain, to_chain)
 
+        # Hide truly inactive miners — they've taken themselves off the subnet
+        # and we can't know when they'll be back, so showing their rate would
+        # pollute the quote. Miners that are active but momentarily in a swap
+        # stay in the list with a status label so users can still price-shop.
         available = []
         for pair in matching:
             try:
                 is_active = client.get_miner_active_flag(pair.hotkey)
-                has_swap = client.get_miner_has_active_swap(pair.hotkey)
                 collateral = client.get_miner_collateral(pair.hotkey)
-                if is_active and not has_swap and collateral > 0:
-                    available.append((pair, collateral))
+                if not is_active or collateral <= 0:
+                    continue
+                has_swap = client.get_miner_has_active_swap(pair.hotkey)
+                available.append((pair, collateral, has_swap))
             except ContractError:
                 continue
 
     if not available:
-        console.print('[yellow]No active miners available for this pair[/yellow]\n')
+        console.print('[yellow]No active miners with collateral for this pair[/yellow]\n')
         return
 
     available.sort(key=lambda x: x[0].rate, reverse=True)
@@ -143,25 +149,38 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         )
         return
 
-    console.print(f'\n[bold]Quote: {amount} {from_chain.upper()} -> {to_chain.upper()}[/bold]\n')
+    src_up = from_chain.upper()
+    dst_up = to_chain.upper()
+    console.print(f'\n[bold]Quote: send {amount} {src_up} → receive {dst_up}[/bold]')
+    console.print(
+        '[dim]Rate shown as destination per source unit (e.g. for BTC→TAO, 345 = 1 BTC gets 345 TAO).[/dim]\n'
+    )
 
     table = Table(show_header=True)
     table.add_column('#', style='dim')
     table.add_column('UID', style='cyan')
-    table.add_column(f'Rate ({to_chain.upper()}/{from_chain.upper()})', style='green')
+    table.add_column('Rate', style='green')
     table.add_column('You Receive', style='bold green')
     table.add_column('Collateral', style='yellow')
     table.add_column('Status', style='bold')
 
     viable_count = 0
-    for idx, (pair, collateral) in enumerate(available, 1):
+    busy_but_fits_count = 0
+    for idx, (pair, collateral, has_swap) in enumerate(available, 1):
         to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
         human_receives = user_receives / (10**dst_chain_def.decimals)
 
         tao_amount_rao = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
         viable, reason = check_swap_viability(tao_amount_rao, collateral, min_swap_rao, max_swap_rao)
-        if viable:
+        # "in swap" takes precedence over amount-viability: even if the amount
+        # fits, the miner can't accept a new reservation until the current one
+        # resolves. Shown yellow rather than red to signal "temporary".
+        if has_swap:
+            status = '[yellow]in swap[/yellow]'
+            if viable:
+                busy_but_fits_count += 1
+        elif viable:
             status = '[green]available[/green]'
             viable_count += 1
         else:
@@ -171,17 +190,66 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
             str(idx),
             str(pair.uid),
             f'{pair.rate:g}',
-            f'{human_receives:.8f} {to_chain.upper()}',
+            f'{human_receives:.8f} {dst_up}',
             f'{from_rao(collateral):.4f} TAO',
             status,
         )
 
     console.print(table)
-    console.print(f'  [dim](after {fee_pct:g}% fee)[/dim]')
+    console.print(f'  [dim](receive amount is after {fee_pct:g}% protocol fee)[/dim]')
+
+    # Show the implied max-send amount at the best available rate so a user
+    # who hit "insufficient collateral" knows the ceiling to retry under.
+    # Prefer a miner that's not in-swap so the hint is actionable now; fall
+    # back to the top-rate row so the user still sees a ceiling figure.
+    reservable = [row for row in available if not row[2]]
+    if (reservable or available) and max_swap_rao > 0:
+        best_pair, best_collateral, best_has_swap = reservable[0] if reservable else available[0]
+        # The TAO leg is capped by min(collateral, max_swap_rao).
+        effective_tao_cap_rao = min(best_collateral, max_swap_rao)
+        if from_chain == 'tao':
+            max_send_human = from_rao(effective_tao_cap_rao)
+        else:
+            # Source is non-TAO — derive max send in source units from the
+            # TAO cap divided by the miner's forward rate (dest-per-source =
+            # TAO-per-source when dst=tao).
+            max_send_human = _max_source_from_tao_cap(best_pair, effective_tao_cap_rao, from_chain, to_chain)
+        if max_send_human is not None:
+            busy_note = ' (currently in a swap — available once that clears)' if best_has_swap else ''
+            console.print(
+                f'  [dim]Best miner (UID {best_pair.uid}) can fulfill up to '
+                f'~{max_send_human:g} {src_up} at rate {best_pair.rate:g}{busy_note}.[/dim]'
+            )
+
     if viable_count == 0:
-        console.print(
-            '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
-            'or wait for more collateral to be posted.[/yellow]\n'
-        )
+        if busy_but_fits_count > 0:
+            console.print(
+                '  [yellow]All miners that can fulfill this amount are currently in a swap — retry shortly.[/yellow]\n'
+            )
+        else:
+            console.print(
+                '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
+                'or wait for more collateral to be posted.[/yellow]\n'
+            )
     else:
         console.print()
+
+
+def _max_source_from_tao_cap(pair, tao_cap_rao: int, from_chain: str, to_chain: str) -> float | None:
+    """Derive the max source-chain amount (human units) a miner can fulfill,
+    given a TAO-side cap. Returns None if the direction has no TAO leg.
+
+    Bridging through TAO: tao_cap_rao is a cap on the TAO side of the swap,
+    so the max source amount is `tao_cap_rao / rate` scaled back to human
+    units. Only meaningful when one side is TAO (true for every pair today).
+    """
+    if from_chain == 'tao' or to_chain != 'tao':
+        # from_chain == 'tao' is the caller's fast path; the 'neither is TAO'
+        # case currently can't occur (every chain bridges through TAO) but we
+        # don't lie about it.
+        return None
+    if pair.rate <= 0:
+        return None
+    # tao_cap_rao (9-decimal) / rate → source amount in source-decimal units.
+    tao_human = tao_cap_rao / 1_000_000_000
+    return tao_human / pair.rate

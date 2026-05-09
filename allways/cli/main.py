@@ -24,7 +24,7 @@ if os.environ.get('_ALW_COMPLETE'):
     from unittest.mock import MagicMock as _MagicMock
 
     _mock = _MagicMock()
-    for _pkg in ['bittensor', 'substrateinterface']:
+    for _pkg in ['bittensor', 'async_substrate_interface']:
         for _suffix in [
             '',
             '.core',
@@ -38,13 +38,16 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
 from click.shell_completion import get_completion_class  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
+from dotenv import find_dotenv, load_dotenv  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-load_dotenv()
+# Precedence: shell env > project .env (CWD walk-up) > ~/.allways/.env. override=False makes earlier loads win.
+load_dotenv(find_dotenv(usecwd=True), override=False)
+load_dotenv(Path.home() / '.allways' / '.env', override=False)
 
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
 from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402
@@ -92,10 +95,7 @@ def show_config():
         table.add_column('Value', style='green')
 
         for key, value in config.items():
-            str_val = str(value)
-            if len(str_val) > 25:
-                str_val = str_val[:12] + '...' + str_val[-10:]
-            table.add_row(key, str_val)
+            table.add_row(key, str(value))
 
         console.print(table)
         console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]\n')
@@ -112,14 +112,16 @@ KNOWN_NETWORKS = {
     'local': 'ws://127.0.0.1:9944',
 }
 
+VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address')
+
 
 @config_group.command('set')
-@click.argument('key', type=str)
+@click.argument('key', type=click.Choice(VALID_CONFIG_KEYS, case_sensitive=False))
 @click.argument('value', type=str)
 def config_set(key: str, value: str):
     """Set a configuration value.
 
-    [dim]Common keys:
+    [dim]Valid keys:
         wallet              Wallet name
         hotkey              Hotkey name
         contract-address    Contract address

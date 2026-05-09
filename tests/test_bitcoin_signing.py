@@ -1,7 +1,8 @@
 """Tests for BIP-137 message signing and verification in BitcoinProvider."""
 
 import os
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
@@ -223,3 +224,50 @@ class TestBitcoinProviderVerifyFromProof:
         # not crash, because no valid signature binds to it.
         result = provider.verify_from_proof('bcrt1qtestnettestaddresstestaddresstestaddr', TEST_MESSAGE, 'AAAA')
         assert result is False
+
+
+class TestBroadcastedTxidsTracking:
+    """Pin the find_recent_outgoing reuse contract: cross-process leakage is
+    impossible (fresh provider = empty set), and same-session retries can
+    still recover a broadcast whose response was lost."""
+
+    SAMPLE_RAW_TX = (
+        '0200000001abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
+        '0000000000ffffffff0100e1f5050000000017a9140000000000000000000000000000000000000000870'
+        '0000000'
+    )
+
+    def _expected_txid(self, raw_hex: str) -> str:
+        from embit.transaction import Transaction as EmbitTx
+
+        return EmbitTx.from_string(raw_hex).txid().hex()
+
+    def test_successful_broadcast_records_txid(self):
+        provider = make_lightweight_provider()
+        txid = self._expected_txid(self.SAMPLE_RAW_TX)
+        with patch.object(provider, 'btc_api_post', return_value=SimpleNamespace(status_code=200, text=txid)):
+            result = provider.broadcast_tx(self.SAMPLE_RAW_TX)
+        assert result == txid
+        assert txid in provider.broadcasted_txids
+
+    def test_broadcast_with_lost_response_still_records_txid(self):
+        """If the post errors and tx_exists hasn't propagated yet, the txid
+        must still be in the set — otherwise a same-session retry that
+        finds the tx via find_recent_outgoing won't be allowed to reuse it
+        and will broadcast a duplicate."""
+        provider = make_lightweight_provider()
+        txid = self._expected_txid(self.SAMPLE_RAW_TX)
+        post = MagicMock(side_effect=ConnectionError('lost'))
+        with (
+            patch.object(provider, 'btc_api_post', post),
+            patch.object(provider, 'tx_exists', return_value=False),
+        ):
+            result = provider.broadcast_tx(self.SAMPLE_RAW_TX)
+        assert result is None
+        assert txid in provider.broadcasted_txids
+
+    def test_fresh_provider_starts_with_empty_set(self):
+        """Each `alw swap` invocation gets a clean set — the prior swap's
+        consumed tx hash can't leak across processes."""
+        provider = make_lightweight_provider()
+        assert provider.broadcasted_txids == set()

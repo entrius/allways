@@ -79,17 +79,18 @@ def make_validator(
     *,
     block: int = 1000,
     reserved_until: int = 2000,
-    reservation_data: tuple | None = (0, 345_000_000, 100_000, 345_000_000),
+    reservation_data: tuple | None = (345_000_000, 100_000, 345_000_000),
     providers: dict | None = None,
 ) -> MagicMock:
     """Build a Validator mock with default-happy contract/chain state.
 
     Individual tests override specific attributes to simulate each branch.
     reservation_data tuple mirrors the on-chain layout used by
-    handle_swap_confirm: (_, tao_amount, source_amount, dest_amount).
+    handle_swap_confirm: (tao_amount, source_amount, dest_amount).
     """
     validator = MagicMock()
     validator.block = block
+    validator.axon_subtensor.get_current_block.return_value = block
     validator.config.netuid = 2
     validator.axon_lock = threading.Lock()
 
@@ -310,7 +311,7 @@ class TestSourceTxVerification:
         """The contract-reserved amounts are authoritative. A queued entry
         must persist those, not any user-supplied value, so the later
         auto-initiate hashes match what the miner was reserved under."""
-        validator = make_validator(reservation_data=(0, 777_000_000, 55_000, 999_000_000))
+        validator = make_validator(reservation_data=(777_000_000, 55_000, 999_000_000))
         validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
             confirmed=False,
             confirmations=1,
@@ -328,23 +329,23 @@ class TestSourceTxVerification:
 
 
 class TestErrorHandling:
-    def test_contract_rejection_surfaces_generic_message(self):
-        """Known contract rejection → short user-facing reason, not a raw
-        ContractTrapped string."""
+    def test_contract_rejection_surfaces_variant_detail(self):
+        """Contract rejections must carry the variant + description through to
+        the user — generic placeholders previously hid actionable info such as
+        DuplicateSourceTx."""
         validator = make_validator()
-        validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError('ContractTrapped: ...')
-        with patch('allways.validator.axon_handlers.is_contract_rejection', return_value=True):
-            result = run_handler(validator, make_synapse())
+        err = 'vote_initiate: DuplicateSourceTx — Source transaction hash already used in another swap'
+        validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError(err)
+        result = run_handler(validator, make_synapse())
         assert result.accepted is False
-        assert 'Contract rejected' in result.rejection_reason
+        assert 'DuplicateSourceTx' in result.rejection_reason
 
     def test_non_rejection_contract_error_surfaces_raw(self):
         """RPC/connectivity errors (not contract rejections) include detail
         so the caller can distinguish transient failures from rejections."""
         validator = make_validator()
         validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError('connection reset')
-        with patch('allways.validator.axon_handlers.is_contract_rejection', return_value=False):
-            result = run_handler(validator, make_synapse())
+        result = run_handler(validator, make_synapse())
         assert result.accepted is False
         assert 'connection reset' in result.rejection_reason
 
