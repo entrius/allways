@@ -90,6 +90,7 @@ def make_validator(
     """
     validator = MagicMock()
     validator.block = block
+    validator.axon_subtensor.get_current_block.return_value = block
     validator.config.netuid = 2
     validator.axon_lock = threading.Lock()
 
@@ -328,23 +329,23 @@ class TestSourceTxVerification:
 
 
 class TestErrorHandling:
-    def test_contract_rejection_surfaces_generic_message(self):
-        """Known contract rejection → short user-facing reason, not a raw
-        ContractTrapped string."""
+    def test_contract_rejection_surfaces_variant_detail(self):
+        """Contract rejections must carry the variant + description through to
+        the user — generic placeholders previously hid actionable info such as
+        DuplicateSourceTx."""
         validator = make_validator()
-        validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError('ContractTrapped: ...')
-        with patch('allways.validator.axon_handlers.is_contract_rejection', return_value=True):
-            result = run_handler(validator, make_synapse())
+        err = 'vote_initiate: DuplicateSourceTx — Source transaction hash already used in another swap'
+        validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError(err)
+        result = run_handler(validator, make_synapse())
         assert result.accepted is False
-        assert 'Contract rejected' in result.rejection_reason
+        assert 'DuplicateSourceTx' in result.rejection_reason
 
     def test_non_rejection_contract_error_surfaces_raw(self):
         """RPC/connectivity errors (not contract rejections) include detail
         so the caller can distinguish transient failures from rejections."""
         validator = make_validator()
         validator.axon_contract_client.get_miner_reserved_until.side_effect = ContractError('connection reset')
-        with patch('allways.validator.axon_handlers.is_contract_rejection', return_value=False):
-            result = run_handler(validator, make_synapse())
+        result = run_handler(validator, make_synapse())
         assert result.accepted is False
         assert 'connection reset' in result.rejection_reason
 

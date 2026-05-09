@@ -4,7 +4,7 @@ import click
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
@@ -59,8 +59,8 @@ def set_timeout(blocks: int):
         getter=lambda c: c.get_fulfillment_timeout(),
         setter=lambda c, w: c.set_fulfillment_timeout(wallet=w, blocks=blocks),
         noun='fulfillment timeout',
-        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
-        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
+        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
         success_msg=f'Fulfillment timeout set to {blocks} blocks',
     )
 
@@ -81,8 +81,8 @@ def set_reservation_ttl(blocks: int):
         getter=lambda c: c.get_reservation_ttl(),
         setter=lambda c, w: c.set_reservation_ttl(wallet=w, blocks=blocks),
         noun='reservation TTL',
-        format_current=lambda v: f'{v} blocks (~{v * SECONDS_PER_BLOCK / 60:.0f} min)',
-        new_display=f'{blocks} blocks (~{blocks * SECONDS_PER_BLOCK / 60:.0f} min)',
+        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
+        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
         success_msg=f'Reservation TTL set to {blocks} blocks',
     )
 
@@ -276,49 +276,11 @@ def remove_vali(hotkey: str):
         print_contract_error('Failed to remove validator', e)
 
 
-@admin_group.command('set-recycle-address', show_disclaimer=True)
-@click.argument('account_id', type=str)
-def set_recycle_address(account_id: str):
-    """Set the address where recycled fees are transferred.
-
-    [dim]Examples:
-        $ alw admin set-recycle-address 5Cxyz...[/dim]
-    """
-    if not is_valid_ss58(account_id):
-        console.print('[red]Not a valid SS58 address[/red]')
-        return
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current = client.get_recycle_address()
-    except ContractError:
-        current = ''
-
-    console.print('\n[bold]Set Recycle Address[/bold]\n')
-    if current:
-        console.print(f'  Current: {current}')
-    console.print(f'  New:     {account_id}\n')
-
-    if current == account_id:
-        console.print('[yellow]This address is already set. Nothing to do.[/yellow]')
-        return
-
-    if not click.confirm('Confirm?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.set_recycle_address(wallet=wallet, address=account_id)
-        console.print(f'[green]Recycle address set to {account_id}[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to set recycle address', e)
-
-
 @admin_group.command('recycle-fees', show_disclaimer=True)
 def recycle_fees():
-    """Transfer accumulated fees to the designated recycle address.
+    """Recycle accumulated fees. Pre-latch: transfers to the custodial
+    fallback. Post-latch (after `enable-chain-ext`): dispatches via the
+    subtensor `add_stake_recycle` chain extension.
 
     [dim]Examples:
         $ alw admin recycle-fees[/dim]
@@ -327,7 +289,10 @@ def recycle_fees():
 
     try:
         accumulated = client.get_accumulated_fees()
-        destination = client.get_recycle_address()
+        custodial = client.get_recycle_address()
+        staking_hotkey = client.get_staking_hotkey()
+        netuid = client.get_netuid()
+        latched = client.get_chain_ext_enabled()
         total_recycled = client.get_total_recycled_fees()
     except ContractError as e:
         print_contract_error('Failed to read fee state', e)
@@ -335,7 +300,13 @@ def recycle_fees():
 
     console.print('\n[bold]Recycle Fees[/bold]\n')
     console.print(f'  Amount:       {from_rao(accumulated):.6f} TAO')
-    console.print(f'  Destination:  {destination}')
+    if latched:
+        console.print(f'  Path:         chain extension → hotkey {staking_hotkey} on netuid {netuid}')
+    else:
+        console.print(f'  Path:         custodial transfer → {custodial}')
+        console.print(
+            '  [dim]Chain extension not latched yet (run `alw admin enable-chain-ext` once subtensor PR #2560 is live).[/dim]'
+        )
     console.print(f'  Total recycled so far: {from_rao(total_recycled):.6f} TAO\n')
 
     if accumulated == 0:
@@ -349,9 +320,52 @@ def recycle_fees():
     try:
         with loading('Submitting transaction...'):
             client.recycle_fees(wallet=wallet)
-        console.print(f'[green]Recycled {from_rao(accumulated):.6f} TAO to {destination}[/green]\n')
+        console.print(f'[green]Recycled {from_rao(accumulated):.6f} TAO[/green]\n')
     except ContractError as e:
         print_contract_error('Failed to recycle fees', e)
+
+
+@admin_group.command('enable-chain-ext', show_disclaimer=True)
+def enable_chain_ext():
+    """One-way latch: switch `recycle_fees` from the custodial fallback to
+    the subtensor `add_stake_recycle` chain extension. Owner-only.
+
+    Run this once subtensor PR #2560 is live on the network this contract
+    is deployed to AND `staking_hotkey` is registered on `netuid`.
+    Cannot be undone — the contract is non-upgradeable.
+
+    [dim]Examples:
+        $ alw admin enable-chain-ext[/dim]
+    """
+    _, wallet, _, client = get_cli_context()
+
+    try:
+        latched = client.get_chain_ext_enabled()
+        staking_hotkey = client.get_staking_hotkey()
+        netuid = client.get_netuid()
+    except ContractError as e:
+        print_contract_error('Failed to read latch state', e)
+        return
+
+    if latched:
+        console.print('[yellow]Chain extension already latched. Nothing to do.[/yellow]')
+        return
+
+    console.print('\n[bold]Enable Chain Extension[/bold]\n')
+    console.print(f'  Staking hotkey: {staking_hotkey}')
+    console.print(f'  Netuid:         {netuid}')
+    console.print('  [red]This is one-way. After this lands the custodial fallback is dead.[/red]\n')
+
+    if not click.confirm('Confirm latching the chain extension?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        with loading('Submitting transaction...'):
+            client.enable_chain_ext(wallet=wallet)
+        console.print('[green]Chain extension latched.[/green]\n')
+    except ContractError as e:
+        print_contract_error('Failed to latch chain extension', e)
 
 
 @admin_group.command('transfer-ownership', show_disclaimer=True)

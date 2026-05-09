@@ -6,11 +6,14 @@ from allways.chain_providers import create_chain_providers
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
+    loading,
+    mark_pending_swap_tx_sent,
     print_contract_error,
     resolve_source_tx_block,
 )
@@ -53,11 +56,15 @@ def post_tx_command(tx_hash: str, tx_block: int):
         console.print('[red]No pending swap found.[/red]')
         console.print('[dim]Run `alw swap now` to initiate a swap first.[/dim]')
         return
+    # Hydrate from contract — local file is the slim user-only set; chains,
+    # amounts, miner addresses are pulled live from get_reservation.
+    hydrate_pending_swap(state, client)
 
     # Validate reservation is still active on-chain
     try:
-        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-        current_block = subtensor.get_current_block()
+        with loading('Reading reservation status...'):
+            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
+            current_block = subtensor.get_current_block()
     except ContractError as e:
         print_contract_error('Failed to read reservation status', e)
         return
@@ -69,7 +76,6 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     remaining = reserved_until - current_block
-    remaining_min = remaining * SECONDS_PER_BLOCK / 60
     human_amount = from_smallest_unit(state.from_amount, state.from_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')
@@ -77,7 +83,7 @@ def post_tx_command(tx_hash: str, tx_block: int):
     console.print(f'  Send:    {human_amount} {state.from_chain.upper()}')
     console.print(f'  To:      {state.miner_from_address}')
     console.print(f'  Miner:   UID {state.miner_uid}')
-    console.print(f'  Expires: ~{remaining} blocks (~{remaining_min:.0f} min)\n')
+    console.print(f'  Expires: ~{remaining} blocks ({blocks_to_minutes_str(remaining)})\n')
 
     # Get transaction hash
     if not tx_hash:
@@ -88,6 +94,9 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     tx_hash = tx_hash.strip()
+    # The user is asserting they've sent funds — record it so that even if
+    # validators reject the confirm, `alw view reservation` reflects reality.
+    mark_pending_swap_tx_sent(tx_hash)
 
     # Set up chain provider and signing key
     chain_providers = create_chain_providers(subtensor=subtensor)
@@ -115,7 +124,8 @@ def post_tx_command(tx_hash: str, tx_block: int):
         )
 
     # Discover validators
-    validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+    with loading('Discovering validators...'):
+        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]')
         return
@@ -123,7 +133,7 @@ def post_tx_command(tx_hash: str, tx_block: int):
     ephemeral_wallet = get_ephemeral_wallet()
 
     # Sign and broadcast confirm synapse
-    accepted, queued = sign_and_broadcast_confirm(
+    accepted, queued, info = sign_and_broadcast_confirm(
         provider,
         state.user_from_address,
         from_key,
@@ -135,10 +145,14 @@ def post_tx_command(tx_hash: str, tx_block: int):
         from_chain=state.from_chain,
         to_chain=state.to_chain,
         from_tx_block=from_tx_block,
+        miner_uid=state.miner_uid,
     )
 
     if accepted == 0:
-        console.print('[yellow]No validators accepted. You can retry this command.[/yellow]')
+        # Translator already printed the headline. Suppress retry hint when the
+        # failure is deterministic — the same tx hash will reject the same way.
+        if not info.deterministic:
+            console.print('[dim]You can retry this command.[/dim]')
         return
 
     if queued > 0 and queued == accepted:
