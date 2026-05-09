@@ -24,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 
 @click.group('miner', cls=StyledGroup)
@@ -263,7 +264,7 @@ def miner_deactivate():
             return
         reserved_until = client.get_miner_reserved_until(hotkey)
         current_block = subtensor.get_current_block()
-        if reserved_until > current_block:
+        if is_reserved(reserved_until, current_block):
             remaining = reserved_until - current_block
             console.print(
                 f'[red]Cannot deactivate: you have an active reservation '

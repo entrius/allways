@@ -37,6 +37,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.misc import is_reserved
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
@@ -277,7 +278,7 @@ def broadcast_reserve_with_retry(
                     time.sleep(2)
                     try:
                         reserved_until = client.get_miner_reserved_until(selected_pair.hotkey)
-                        if reserved_until > current_block:
+                        if is_reserved(reserved_until, current_block):
                             reserved = True
                             break
                         vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
