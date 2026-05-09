@@ -6,10 +6,11 @@ from allways.chain_providers import create_chain_providers
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
@@ -55,6 +56,9 @@ def post_tx_command(tx_hash: str, tx_block: int):
         console.print('[red]No pending swap found.[/red]')
         console.print('[dim]Run `alw swap now` to initiate a swap first.[/dim]')
         return
+    # Hydrate from contract — local file is the slim user-only set; chains,
+    # amounts, miner addresses are pulled live from get_reservation.
+    hydrate_pending_swap(state, client)
 
     # Validate reservation is still active on-chain
     try:
@@ -72,7 +76,6 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     remaining = reserved_until - current_block
-    remaining_min = remaining * SECONDS_PER_BLOCK / 60
     human_amount = from_smallest_unit(state.from_amount, state.from_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')
@@ -80,7 +83,7 @@ def post_tx_command(tx_hash: str, tx_block: int):
     console.print(f'  Send:    {human_amount} {state.from_chain.upper()}')
     console.print(f'  To:      {state.miner_from_address}')
     console.print(f'  Miner:   UID {state.miner_uid}')
-    console.print(f'  Expires: ~{remaining} blocks (~{remaining_min:.0f} min)\n')
+    console.print(f'  Expires: ~{remaining} blocks ({blocks_to_minutes_str(remaining)})\n')
 
     # Get transaction hash
     if not tx_hash:

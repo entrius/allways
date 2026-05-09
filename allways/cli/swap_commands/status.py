@@ -5,12 +5,14 @@ from rich.table import Table
 
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
+    blocks_to_minutes_str,
     console,
     from_rao,
     get_cli_context,
+    hydrate_pending_swap,
     load_pending_swap,
     loading,
+    probe_pending_reservation,
     read_miner_commitments,
 )
 from allways.constants import NETUID_FINNEY
@@ -79,20 +81,25 @@ def status_command():
         # Pending reservation
         pending = load_pending_swap()
         if pending:
-            try:
-                reserved_until = client.get_miner_reserved_until(pending.miner_hotkey)
-                if reserved_until > subtensor.get_current_block():
-                    remaining = reserved_until - subtensor.get_current_block()
-                    remaining_min = remaining * SECONDS_PER_BLOCK / 60
-                    table.add_row(
-                        'Pending Reservation',
-                        f'send {pending.from_chain.upper()} → receive {pending.to_chain.upper()} '
-                        f'(~{remaining_min:.0f} min left)',
-                    )
-                else:
-                    table.add_row('Pending Reservation', '[dim]Expired[/dim]')
-            except ContractError:
+            hydrate_pending_swap(pending, client)
+            current_block = subtensor.get_current_block()
+            res_status = probe_pending_reservation(client, pending, current_block)
+            if res_status.kind == 'ours_active':
+                remaining = max(0, res_status.reserved_until - current_block)
+                table.add_row(
+                    'Pending Reservation',
+                    f'send {pending.from_chain.upper()} → receive {pending.to_chain.upper()} '
+                    f'({blocks_to_minutes_str(remaining)} left)',
+                )
+            elif res_status.kind == 'our_swap':
+                table.add_row(
+                    'Pending Reservation',
+                    f'[dim]became swap #{res_status.swap.id} ({res_status.swap.status.name})[/dim]',
+                )
+            elif res_status.kind == 'rpc_error':
                 table.add_row('Pending Reservation', '[dim]unable to verify[/dim]')
+            else:  # 'replaced' or 'expired'
+                table.add_row('Pending Reservation', '[dim]Expired[/dim]')
         else:
             table.add_row('Pending Reservation', 'None')
 

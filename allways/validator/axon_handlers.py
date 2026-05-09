@@ -12,13 +12,13 @@ to inject the validator context.
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
+from bittensor import Keypair
 from Crypto.Hash import keccak
-from substrateinterface import Keypair
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
-from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
@@ -56,14 +56,6 @@ def scale_encode_reserve_hash_input(
         + encode_u128(from_amount)
         + encode_u128(to_amount)
     )
-
-
-def scale_encode_extend_hash_input(miner_bytes: bytes, from_tx_hash: str) -> bytes:
-    """SCALE-encode the extend hash input tuple: (AccountId, &str).
-
-    Matches ink::env::hash_encoded::<Keccak256, _>(&(miner, from_tx_hash)).
-    """
-    return miner_bytes + encode_str(from_tx_hash)
 
 
 def scale_encode_initiate_hash_input(
@@ -291,6 +283,13 @@ async def handle_swap_reserve(
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse
 
+        # Source-chain RPC — separate connection from substrate, so it doesn't
+        # need axon_lock and shouldn't block the substrate websocket.
+        balance = provider.get_balance(synapse.from_address)
+        if balance < synapse.from_amount:
+            reject_synapse(synapse, 'Insufficient source balance', ctx)
+            return synapse
+
         # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
         from_addr_bytes = synapse.from_address.encode('utf-8')
         miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
@@ -323,11 +322,6 @@ async def handle_swap_reserve(
             reserve_rate, _ = commitment.get_rate_for_direction(synapse.from_chain)
             if reserve_rate <= 0:
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
-                return synapse
-
-            balance = provider.get_balance(synapse.from_address)
-            if balance < synapse.from_amount:
-                reject_synapse(synapse, 'Insufficient source balance', ctx)
                 return synapse
 
             collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
@@ -366,9 +360,16 @@ async def handle_swap_reserve(
             if strike_count > 0 and last_expired > 0:
                 cooldown = RESERVATION_COOLDOWN_BLOCKS * (2 ** (strike_count - 1))
                 if cur_block < last_expired + cooldown:
-                    reject_synapse(synapse, f'Address on cooldown ({cooldown} blocks remaining)', ctx)
+                    remaining = (last_expired + cooldown) - cur_block
+                    reject_synapse(
+                        synapse,
+                        f'Address on cooldown: ~{remaining} blocks remaining '
+                        f'(strike {strike_count}, {cooldown}-block window)',
+                        ctx,
+                    )
                     return synapse
 
+            bt.logging.info(f'{ctx} preflight ok, voting')
             contract.vote_reserve(
                 wallet=validator.wallet,
                 request_hash=request_hash,
@@ -385,8 +386,7 @@ async def handle_swap_reserve(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the reservation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
+        reject_synapse(synapse, str(e))
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
@@ -583,8 +583,7 @@ async def handle_swap_confirm(
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
-        reason = 'Contract rejected the swap initiation' if is_contract_rejection(e) else str(e)
-        reject_synapse(synapse, reason)
+        reject_synapse(synapse, str(e))
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
