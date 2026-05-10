@@ -421,34 +421,22 @@ class ContractEventWatcher:
                 if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
                     return
                 self.apply_busy_delta(block_num, miner, +1)
-        elif name == 'SwapCompleted':
+        elif name in ('SwapCompleted', 'SwapTimedOut'):
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
+                completed = name == 'SwapCompleted'
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
-                    completed=True,
+                    completed=completed,
                     resolved_block=block_num,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
                 self.bootstrapped_swap_ids.discard(swap_id)
                 if self.swap_tracker is not None:
-                    self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
-        elif name == 'SwapTimedOut':
-            swap_id = values.get('swap_id')
-            miner = values.get('miner', '')
-            if isinstance(swap_id, int) and miner:
-                self.state_store.insert_swap_outcome(
-                    swap_id=swap_id,
-                    miner_hotkey=miner,
-                    completed=False,
-                    resolved_block=block_num,
-                )
-                self.apply_busy_delta(block_num, miner, -1)
-                self.bootstrapped_swap_ids.discard(swap_id)
-                if self.swap_tracker is not None:
-                    self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
+                    status = SwapStatus.COMPLETED if completed else SwapStatus.TIMED_OUT
+                    self.swap_tracker.resolve(swap_id, status, block_num)
         elif name == 'ReservationExtensionFinalized':
             # Event-driven cache update for the local pending_confirms row —
             # replaces the polling refresh that the legacy vote-extend flow
