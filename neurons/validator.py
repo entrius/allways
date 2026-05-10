@@ -38,6 +38,7 @@ from allways.validator.chain_verification import SwapVerifier
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
 from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
+from allways.validator.reservation_index import ReservationIndex
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
@@ -100,11 +101,20 @@ class Validator(BaseValidatorNeuron):
         # in-memory dicts and trusts the contract's active flag for all
         # collateral-floor invariants.
         metadata_path = Path(__file__).resolve().parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
+        # Validator-side mirror of the contract's reservations table. The
+        # reserve handler consults this to enforce that a single source
+        # address cannot tie up more miners than its visible balance covers
+        # (issue #295). Built before the watcher so the watcher can pump
+        # MinerReserved / SwapInitiated / ReservationCancelled events into
+        # it during sync.
+        self.reservation_index = ReservationIndex()
         self.event_watcher = ContractEventWatcher(
             substrate=self.subtensor.substrate,
             contract_address=self.contract_client.contract_address,
             metadata_path=metadata_path,
             state_store=self.state_store,
+            reservation_index=self.reservation_index,
+            contract_client=self.contract_client,
         )
         self.event_watcher.initialize(
             current_block=self.block,
