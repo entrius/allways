@@ -196,15 +196,18 @@ def parse_global_flags() -> dict:
         if '=' in arg:
             flag, value = arg.split('=', 1)
             if flag in _GLOBAL_FLAGS:
+                if value == '':
+                    raise click.UsageError(f'{flag} requires a value')
                 overrides[_GLOBAL_FLAGS[flag]] = value
                 i += 1
                 continue
         # Handle --flag value form
         if arg in _GLOBAL_FLAGS:
-            if i + 1 < len(sys.argv):
-                overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
-                i += 2
-                continue
+            if i + 1 >= len(sys.argv) or sys.argv[i + 1].startswith('--'):
+                raise click.UsageError(f'{arg} requires a value')
+            overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
+            i += 2
+            continue
         new_argv.append(arg)
         i += 1
     sys.argv[:] = new_argv
