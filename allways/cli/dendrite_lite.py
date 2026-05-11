@@ -68,28 +68,32 @@ def discover_validators(
     return axons
 
 
+async def broadcast_synapse_async(
+    wallet: bt.Wallet,
+    axons: List[bt.AxonInfo],
+    synapse: bt.Synapse,
+    timeout: float = 30.0,
+) -> list:
+    """Async-native broadcast for callers already on an event loop (FastAPI)."""
+    dendrite = bt.Dendrite(wallet=wallet)
+    timeout = resolve_dendrite_timeout(timeout)
+    return await dendrite(axons=axons, synapse=synapse, deserialize=False, timeout=timeout)
+
+
 def broadcast_synapse(
     wallet: bt.Wallet,
     axons: List[bt.AxonInfo],
     synapse: bt.Synapse,
     timeout: float = 30.0,
 ) -> list:
-    """Broadcast a synapse to all validator axons via dendrite.
-
-    Returns list of response synapses.
-    """
+    """Broadcast a synapse to all validator axons via dendrite (sync wrapper for CLI)."""
     import asyncio
-
-    dendrite = bt.Dendrite(wallet=wallet)
-    timeout = resolve_dendrite_timeout(timeout)
 
     loop = asyncio.new_event_loop()
     try:
-        responses = loop.run_until_complete(dendrite(axons=axons, synapse=synapse, deserialize=False, timeout=timeout))
+        return loop.run_until_complete(broadcast_synapse_async(wallet, axons, synapse, timeout))
     finally:
         loop.close()
-
-    return responses
 
 
 def resolve_dendrite_timeout(default: float) -> float:

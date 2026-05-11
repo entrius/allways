@@ -36,6 +36,9 @@ dependencies = [
     "bech32",
     "pycryptodome",
     "numpy",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2",
 ]
 
 [project.scripts]
@@ -43,6 +46,7 @@ alw = "allways.cli.main:main"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pre-commit>=4.2.0",
     "pytest>=9.0.0",
     "ruff>=0.14.10",
