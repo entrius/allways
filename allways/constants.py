@@ -53,8 +53,8 @@ SCORING_WINDOW_BLOCKS = 1200  # ~4 hours at 12s/block — also the scoring caden
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    ('tao', 'btc'): 0.04,
-    ('btc', 'tao'): 0.04,
+    ('tao', 'btc'): 0.5,
+    ('btc', 'tao'): 0.5,
 }
 # 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
 SUCCESS_EXPONENT: int = 3
