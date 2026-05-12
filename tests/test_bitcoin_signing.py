@@ -112,6 +112,60 @@ def make_lightweight_provider() -> BitcoinProvider:
         return BitcoinProvider()
 
 
+def make_node_provider() -> BitcoinProvider:
+    with patch.dict(os.environ, {'BTC_MODE': 'node', 'BTC_NETWORK': 'mainnet'}, clear=False):
+        return BitcoinProvider()
+
+
+class TestBitcoinProviderGetBalance:
+    def test_node_mode_sums_current_utxos(self):
+        provider = make_node_provider()
+        address = 'bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc'
+        rpc = MagicMock(
+            return_value=[
+                {'amount': 0.25},
+                {'amount': 0.00000001},
+            ]
+        )
+
+        with patch.object(provider, 'rpc_call', rpc):
+            assert provider.get_balance(address) == 25_000_001
+
+        rpc.assert_called_once_with('listunspent', [0, 9999999, [address]])
+
+    def test_node_mode_spent_address_reports_zero(self):
+        provider = make_node_provider()
+        address = 'bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc'
+
+        def rpc_call(method, _params):
+            if method == 'listunspent':
+                return []
+            if method == 'getreceivedbyaddress':
+                return 1.0
+            return None
+
+        with (
+            patch.object(provider, 'rpc_call', side_effect=rpc_call) as rpc,
+            patch.object(provider, 'api_get_balance') as api_get_balance,
+        ):
+            assert provider.get_balance(address) == 0
+
+        rpc.assert_called_once_with('listunspent', [0, 9999999, [address]])
+        api_get_balance.assert_not_called()
+
+    def test_node_mode_falls_back_to_esplora_when_rpc_unavailable(self):
+        provider = make_node_provider()
+        address = 'bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc'
+
+        with (
+            patch.object(provider, 'rpc_call', return_value=None),
+            patch.object(provider, 'api_get_balance', return_value=12345) as api_get_balance,
+        ):
+            assert provider.get_balance(address) == 12345
+
+        api_get_balance.assert_called_once_with(address)
+
+
 class TestBitcoinProviderSignFromProof:
     """Direct coverage of BitcoinProvider.sign_from_proof — the wrapper our
     validator/CLI actually invoke, not the underlying library."""

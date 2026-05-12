@@ -140,7 +140,7 @@ class BitcoinProvider(ChainProvider):
             raise ConnectionError(f'Cannot reach Bitcoin RPC at {self.rpc_url}')
         bt.logging.success(f'BTC RPC connected: chain={result.get("chain")}, blocks={result.get("blocks")}')
 
-    def rpc_call(self, method: str, params: Optional[list] = None) -> Optional[dict]:
+    def rpc_call(self, method: str, params: Optional[list] = None) -> Optional[Any]:
         """Generic JSON-RPC helper for BTC Core."""
         if self.mode == 'lightweight':
             return None
@@ -303,9 +303,9 @@ class BitcoinProvider(ChainProvider):
 
     def get_balance(self, address: str) -> int:
         """Get balance for a Bitcoin address in satoshis via RPC with Esplora fallback."""
-        result = self.rpc_call('getreceivedbyaddress', [address, 0])
-        if result is not None:
-            return int(round(result * BTC_TO_SAT))
+        utxos = self.rpc_call('listunspent', [0, 9999999, [address]])
+        if isinstance(utxos, list):
+            return sum(int(round(float(utxo.get('amount', 0)) * BTC_TO_SAT)) for utxo in utxos)
         return self.api_get_balance(address)
 
     def btc_api_bases(self) -> Tuple[str, ...]:
