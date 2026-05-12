@@ -185,10 +185,6 @@ class BitcoinProvider(ChainProvider):
         if not raw_tx:
             return None
 
-        for vin in raw_tx.get('vin', []):
-            if vin.get('sequence', 0xFFFFFFFF) < 0xFFFFFFFE:
-                return None  # BIP-125: RBF-flagged, reject
-
         confirmations = raw_tx.get('confirmations', 0)
         confirmed = confirmations >= self.get_chain().min_confirmations
         block_number = None
@@ -266,10 +262,6 @@ class BitcoinProvider(ChainProvider):
                 return None
             resp.raise_for_status()
             data = resp.json()
-
-            for vin in data.get('vin', []):
-                if vin.get('sequence', 0xFFFFFFFF) < 0xFFFFFFFE:
-                    return None  # BIP-125: RBF-flagged, reject
 
             confirmed = data.get('status', {}).get('confirmed', False)
             block_number = data.get('status', {}).get('block_height')
