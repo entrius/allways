@@ -49,7 +49,7 @@ BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS = 5
 
 # ─── Scoring ─────────────────────────────────────────────
-SCORING_WINDOW_BLOCKS = 1200  # ~4 hours at 12s/block — also the scoring cadence
+SCORING_WINDOW_BLOCKS = 600  # ~2 hours at 12s/block — also the scoring cadence
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
