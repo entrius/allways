@@ -10,6 +10,7 @@ services:
       - "${PORT}:${PORT}"
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
+      - ./data/allways:/root/.allways
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 

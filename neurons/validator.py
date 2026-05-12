@@ -17,9 +17,11 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
+from allways.commitments import read_miner_commitments
 from allways.constants import (
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
     FEE_DIVISOR,
+    SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
@@ -115,6 +117,7 @@ class Validator(BaseValidatorNeuron):
             metagraph_hotkeys=list(self.metagraph.hotkeys),
             contract_client=self.contract_client,
         )
+        self.bootstrap_miner_rates()
 
         self.swap_tracker = SwapTracker(client=self.contract_client)
         self.swap_tracker.initialize()
@@ -151,6 +154,46 @@ class Validator(BaseValidatorNeuron):
         self.attach_axon_handlers()
 
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
+
+    def bootstrap_miner_rates(self) -> None:
+        """Cold-start anchor for rate events. Without this, a validator with a
+        fresh state.db (first run, or a container recreate that loses the
+        writable layer) has no rate visible at window_start on the first
+        scoring pass, so every miner reads as 'no rate posted' and the entire
+        pool recycles to RECYCLE_UID. Read current commitments from chain and
+        seed one anchor event per (hotkey, direction) at cursor — mirrors the
+        active-flag anchor that event_watcher.initialize already does."""
+        try:
+            pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+        except Exception as e:
+            bt.logging.warning(f'Rate bootstrap: commitment read failed: {e}')
+            return
+
+        anchor_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
+        current_hotkeys = set(self.metagraph.hotkeys)
+        seeded = 0
+        for pair in pairs:
+            if pair.hotkey not in current_hotkeys:
+                continue
+            for from_c, to_c, r in (
+                (pair.from_chain, pair.to_chain, pair.rate),
+                (pair.to_chain, pair.from_chain, pair.counter_rate),
+            ):
+                if r <= 0:
+                    continue
+                self.last_known_rates[(pair.hotkey, from_c, to_c)] = r
+                existing = self.state_store.get_latest_rate_before(pair.hotkey, from_c, to_c, anchor_block)
+                if existing is None:
+                    self.state_store.insert_rate_event(
+                        hotkey=pair.hotkey,
+                        from_chain=from_c,
+                        to_chain=to_c,
+                        rate=r,
+                        block=anchor_block,
+                    )
+                    seeded += 1
+        if seeded:
+            bt.logging.info(f'Rate bootstrap: seeded {seeded} anchor(s) at block {anchor_block}')
 
     def attach_axon_handlers(self):
         """Attach all synapse handlers to the axon."""
