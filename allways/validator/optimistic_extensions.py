@@ -99,7 +99,7 @@ class OptimisticExtensionWatcher:
             return False
 
         if extension_count == 0:
-            remaining = 1
+            remaining = 4  # ~48 min runway, sized for BTC block-time variance
         else:
             if observed_confirmations < 1:
                 return False
@@ -213,7 +213,7 @@ class OptimisticExtensionWatcher:
             return False
 
         if extension_count == 0:
-            remaining = 1
+            remaining = 4  # ~48 min runway, sized for BTC block-time variance
         else:
             if observed_confirmations < 1:
                 return False
