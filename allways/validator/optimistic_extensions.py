@@ -76,11 +76,11 @@ class OptimisticExtensionWatcher:
         ``fetch_pending_reservation`` and passes the same value into all
         three propose/challenge/finalize methods to avoid redundant RPCs.
 
-        - Tier 0 (first extension): caller is responsible for ensuring the tx
-          is visible (``tx_info != None``); target sized for BTC block variance.
-        - Tier 1 (second extension): fires on visibility same as tier-0 — no
-          confirmation gate. Acts as tail-of-distribution safety net.
-        - Tier 2+: refused locally to avoid a doomed tx (contract rejects too).
+        Both tiers fire on tx visibility alone with identical runway. Tier-1
+        previously gated on ``observed_confirmations >= 1``; that raced with
+        the challenge-window guard near the deadline, so it was dropped in
+        favour of tier-1 acting as a tail-of-distribution safety net.
+        Tier 2+ is refused locally to avoid a doomed tx (contract rejects too).
 
         Returns True if a propose tx was submitted, False otherwise.
         """
@@ -98,13 +98,7 @@ class OptimisticExtensionWatcher:
         if current_block + CHALLENGE_WINDOW_BLOCKS >= reserved_until:
             return False
 
-        if extension_count == 0:
-            remaining = 4  # ~48 min runway, sized for BTC block-time variance
-        else:
-            # deprecated: tier-1 evidence gate — tier-1 now fires on visibility like tier-0
-            # if observed_confirmations < 1:
-            #     return False
-            remaining = 4  # tail safety net at same runway as tier-0
+        remaining = 4  # ~48 min runway, sized for BTC block-time variance
         target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
         return self._try_call(
@@ -200,8 +194,8 @@ class OptimisticExtensionWatcher:
         extension_count: int,
         pending: Optional[PendingExtension],
     ) -> bool:
-        """Tiered timeout-extension propose. See ``maybe_propose_reservation``
-        for the ``pending`` contract."""
+        """Timeout-extension propose. See ``maybe_propose_reservation`` for
+        the ``pending`` contract and tier semantics."""
         if extension_count >= MAX_EXTENSIONS_PER_SWAP:
             return False
 
@@ -211,13 +205,7 @@ class OptimisticExtensionWatcher:
         if current_block + CHALLENGE_WINDOW_BLOCKS >= timeout_block:
             return False
 
-        if extension_count == 0:
-            remaining = 4  # ~48 min runway, sized for BTC block-time variance
-        else:
-            # deprecated: tier-1 evidence gate — tier-1 now fires on visibility like tier-0
-            # if observed_confirmations < 1:
-            #     return False
-            remaining = 4  # tail safety net at same runway as tier-0
+        remaining = 4  # ~48 min runway, sized for BTC block-time variance
         target_block = compute_extension_target(dest_chain_id, remaining, current_block)
 
         return self._try_call(
