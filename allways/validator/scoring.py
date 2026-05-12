@@ -7,7 +7,7 @@ unclaimed pool recycles to ``RECYCLE_UID``. Entry point is
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
@@ -27,6 +27,22 @@ from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
+
+
+# Per-direction breakdown threaded through replay so log_scoring_trace can
+# explain who held crown, who was outbid, and why pool was recycled.
+@dataclass
+class DirectionTrace:
+    pool: float = 0.0
+    crown_blocks: Dict[str, float] = field(default_factory=dict)
+    unfilled_blocks: int = 0
+    best_rate: float = 0.0  # rate of the winning miner at the last filled interval
+
+
+# Cap non-earner diagnostic lines so a full 256-UID metagraph can't bloat one
+# scoring round into thousands of log lines. Sized to cover all realistically
+# active miners.
+SCORING_TRACE_NON_EARNER_CAP = 30
 
 
 def score_and_reward_miners(self: Validator) -> None:
@@ -99,7 +115,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
 
+    direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
+
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
+        trace = DirectionTrace(pool=pool)
+        direction_traces[(from_chain, to_chain)] = trace
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
@@ -108,6 +128,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             window_start=window_start,
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
+            trace=trace,
         )
         total = sum(crown_blocks.values())
         if total == 0:
@@ -123,11 +144,21 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
-    rewards[recycle_uid] += max(0.0, 1.0 - distributed)
+    recycled = max(0.0, 1.0 - distributed)
+    rewards[recycle_uid] += recycled
 
-    bt.logging.info(
-        f'V1 scoring: window=[{window_start}, {window_end}], '
-        f'distributed={distributed:.6f}, recycled={max(0.0, 1.0 - distributed):.6f}'
+    log_scoring_trace(
+        self,
+        window_start=window_start,
+        window_end=window_end,
+        hotkey_to_uid=hotkey_to_uid,
+        rewardable_hotkeys=rewardable_hotkeys,
+        direction_traces=direction_traces,
+        rewards=rewards,
+        success_stats=success_stats,
+        distributed=distributed,
+        recycled=recycled,
+        recycle_uid=recycle_uid,
     )
 
     return rewards, set(range(n_uids))
@@ -142,6 +173,124 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
     if total == 0:
         return 1.0
     return completed / total
+
+
+def log_scoring_trace(
+    self: Validator,
+    *,
+    window_start: int,
+    window_end: int,
+    hotkey_to_uid: Dict[str, int],
+    rewardable_hotkeys: Set[str],
+    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    rewards: np.ndarray,
+    success_stats: Dict[str, Tuple[int, int]],
+    distributed: float,
+    recycled: float,
+    recycle_uid: int,
+) -> None:
+    """Emit one multi-line log entry per scoring round so a miner can answer
+    "why did I earn what I earned" from logs alone — per-direction crown
+    breakdown, per-rewarded UID, per-non-earner reason, recycle attribution."""
+    lines: List[str] = [
+        f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
+    ]
+
+    for (from_c, to_c), trace in direction_traces.items():
+        sorted_holders = sorted(trace.crown_blocks.items(), key=lambda kv: -kv[1])
+        holders_str = ', '.join(
+            f'UID{hotkey_to_uid[hk]}: {blk:.0f} blk' for hk, blk in sorted_holders if hk in hotkey_to_uid
+        )
+        lines.append(
+            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders_str}}} unfilled={trace.unfilled_blocks} blk'
+        )
+
+    earner_uids = sorted(
+        (uid for uid in range(len(rewards)) if rewards[uid] > 0),
+        key=lambda u: -float(rewards[u]),
+    )
+    for uid in earner_uids:
+        hk = self.metagraph.hotkeys[uid]
+        crown_blk = sum(t.crown_blocks.get(hk, 0.0) for t in direction_traces.values())
+        # UID 53's reward equals (crown earnings) + (recycle remainder). The
+        # recycle line below attributes the remainder separately.
+        if uid == recycle_uid and crown_blk == 0:
+            continue
+        sr = success_rate(success_stats.get(hk))
+        lines.append(
+            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f} reward={float(rewards[uid]):.3f}'
+        )
+
+    ever_active: Set[str] = set(self.event_watcher.get_active_miners_at(window_start))
+    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
+        if e['active']:
+            ever_active.add(e['hotkey'])
+
+    last_known_rates = getattr(self, 'last_known_rates', {}) or {}
+    rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
+    for (hk, from_c, to_c), r in last_known_rates.items():
+        if r > 0:
+            rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
+
+    non_earner_lines: List[str] = []
+    for hk in rewardable_hotkeys:
+        uid = hotkey_to_uid.get(hk)
+        if uid is None or uid == recycle_uid:
+            continue
+        if rewards[uid] > 0:
+            continue
+        latest_rates = rates_by_hotkey.get(hk, {})
+        # Skip dormant UIDs: no rate posted AND never active in window. Those
+        # are usually never-onboarded slots and would drown out the diagnostic.
+        if not latest_rates and hk not in ever_active:
+            continue
+        sr = success_rate(success_stats.get(hk))
+        reason = diagnose_non_earner(hk, latest_rates, sr, ever_active, direction_traces)
+        non_earner_lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
+        if len(non_earner_lines) >= SCORING_TRACE_NON_EARNER_CAP:
+            break
+
+    lines.extend(non_earner_lines)
+
+    if recycled > 0:
+        unfilled_parts = [
+            f'{trace.unfilled_blocks} unfilled blk in {f}→{t}'
+            for (f, t), trace in direction_traces.items()
+            if trace.unfilled_blocks > 0
+        ]
+        cause = '; '.join(unfilled_parts) if unfilled_parts else 'no crown winners'
+        lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
+
+    bt.logging.info('\n'.join(lines))
+
+
+def diagnose_non_earner(
+    hotkey: str,
+    latest_rates: Dict[Tuple[str, str], float],
+    sr: float,
+    ever_active: Set[str],
+    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+) -> str:
+    """One of: no_rate_posted, not_active_during_window, slashed_credibility_zero,
+    outbid(...). Reasons are evaluated in disqualification order so the
+    earliest failing check wins."""
+    if not latest_rates:
+        return 'no_rate_posted'
+    if hotkey not in ever_active:
+        return 'not_active_during_window'
+    if sr <= 0:
+        return 'slashed_credibility_zero'
+    parts: List[str] = []
+    for direction, own in latest_rates.items():
+        trace = direction_traces.get(direction)
+        best = trace.best_rate if trace is not None else 0.0
+        if best > 0:
+            parts.append(f'{direction[0]}→{direction[1]}: own={own:g} vs best={best:g}')
+    if parts:
+        return 'outbid (' + '; '.join(parts) + ')'
+    # Has rates and was active but no direction had a competing winner —
+    # usually the qualifying-but-only-direction edge case.
+    return 'no_competition_in_posted_directions'
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────
@@ -236,6 +385,7 @@ def replay_crown_time_window(
     window_start: int,
     window_end: int,
     rewardable_hotkeys: Set[str],
+    trace: Optional[DirectionTrace] = None,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
@@ -244,7 +394,11 @@ def replay_crown_time_window(
     are evaluated per-block via the replay — a miner's status at scoring
     time is irrelevant other than metagraph membership (used to credit the
     UID). Collateral-floor invariants are trusted to the contract's active
-    flag; halt state is handled at ``score_and_reward_miners`` entry."""
+    flag; halt state is handled at ``score_and_reward_miners`` entry.
+
+    When ``trace`` is supplied, unfilled-interval counts and the latest
+    winning rate are recorded for downstream diagnostic logging.
+    """
     rates, busy_count, active_set = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
     )
@@ -272,7 +426,12 @@ def replay_crown_time_window(
             lower_rate_wins=lower_rate_wins,
         )
         if not holders:
+            if trace is not None:
+                trace.unfilled_blocks += duration
             return
+        winner_rate = rates.get(holders[0], 0.0)
+        if trace is not None and winner_rate > 0:
+            trace.best_rate = winner_rate
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
@@ -298,6 +457,8 @@ def replay_crown_time_window(
         prev_block = event.block
 
     credit_interval(prev_block, window_end)
+    if trace is not None:
+        trace.crown_blocks = dict(crown_blocks)
     return crown_blocks
 
 
