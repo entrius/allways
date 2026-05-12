@@ -17,7 +17,9 @@ from allways.validator.state_store import ValidatorStateStore
 from tests.test_scoring_v1 import make_watcher, seed_active
 
 
-def _insert_rate(conn: sqlite3.Connection, hotkey: str, from_chain: str, to_chain: str, rate: float, block: int) -> None:
+def _insert_rate(
+    conn: sqlite3.Connection, hotkey: str, from_chain: str, to_chain: str, rate: float, block: int
+) -> None:
     conn.execute(
         'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
         (hotkey, from_chain, to_chain, rate, block),
