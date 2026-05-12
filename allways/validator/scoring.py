@@ -7,7 +7,7 @@ unclaimed pool recycles to ``RECYCLE_UID``. Entry point is
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
@@ -23,10 +23,19 @@ from allways.constants import (
     SUCCESS_EXPONENT,
 )
 from allways.validator.event_watcher import ContractEventWatcher
+from allways.validator.scoring_trace import log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
+
+
+@dataclass
+class DirectionTrace:
+    pool: float = 0.0
+    crown_blocks: Dict[str, float] = field(default_factory=dict)
+    unfilled_blocks: int = 0
+    best_rate: float = 0.0
 
 
 def score_and_reward_miners(self: Validator) -> None:
@@ -98,8 +107,13 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     rewards = np.zeros(n_uids, dtype=np.float32)
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
+    success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
+
+    direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
+        trace = DirectionTrace(pool=pool)
+        direction_traces[(from_chain, to_chain)] = trace
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
@@ -108,6 +122,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             window_start=window_start,
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
+            trace=trace,
         )
         total = sum(crown_blocks.values())
         if total == 0:
@@ -118,16 +133,22 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             share = blocks / total
-            sr = success_rate(success_stats.get(hotkey))
-            rewards[uid] += pool * share * (sr**SUCCESS_EXPONENT)
+            rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT)
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
-    rewards[recycle_uid] += max(0.0, 1.0 - distributed)
+    recycled = max(0.0, 1.0 - distributed)
+    rewards[recycle_uid] += recycled
 
-    bt.logging.info(
-        f'V1 scoring: window=[{window_start}, {window_end}], '
-        f'distributed={distributed:.6f}, recycled={max(0.0, 1.0 - distributed):.6f}'
+    log_scoring_trace(
+        self,
+        window_start=window_start,
+        window_end=window_end,
+        direction_traces=direction_traces,
+        rewards=rewards,
+        success_rates=success_rates,
+        distributed=distributed,
+        recycled=recycled,
     )
 
     return rewards, set(range(n_uids))
@@ -236,6 +257,7 @@ def replay_crown_time_window(
     window_start: int,
     window_end: int,
     rewardable_hotkeys: Set[str],
+    trace: Optional[DirectionTrace] = None,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
@@ -272,7 +294,12 @@ def replay_crown_time_window(
             lower_rate_wins=lower_rate_wins,
         )
         if not holders:
+            if trace is not None:
+                trace.unfilled_blocks += duration
             return
+        winner_rate = rates.get(holders[0], 0.0)
+        if trace is not None and winner_rate > 0:
+            trace.best_rate = winner_rate
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
@@ -298,6 +325,8 @@ def replay_crown_time_window(
         prev_block = event.block
 
     credit_interval(prev_block, window_end)
+    if trace is not None:
+        trace.crown_blocks = dict(crown_blocks)
     return crown_blocks
 
 
