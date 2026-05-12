@@ -77,9 +77,9 @@ class OptimisticExtensionWatcher:
         three propose/challenge/finalize methods to avoid redundant RPCs.
 
         - Tier 0 (first extension): caller is responsible for ensuring the tx
-          is visible (``tx_info != None``); target sized for one chain block.
-        - Tier 1 (second extension): requires ``observed_confirmations >= 1``;
-          target = chain-aware full-confirmation window.
+          is visible (``tx_info != None``); target sized for BTC block variance.
+        - Tier 1 (second extension): fires on visibility same as tier-0 — no
+          confirmation gate. Acts as tail-of-distribution safety net.
         - Tier 2+: refused locally to avoid a doomed tx (contract rejects too).
 
         Returns True if a propose tx was submitted, False otherwise.
@@ -128,7 +128,7 @@ class OptimisticExtensionWatcher:
     ) -> bool:
         """Challenge the pending reservation extension if its target is too far.
 
-        Mirrors the deadline-anchored math used by ``maybe_propose_reservation``
+        Mirrors the current-block-anchored math used by ``maybe_propose_reservation``
         so challenger and proposer compute the same expected target. Without
         this the two sides could drift by up to EXTEND_THRESHOLD_BLOCKS,
         which the EXTENSION_BUCKET_BLOCKS tolerance currently absorbs but
@@ -238,8 +238,8 @@ class OptimisticExtensionWatcher:
         timeout_block: int,
         pending: Optional[PendingExtension],
     ) -> bool:
-        """Mirror of ``maybe_challenge_reservation``: deadline-anchored expected
-        target so challenger and proposer stay aligned."""
+        """Mirror of ``maybe_challenge_reservation``: current-block-anchored
+        expected target so challenger and proposer stay aligned."""
         if pending is None:
             return False
         if self._is_own_proposal(pending):
