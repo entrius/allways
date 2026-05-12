@@ -74,10 +74,16 @@ async def broadcast_synapse_async(
     synapse: bt.Synapse,
     timeout: float = 30.0,
 ) -> list:
-    """Async-native broadcast for callers already on an event loop (FastAPI)."""
-    dendrite = bt.Dendrite(wallet=wallet)
+    """Async-native broadcast for callers already on an event loop (FastAPI).
+
+    Uses Dendrite as an async context manager so the underlying aiohttp session
+    is closed on each call. Long-running services that skipped this would
+    accumulate sockets — Dendrite's `__del__` cleanup logs a warning and won't
+    close cleanly without a running loop.
+    """
     timeout = resolve_dendrite_timeout(timeout)
-    return await dendrite(axons=axons, synapse=synapse, deserialize=False, timeout=timeout)
+    async with bt.Dendrite(wallet=wallet) as dendrite:
+        return await dendrite(axons=axons, synapse=synapse, deserialize=False, timeout=timeout)
 
 
 def broadcast_synapse(
