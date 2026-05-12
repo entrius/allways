@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
 
 import bittensor as bt
 import numpy as np
@@ -228,6 +228,75 @@ def merge_replay_events(
     return events
 
 
+def _walk_replay_events(
+    store: ValidatorStateStore,
+    event_watcher: ContractEventWatcher,
+    from_chain: str,
+    to_chain: str,
+    window_start: int,
+    window_end: int,
+    rewardable_hotkeys: Set[str],
+) -> Iterator[Tuple[int, int, List[str], float]]:
+    """Walks the merged active/busy/rate stream over the window and yields one
+    record per uniform-state interval: ``(start, end, holders, best_rate)``.
+    ``holders`` is empty when nobody qualifies for that interval; emit it
+    anyway so callers that materialize per-block state can encode "no holder"
+    as absence. Aggregating and per-block consumers both share this generator
+    so the qualification rule (active, not busy, has rate > 0, lower-rate-
+    wins-when-reversed) lives in exactly one place."""
+    rates, busy_count, active_set = reconstruct_window_start_state(
+        store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
+    )
+    replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
+
+    # Rates are stored as canonical_dest per canonical_source (TAO per BTC).
+    # In the canonical direction (btc→tao) higher = better; in the reverse
+    # direction (tao→btc) lower = better.
+    canon_from, _ = canonical_pair(from_chain, to_chain)
+    lower_rate_wins = from_chain != canon_from
+
+    def emit_interval(interval_start: int, interval_end: int) -> Optional[Tuple[int, int, List[str], float]]:
+        if interval_end <= interval_start:
+            return None
+        busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        holders = crown_holders_at_instant(
+            rates,
+            rewardable_hotkeys,
+            busy=busy_set,
+            active=active_set,
+            lower_rate_wins=lower_rate_wins,
+        )
+        best_rate = rates[holders[0]] if holders else 0.0
+        return (interval_start, interval_end, holders, best_rate)
+
+    def apply_event(event: ReplayEvent) -> None:
+        if event.kind is EventKind.RATE:
+            rates[event.hotkey] = event.value
+        elif event.kind is EventKind.BUSY:
+            new_count = busy_count.get(event.hotkey, 0) + int(event.value)
+            if new_count > 0:
+                busy_count[event.hotkey] = new_count
+            else:
+                busy_count.pop(event.hotkey, None)
+        else:  # ACTIVE
+            if event.value > 0:
+                active_set.add(event.hotkey)
+            else:
+                active_set.discard(event.hotkey)
+
+    prev_block = window_start
+    for event in replay_events:
+        interval = emit_interval(prev_block, event.block)
+        if interval is not None:
+            yield interval
+        apply_event(event)
+        prev_block = event.block
+
+    interval = emit_interval(prev_block, window_end)
+    if interval is not None:
+        yield interval
+
+
 def replay_crown_time_window(
     store: ValidatorStateStore,
     event_watcher: ContractEventWatcher,
@@ -245,60 +314,38 @@ def replay_crown_time_window(
     time is irrelevant other than metagraph membership (used to credit the
     UID). Collateral-floor invariants are trusted to the contract's active
     flag; halt state is handled at ``score_and_reward_miners`` entry."""
-    rates, busy_count, active_set = reconstruct_window_start_state(
-        store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
-    )
-    replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
-
-    # Rates are stored as canonical_dest per canonical_source (TAO per BTC).
-    # In the canonical direction (btc→tao) higher = better; in the reverse
-    # direction (tao→btc) lower = better.
-    canon_from, _ = canonical_pair(from_chain, to_chain)
-    lower_rate_wins = from_chain != canon_from
-
     crown_blocks: Dict[str, float] = {}
-    prev_block = window_start
-
-    def credit_interval(interval_start: int, interval_end: int) -> None:
-        duration = interval_end - interval_start
-        if duration <= 0:
-            return
-        busy_set = {hk for hk, c in busy_count.items() if c > 0}
-        holders = crown_holders_at_instant(
-            rates,
-            rewardable_hotkeys,
-            busy=busy_set,
-            active=active_set,
-            lower_rate_wins=lower_rate_wins,
-        )
+    for start, end, holders, _rate in _walk_replay_events(
+        store, event_watcher, from_chain, to_chain, window_start, window_end, rewardable_hotkeys
+    ):
         if not holders:
-            return
-        split = duration / len(holders)
+            continue
+        split = (end - start) / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
-
-    def apply_event(event: ReplayEvent) -> None:
-        if event.kind is EventKind.RATE:
-            rates[event.hotkey] = event.value
-        elif event.kind is EventKind.BUSY:
-            new_count = busy_count.get(event.hotkey, 0) + int(event.value)
-            if new_count > 0:
-                busy_count[event.hotkey] = new_count
-            else:
-                busy_count.pop(event.hotkey, None)
-        else:  # ACTIVE
-            if event.value > 0:
-                active_set.add(event.hotkey)
-            else:
-                active_set.discard(event.hotkey)
-
-    for event in replay_events:
-        credit_interval(prev_block, event.block)
-        apply_event(event)
-        prev_block = event.block
-
-    credit_interval(prev_block, window_end)
     return crown_blocks
+
+
+def replay_crown_time_window_iter(
+    store: ValidatorStateStore,
+    event_watcher: ContractEventWatcher,
+    from_chain: str,
+    to_chain: str,
+    window_start: int,
+    window_end: int,
+    rewardable_hotkeys: Set[str],
+) -> Iterator[Tuple[int, List[str], float]]:
+    """Per-block display path. Yields ``(block, holders, rate)`` for every
+    block in ``[window_start, window_end)``. ``holders`` is empty when nobody
+    qualifies — caller is responsible for encoding that as absence in any
+    persisted store. Each held block emits credit ``1.0 / len(holders)`` if
+    the caller chooses to credit per-block, so SUM(credit) across the same
+    window matches ``replay_crown_time_window`` bit-for-bit."""
+    for start, end, holders, rate in _walk_replay_events(
+        store, event_watcher, from_chain, to_chain, window_start, window_end, rewardable_hotkeys
+    ):
+        for block in range(start, end):
+            yield (block, holders, rate)
 
 
 def crown_holders_at_instant(

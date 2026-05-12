@@ -45,19 +45,32 @@ class ValidatorStateStore:
         self,
         db_path: Path | str | None = None,
         current_block_fn: Optional[Callable[[], int]] = None,
+        readonly: bool = False,
     ):
         self.db_path = Path(db_path or Path.home() / '.allways' / 'validator' / 'state.db')
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
+        if not readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
-        self.conn: Optional[sqlite3.Connection] = sqlite3.connect(self.db_path, check_same_thread=False)
-        # busy_timeout must be set before journal_mode: the WAL switch takes a
-        # brief exclusive lock that a concurrent opener would otherwise hit as
-        # an immediate "database is locked" error.
-        self.conn.execute('PRAGMA busy_timeout=5000')
-        self.conn.execute('PRAGMA journal_mode=WAL')
+        if readonly:
+            # External readers (e.g. the alw-utils sync utility) open the
+            # validator's DB read-only via SQLite URI mode so a stray write
+            # surfaces as an error instead of corrupting the live state. WAL
+            # mode is set by the writer; readers do not flip journal modes.
+            uri = f'file:{self.db_path}?mode=ro'
+            self.conn: Optional[sqlite3.Connection] = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            self.conn.execute('PRAGMA busy_timeout=5000')
+        else:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # busy_timeout must be set before journal_mode: the WAL switch takes a
+            # brief exclusive lock that a concurrent opener would otherwise hit as
+            # an immediate "database is locked" error.
+            self.conn.execute('PRAGMA busy_timeout=5000')
+            self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.row_factory = sqlite3.Row
         self.current_block_fn = current_block_fn
-        self.init_db()
+        if not readonly:
+            self.init_db()
 
     # ─── pending_confirms ───────────────────────────────────────────────
 
@@ -253,6 +266,32 @@ class ValidatorStateStore:
                 (from_chain, to_chain, start_block, end_block),
             ).fetchall()
         return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
+
+    def get_rate_events_since_id(self, since_id: int) -> List[dict]:
+        """Rate events with autoincrement ``id`` > ``since_id``, oldest first.
+        Read-only consumers (the alw-utils sync utility) tail the log by id so
+        they advance one cursor regardless of direction or hotkey."""
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT id, hotkey, from_chain, to_chain, rate, block FROM rate_events
+                WHERE id > ?
+                ORDER BY id ASC
+                """,
+                (since_id,),
+            ).fetchall()
+        return [
+            {
+                'id': r['id'],
+                'hotkey': r['hotkey'],
+                'from_chain': r['from_chain'],
+                'to_chain': r['to_chain'],
+                'rate': r['rate'],
+                'block': r['block'],
+            }
+            for r in rows
+        ]
 
     # ─── swap_outcomes ──────────────────────────────────────────────────
 
