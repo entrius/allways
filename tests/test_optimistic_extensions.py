@@ -47,9 +47,9 @@ def make_watcher(pending_reservation=None, pending_timeout=None, propose_raises=
 
 
 class TestMaybeProposeReservation:
-    def test_tier0_proposes_on_visibility_with_short_target(self):
-        # Tier 0: BTC blocks_needed=90, anchor=max(current=1000, reserved=1050)=1050,
-        # target=1140.
+    def test_tier0_proposes_on_visibility_with_runway_target(self):
+        # Tier 0: remaining=4 → blocks_needed=240, anchor=max(current=1000,
+        # reserved=1050)=1050, target=1290.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -64,11 +64,11 @@ class TestMaybeProposeReservation:
         assert result is True
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
         assert call_kwargs['miner_hotkey'] == MINER
-        assert call_kwargs['target_block'] == 1140
+        assert call_kwargs['target_block'] == 1290
 
-    def test_tier1_proposes_with_chain_aware_target(self):
-        # Tier 1: BTC remaining=2 → blocks_needed=150, anchor=max(1000,1100)=1100,
-        # target=1250.
+    def test_tier1_proposes_with_runway_target(self):
+        # Tier 1: remaining=4 (same runway as tier-0), anchor=max(1000,1100)=1100,
+        # target=1340.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -81,10 +81,10 @@ class TestMaybeProposeReservation:
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
-        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1250
+        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1340
 
-    def test_tier1_skips_when_below_one_confirmation(self):
-        # Tier 1 demands ≥1 confirmation — mempool-only tx is not enough.
+    def test_tier1_proposes_without_confirmations(self):
+        # Tier 1 fires on visibility like tier-0 — no confirmation gate.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -96,8 +96,8 @@ class TestMaybeProposeReservation:
             extension_count=1,
             pending=w.fetch_pending_reservation(MINER),
         )
-        assert result is False
-        w.contract_client.propose_extend_reservation.assert_not_called()
+        assert result is True
+        w.contract_client.propose_extend_reservation.assert_called_once()
 
     def test_skips_when_at_extension_cap(self):
         # extension_count=MAX → contract would reject; refuse locally.
@@ -313,8 +313,8 @@ class TestFetchPendingReservation:
 
 class TestMaybeProposeTimeout:
     def test_tier0_proposes_on_visibility(self):
-        # BTC tier-0: blocks_needed=90, anchor=max(current=1000, timeout=1050)=1050,
-        # target=1140.
+        # BTC tier-0: remaining=4 → blocks_needed=240,
+        # anchor=max(current=1000, timeout=1050)=1050, target=1290.
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
             swap_id=42,
@@ -328,9 +328,10 @@ class TestMaybeProposeTimeout:
         assert result is True
         kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
         assert kwargs['swap_id'] == 42
-        assert kwargs['target_block'] == 1140
+        assert kwargs['target_block'] == 1290
 
-    def test_tier1_requires_confirmations(self):
+    def test_tier1_proposes_without_confirmations(self):
+        # Tier 1 fires on visibility like tier-0 — no confirmation gate.
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
             swap_id=42,
@@ -341,7 +342,8 @@ class TestMaybeProposeTimeout:
             extension_count=1,
             pending=w.fetch_pending_timeout(42),
         )
-        assert result is False
+        assert result is True
+        w.contract_client.propose_extend_timeout.assert_called_once()
 
     def test_skips_when_at_cap(self):
         w = make_watcher(pending_timeout=None)

@@ -47,8 +47,8 @@ class TestCanonicalPair:
 
 class TestConfirmationsToSubtensorBlocks:
     def test_btc(self):
-        # ceil(3 * 600 / 12) = ceil(150) = 150
-        assert confirmations_to_subtensor_blocks('btc') == 150
+        # ceil(2 * 600 / 12) = ceil(100) = 100
+        assert confirmations_to_subtensor_blocks('btc') == 100
 
     def test_tao(self):
         # ceil(6 * 12 / 12) = ceil(6) = 6
