@@ -13,7 +13,7 @@ from typing import Optional
 
 import bittensor as bt
 
-from allways.chains import compute_extension_target, get_chain
+from allways.chains import compute_extension_target
 from allways.classes import PendingExtension
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
@@ -101,10 +101,10 @@ class OptimisticExtensionWatcher:
         if extension_count == 0:
             remaining = 4  # ~48 min runway, sized for BTC block-time variance
         else:
-            if observed_confirmations < 1:
-                return False
-            chain = get_chain(from_chain_id)
-            remaining = max(0, chain.min_confirmations - observed_confirmations)
+            # deprecated: tier-1 evidence gate — tier-1 now fires on visibility like tier-0
+            # if observed_confirmations < 1:
+            #     return False
+            remaining = 4  # tail safety net at same runway as tier-0
         target_block = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
 
         return self._try_call(
@@ -143,8 +143,7 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        chain = get_chain(from_chain_id)
-        remaining = max(0, chain.min_confirmations - observed_confirmations)
+        remaining = 4  # mirror propose
         expected = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
@@ -215,10 +214,10 @@ class OptimisticExtensionWatcher:
         if extension_count == 0:
             remaining = 4  # ~48 min runway, sized for BTC block-time variance
         else:
-            if observed_confirmations < 1:
-                return False
-            chain = get_chain(dest_chain_id)
-            remaining = max(0, chain.min_confirmations - observed_confirmations)
+            # deprecated: tier-1 evidence gate — tier-1 now fires on visibility like tier-0
+            # if observed_confirmations < 1:
+            #     return False
+            remaining = 4  # tail safety net at same runway as tier-0
         target_block = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
 
         return self._try_call(
@@ -246,8 +245,7 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        chain = get_chain(dest_chain_id)
-        remaining = max(0, chain.min_confirmations - observed_confirmations)
+        remaining = 4  # mirror propose
         expected = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
