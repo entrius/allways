@@ -23,6 +23,7 @@ from allways.constants import (
     SUCCESS_EXPONENT,
 )
 from allways.validator.event_watcher import ContractEventWatcher
+from allways.validator.scoring_trace import log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
@@ -106,6 +107,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     rewards = np.zeros(n_uids, dtype=np.float32)
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
+    success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
 
@@ -131,8 +133,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             share = blocks / total
-            sr = success_rate(success_stats.get(hotkey))
-            rewards[uid] += pool * share * (sr**SUCCESS_EXPONENT)
+            rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT)
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
@@ -145,7 +146,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         window_end=window_end,
         direction_traces=direction_traces,
         rewards=rewards,
-        success_stats=success_stats,
+        success_rates=success_rates,
         distributed=distributed,
         recycled=recycled,
     )
@@ -162,115 +163,6 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
     if total == 0:
         return 1.0
     return completed / total
-
-
-def log_scoring_trace(
-    self: Validator,
-    *,
-    window_start: int,
-    window_end: int,
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
-    rewards: np.ndarray,
-    success_stats: Dict[str, Tuple[int, int]],
-    distributed: float,
-    recycled: float,
-) -> None:
-    hotkeys = self.metagraph.hotkeys
-    recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-    hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
-
-    lines = [
-        f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
-    ]
-
-    for (from_c, to_c), trace in direction_traces.items():
-        holders = ', '.join(
-            f'UID{hotkey_to_uid[hk]}: {blk:.0f} blk'
-            for hk, blk in sorted(trace.crown_blocks.items(), key=lambda kv: -kv[1])
-            if hk in hotkey_to_uid
-        )
-        lines.append(
-            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_blocks} blk'
-        )
-
-    for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
-        hk = hotkeys[uid]
-        crown_blk = sum(t.crown_blocks.get(hk, 0.0) for t in direction_traces.values())
-        if uid == recycle_uid and crown_blk == 0:
-            continue
-        crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
-        sr = success_rate(success_stats.get(hk))
-        lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f} reward={crown_reward:.3f}')
-
-    lines.extend(
-        non_earner_lines(self, window_start, window_end, rewards, success_stats, direction_traces, recycle_uid)
-    )
-
-    if recycled > 0:
-        parts = [
-            f'{t.unfilled_blocks} unfilled blk in {f}→{to}'
-            for (f, to), t in direction_traces.items()
-            if t.unfilled_blocks > 0
-        ]
-        cause = '; '.join(parts) or 'no crown winners'
-        lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
-
-    bt.logging.info('\n'.join(lines))
-
-
-def non_earner_lines(
-    self: Validator,
-    window_start: int,
-    window_end: int,
-    rewards: np.ndarray,
-    success_stats: Dict[str, Tuple[int, int]],
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
-    recycle_uid: int,
-) -> List[str]:
-    ever_active = set(self.event_watcher.get_active_miners_at(window_start))
-    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
-        if e['active']:
-            ever_active.add(e['hotkey'])
-
-    rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
-    for (hk, from_c, to_c), r in (getattr(self, 'last_known_rates', {}) or {}).items():
-        if r > 0:
-            rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
-
-    out: List[str] = []
-    for uid, hk in enumerate(self.metagraph.hotkeys):
-        if uid == recycle_uid or rewards[uid] > 0:
-            continue
-        latest_rates = rates_by_hotkey.get(hk, {})
-        if not latest_rates and hk not in ever_active:
-            continue
-        sr = success_rate(success_stats.get(hk))
-        reason = diagnose_non_earner(hk, latest_rates, sr, ever_active, direction_traces)
-        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
-        if len(out) >= 30:
-            break
-    return out
-
-
-def diagnose_non_earner(
-    hotkey: str,
-    latest_rates: Dict[Tuple[str, str], float],
-    sr: float,
-    ever_active: Set[str],
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
-) -> str:
-    if not latest_rates:
-        return 'no_rate_posted'
-    if hotkey not in ever_active:
-        return 'not_active_during_window'
-    if sr <= 0:
-        return 'slashed_credibility_zero'
-    parts = [
-        f'{direction[0]}→{direction[1]}: own={own:g} vs best={direction_traces[direction].best_rate:g}'
-        for direction, own in latest_rates.items()
-        if direction in direction_traces and direction_traces[direction].best_rate > 0
-    ]
-    return 'outbid (' + '; '.join(parts) + ')' if parts else 'no_competing_winner'
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────
