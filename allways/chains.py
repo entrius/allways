@@ -31,7 +31,7 @@ CHAIN_BTC = ChainDefinition(
     decimals=8,
     env_prefix='BTC',
     seconds_per_block=600,
-    min_confirmations=3,
+    min_confirmations=2,
 )
 CHAIN_TAO = ChainDefinition(
     id='tao',
