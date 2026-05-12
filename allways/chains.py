@@ -85,16 +85,13 @@ def compute_extension_target(
 
     Covers ``remaining_blocks`` source-chain blocks plus a padding buffer,
     bucket-rounded so validators converge, capped at MAX_EXTENSION_BLOCKS.
-
-    Anchored on ``current_subnet_block`` only. The contract enforces
-    ``target_block - current <= MAX_EXTENSION_BLOCKS`` (lib.rs:670 / :1090)
-    using its own block_number at extrinsic execution time, so a
-    deadline-anchored target would silently blow the cap once
-    ``remaining_blocks`` approaches the bucket ceiling.
     """
     chain = get_chain(from_chain_id)
     seconds_needed = remaining_blocks * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
     blocks_needed = math.ceil(seconds_needed / SUBTENSOR_BLOCK_SECONDS)
     blocks_needed = math.ceil(blocks_needed / EXTENSION_BUCKET_BLOCKS) * EXTENSION_BUCKET_BLOCKS
     blocks_needed = min(blocks_needed, MAX_EXTENSION_BLOCKS)
+    # Anchor on current, not deadline: contract caps ``target - current_at_exec``
+    # at MAX_EXTENSION_BLOCKS (lib.rs:670, :1090), so a deadline anchor blows
+    # the cap whenever propose fires before the deadline.
     return current_subnet_block + blocks_needed
