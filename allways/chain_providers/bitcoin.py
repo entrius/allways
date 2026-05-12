@@ -281,6 +281,13 @@ class BitcoinProvider(ChainProvider):
             min_confs = self.get_chain().min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
 
+            if is_confirmed:
+                block_hash = data.get('status', {}).get('block_hash')
+                if block_hash:
+                    status_resp = self.btc_api_get(f'/block/{block_hash}/status', timeout=10)
+                    if status_resp.ok and not status_resp.json().get('in_best_chain', False):
+                        return None  # block was reorged out
+
             for vout in data.get('vout', []):
                 addr = vout.get('scriptpubkey_address', '')
                 amount_sat = vout.get('value', 0)
