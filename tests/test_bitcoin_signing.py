@@ -112,6 +112,42 @@ def make_lightweight_provider() -> BitcoinProvider:
         return BitcoinProvider()
 
 
+def make_lightweight_provider_for_network(network: str) -> BitcoinProvider:
+    with patch.dict(
+        os.environ, {'BTC_MODE': 'lightweight', 'BTC_NETWORK': network, 'BTC_PRIVATE_KEY': TEST_WIF}, clear=False
+    ):
+        return BitcoinProvider()
+
+
+class TestBitcoinAddressValidationNetwork:
+    MAINNET_ADDRESSES = [
+        'bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc',
+        '1LDsjB43N2NAQ1Vbc2xyHca4iBBciN8iwC',
+        '37XAVCtKEvPbx2rpkxx7FmrUsetFXSawx5',
+    ]
+    TESTNET_ADDRESSES = [
+        'tb1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvy5n4at',
+        'mzjq2E92B3oRB7yDKbwM7XnPaAnKfRERw2',
+        '2My5NYwpLrNtx9pVNS6Zysiqk616RJuHDuz',
+    ]
+
+    def test_mainnet_accepts_mainnet_addresses(self):
+        provider = make_lightweight_provider_for_network('mainnet')
+        assert all(provider.is_valid_address(addr) for addr in self.MAINNET_ADDRESSES)
+
+    def test_mainnet_rejects_testnet_addresses(self):
+        provider = make_lightweight_provider_for_network('mainnet')
+        assert all(not provider.is_valid_address(addr) for addr in self.TESTNET_ADDRESSES)
+
+    def test_testnet_accepts_testnet_addresses(self):
+        provider = make_lightweight_provider_for_network('testnet')
+        assert all(provider.is_valid_address(addr) for addr in self.TESTNET_ADDRESSES)
+
+    def test_testnet_rejects_mainnet_addresses(self):
+        provider = make_lightweight_provider_for_network('testnet')
+        assert all(not provider.is_valid_address(addr) for addr in self.MAINNET_ADDRESSES)
+
+
 class TestBitcoinProviderSignFromProof:
     """Direct coverage of BitcoinProvider.sign_from_proof — the wrapper our
     validator/CLI actually invoke, not the underlying library."""

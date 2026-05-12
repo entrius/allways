@@ -400,9 +400,19 @@ class BitcoinProvider(ChainProvider):
         try:
             if address.lower().startswith(('bc1', 'tb1', 'bcrt1')):
                 hrp, data = bech32.bech32_decode(address)
-                return data is not None
+                if data is None:
+                    return False
+                if self.network == 'testnet':
+                    return hrp == 'tb'
+                if self.network == 'regtest':
+                    return hrp == 'bcrt'
+                return hrp == 'bc'
             decoded = base58.b58decode_check(address)
-            return len(decoded) == 21 and decoded[0] in (0x00, 0x05, 0x6F, 0xC4)
+            if len(decoded) != 21:
+                return False
+            if self.network in ('testnet', 'regtest'):
+                return decoded[0] in (0x6F, 0xC4)
+            return decoded[0] in (0x00, 0x05)
         except Exception:
             return False
 
