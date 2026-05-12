@@ -64,7 +64,6 @@ class OptimisticExtensionWatcher:
         from_tx_hash: bytes,
         current_block: int,
         reserved_until: int,
-        observed_confirmations: int,
         extension_count: int,
         pending: Optional[PendingExtension],
     ) -> bool:
@@ -115,7 +114,6 @@ class OptimisticExtensionWatcher:
         self,
         miner_hotkey: str,
         from_chain_id: str,
-        observed_confirmations: int,
         current_block: int,
         reserved_until: int,
         pending: Optional[PendingExtension],
@@ -190,7 +188,6 @@ class OptimisticExtensionWatcher:
         dest_chain_id: str,
         current_block: int,
         timeout_block: int,
-        observed_confirmations: int,
         extension_count: int,
         pending: Optional[PendingExtension],
     ) -> bool:
@@ -221,7 +218,6 @@ class OptimisticExtensionWatcher:
         self,
         swap_id: int,
         dest_chain_id: str,
-        observed_confirmations: int,
         current_block: int,
         timeout_block: int,
         pending: Optional[PendingExtension],

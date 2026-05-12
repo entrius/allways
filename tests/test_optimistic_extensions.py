@@ -57,7 +57,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1050,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -76,7 +75,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1100,
-            observed_confirmations=1,
             extension_count=1,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -92,7 +90,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1100,
-            observed_confirmations=0,
             extension_count=1,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -108,7 +105,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1100,
-            observed_confirmations=1,
             extension_count=2,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -123,7 +119,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1100,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -141,7 +136,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1050,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -158,7 +152,6 @@ class TestMaybeProposeReservation:
             from_tx_hash=bytes(32),
             current_block=1000,
             reserved_until=1005,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_reservation(MINER),
         )
@@ -176,7 +169,6 @@ class TestMaybeChallengeReservation:
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
             from_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
@@ -192,7 +184,6 @@ class TestMaybeChallengeReservation:
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
             from_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
@@ -205,7 +196,6 @@ class TestMaybeChallengeReservation:
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
             from_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
@@ -221,7 +211,6 @@ class TestMaybeChallengeReservation:
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
             from_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             reserved_until=1100,
             pending=w.fetch_pending_reservation(MINER),
@@ -321,7 +310,6 @@ class TestMaybeProposeTimeout:
             dest_chain_id='btc',
             current_block=1000,
             timeout_block=1050,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_timeout(42),
         )
@@ -338,7 +326,6 @@ class TestMaybeProposeTimeout:
             dest_chain_id='btc',
             current_block=1000,
             timeout_block=1100,
-            observed_confirmations=0,
             extension_count=1,
             pending=w.fetch_pending_timeout(42),
         )
@@ -352,7 +339,6 @@ class TestMaybeProposeTimeout:
             dest_chain_id='btc',
             current_block=1000,
             timeout_block=1100,
-            observed_confirmations=1,
             extension_count=2,
             pending=w.fetch_pending_timeout(42),
         )
@@ -365,7 +351,6 @@ class TestMaybeProposeTimeout:
             dest_chain_id='btc',
             current_block=1000,
             timeout_block=1050,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_timeout(42),
         )
@@ -381,7 +366,6 @@ class TestMaybeProposeTimeout:
             dest_chain_id='btc',
             current_block=1000,
             timeout_block=1005,
-            observed_confirmations=0,
             extension_count=0,
             pending=w.fetch_pending_timeout(42),
         )
@@ -399,7 +383,6 @@ class TestMaybeChallengeTimeout:
         result = w.maybe_challenge_timeout(
             swap_id=42,
             dest_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             timeout_block=1100,
             pending=w.fetch_pending_timeout(42),
@@ -413,7 +396,6 @@ class TestMaybeChallengeTimeout:
         result = w.maybe_challenge_timeout(
             swap_id=42,
             dest_chain_id='btc',
-            observed_confirmations=1,
             current_block=1000,
             timeout_block=1100,
             pending=w.fetch_pending_timeout(42),
