@@ -105,7 +105,7 @@ class OptimisticExtensionWatcher:
             # if observed_confirmations < 1:
             #     return False
             remaining = 4  # tail safety net at same runway as tier-0
-        target_block = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
+        target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
         return self._try_call(
             'propose_extend_reservation',
@@ -144,7 +144,7 @@ class OptimisticExtensionWatcher:
             return False
 
         remaining = 4  # mirror propose
-        expected = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
+        expected = compute_extension_target(from_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
@@ -218,7 +218,7 @@ class OptimisticExtensionWatcher:
             # if observed_confirmations < 1:
             #     return False
             remaining = 4  # tail safety net at same runway as tier-0
-        target_block = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
+        target_block = compute_extension_target(dest_chain_id, remaining, current_block)
 
         return self._try_call(
             'propose_extend_timeout',
@@ -246,7 +246,7 @@ class OptimisticExtensionWatcher:
             return False
 
         remaining = 4  # mirror propose
-        expected = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
+        expected = compute_extension_target(dest_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 

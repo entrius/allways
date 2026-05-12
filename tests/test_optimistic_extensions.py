@@ -48,8 +48,8 @@ def make_watcher(pending_reservation=None, pending_timeout=None, propose_raises=
 
 class TestMaybeProposeReservation:
     def test_tier0_proposes_on_visibility_with_runway_target(self):
-        # Tier 0: remaining=4 → blocks_needed=240, anchor=max(current=1000,
-        # reserved=1050)=1050, target=1290.
+        # Tier 0: remaining=4 → blocks_needed=240, anchor=current=1000,
+        # target=1240.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -64,11 +64,11 @@ class TestMaybeProposeReservation:
         assert result is True
         call_kwargs = w.contract_client.propose_extend_reservation.call_args.kwargs
         assert call_kwargs['miner_hotkey'] == MINER
-        assert call_kwargs['target_block'] == 1290
+        assert call_kwargs['target_block'] == 1240
 
     def test_tier1_proposes_with_runway_target(self):
-        # Tier 1: remaining=4 (same runway as tier-0), anchor=max(1000,1100)=1100,
-        # target=1340.
+        # Tier 1: remaining=4 (same runway as tier-0), anchor=current=1000,
+        # target=1240.
         w = make_watcher(pending_reservation=None)
         result = w.maybe_propose_reservation(
             miner_hotkey=MINER,
@@ -81,7 +81,7 @@ class TestMaybeProposeReservation:
             pending=w.fetch_pending_reservation(MINER),
         )
         assert result is True
-        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1340
+        assert w.contract_client.propose_extend_reservation.call_args.kwargs['target_block'] == 1240
 
     def test_tier1_proposes_without_confirmations(self):
         # Tier 1 fires on visibility like tier-0 — no confirmation gate.
@@ -168,8 +168,8 @@ class TestMaybeProposeReservation:
 
 class TestMaybeChallengeReservation:
     def test_challenges_when_target_too_far(self):
-        # BTC at 1/3 confs → blocks_needed=150. Anchor=max(1000,1100)=1100,
-        # expected=1250. Pending=2000 is past expected + bucket(30)=1280.
+        # remaining=4 → blocks_needed=240. Anchor=current=1000, expected=1240.
+        # Pending=2000 is past expected + bucket(30)=1270.
         w = make_watcher(
             pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
@@ -185,9 +185,9 @@ class TestMaybeChallengeReservation:
         w.contract_client.challenge_extend_reservation.assert_called_once()
 
     def test_skips_when_target_within_one_bucket_tolerance(self):
-        # expected=1250 (see above), pending=1280 is the boundary.
+        # expected=1240 (see above), pending=1270 is the boundary.
         w = make_watcher(
-            pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1280, proposed_at=995),
+            pending_reservation=PendingExtension(OTHER_HOTKEY, target_block=1270, proposed_at=995),
         )
         result = w.maybe_challenge_reservation(
             miner_hotkey=MINER,
@@ -314,7 +314,7 @@ class TestFetchPendingReservation:
 class TestMaybeProposeTimeout:
     def test_tier0_proposes_on_visibility(self):
         # BTC tier-0: remaining=4 → blocks_needed=240,
-        # anchor=max(current=1000, timeout=1050)=1050, target=1290.
+        # anchor=current=1000, target=1240.
         w = make_watcher(pending_timeout=None)
         result = w.maybe_propose_timeout(
             swap_id=42,
@@ -328,7 +328,7 @@ class TestMaybeProposeTimeout:
         assert result is True
         kwargs = w.contract_client.propose_extend_timeout.call_args.kwargs
         assert kwargs['swap_id'] == 42
-        assert kwargs['target_block'] == 1290
+        assert kwargs['target_block'] == 1240
 
     def test_tier1_proposes_without_confirmations(self):
         # Tier 1 fires on visibility like tier-0 — no confirmation gate.
@@ -391,8 +391,8 @@ class TestMaybeProposeTimeout:
 
 class TestMaybeChallengeTimeout:
     def test_challenges_when_target_too_far(self):
-        # Anchor=max(1000,1100)=1100, expected=1250, pending=2000 past
-        # expected + bucket(30)=1280.
+        # Anchor=current=1000, expected=1240, pending=2000 past
+        # expected + bucket(30)=1270.
         w = make_watcher(
             pending_timeout=PendingExtension(OTHER_HOTKEY, target_block=2000, proposed_at=995),
         )
