@@ -82,8 +82,9 @@ async def forward(self: Validator) -> None:
     extend_fulfilled_near_timeout(self)
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
-    if self.step % SCORING_WINDOW_BLOCKS == 0:
+    if not self.initial_scoring_done or self.step % SCORING_WINDOW_BLOCKS == 0:
         score_and_reward_miners(self)
+        self.initial_scoring_done = True
         bt.logging.info('forward: scoring done')
 
 

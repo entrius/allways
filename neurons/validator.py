@@ -86,6 +86,10 @@ class Validator(BaseValidatorNeuron):
         # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
         # Used to absorb mempool propagation lag before dropping a pending entry.
         self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
+        # Forces one scoring pass per fresh process so a mid-window restart
+        # doesn't leave self.scores stale until the next 1200-step boundary
+        # (which would route emissions to RECYCLE via the empty-norm fallback).
+        self.initial_scoring_done = False
 
         # Optimistic propose/challenge/finalize for reservation + timeout
         # extensions. Stateless decision class — the forward loop drives it
