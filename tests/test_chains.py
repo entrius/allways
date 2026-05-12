@@ -47,8 +47,8 @@ class TestCanonicalPair:
 
 class TestConfirmationsToSubtensorBlocks:
     def test_btc(self):
-        # ceil(3 * 600 / 12) = ceil(150) = 150
-        assert confirmations_to_subtensor_blocks('btc') == 150
+        # ceil(2 * 600 / 12) = ceil(100) = 100
+        assert confirmations_to_subtensor_blocks('btc') == 100
 
     def test_tao(self):
         # ceil(6 * 12 / 12) = ceil(6) = 6
@@ -57,8 +57,8 @@ class TestConfirmationsToSubtensorBlocks:
 
 class TestComputeExtensionTarget:
     # BTC: 600s/block, padding 300s, bucket 30 blocks.
-    # Callers compute remaining_blocks themselves: tier-1 passes 1; tier-2
-    # passes max(0, min_confirmations - observed_confirmations).
+    # Callers pass a fixed remaining (currently 4 across all tiers) sized for
+    # source-chain block-time variance plus padding.
 
     def test_btc_remaining_three(self):
         # tier-2 at 0/3 confs: remaining=3, seconds=3*600+300=2100,

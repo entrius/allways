@@ -305,7 +305,6 @@ def try_extend_reservation(
     self.optimistic_extensions.maybe_challenge_reservation(
         miner_hotkey=item.miner_hotkey,
         from_chain_id=item.from_chain,
-        observed_confirmations=tx_info.confirmations,
         current_block=current_block,
         reserved_until=reserved_until,
         pending=pending,
@@ -332,7 +331,6 @@ def try_extend_reservation(
         from_tx_hash=from_tx_hash_bytes,
         current_block=current_block,
         reserved_until=reserved_until,
-        observed_confirmations=tx_info.confirmations,
         extension_count=extension_count,
         pending=pending,
     )
@@ -498,7 +496,6 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         self.optimistic_extensions.maybe_challenge_timeout(
             swap_id=swap.id,
             dest_chain_id=swap.to_chain,
-            observed_confirmations=tx_info.confirmations,
             current_block=current_block,
             timeout_block=swap.timeout_block,
             pending=pending,
@@ -508,7 +505,6 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
             dest_chain_id=swap.to_chain,
             current_block=current_block,
             timeout_block=swap.timeout_block,
-            observed_confirmations=tx_info.confirmations,
             extension_count=extension_count,
             pending=pending,
         )

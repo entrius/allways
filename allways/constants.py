@@ -88,7 +88,7 @@ CHALLENGE_WINDOW_BLOCKS = 8
 # whose finalize window opens past the original reservation deadline.
 # Default sized for mainnet; testnet validators with slower/jankier RPC can
 # override via VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE env var.
-DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 20
+DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 10
 VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
     1,
     int(

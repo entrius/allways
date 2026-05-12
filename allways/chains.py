@@ -31,7 +31,7 @@ CHAIN_BTC = ChainDefinition(
     decimals=8,
     env_prefix='BTC',
     seconds_per_block=600,
-    min_confirmations=3,
+    min_confirmations=2,
 )
 CHAIN_TAO = ChainDefinition(
     id='tao',
@@ -80,28 +80,18 @@ def compute_extension_target(
     from_chain_id: str,
     remaining_blocks: int,
     current_subnet_block: int,
-    deadline_block: int = 0,
 ) -> int:
     """Subtensor block to extend a reservation/timeout to.
 
     Covers ``remaining_blocks`` source-chain blocks plus a padding buffer,
     bucket-rounded so validators converge, capped at MAX_EXTENSION_BLOCKS.
-
-    Anchored on ``max(current_subnet_block, deadline_block)`` so runway is
-    measured past the existing deadline. Propose fires inside
-    EXTEND_THRESHOLD_BLOCKS of the deadline, so a current-block anchor
-    silently shortens tier-0 BTC's nominal +90 to ~+71 past the old
-    deadline — barely one BTC block. ``deadline_block`` defaults to 0 to
-    keep callers that don't have one yet on the old behaviour.
-
-    Callers pick ``remaining_blocks`` per tier:
-    - Tier-0 (tx visibility, no confirmations yet): pass 1.
-    - Tier-1+ (≥1 confirmation): pass max(0, min_confirmations - observed).
     """
     chain = get_chain(from_chain_id)
     seconds_needed = remaining_blocks * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
     blocks_needed = math.ceil(seconds_needed / SUBTENSOR_BLOCK_SECONDS)
     blocks_needed = math.ceil(blocks_needed / EXTENSION_BUCKET_BLOCKS) * EXTENSION_BUCKET_BLOCKS
     blocks_needed = min(blocks_needed, MAX_EXTENSION_BLOCKS)
-    anchor = max(current_subnet_block, deadline_block)
-    return anchor + blocks_needed
+    # Anchor on current, not deadline: contract caps ``target - current_at_exec``
+    # at MAX_EXTENSION_BLOCKS (lib.rs:670, :1090), so a deadline anchor blows
+    # the cap whenever propose fires before the deadline.
+    return current_subnet_block + blocks_needed

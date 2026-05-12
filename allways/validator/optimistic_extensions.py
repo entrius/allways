@@ -13,7 +13,7 @@ from typing import Optional
 
 import bittensor as bt
 
-from allways.chains import compute_extension_target, get_chain
+from allways.chains import compute_extension_target
 from allways.classes import PendingExtension
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
@@ -64,7 +64,6 @@ class OptimisticExtensionWatcher:
         from_tx_hash: bytes,
         current_block: int,
         reserved_until: int,
-        observed_confirmations: int,
         extension_count: int,
         pending: Optional[PendingExtension],
     ) -> bool:
@@ -76,11 +75,11 @@ class OptimisticExtensionWatcher:
         ``fetch_pending_reservation`` and passes the same value into all
         three propose/challenge/finalize methods to avoid redundant RPCs.
 
-        - Tier 0 (first extension): caller is responsible for ensuring the tx
-          is visible (``tx_info != None``); target sized for one chain block.
-        - Tier 1 (second extension): requires ``observed_confirmations >= 1``;
-          target = chain-aware full-confirmation window.
-        - Tier 2+: refused locally to avoid a doomed tx (contract rejects too).
+        Both tiers fire on tx visibility alone with identical runway. Tier-1
+        previously gated on ``observed_confirmations >= 1``; that raced with
+        the challenge-window guard near the deadline, so it was dropped in
+        favour of tier-1 acting as a tail-of-distribution safety net.
+        Tier 2+ is refused locally to avoid a doomed tx (contract rejects too).
 
         Returns True if a propose tx was submitted, False otherwise.
         """
@@ -98,14 +97,8 @@ class OptimisticExtensionWatcher:
         if current_block + CHALLENGE_WINDOW_BLOCKS >= reserved_until:
             return False
 
-        if extension_count == 0:
-            remaining = 1
-        else:
-            if observed_confirmations < 1:
-                return False
-            chain = get_chain(from_chain_id)
-            remaining = max(0, chain.min_confirmations - observed_confirmations)
-        target_block = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
+        remaining = 4  # ~48 min runway, sized for BTC block-time variance
+        target_block = compute_extension_target(from_chain_id, remaining, current_block)
 
         return self._try_call(
             'propose_extend_reservation',
@@ -121,14 +114,13 @@ class OptimisticExtensionWatcher:
         self,
         miner_hotkey: str,
         from_chain_id: str,
-        observed_confirmations: int,
         current_block: int,
         reserved_until: int,
         pending: Optional[PendingExtension],
     ) -> bool:
         """Challenge the pending reservation extension if its target is too far.
 
-        Mirrors the deadline-anchored math used by ``maybe_propose_reservation``
+        Mirrors the current-block-anchored math used by ``maybe_propose_reservation``
         so challenger and proposer compute the same expected target. Without
         this the two sides could drift by up to EXTEND_THRESHOLD_BLOCKS,
         which the EXTENSION_BUCKET_BLOCKS tolerance currently absorbs but
@@ -143,9 +135,8 @@ class OptimisticExtensionWatcher:
         if self._is_own_proposal(pending):
             return False
 
-        chain = get_chain(from_chain_id)
-        remaining = max(0, chain.min_confirmations - observed_confirmations)
-        expected = compute_extension_target(from_chain_id, remaining, current_block, deadline_block=reserved_until)
+        remaining = 4  # mirror propose
+        expected = compute_extension_target(from_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
@@ -197,12 +188,11 @@ class OptimisticExtensionWatcher:
         dest_chain_id: str,
         current_block: int,
         timeout_block: int,
-        observed_confirmations: int,
         extension_count: int,
         pending: Optional[PendingExtension],
     ) -> bool:
-        """Tiered timeout-extension propose. See ``maybe_propose_reservation``
-        for the ``pending`` contract."""
+        """Timeout-extension propose. See ``maybe_propose_reservation`` for
+        the ``pending`` contract and tier semantics."""
         if extension_count >= MAX_EXTENSIONS_PER_SWAP:
             return False
 
@@ -212,14 +202,8 @@ class OptimisticExtensionWatcher:
         if current_block + CHALLENGE_WINDOW_BLOCKS >= timeout_block:
             return False
 
-        if extension_count == 0:
-            remaining = 1
-        else:
-            if observed_confirmations < 1:
-                return False
-            chain = get_chain(dest_chain_id)
-            remaining = max(0, chain.min_confirmations - observed_confirmations)
-        target_block = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
+        remaining = 4  # ~48 min runway, sized for BTC block-time variance
+        target_block = compute_extension_target(dest_chain_id, remaining, current_block)
 
         return self._try_call(
             'propose_extend_timeout',
@@ -234,21 +218,19 @@ class OptimisticExtensionWatcher:
         self,
         swap_id: int,
         dest_chain_id: str,
-        observed_confirmations: int,
         current_block: int,
         timeout_block: int,
         pending: Optional[PendingExtension],
     ) -> bool:
-        """Mirror of ``maybe_challenge_reservation``: deadline-anchored expected
-        target so challenger and proposer stay aligned."""
+        """Mirror of ``maybe_challenge_reservation``: current-block-anchored
+        expected target so challenger and proposer stay aligned."""
         if pending is None:
             return False
         if self._is_own_proposal(pending):
             return False
 
-        chain = get_chain(dest_chain_id)
-        remaining = max(0, chain.min_confirmations - observed_confirmations)
-        expected = compute_extension_target(dest_chain_id, remaining, current_block, deadline_block=timeout_block)
+        remaining = 4  # mirror propose
+        expected = compute_extension_target(dest_chain_id, remaining, current_block)
         if pending.target_block <= expected + EXTENSION_BUCKET_BLOCKS:
             return False
 
