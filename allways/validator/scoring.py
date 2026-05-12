@@ -143,14 +143,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         self,
         window_start=window_start,
         window_end=window_end,
-        hotkey_to_uid=hotkey_to_uid,
-        rewardable_hotkeys=rewardable_hotkeys,
         direction_traces=direction_traces,
         rewards=rewards,
         success_stats=success_stats,
         distributed=distributed,
         recycled=recycled,
-        recycle_uid=recycle_uid,
     )
 
     return rewards, set(range(n_uids))
@@ -172,15 +169,16 @@ def log_scoring_trace(
     *,
     window_start: int,
     window_end: int,
-    hotkey_to_uid: Dict[str, int],
-    rewardable_hotkeys: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     rewards: np.ndarray,
     success_stats: Dict[str, Tuple[int, int]],
     distributed: float,
     recycled: float,
-    recycle_uid: int,
 ) -> None:
+    hotkeys = self.metagraph.hotkeys
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
+
     lines = [
         f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
     ]
@@ -196,38 +194,17 @@ def log_scoring_trace(
         )
 
     for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
-        hk = self.metagraph.hotkeys[uid]
+        hk = hotkeys[uid]
         crown_blk = sum(t.crown_blocks.get(hk, 0.0) for t in direction_traces.values())
         if uid == recycle_uid and crown_blk == 0:
             continue
-        own_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
+        crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
         sr = success_rate(success_stats.get(hk))
-        lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f} reward={own_reward:.3f}')
+        lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f} reward={crown_reward:.3f}')
 
-    ever_active = set(self.event_watcher.get_active_miners_at(window_start))
-    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
-        if e['active']:
-            ever_active.add(e['hotkey'])
-
-    rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
-    for (hk, from_c, to_c), r in (getattr(self, 'last_known_rates', {}) or {}).items():
-        if r > 0:
-            rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
-
-    emitted = 0
-    for hk in rewardable_hotkeys:
-        uid = hotkey_to_uid.get(hk)
-        if uid is None or uid == recycle_uid or rewards[uid] > 0:
-            continue
-        latest_rates = rates_by_hotkey.get(hk, {})
-        if not latest_rates and hk not in ever_active:
-            continue
-        sr = success_rate(success_stats.get(hk))
-        reason = diagnose_non_earner(hk, latest_rates, sr, ever_active, direction_traces)
-        lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
-        emitted += 1
-        if emitted >= 30:
-            break
+    lines.extend(
+        non_earner_lines(self, window_start, window_end, rewards, success_stats, direction_traces, recycle_uid)
+    )
 
     if recycled > 0:
         parts = [
@@ -239,6 +216,40 @@ def log_scoring_trace(
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
 
     bt.logging.info('\n'.join(lines))
+
+
+def non_earner_lines(
+    self: Validator,
+    window_start: int,
+    window_end: int,
+    rewards: np.ndarray,
+    success_stats: Dict[str, Tuple[int, int]],
+    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    recycle_uid: int,
+) -> List[str]:
+    ever_active = set(self.event_watcher.get_active_miners_at(window_start))
+    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
+        if e['active']:
+            ever_active.add(e['hotkey'])
+
+    rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
+    for (hk, from_c, to_c), r in (getattr(self, 'last_known_rates', {}) or {}).items():
+        if r > 0:
+            rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
+
+    out: List[str] = []
+    for uid, hk in enumerate(self.metagraph.hotkeys):
+        if uid == recycle_uid or rewards[uid] > 0:
+            continue
+        latest_rates = rates_by_hotkey.get(hk, {})
+        if not latest_rates and hk not in ever_active:
+            continue
+        sr = success_rate(success_stats.get(hk))
+        reason = diagnose_non_earner(hk, latest_rates, sr, ever_active, direction_traces)
+        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
+        if len(out) >= 30:
+            break
+    return out
 
 
 def diagnose_non_earner(
