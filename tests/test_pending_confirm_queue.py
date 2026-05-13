@@ -107,6 +107,28 @@ class TestPendingConfirmQueue:
         assert queue.has('miner-2')
         assert queue.pending_size() == 1
 
+    def test_update_reserved_until_bumps_value(self, tmp_path: Path):
+        queue = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        queue.enqueue(PENDING_CONFIRM_SAMPLE1)  # reserved_until=100
+
+        assert queue.update_reserved_until('miner-1', 200) is True
+        assert queue.get_all()[0].reserved_until == 200
+
+    def test_update_reserved_until_is_monotonic(self, tmp_path: Path):
+        queue = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        queue.enqueue(replace(PENDING_CONFIRM_SAMPLE1, reserved_until=200))
+
+        assert queue.update_reserved_until('miner-1', 150) is False
+        assert queue.get_all()[0].reserved_until == 200
+
+        assert queue.update_reserved_until('miner-1', 200) is False
+        assert queue.get_all()[0].reserved_until == 200
+
+    def test_update_reserved_until_missing_miner_is_noop(self, tmp_path: Path):
+        queue = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert queue.update_reserved_until('nobody', 500) is False
+        assert queue.pending_size() == 0
+
     def test_update_reserved_until_prevents_stale_purge(self, tmp_path: Path):
         """Regression: after the contract extends a reservation, refreshing the
         cached reserved_until must keep the row alive past its original TTL."""
@@ -124,12 +146,6 @@ class TestPendingConfirmQueue:
         removed = queue.purge_expired_pending_confirms()
         assert removed == 0
         assert queue.has('miner-1')
-
-    def test_update_reserved_until_unknown_hotkey_is_noop(self, tmp_path: Path):
-        db_path = tmp_path / 'state.db'
-        queue = ValidatorStateStore(db_path=db_path)
-        queue.update_reserved_until('miner-unknown', 999)
-        assert queue.pending_size() == 0
 
     def test_enqueue_and_remove_are_safe_across_threads(self, tmp_path: Path):
         db_path = tmp_path / 'state.db'

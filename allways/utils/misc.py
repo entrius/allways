@@ -4,6 +4,19 @@ from math import floor
 from typing import Any, Callable
 
 
+def is_reserved(reserved_until: int, current_block: int) -> bool:
+    """True iff the miner is still reserved at ``current_block``.
+
+    Mirrors the on-chain contract, which treats ``reserved_until >= current_block``
+    as active (see ``smart-contracts/ink/lib.rs`` — ``reserve`` blocks new
+    reservations while this predicate holds, and ``initiate_swap`` accepts the
+    confirm at exactly that boundary). CLI, validator axon, and state store
+    must agree with the contract or the boundary block leaks a mismatch
+    between the user-visible message and the on-chain path.
+    """
+    return reserved_until >= current_block
+
+
 # LRU Cache with TTL
 def ttl_cache(maxsize: int = 128, typed: bool = False, ttl: int = -1):
     """

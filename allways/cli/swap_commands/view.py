@@ -35,6 +35,7 @@ from allways.constants import (
     MAX_EXTENSIONS_PER_SWAP,
 )
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
 
@@ -176,7 +177,7 @@ def view_miners(
         if has_swap:
             status_parts.append('[blue]in-swap[/blue]')
             status_tokens.add('in-swap')
-        if reserved_until and current_block and reserved_until > current_block:
+        if reserved_until and current_block and is_reserved(reserved_until, current_block):
             try:
                 resv = client.get_reservation_data(pair.hotkey)
             except ContractError:

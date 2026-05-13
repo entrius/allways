@@ -21,6 +21,7 @@ from allways.constants import (
     TAO_TO_RAO,
 )
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.utils.misc import is_reserved
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -519,7 +520,7 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
             on_chain = client.get_reservation(state.miner_hotkey)
         except ContractError:
             return ReservationStatus(kind='rpc_error')
-        if on_chain is None or on_chain.reserved_until < current_block:
+        if on_chain is None or not is_reserved(on_chain.reserved_until, current_block):
             return ReservationStatus(kind='expired')
         if on_chain.hash != state.request_hash:
             return ReservationStatus(kind='replaced')
@@ -531,7 +532,7 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
     except ContractError:
         return ReservationStatus(kind='rpc_error')
 
-    if reserved_until == 0 or on_chain is None or reserved_until < current_block:
+    if on_chain is None or not is_reserved(reserved_until, current_block):
         return ReservationStatus(kind='expired')
 
     chain_tao, chain_from, chain_to = on_chain

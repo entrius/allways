@@ -20,6 +20,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.misc import is_reserved
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
@@ -336,7 +337,7 @@ async def handle_swap_reserve(
             # through self.subtensor, which the forward loop already uses;
             # concurrent reads collide on the same websocket.
             cur_block = validator.axon_subtensor.get_current_block()
-            if reserved_until >= cur_block:
+            if is_reserved(reserved_until, cur_block):
                 reject_synapse(synapse, 'Miner already reserved', ctx)
                 return synapse
             if synapse.tao_amount > collateral:
@@ -441,7 +442,7 @@ async def handle_swap_confirm(
         with validator.axon_lock:
             reserved_until = contract.get_miner_reserved_until(miner)
             # Read the current block via axon_subtensor — see handle_swap_reserve.
-            if reserved_until < validator.axon_subtensor.get_current_block():
+            if not is_reserved(reserved_until, validator.axon_subtensor.get_current_block()):
                 reject_synapse(synapse, 'No active reservation for this miner', ctx)
                 return synapse
 
