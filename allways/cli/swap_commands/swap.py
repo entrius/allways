@@ -15,6 +15,8 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
+
+# to_smallest_unit and from_smallest_unit moved to helpers.py
 from allways.cli.swap_commands.helpers import (
     PendingSwapState,
     blocks_to_minutes_str,
@@ -22,6 +24,7 @@ from allways.cli.swap_commands.helpers import (
     console,
     find_matching_miners,
     from_rao,
+    from_smallest_unit,
     get_cli_context,
     is_local_network,
     load_pending_swap,
@@ -31,6 +34,7 @@ from allways.cli.swap_commands.helpers import (
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
+    to_smallest_unit,
 )
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
@@ -39,24 +43,6 @@ from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
-
-
-def to_smallest_unit(amount: float, chain_id: str) -> int:
-    """Convert a human-readable amount to the smallest unit for a chain.
-
-    Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
-    """
-    from decimal import Decimal
-
-    chain = get_chain(chain_id)
-    return int(Decimal(str(amount)) * (10**chain.decimals))
-
-
-def from_smallest_unit(amount: int, chain_id: str) -> float:
-    """Convert from smallest unit to human-readable amount."""
-    chain = get_chain(chain_id)
-    return amount / (10**chain.decimals)
-
 
 # =========================================================================
 # Shared functions (used by swap command, post_tx command)
