@@ -430,6 +430,7 @@ class ContractEventWatcher:
                     miner_hotkey=miner,
                     completed=True,
                     resolved_block=block_num,
+                    tao_amount=int(values.get('tao_amount') or 0),
                 )
                 self.apply_busy_delta(block_num, miner, -1)
                 self.bootstrapped_swap_ids.discard(swap_id)

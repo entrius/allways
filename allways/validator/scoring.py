@@ -1,7 +1,7 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``pool * share * success_rate ** SUCCESS_EXPONENT``;
-unclaimed pool recycles to ``RECYCLE_UID``. Entry point is
+Reward per miner is ``pool × crown_share × sr³ × capacity × volume_factor``;
+any shortfall recycles to ``RECYCLE_UID``. Entry point is
 ``score_and_reward_miners(validator)``.
 """
 
@@ -16,14 +16,16 @@ import numpy as np
 
 from allways.chains import canonical_pair
 from allways.constants import (
+    CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
+    VOLUME_WEIGHT_ALPHA,
 )
 from allways.validator.event_watcher import ContractEventWatcher
-from allways.validator.scoring_trace import log_scoring_trace
+from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
@@ -86,8 +88,8 @@ def prune_swap_outcomes(self: Validator) -> None:
 
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
-    """Replay the crown-time event stream over the window, derive per-miner
-    rewards, recycle any undistributed pool to ``RECYCLE_UID``."""
+    """Replay the crown-time event stream, derive per-miner rewards
+    (pool × crown_share × sr³ × capacity × volume_factor), recycle the rest."""
     n_uids = self.metagraph.n.item()
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
@@ -110,6 +112,13 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
+    weighting_traces: Dict[str, WeightingTrace] = {}
+    try:
+        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'max_swap_amount read failed: {e}')
+        max_swap_amount = 0
+    collaterals: Dict[str, int] = {}
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         trace = DirectionTrace(pool=pool)
@@ -132,8 +141,30 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             uid = hotkey_to_uid.get(hotkey)
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
+            if hotkey not in collaterals:
+                try:
+                    collaterals[hotkey] = int(self.contract_client.get_miner_collateral(hotkey))
+                except Exception as e:
+                    bt.logging.warning(f'collateral read failed for {hotkey[:8]}: {e}')
+                    collaterals[hotkey] = 0
+            cap = capacity_factor(collaterals[hotkey], max_swap_amount)
+            wt = weighting_traces.setdefault(hotkey, WeightingTrace())
+            wt.record_capacity(collateral=collaterals[hotkey], factor=cap)
+            wt.record_credibility(
+                closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
+                ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
+            )
             share = blocks / total
-            rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT)
+            rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
+
+    apply_volume_weighting(
+        self,
+        rewards=rewards,
+        hotkey_to_uid=hotkey_to_uid,
+        direction_traces=direction_traces,
+        weighting_traces=weighting_traces,
+        window_start=window_start,
+    )
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
@@ -149,20 +180,80 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         success_rates=success_rates,
         distributed=distributed,
         recycled=recycled,
+        weighting_traces=weighting_traces,
     )
 
     return rewards, set(range(n_uids))
 
 
-def success_rate(stats: Optional[Tuple[int, int]]) -> float:
-    """All-time success rate. Zero-outcome miners default to 1.0 (optimistic)."""
-    if stats is None:
+def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
+    """min(1, collateral / max_swap). Fail-safe to 1.0 when bounds unset."""
+    if max_swap_amount_rao <= 0:
         return 1.0
+    if collateral_rao <= 0:
+        return 0.0
+    return min(1.0, collateral_rao / max_swap_amount_rao)
+
+
+def volume_factor(
+    vol_rao: int,
+    total_volume_rao: int,
+    crown_share: float,
+    alpha: float = VOLUME_WEIGHT_ALPHA,
+) -> float:
+    """(1-α) + α·min(1, vol_share/crown_share). Idle network or no crown → 1.0
+    (no penalty); cap kills any over-serve bonus."""
+    if total_volume_rao <= 0 or crown_share <= 0:
+        return 1.0
+    participation = min(1.0, (vol_rao / total_volume_rao) / crown_share)
+    return (1.0 - alpha) + alpha * participation
+
+
+def apply_volume_weighting(
+    self: Validator,
+    *,
+    rewards: np.ndarray,
+    hotkey_to_uid: Dict[str, int],
+    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    weighting_traces: Dict[str, WeightingTrace],
+    window_start: int,
+) -> None:
+    """Multiply each crown earner's reward by their volume_factor."""
+    volumes = self.state_store.get_volume_since(window_start)
+    crown_per_hotkey: Dict[str, float] = {}
+    for trace in direction_traces.values():
+        for hk, blk in trace.crown_blocks.items():
+            crown_per_hotkey[hk] = crown_per_hotkey.get(hk, 0.0) + blk
+
+    total_crown = sum(crown_per_hotkey.values())
+    total_volume = sum(volumes.values())
+    if total_crown <= 0:
+        return
+
+    for hotkey, crown in crown_per_hotkey.items():
+        uid = hotkey_to_uid.get(hotkey)
+        if uid is None or rewards[uid] <= 0:
+            continue
+        crown_share = crown / total_crown
+        vol = volumes.get(hotkey, 0)
+        factor = volume_factor(vol, total_volume, crown_share)
+        rewards[uid] *= factor
+        weighting_traces.setdefault(hotkey, WeightingTrace()).record_volume(
+            vol_rao=vol,
+            total_volume_rao=total_volume,
+            crown_share=crown_share,
+            factor=factor,
+        )
+
+
+def success_rate(stats: Optional[Tuple[int, int]]) -> float:
+    """Raw success rate × linear ramp to full credibility at
+    CREDIBILITY_RAMP_OBSERVATIONS closed swaps. Zero observations → 0."""
+    if not stats or stats == (0, 0):
+        return 0.0
     completed, timed_out = stats
     total = completed + timed_out
-    if total == 0:
-        return 1.0
-    return completed / total
+    return (completed / total) * min(1.0, total / CREDIBILITY_RAMP_OBSERVATIONS)
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────

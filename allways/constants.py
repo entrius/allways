@@ -58,6 +58,10 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
 SUCCESS_EXPONENT: int = 3
+# Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
+VOLUME_WEIGHT_ALPHA: float = 0.5
+# Closed swaps required for full credibility (0 → 100% linear ramp).
+CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
