@@ -31,6 +31,7 @@ from allways.utils.scale import (
     decode_u128,
     strip_hex_prefix,
 )
+from allways.validator.reservation_index import ReservationIndex
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
@@ -209,6 +210,8 @@ class ContractEventWatcher:
         metadata_path: Path,
         state_store: ValidatorStateStore,
         swap_tracker: Optional[SwapTracker] = None,
+        reservation_index: Optional[ReservationIndex] = None,
+        contract_client: Any = None,
     ):
         self.substrate = substrate
         self.contract_address = contract_address
@@ -217,6 +220,17 @@ class ContractEventWatcher:
         # watcher (cycle in current init order). Timeout extension finalize
         # writes are skipped until this is set.
         self.swap_tracker = swap_tracker
+        # Validator-side mirror of the on-chain reservations table; used by
+        # ``handle_swap_reserve`` to enforce that a single source address
+        # cannot reserve more miners than its visible balance covers
+        # (issue #295). Optional so legacy callers / tests that don't need
+        # the cross-miner check can still construct a watcher.
+        self.reservation_index = reservation_index
+        # Reservations are upserted via the MinerReserved event, but the
+        # event payload only carries (miner, reserved_until); the
+        # from_addr/from_amount/from_chain fields needed by the index live
+        # in the contract storage and have to be fetched on the spot.
+        self.contract_client = contract_client
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
         self.last_prune_block: int = 0
@@ -289,6 +303,11 @@ class ContractEventWatcher:
         """Cold start: snapshot contract state for every metagraph miner, then
         rewind the cursor by one scoring window so ``sync_to`` backfills it
         before the first scoring pass runs."""
+        if contract_client is not None and self.contract_client is None:
+            # Late-bind the contract_client so MinerReserved handling has a
+            # client to read full reservation rows from. Initializers that
+            # already injected a client at construction time keep theirs.
+            self.contract_client = contract_client
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
@@ -296,6 +315,16 @@ class ContractEventWatcher:
                         self.active_miners.add(hotkey)
                 except Exception as e:
                     bt.logging.debug(f'EventWatcher bootstrap: active flag read failed for {hotkey[:8]}: {e}')
+            if self.reservation_index is not None:
+                # Hydrate the reservation mirror by reading every metagraph
+                # hotkey once. After this, MinerReserved / SwapInitiated /
+                # ReservationCancelled events keep it in sync incrementally
+                # so the per-request reserve check is O(active_reservations).
+                self.reservation_index.hydrate_from_contract(
+                    contract_client=contract_client,
+                    miner_hotkeys=metagraph_hotkeys,
+                    current_block=current_block,
+                )
             # Without this seed, a miner already serving a swap at startup
             # would be treated as idle until the next terminal event.
             try:
@@ -414,6 +443,14 @@ class ContractEventWatcher:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if miner:
+                # Reservation has been consumed into a live swap; the
+                # contract removes the row in clear_confirmed_reservation,
+                # so the validator-side mirror must drop it too. Without
+                # this drop, ``committed_amount_for_address`` would keep
+                # counting the swap's source amount as a held reservation
+                # and reject the user's *next* unrelated reserve attempt.
+                if self.reservation_index is not None:
+                    self.reservation_index.remove(miner)
                 # Skip if this swap's +1 was already seeded from the contract's
                 # live active-swap list at bootstrap — otherwise a restart
                 # whose replay window covers the original SwapInitiated would
@@ -421,6 +458,23 @@ class ContractEventWatcher:
                 if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
                     return
                 self.apply_busy_delta(block_num, miner, +1)
+        elif name == 'MinerReserved':
+            # MinerReserved only carries (miner, reserved_until) — fetch the
+            # full Reservation row so the index can answer queries keyed on
+            # (from_address, from_chain) without another RPC at request time.
+            miner = values.get('miner', '')
+            if miner and self.reservation_index is not None and self.contract_client is not None:
+                try:
+                    res = self.contract_client.get_reservation(miner)
+                except Exception as e:
+                    bt.logging.warning(f'EventWatcher: get_reservation({miner[:8]}) on MinerReserved failed: {e}')
+                    res = None
+                if res is not None:
+                    self.reservation_index.upsert(miner, res)
+        elif name == 'ReservationCancelled':
+            miner = values.get('miner', '')
+            if miner and self.reservation_index is not None:
+                self.reservation_index.remove(miner)
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')

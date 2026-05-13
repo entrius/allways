@@ -343,6 +343,31 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Insufficient miner collateral', ctx)
                 return synapse
 
+            # Aggregate-balance gate: the per-request balance check above
+            # only verifies the source can fund THIS swap in isolation.
+            # Without considering the user's other still-live reservations
+            # from the same source address, a user with funds for one swap
+            # could lock multiple miners simultaneously and deny capacity
+            # to honest users (issue #295). The contract has no source-
+            # address index, so the validator consults its event-driven
+            # mirror (ReservationIndex) for the cumulative committed
+            # amount and rejects if balance can't cover committed + new.
+            reservation_index = getattr(validator, 'reservation_index', None)
+            if reservation_index is not None:
+                committed = reservation_index.committed_amount_for_address(
+                    from_address=synapse.from_address,
+                    from_chain=synapse.from_chain,
+                    current_block=cur_block,
+                    exclude_miner=miner,
+                )
+                if balance < committed + synapse.from_amount:
+                    reject_synapse(
+                        synapse,
+                        f'Insufficient source balance: {committed} already committed across other live reservations',
+                        ctx,
+                    )
+                    return synapse
+
             min_collateral = validator.bounds_cache.min_collateral()
             if min_collateral > 0 and collateral < min_collateral:
                 reject_synapse(synapse, 'Miner collateral below minimum', ctx)
