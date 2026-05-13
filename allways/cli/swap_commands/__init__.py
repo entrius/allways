@@ -1,6 +1,7 @@
 from allways.cli.swap_commands.admin import admin_group
 from allways.cli.swap_commands.claim import claim_command
 from allways.cli.swap_commands.collateral import collateral_group
+from allways.cli.swap_commands.history import history_command
 from allways.cli.swap_commands.miner_commands import miner_group
 from allways.cli.swap_commands.pair import post_pair
 from allways.cli.swap_commands.post_tx import post_tx_command
@@ -17,6 +18,7 @@ miner_group.add_command(post_pair, 'post')
 swap_group.add_command(post_tx_command, 'post-tx')
 swap_group.add_command(quote_command, 'quote')
 swap_group.add_command(resume_reservation_command, 'resume-reservation')
+swap_group.add_command(history_command, 'history')
 
 
 def register_commands(cli):

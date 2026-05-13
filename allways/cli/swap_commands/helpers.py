@@ -25,6 +25,7 @@ from allways.contract_client import AllwaysContractClient, ContractError, is_con
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
 PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
+SWAP_HISTORY_FILE = ALLWAYS_DIR / 'swap_history.json'
 
 console = Console()
 
@@ -606,6 +607,51 @@ def resolve_source_tx_block(
         '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
     )
     return 0
+
+
+def append_swap_history(swap) -> None:
+    """Append a resolved swap to ~/.allways/swap_history.json."""
+    import time
+
+    entry = {
+        'swap_id': swap.id,
+        'from_chain': swap.from_chain,
+        'to_chain': swap.to_chain,
+        'from_amount': swap.from_amount,
+        'to_amount': swap.to_amount,
+        'user_from_address': swap.user_from_address,
+        'user_to_address': swap.user_to_address,
+        'from_tx_hash': swap.from_tx_hash,
+        'to_tx_hash': swap.to_tx_hash,
+        'status': swap.status.name,
+        'initiated_block': swap.initiated_block,
+        'completed_block': swap.completed_block,
+        'rate': swap.rate,
+        'recorded_at': time.time(),
+    }
+    try:
+        ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
+        existing = []
+        if SWAP_HISTORY_FILE.exists():
+            try:
+                existing = json.loads(SWAP_HISTORY_FILE.read_text())
+            except Exception:
+                existing = []
+        if not any(e.get('swap_id') == swap.id for e in existing):
+            existing.append(entry)
+            SWAP_HISTORY_FILE.write_text(json.dumps(existing, indent=2))
+    except Exception:
+        pass
+
+
+def load_swap_history() -> list:
+    """Load swap history from ~/.allways/swap_history.json."""
+    if not SWAP_HISTORY_FILE.exists():
+        return []
+    try:
+        return json.loads(SWAP_HISTORY_FILE.read_text())
+    except Exception:
+        return []
 
 
 def find_matching_miners(all_pairs, from_chain: str, to_chain: str):
