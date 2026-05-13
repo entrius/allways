@@ -1,7 +1,7 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``pool * share * success_rate ** SUCCESS_EXPONENT``;
-unclaimed pool recycles to ``RECYCLE_UID``. Entry point is
+Reward per miner is ``pool × crown_share × sr³ × capacity × volume_factor``;
+any shortfall recycles to ``RECYCLE_UID``. Entry point is
 ``score_and_reward_miners(validator)``.
 """
 
@@ -25,7 +25,7 @@ from allways.constants import (
     VOLUME_WEIGHT_ALPHA,
 )
 from allways.validator.event_watcher import ContractEventWatcher
-from allways.validator.scoring_trace import log_scoring_trace
+from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
@@ -38,19 +38,6 @@ class DirectionTrace:
     crown_blocks: Dict[str, float] = field(default_factory=dict)
     unfilled_blocks: int = 0
     best_rate: float = 0.0
-
-
-@dataclass
-class WeightingTrace:
-    """Per-hotkey capacity + volume factors surfaced in the scoring log."""
-
-    collateral: int = 0
-    capacity_factor: float = 1.0
-    volume_rao: int = 0
-    crown_share: float = 0.0
-    volume_share: float = 0.0
-    participation: float = 1.0
-    volume_factor: float = 1.0
 
 
 def score_and_reward_miners(self: Validator) -> None:
@@ -126,7 +113,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
-    max_swap_amount = read_max_swap_amount(self)
+    try:
+        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'max_swap_amount read failed: {e}')
+        max_swap_amount = 0
     collaterals: Dict[str, int] = {}
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
@@ -151,11 +142,18 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             if hotkey not in collaterals:
-                collaterals[hotkey] = read_miner_collateral(self, hotkey)
+                try:
+                    collaterals[hotkey] = int(self.contract_client.get_miner_collateral(hotkey))
+                except Exception as e:
+                    bt.logging.warning(f'collateral read failed for {hotkey[:8]}: {e}')
+                    collaterals[hotkey] = 0
             cap = capacity_factor(collaterals[hotkey], max_swap_amount)
             wt = weighting_traces.setdefault(hotkey, WeightingTrace())
-            wt.collateral = collaterals[hotkey]
-            wt.capacity_factor = cap
+            wt.record_capacity(collateral=collaterals[hotkey], factor=cap)
+            wt.record_credibility(
+                closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
+                ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
+            )
             share = blocks / total
             rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
 
@@ -183,7 +181,6 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
-        success_stats=success_stats,
     )
 
     return rewards, set(range(n_uids))
@@ -198,11 +195,17 @@ def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
     return min(1.0, collateral_rao / max_swap_amount_rao)
 
 
-def volume_factor(volume_share: float, crown_share: float, alpha: float = VOLUME_WEIGHT_ALPHA) -> float:
-    """(1-α) + α·min(1, vol_share/crown_share). Cap kills over-serve bonus."""
-    if crown_share <= 0:
+def volume_factor(
+    vol_rao: int,
+    total_volume_rao: int,
+    crown_share: float,
+    alpha: float = VOLUME_WEIGHT_ALPHA,
+) -> float:
+    """(1-α) + α·min(1, vol_share/crown_share). Idle network or no crown → 1.0
+    (no penalty); cap kills any over-serve bonus."""
+    if total_volume_rao <= 0 or crown_share <= 0:
         return 1.0
-    participation = min(1.0, volume_share / crown_share)
+    participation = min(1.0, (vol_rao / total_volume_rao) / crown_share)
     return (1.0 - alpha) + alpha * participation
 
 
@@ -215,8 +218,7 @@ def apply_volume_weighting(
     weighting_traces: Dict[str, WeightingTrace],
     window_start: int,
 ) -> None:
-    """Multiply each crown earner's reward by their volume_factor. Idle
-    network (total_volume == 0) leaves every factor at 1.0."""
+    """Multiply each crown earner's reward by their volume_factor."""
     volumes = self.state_store.get_volume_since(window_start)
     crown_per_hotkey: Dict[str, float] = {}
     for trace in direction_traces.values():
@@ -234,39 +236,14 @@ def apply_volume_weighting(
             continue
         crown_share = crown / total_crown
         vol = volumes.get(hotkey, 0)
-        vol_share = (vol / total_volume) if total_volume > 0 else 0.0
-        factor = volume_factor(vol_share, crown_share) if total_volume > 0 else 1.0
+        factor = volume_factor(vol, total_volume, crown_share)
         rewards[uid] *= factor
-        wt = weighting_traces.setdefault(hotkey, WeightingTrace())
-        wt.volume_rao = vol
-        wt.crown_share = crown_share
-        wt.volume_share = vol_share
-        wt.participation = min(1.0, vol_share / crown_share) if crown_share > 0 else 1.0
-        wt.volume_factor = factor
-
-
-def read_max_swap_amount(self: Validator) -> int:
-    """bounds_cache read; 0 → capacity_factor fail-safes to 1.0."""
-    cache = getattr(self, 'bounds_cache', None)
-    if cache is None:
-        return 0
-    try:
-        return int(cache.max_swap_amount())
-    except Exception as e:
-        bt.logging.warning(f'max_swap_amount read failed: {e}')
-        return 0
-
-
-def read_miner_collateral(self: Validator, hotkey: str) -> int:
-    """contract_client read; 0 on error → capacity_factor = 0 for that miner."""
-    client = getattr(self, 'contract_client', None)
-    if client is None:
-        return 0
-    try:
-        return int(client.get_miner_collateral(hotkey))
-    except Exception as e:
-        bt.logging.warning(f'collateral read failed for {hotkey[:8]}: {e}')
-        return 0
+        weighting_traces.setdefault(hotkey, WeightingTrace()).record_volume(
+            vol_rao=vol,
+            total_volume_rao=total_volume,
+            crown_share=crown_share,
+            factor=factor,
+        )
 
 
 def success_rate(stats: Optional[Tuple[int, int]]) -> float:

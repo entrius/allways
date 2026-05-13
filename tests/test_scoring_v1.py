@@ -1036,61 +1036,63 @@ class TestCapacityFactorHelper:
 
 
 class TestVolumeFactorHelper:
-    """Direct unit tests for the volume_factor pure function."""
+    """Direct unit tests for the volume_factor pure function.
+
+    Signature: volume_factor(vol_rao, total_volume_rao, crown_share, alpha).
+    """
 
     def test_idle_crown_loses_alpha(self):
-        """volume_share = 0, crown_share > 0 → factor = (1 - α)."""
+        """vol=0 of total=1 → vol_share=0, participation=0 → factor = (1-α)."""
         from allways.validator.scoring import volume_factor
 
-        assert volume_factor(volume_share=0.0, crown_share=1.0, alpha=0.5) == 0.5
+        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.5) == 0.5
 
     def test_matching_volume_keeps_full_reward(self):
         from allways.validator.scoring import volume_factor
 
-        assert volume_factor(volume_share=0.5, crown_share=0.5, alpha=0.5) == 1.0
+        # 500/1000 = 0.5 vol_share, crown_share 0.5 → participation 1.0.
+        assert volume_factor(500, 1_000, crown_share=0.5, alpha=0.5) == 1.0
 
     def test_over_serving_capped_at_one(self):
-        """Cap is the anti-wash-trade guarantee — extra volume never amplifies."""
+        """Anti-wash-trade: high volume / low crown stays at 1.0."""
         from allways.validator.scoring import volume_factor
 
-        assert volume_factor(volume_share=0.9, crown_share=0.1, alpha=0.5) == 1.0
+        assert volume_factor(900, 1_000, crown_share=0.1, alpha=0.5) == 1.0
 
     def test_partial_mismatch_interpolates(self):
-        """50% participation → halfway between (1-α) and 1.0."""
+        """vol_share/crown_share = 0.5 → factor = 0.5 + 0.5*0.5 = 0.75."""
         from allways.validator.scoring import volume_factor
 
-        result = volume_factor(volume_share=0.25, crown_share=0.5, alpha=0.5)
-        # participation = 0.5 → factor = 0.5 + 0.5*0.5 = 0.75
-        assert result == 0.75
+        assert volume_factor(250, 1_000, crown_share=0.5, alpha=0.5) == 0.75
 
     def test_zero_crown_share_is_moot(self):
-        """A miner with no crown can't earn — factor is irrelevant, default 1.0."""
         from allways.validator.scoring import volume_factor
 
-        assert volume_factor(volume_share=0.5, crown_share=0.0, alpha=0.5) == 1.0
+        assert volume_factor(500, 1_000, crown_share=0.0, alpha=0.5) == 1.0
+
+    def test_idle_network_short_circuits_to_one(self):
+        """total_volume == 0 → factor = 1.0 (no penalty for a quiet window)."""
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(0, 0, crown_share=1.0, alpha=0.5) == 1.0
 
     def test_alpha_zero_disables_volume_weighting(self):
-        """α=0 → factor is always 1.0 regardless of volume gap."""
         from allways.validator.scoring import volume_factor
 
-        for vs in (0.0, 0.25, 0.5, 0.75, 1.0):
-            assert volume_factor(volume_share=vs, crown_share=1.0, alpha=0.0) == 1.0
+        for vol in (0, 250, 500, 750, 1_000):
+            assert volume_factor(vol, 1_000, crown_share=1.0, alpha=0.0) == 1.0
 
     def test_alpha_one_is_pure_volume_share(self):
-        """α=1 → factor equals participation directly."""
         from allways.validator.scoring import volume_factor
 
-        # Idle crown → factor = 0
-        assert volume_factor(volume_share=0.0, crown_share=1.0, alpha=1.0) == 0.0
-        # Half participation → factor = 0.5
-        assert volume_factor(volume_share=0.25, crown_share=0.5, alpha=1.0) == 0.5
+        assert volume_factor(0, 1_000, crown_share=1.0, alpha=1.0) == 0.0
+        assert volume_factor(250, 1_000, crown_share=0.5, alpha=1.0) == 0.5
 
     def test_alpha_03_softer_penalty(self):
-        """α=0.3 keeps 70% on full idle, 100% on full participation."""
         from allways.validator.scoring import volume_factor
 
-        assert volume_factor(0.0, 1.0, alpha=0.3) == 0.7
-        np.testing.assert_allclose(volume_factor(0.5, 1.0, alpha=0.3), 0.85, atol=1e-6)
+        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.3) == 0.7
+        np.testing.assert_allclose(volume_factor(500, 1_000, crown_share=1.0, alpha=0.3), 0.85, atol=1e-6)
 
 
 class TestCapacityWeighting:
