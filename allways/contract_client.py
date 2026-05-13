@@ -1013,9 +1013,16 @@ class AllwaysContractClient:
         log_msg: str,
         args: Optional[dict] = None,
         value: int = 0,
+        wait_for_inclusion: bool = True,
     ) -> str:
         self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(method, args=args, keypair=wallet.hotkey, value=value)
+        tx_hash = self.exec_contract_raw(
+            method,
+            args=args,
+            keypair=wallet.hotkey,
+            value=value,
+            wait_for_inclusion=wait_for_inclusion,
+        )
         bt.logging.info(f'{log_msg}: {tx_hash}')
         return tx_hash
 
@@ -1064,36 +1071,30 @@ class AllwaysContractClient:
         from_tx_hash: bytes,
         target_block: int,
     ) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'propose_extend_reservation',
-            args={'miner': miner_hotkey, 'from_tx_hash': from_tx_hash, 'target_block': target_block},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Propose extend reservation miner={miner_hotkey} target={target_block}',
+            {'miner': miner_hotkey, 'from_tx_hash': from_tx_hash, 'target_block': target_block},
             wait_for_inclusion=False,
         )
-        bt.logging.info(f'Propose extend reservation miner={miner_hotkey} target={target_block}: {tx_hash}')
-        return tx_hash
 
     def challenge_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'challenge_extend_reservation',
-            args={'miner': miner_hotkey},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Challenge extend reservation miner={miner_hotkey}',
+            {'miner': miner_hotkey},
             wait_for_inclusion=False,
         )
-        bt.logging.info(f'Challenge extend reservation miner={miner_hotkey}: {tx_hash}')
-        return tx_hash
 
     def finalize_extend_reservation(self, wallet: bt.Wallet, miner_hotkey: str) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'finalize_extend_reservation',
-            args={'miner': miner_hotkey},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Finalize extend reservation miner={miner_hotkey}',
+            {'miner': miner_hotkey},
         )
-        bt.logging.info(f'Finalize extend reservation miner={miner_hotkey}: {tx_hash}')
-        return tx_hash
 
     def propose_extend_timeout(
         self,
@@ -1101,36 +1102,30 @@ class AllwaysContractClient:
         swap_id: int,
         target_block: int,
     ) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'propose_extend_timeout',
-            args={'swap_id': swap_id, 'target_block': target_block},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Propose extend timeout swap={swap_id} target={target_block}',
+            {'swap_id': swap_id, 'target_block': target_block},
             wait_for_inclusion=False,
         )
-        bt.logging.info(f'Propose extend timeout swap={swap_id} target={target_block}: {tx_hash}')
-        return tx_hash
 
     def challenge_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'challenge_extend_timeout',
-            args={'swap_id': swap_id},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Challenge extend timeout swap={swap_id}',
+            {'swap_id': swap_id},
             wait_for_inclusion=False,
         )
-        bt.logging.info(f'Challenge extend timeout swap={swap_id}: {tx_hash}')
-        return tx_hash
 
     def finalize_extend_timeout(self, wallet: bt.Wallet, swap_id: int) -> str:
-        self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(
+        return self._exec_logged(
             'finalize_extend_timeout',
-            args={'swap_id': swap_id},
-            keypair=wallet.hotkey,
+            wallet,
+            f'Finalize extend timeout swap={swap_id}',
+            {'swap_id': swap_id},
         )
-        bt.logging.info(f'Finalize extend timeout swap={swap_id}: {tx_hash}')
-        return tx_hash
 
     def _decode_pending_extension(self, data: bytes) -> Optional[PendingExtension]:
         """Decode an Option<PendingExtension> SCALE payload."""
