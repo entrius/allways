@@ -325,10 +325,21 @@ class SubtensorProvider(ChainProvider):
                 receipt = response.extrinsic_receipt
                 tx_hash = receipt.extrinsic_hash
                 block_num = self.subtensor.substrate.get_block_number(receipt.block_hash)
-            except Exception:
-                bt.logging.warning('Could not parse transfer receipt, using fallback')
-                tx_hash = getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-                block_num = self.subtensor.get_current_block()
+            except Exception as e:
+                # Previously this fell back to the literal string 'tao_transfer'
+                # as the tx hash, which then propagated through pending_swap.json,
+                # the SwapConfirmSynapse, and the proof_message — validators
+                # searched for a TAO tx with that decoded hash, found nothing,
+                # and the user's funds stranded with no recovery path. Fail
+                # loudly instead so the caller surfaces the broadcast/parse
+                # split-brain rather than persisting a bogus tx hash.
+                bt.logging.error(f'Failed to parse transfer receipt: {e}')
+                return None
+            if not tx_hash:
+                bt.logging.error(
+                    'extrinsic_hash missing from receipt despite successful broadcast'
+                )
+                return None
             bt.logging.info(f'Sent {amount} rao to {to_address} (tx: {tx_hash}, block: {block_num})')
             return (tx_hash, block_num)
         except Exception as e:
