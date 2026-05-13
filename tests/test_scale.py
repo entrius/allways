@@ -451,6 +451,14 @@ class TestIsValidAddress:
         # Contains 0, O, I, l — invalid in base58
         assert p.is_valid_address('0' * 48) is False
 
+    def test_invalid_checksum(self):
+        p = self.provider()
+        assert p.is_valid_address('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQZ') is False
+
+    def test_base58_shape_without_valid_ss58_payload(self):
+        p = self.provider()
+        assert p.is_valid_address('1' * 48) is False
+
     def test_empty(self):
         p = self.provider()
         assert p.is_valid_address('') is False
