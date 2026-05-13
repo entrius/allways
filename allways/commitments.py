@@ -119,6 +119,15 @@ def get_commitment(subtensor: bt.Subtensor, netuid: int, hotkey: str, block: Opt
     return decode_commitment_field(metadata)
 
 
+def _metagraph_hotkey_to_uid(metagraph: 'bt.Metagraph') -> dict:
+    """Build a {hotkey: uid} map from a metagraph snapshot.
+
+    Extracted so callers always derive the map from the same snapshot
+    and cannot accidentally use a stale copy.
+    """
+    return {metagraph.hotkeys[uid]: uid for uid in range(metagraph.n.item())}
+
+
 def read_miner_commitment(
     subtensor: bt.Subtensor,
     netuid: int,
@@ -135,7 +144,7 @@ def read_miner_commitment(
     """
     uid = 0
     if metagraph is not None:
-        hotkey_to_uid = {metagraph.hotkeys[u]: u for u in range(metagraph.n.item())}
+        hotkey_to_uid = _metagraph_hotkey_to_uid(metagraph)
         resolved = hotkey_to_uid.get(hotkey)
         if resolved is None:
             return None
@@ -157,7 +166,7 @@ def read_miner_commitments(subtensor: bt.Subtensor, netuid: int) -> List[MinerPa
     pairs: List[MinerPair] = []
     try:
         metagraph = subtensor.metagraph(netuid)
-        hotkey_to_uid = {metagraph.hotkeys[uid]: uid for uid in range(metagraph.n.item())}
+        hotkey_to_uid = _metagraph_hotkey_to_uid(metagraph)
         result = subtensor.substrate.query_map(
             module='Commitments',
             storage_function='CommitmentOf',
