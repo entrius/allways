@@ -58,15 +58,9 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
 SUCCESS_EXPONENT: int = 3
-# Marginal weight on realized volume vs crown share. 0 = no penalty for idle
-# crown (legacy behavior). 1 = pure volume-share emission. 0.5 means a fully-
-# idle crown holder loses half their reward; a fully-participating one keeps
-# all of it.
+# Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
-# Linear ramp toward full credibility. A miner with zero observed swaps starts
-# at 0% credibility (no benefit of the doubt); credibility rises proportionally
-# with closed swaps and tops out once ``CREDIBILITY_RAMP_OBSERVATIONS`` is hit.
-# Closes the new-miner free-emission hole without adding a hard cliff.
+# Closed swaps required for full credibility (0 → 100% linear ramp).
 CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 
 # ─── Emission Recycling ────────────────────────────────────

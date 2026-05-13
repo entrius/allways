@@ -42,8 +42,7 @@ class DirectionTrace:
 
 @dataclass
 class WeightingTrace:
-    """Per-hotkey capacity + volume factors surfaced into the scoring log so a
-    miner can self-diagnose why their reward < headline crown share."""
+    """Per-hotkey capacity + volume factors surfaced in the scoring log."""
 
     collateral: int = 0
     capacity_factor: float = 1.0
@@ -102,17 +101,8 @@ def prune_swap_outcomes(self: Validator) -> None:
 
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
-    """Replay the crown-time event stream over the window, derive per-miner
-    rewards, recycle any undistributed pool to ``RECYCLE_UID``.
-
-    Reward equation:
-
-        reward_i = Σ_dir (pool_d × crown_share_id × sr_i^SUCCESS_EXPONENT × capacity_i) × volume_factor_i
-
-    Where ``capacity_i = min(1.0, collateral_i / max_swap_amount)`` and
-    ``volume_factor_i = (1-α) + α * min(1.0, vol_share_i / crown_share_i)``.
-    Shortfalls from sr, capacity, and volume all flow to ``RECYCLE_UID``.
-    """
+    """Replay the crown-time event stream, derive per-miner rewards
+    (pool × crown_share × sr³ × capacity × volume_factor), recycle the rest."""
     n_uids = self.metagraph.n.item()
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
@@ -200,10 +190,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
 
 def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
-    """Fraction of the swap-size band this miner's collateral can serve.
-    Clamped to [0, 1]. Fail-safe: returns 1.0 if max_swap_amount is unset
-    (cold start / RPC failure) so the first scoring pass after restart doesn't
-    zero every miner."""
+    """min(1, collateral / max_swap). Fail-safe to 1.0 when bounds unset."""
     if max_swap_amount_rao <= 0:
         return 1.0
     if collateral_rao <= 0:
@@ -212,15 +199,9 @@ def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
 
 
 def volume_factor(volume_share: float, crown_share: float, alpha: float = VOLUME_WEIGHT_ALPHA) -> float:
-    """Marginal penalty on the gap between volume served and crown held.
-
-    ``participation = min(1.0, volume_share / crown_share)`` — the cap removes
-    any reward for over-serving (no incentive to force wash swaps). A miner
-    matching their crown share with real volume scores 1.0; an idle crown
-    holder scores ``(1 - alpha)``.
-    """
+    """(1-α) + α·min(1, vol_share/crown_share). Cap kills over-serve bonus."""
     if crown_share <= 0:
-        return 1.0  # no crown reward to multiply — factor is moot
+        return 1.0
     participation = min(1.0, volume_share / crown_share)
     return (1.0 - alpha) + alpha * participation
 
@@ -234,12 +215,8 @@ def apply_volume_weighting(
     weighting_traces: Dict[str, WeightingTrace],
     window_start: int,
 ) -> None:
-    """Apply the volume_factor multiplier to every crown earner.
-
-    Aggregates crown across directions and volume across all completed swaps
-    in the window. When total volume is zero (idle network) every factor is
-    1.0 — we don't punish miners for a quiet window.
-    """
+    """Multiply each crown earner's reward by their volume_factor. Idle
+    network (total_volume == 0) leaves every factor at 1.0."""
     volumes = self.state_store.get_volume_since(window_start)
     crown_per_hotkey: Dict[str, float] = {}
     for trace in direction_traces.values():
@@ -249,7 +226,7 @@ def apply_volume_weighting(
     total_crown = sum(crown_per_hotkey.values())
     total_volume = sum(volumes.values())
     if total_crown <= 0:
-        return  # no crown earners; volume factor is moot
+        return
 
     for hotkey, crown in crown_per_hotkey.items():
         uid = hotkey_to_uid.get(hotkey)
@@ -269,38 +246,32 @@ def apply_volume_weighting(
 
 
 def read_max_swap_amount(self: Validator) -> int:
-    """Read max_swap_amount via bounds_cache. Falls back to 0 (which capacity
-    interprets as 'unset → 1.0 factor') if the cache isn't wired or fails."""
+    """bounds_cache read; 0 → capacity_factor fail-safes to 1.0."""
     cache = getattr(self, 'bounds_cache', None)
     if cache is None:
         return 0
     try:
         return int(cache.max_swap_amount())
     except Exception as e:
-        bt.logging.warning(f'capacity weighting: max_swap_amount read failed, fail-safe to 0: {e}')
+        bt.logging.warning(f'max_swap_amount read failed: {e}')
         return 0
 
 
 def read_miner_collateral(self: Validator, hotkey: str) -> int:
-    """Read miner collateral via contract_client. Falls back to 0 on error
-    (which makes capacity_factor = 0 for that miner — strict). The miner is
-    on the contract's active set per replay, so a collateral read failure is
-    a real problem worth logging, not silently masking."""
+    """contract_client read; 0 on error → capacity_factor = 0 for that miner."""
     client = getattr(self, 'contract_client', None)
     if client is None:
         return 0
     try:
         return int(client.get_miner_collateral(hotkey))
     except Exception as e:
-        bt.logging.warning(f'capacity weighting: collateral read failed for {hotkey[:8]}: {e}')
+        bt.logging.warning(f'collateral read failed for {hotkey[:8]}: {e}')
         return 0
 
 
 def success_rate(stats: Optional[Tuple[int, int]]) -> float:
-    """Credibility-adjusted success rate. Raw ``completed / total`` is scaled
-    by a linear ramp toward full credibility at ``CREDIBILITY_RAMP_OBSERVATIONS``
-    closed swaps. Zero-outcome miners earn no trust by default — they have to
-    serve swaps to climb the ramp."""
+    """Raw success rate × linear ramp to full credibility at
+    CREDIBILITY_RAMP_OBSERVATIONS closed swaps. Zero observations → 0."""
     if not stats or stats == (0, 0):
         return 0.0
     completed, timed_out = stats
