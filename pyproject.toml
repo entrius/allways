@@ -1,6 +1,6 @@
 [project]
 name = "allways"
-version = "1.0.2"
+version = "1.0.3"
 description = "Allways - Universal Transaction Layer: Trustless cross-chain swaps on Bittensor Subnet 7"
 license = "MIT"
 requires-python = ">=3.10,<3.15"
