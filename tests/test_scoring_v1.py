@@ -61,14 +61,35 @@ def seed_active(watcher: ContractEventWatcher, hotkey: str, active: bool, block:
         watcher.active_miners.discard(hotkey)
 
 
-def make_validator(tmp_path: Path, hotkeys: list[str], block: int = 10_000) -> SimpleNamespace:
+def make_validator(
+    tmp_path: Path,
+    hotkeys: list[str],
+    block: int = 10_000,
+    *,
+    max_swap_amount: int = 0,
+    collaterals: dict[str, int] | None = None,
+) -> SimpleNamespace:
+    """Build a SimpleNamespace stand-in for the validator.
+
+    Defaults bypass capacity weighting (``max_swap_amount=0`` → capacity_factor
+    returns 1.0 fail-safe) and provide a zero-collateral stub. Tests that
+    exercise capacity weighting pass explicit ``max_swap_amount`` and
+    ``collaterals`` overrides.
+    """
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     watcher = make_watcher(store, active=set(hotkeys))
+    collaterals = collaterals or {}
+    bounds_cache = MagicMock()
+    bounds_cache.max_swap_amount.return_value = max_swap_amount
+    contract_client = MagicMock()
+    contract_client.get_miner_collateral.side_effect = lambda hk: collaterals.get(hk, 0)
     return SimpleNamespace(
         block=block,
         metagraph=make_metagraph(hotkeys),
         state_store=store,
         event_watcher=watcher,
+        bounds_cache=bounds_cache,
+        contract_client=contract_client,
     )
 
 
@@ -925,3 +946,598 @@ class TestHaltShortCircuit:
         rewards = captured['rewards']
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
         assert rewards[recycle_uid] > 0  # recycle got something via normal path
+
+
+class TestCapacityFactorHelper:
+    """Direct unit tests for the capacity_factor pure function."""
+
+    def test_at_max_swap_is_full(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(500_000_000, 500_000_000) == 1.0
+
+    def test_half_max_swap_is_half(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(250_000_000, 500_000_000) == 0.5
+
+    def test_quarter_max_swap_is_quarter(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(125_000_000, 500_000_000) == 0.25
+
+    def test_above_max_swap_caps_at_one(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(2_000_000_000, 500_000_000) == 1.0
+
+    def test_zero_collateral_is_zero(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(0, 500_000_000) == 0.0
+
+    def test_negative_collateral_is_zero(self):
+        """Defensive — contract guarantees >=0 but the helper handles it."""
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(-1, 500_000_000) == 0.0
+
+    def test_zero_max_swap_is_fail_safe_one(self):
+        """Bounds cache cold start / RPC failure returns 0; factor should
+        default to 1.0 so the first scoring pass doesn't zero everyone."""
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(100_000_000, 0) == 1.0
+
+    def test_negative_max_swap_is_fail_safe_one(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(100_000_000, -1) == 1.0
+
+
+class TestVolumeFactorHelper:
+    """Direct unit tests for the volume_factor pure function."""
+
+    def test_idle_crown_loses_alpha(self):
+        """volume_share = 0, crown_share > 0 → factor = (1 - α)."""
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(volume_share=0.0, crown_share=1.0, alpha=0.5) == 0.5
+
+    def test_matching_volume_keeps_full_reward(self):
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(volume_share=0.5, crown_share=0.5, alpha=0.5) == 1.0
+
+    def test_over_serving_capped_at_one(self):
+        """Cap is the anti-wash-trade guarantee — extra volume never amplifies."""
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(volume_share=0.9, crown_share=0.1, alpha=0.5) == 1.0
+
+    def test_partial_mismatch_interpolates(self):
+        """50% participation → halfway between (1-α) and 1.0."""
+        from allways.validator.scoring import volume_factor
+
+        result = volume_factor(volume_share=0.25, crown_share=0.5, alpha=0.5)
+        # participation = 0.5 → factor = 0.5 + 0.5*0.5 = 0.75
+        assert result == 0.75
+
+    def test_zero_crown_share_is_moot(self):
+        """A miner with no crown can't earn — factor is irrelevant, default 1.0."""
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(volume_share=0.5, crown_share=0.0, alpha=0.5) == 1.0
+
+    def test_alpha_zero_disables_volume_weighting(self):
+        """α=0 → factor is always 1.0 regardless of volume gap."""
+        from allways.validator.scoring import volume_factor
+
+        for vs in (0.0, 0.25, 0.5, 0.75, 1.0):
+            assert volume_factor(volume_share=vs, crown_share=1.0, alpha=0.0) == 1.0
+
+    def test_alpha_one_is_pure_volume_share(self):
+        """α=1 → factor equals participation directly."""
+        from allways.validator.scoring import volume_factor
+
+        # Idle crown → factor = 0
+        assert volume_factor(volume_share=0.0, crown_share=1.0, alpha=1.0) == 0.0
+        # Half participation → factor = 0.5
+        assert volume_factor(volume_share=0.25, crown_share=0.5, alpha=1.0) == 0.5
+
+    def test_alpha_03_softer_penalty(self):
+        """α=0.3 keeps 70% on full idle, 100% on full participation."""
+        from allways.validator.scoring import volume_factor
+
+        assert volume_factor(0.0, 1.0, alpha=0.3) == 0.7
+        np.testing.assert_allclose(volume_factor(0.5, 1.0, alpha=0.3), 0.85, atol=1e-6)
+
+
+class TestCapacityWeighting:
+    """End-to-end capacity weighting via calculate_miner_rewards."""
+
+    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, 'tao', 'btc', rate, 0),
+        )
+        conn.commit()
+
+    def test_full_capacity_pays_baseline(self, tmp_path: Path):
+        """Miner with collateral = max_swap earns the full per-direction pool."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 500_000_000},
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        # hk_a holds 100% of tao→btc crown, full capacity, sr=1.0, no volume penalty.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_quarter_capacity_pays_quarter(self, tmp_path: Path):
+        """Collateral at 1/4 of max swap → 1/4 reward, 3/4 recycles."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 125_000_000},
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.25, atol=1e-6)
+        # Pool conservation: hk_a got 0.125, btc→tao bucket fully recycles (0.5),
+        # plus capacity shortfall on tao→btc (0.375) → recycle = 0.875.
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        np.testing.assert_allclose(rewards[recycle_uid], 0.875, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_over_max_caps_at_full(self, tmp_path: Path):
+        """Collateral 2x max_swap → factor still 1.0, no bonus."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 1_000_000_000},
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_zero_collateral_zeros_reward(self, tmp_path: Path):
+        """Collateral 0 with max_swap set → factor 0 → no reward, full recycle."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 0},
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        assert rewards[0] == 0.0
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_unequal_collateral_proportional_rewards(self, tmp_path: Path):
+        """Two miners tie crown, unequal collateral → rewards scale linearly."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 500_000_000, 'hk_b': 100_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', 0.00020, 0),
+            )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v)
+        # Both split crown 50/50. A's capacity = 1.0, B's = 0.2. Direction pool = 0.5.
+        # A earns 0.5 * 0.5 * 1.0 = 0.25; B earns 0.5 * 0.5 * 0.2 = 0.05.
+        np.testing.assert_allclose(rewards[0], 0.25, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], 0.05, atol=1e-6)
+        v.state_store.close()
+
+    def test_cold_start_max_swap_zero_is_fail_safe(self, tmp_path: Path):
+        """max_swap_amount=0 (default) bypasses capacity weighting entirely.
+        Critical: a freshly restarted validator must not zero every miner."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)  # defaults: max_swap=0, no collateral lookup
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        # Fail-safe path: capacity_factor = 1.0 regardless of collateral.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_collateral_rpc_failure_is_logged_not_fatal(self, tmp_path: Path):
+        """A failing get_miner_collateral logs and treats as 0 → factor 0 →
+        miner's reward zeroes but the scoring pass completes."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)
+        v.contract_client.get_miner_collateral.side_effect = RuntimeError('rpc down')
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+    def test_collateral_read_cached_within_pass(self, tmp_path: Path):
+        """A miner holding crown in both directions has collateral fetched once,
+        not per-direction. Keeps the RPC budget bounded."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 500_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for from_c, to_c in (('tao', 'btc'), ('btc', 'tao')):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                ('hk_a', from_c, to_c, 0.00020 if from_c == 'tao' else 200.0, 0),
+            )
+        conn.commit()
+        calculate_miner_rewards(v)
+        # hk_a held crown in both directions → exactly one RPC for collateral.
+        assert v.contract_client.get_miner_collateral.call_count == 1
+        v.state_store.close()
+
+
+class TestVolumeWeighting:
+    """End-to-end volume weighting via calculate_miner_rewards."""
+
+    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, 'tao', 'btc', rate, 0),
+        )
+        conn.commit()
+
+    def insert_volume(
+        self,
+        v: SimpleNamespace,
+        miner_hotkey: str,
+        tao_amount: int,
+        swap_id: int = 1,
+        resolved_block: int = 9_500,
+        completed: bool = True,
+    ) -> None:
+        v.state_store.insert_swap_outcome(
+            swap_id=swap_id,
+            miner_hotkey=miner_hotkey,
+            completed=completed,
+            resolved_block=resolved_block,
+            tao_amount=tao_amount,
+        )
+
+    def test_idle_network_no_penalty(self, tmp_path: Path):
+        """Total network volume = 0 → factor 1.0 for all crown earners."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        # No swaps → factor = 1.0 → full crown reward.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_idle_crown_holder_loses_alpha(self, tmp_path: Path):
+        """A holds 100% crown, B serves 100% volume → A factor = (1 - α)."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_tao_btc_crown(v, 'hk_a')
+        # B doesn't post a rate → never holds crown.
+        self.insert_volume(v, 'hk_b', tao_amount=1_000_000_000, swap_id=1)
+        rewards, _ = calculate_miner_rewards(v)
+        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → factor = 0.5.
+        # B has crown_share = 0 → no crown reward to multiply.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
+        assert rewards[1] == 0.0
+        v.state_store.close()
+
+    def test_matched_crown_and_volume_full_reward(self, tmp_path: Path):
+        """Equal crown + equal volume → factor 1.0 for both."""
+        from allways.constants import VOLUME_WEIGHT_ALPHA  # noqa: F401 — keep imports tidy
+
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        conn = v.state_store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', 0.00020, 0),
+            )
+        conn.commit()
+        self.insert_volume(v, 'hk_a', tao_amount=500_000_000, swap_id=1)
+        self.insert_volume(v, 'hk_b', tao_amount=500_000_000, swap_id=2)
+        rewards, _ = calculate_miner_rewards(v)
+        # Both 50/50 on crown and volume → participation 1.0 → factor 1.0 each.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * 0.5, atol=1e-6)
+        v.state_store.close()
+
+    def test_over_serving_capped_no_bonus(self, tmp_path: Path):
+        """A holds 100% crown but B serves 9× more volume → A's factor still > 0,
+        B gets nothing (no crown). Verifies cap is one-sided: high volume can't
+        amplify a low crown holder."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        # btc→tao: higher rate wins (canonical direction). A wins, B loses.
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 200.0, 0),
+        )
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_b', 'btc', 'tao', 100.0, 0),
+        )
+        conn.commit()
+        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1)
+        self.insert_volume(v, 'hk_b', tao_amount=900_000_000, swap_id=2)
+        rewards, _ = calculate_miner_rewards(v)
+        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → factor = 0.55
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.55, atol=1e-6)
+        # B: crown_share = 0 → factor moot, no reward to multiply.
+        assert rewards[1] == 0.0
+        v.state_store.close()
+
+    def test_partial_mismatch_interpolates(self, tmp_path: Path):
+        """A holds 80% crown / 20% volume, B holds 20% crown / 80% volume.
+        Uses btc→tao (higher rate wins) so the rate-direction mapping is
+        self-evident in the test."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 200.0, 0),
+        )
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_b', 'btc', 'tao', 150.0, 0),
+        )
+        conn.commit()
+        # Window is (9400, 10000]. A busy block 9_500..9_620 (120 blocks within
+        # the window) so B holds crown 20% of window.
+        v.event_watcher.apply_event(9_500, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        v.event_watcher.apply_event(9_620, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a', 'tao_amount': 200_000_000})
+        self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2)
+        rewards, _ = calculate_miner_rewards(v)
+        # Crown: A=480/600=0.8, B=120/600=0.2. Volume: A=0.2, B=0.8.
+        # A participation = 0.2/0.8 = 0.25 → factor 0.625.
+        # B participation = min(1.0, 0.8/0.2) = 1.0 → factor 1.0.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8 * 0.625, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_TAO * 0.2 * 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_timed_out_swaps_dont_count_as_volume(self, tmp_path: Path):
+        """SwapTimedOut hits credibility, not volume."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_tao_btc_crown(v, 'hk_a')
+        # Timed-out swap → completed=False → ignored by get_volume_since.
+        self.insert_volume(
+            v,
+            'hk_a',
+            tao_amount=1_000_000_000,
+            swap_id=1,
+            completed=False,
+        )
+        rewards, _ = calculate_miner_rewards(v)
+        # Volume aggregator returns 0 → idle network short-circuit → factor 1.0.
+        # But sr is also dropped by the failed swap: 0/(0+1) = 0 → factor 0³.
+        # So reward is zero — but for credibility reasons, not volume.
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+    def test_volume_aggregates_across_directions(self, tmp_path: Path):
+        """tao_amount is the canonical TAO side regardless of swap direction —
+        get_volume_since sums across both directions per miner."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_tao_btc_crown(v, 'hk_a')
+        # Two completed swaps, both contribute to volume.
+        self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1)
+        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2)
+        volumes = v.state_store.get_volume_since(0)
+        assert volumes == {'hk_a': 500_000_000}
+        v.state_store.close()
+
+    def test_legacy_rows_with_zero_tao_amount_tolerated(self, tmp_path: Path):
+        """Pre-migration rows have tao_amount = 0 in the schema default — they
+        just don't count toward future volume aggregation."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        # Direct insert simulating a row that predates the column.
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block, tao_amount) VALUES (?, ?, ?, ?, ?)',
+            (1, 'hk_a', 1, 9_000, 0),
+        )
+        conn.commit()
+        # No volume seen → idle-network short-circuit applies.
+        volumes = v.state_store.get_volume_since(0)
+        assert volumes == {'hk_a': 0}
+        v.state_store.close()
+
+
+class TestCapacityVolumeInteraction:
+    """Capacity + volume are independent multipliers — verify they compose."""
+
+    def test_both_factors_compose_multiplicatively(self, tmp_path: Path):
+        """Single miner, capacity 0.5, idle on volume → reward = pool * 0.5 * 0.5."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 250_000_000},
+        )
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        # B serves some volume so A's vol_share = 0.
+        v.state_store.insert_swap_outcome(
+            swap_id=1,
+            miner_hotkey='hk_b',
+            completed=True,
+            resolved_block=9_500,
+            tao_amount=500_000_000,
+        )
+        rewards, _ = calculate_miner_rewards(v)
+        # A: pool 0.5 × crown 1.0 × sr 1.0 × capacity 0.5 × volume_factor 0.5
+        np.testing.assert_allclose(rewards[0], 0.5 * 1.0 * 1.0 * 0.5 * 0.5, atol=1e-6)
+        v.state_store.close()
+
+    def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
+        """Reward sum + recycle = 1.0 always, regardless of capacity/volume shortfalls."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 100_000_000, 'hk_b': 500_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for hk, rate in (('hk_a', 0.00020), ('hk_b', 200.0)):
+            from_c, to_c = ('tao', 'btc') if rate < 1 else ('btc', 'tao')
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, from_c, to_c, rate, 0),
+            )
+        conn.commit()
+        v.state_store.insert_swap_outcome(
+            swap_id=1,
+            miner_hotkey='hk_b',
+            completed=True,
+            resolved_block=9_500,
+            tao_amount=400_000_000,
+        )
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.state_store.close()
+
+
+class TestStateStoreVolumeMigration:
+    """The tao_amount column was added in a schema migration. Ensure the
+    ALTER path is idempotent and aggregation tolerates legacy data."""
+
+    def test_idempotent_alter_on_reopen(self, tmp_path: Path):
+        """Opening the DB twice must not fail on duplicate ALTER."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.close()
+        # Re-open — init_db runs again, ALTER must be caught.
+        store2 = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store2.close()
+
+    def test_insert_swap_outcome_persists_tao_amount(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_swap_outcome(
+            swap_id=42,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=1_000,
+            tao_amount=123_456_789,
+        )
+        row = (
+            store.require_connection()
+            .execute(
+                'SELECT tao_amount FROM swap_outcomes WHERE swap_id = ?',
+                (42,),
+            )
+            .fetchone()
+        )
+        assert row['tao_amount'] == 123_456_789
+        store.close()
+
+    def test_get_volume_since_excludes_timed_out(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_swap_outcome(
+            swap_id=1,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=1_000,
+            tao_amount=100_000_000,
+        )
+        store.insert_swap_outcome(
+            swap_id=2,
+            miner_hotkey='hk_a',
+            completed=False,
+            resolved_block=1_100,
+            tao_amount=999_999_999,
+        )
+        assert store.get_volume_since(0) == {'hk_a': 100_000_000}
+        store.close()
+
+    def test_get_volume_since_respects_cutoff(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_swap_outcome(
+            swap_id=1,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=500,
+            tao_amount=100_000_000,
+        )
+        store.insert_swap_outcome(
+            swap_id=2,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=1_500,
+            tao_amount=200_000_000,
+        )
+        # since=1_000 → only the later swap counts.
+        assert store.get_volume_since(1_000) == {'hk_a': 200_000_000}
+        store.close()
+
+
+class TestEventWatcherPassesTaoAmount:
+    """SwapCompleted events carry tao_amount; it must reach the state store."""
+
+    def test_swap_completed_persists_tao_amount(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        # Pre-arm with the matching SwapInitiated so the busy delta is consistent.
+        watcher.apply_event(100, 'SwapInitiated', {'swap_id': 7, 'miner': 'hk_a'})
+        watcher.apply_event(
+            200,
+            'SwapCompleted',
+            {'swap_id': 7, 'miner': 'hk_a', 'tao_amount': 250_000_000},
+        )
+        assert store.get_volume_since(0) == {'hk_a': 250_000_000}
+        store.close()
+
+    def test_swap_completed_without_tao_amount_defaults_to_zero(self, tmp_path: Path):
+        """Tests that don't set tao_amount still work (backwards compat with
+        the older test fixtures that didn't pass the field)."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        watcher.apply_event(100, 'SwapInitiated', {'swap_id': 7, 'miner': 'hk_a'})
+        watcher.apply_event(200, 'SwapCompleted', {'swap_id': 7, 'miner': 'hk_a'})
+        # Row exists but tao_amount is 0 → excluded from any positive-volume
+        # network.
+        row = (
+            store.require_connection()
+            .execute(
+                'SELECT tao_amount FROM swap_outcomes WHERE swap_id = 7',
+            )
+            .fetchone()
+        )
+        assert row['tao_amount'] == 0
+        store.close()

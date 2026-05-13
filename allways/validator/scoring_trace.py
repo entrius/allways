@@ -4,15 +4,15 @@ presentation — never mutates state."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 import numpy as np
 
-from allways.constants import RECYCLE_UID
+from allways.constants import RECYCLE_UID, TAO_TO_RAO
 
 if TYPE_CHECKING:
-    from allways.validator.scoring import DirectionTrace
+    from allways.validator.scoring import DirectionTrace, WeightingTrace
     from neurons.validator import Validator
 
 
@@ -29,10 +29,12 @@ def log_scoring_trace(
     success_rates: Dict[str, float],
     distributed: float,
     recycled: float,
+    weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
+    weighting_traces = weighting_traces or {}
 
     lines = [
         f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
@@ -55,7 +57,17 @@ def log_scoring_trace(
             continue
         crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
         sr = success_rates.get(hk, 1.0)
-        lines.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f} reward={crown_reward:.3f}')
+        wt = weighting_traces.get(hk)
+        extras = ''
+        if wt is not None:
+            extras = (
+                f' cap={wt.capacity_factor:.2f} (col={wt.collateral / TAO_TO_RAO:g}t)'
+                f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
+                f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
+            )
+        lines.append(
+            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'
+        )
 
     lines.extend(
         non_earner_lines(self, window_start, window_end, rewards, success_rates, direction_traces, recycle_uid)

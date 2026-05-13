@@ -58,6 +58,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
 SUCCESS_EXPONENT: int = 3
+# Marginal weight on realized volume vs crown share. 0 = no penalty for idle
+# crown (legacy behavior). 1 = pure volume-share emission. 0.5 means a fully-
+# idle crown holder loses half their reward; a fully-participating one keeps
+# all of it.
+VOLUME_WEIGHT_ALPHA: float = 0.5
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
