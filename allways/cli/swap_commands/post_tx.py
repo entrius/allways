@@ -17,7 +17,7 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     resolve_source_tx_block,
 )
-from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
+from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_with_progress, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
@@ -163,7 +163,12 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     # Poll for swap creation
-    swap_id = poll_for_swap_creation(client, state.miner_hotkey)
+    swap_id = poll_for_swap_with_progress(
+        client,
+        state.miner_hotkey,
+        state.from_chain,
+        message='Waiting for swap to appear on-chain...',
+    )
     if swap_id is not None:
         clear_pending_swap()
         console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
