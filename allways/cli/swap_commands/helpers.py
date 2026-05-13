@@ -186,8 +186,15 @@ def parse_global_flags() -> dict:
 
     Strips matched flags and their values from sys.argv so Click
     subcommands don't choke on unknown options.
+
+    #243: a duplicate global flag (e.g. ``--netuid 7 --netuid 8``) used to
+    silently last-wins. Now the duplicate is still last-wins (preserving
+    backward-compatible behavior for any scripts that relied on it), but the
+    override is surfaced via stderr so an operator typing it by mistake
+    sees the resolution rather than getting a silent surprise downstream.
     """
     overrides = {}
+    seen: dict = {}  # canonical key -> (raw flag, prior value) for dup detection
     new_argv = [sys.argv[0]]
     i = 1
     while i < len(sys.argv):
@@ -196,13 +203,32 @@ def parse_global_flags() -> dict:
         if '=' in arg:
             flag, value = arg.split('=', 1)
             if flag in _GLOBAL_FLAGS:
-                overrides[_GLOBAL_FLAGS[flag]] = value
+                key = _GLOBAL_FLAGS[flag]
+                if key in seen:
+                    prior_flag, prior_value = seen[key]
+                    print(
+                        f'warning: duplicate global flag {flag} {value!r} '
+                        f'overrides earlier {prior_flag} {prior_value!r}',
+                        file=sys.stderr,
+                    )
+                seen[key] = (flag, value)
+                overrides[key] = value
                 i += 1
                 continue
         # Handle --flag value form
         if arg in _GLOBAL_FLAGS:
             if i + 1 < len(sys.argv):
-                overrides[_GLOBAL_FLAGS[arg]] = sys.argv[i + 1]
+                key = _GLOBAL_FLAGS[arg]
+                value = sys.argv[i + 1]
+                if key in seen:
+                    prior_flag, prior_value = seen[key]
+                    print(
+                        f'warning: duplicate global flag {arg} {value!r} '
+                        f'overrides earlier {prior_flag} {prior_value!r}',
+                        file=sys.stderr,
+                    )
+                seen[key] = (arg, value)
+                overrides[key] = value
                 i += 2
                 continue
         new_argv.append(arg)
