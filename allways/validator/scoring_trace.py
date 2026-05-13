@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
-from allways.constants import RECYCLE_UID, TAO_TO_RAO
+from allways.constants import CREDIBILITY_RAMP_OBSERVATIONS, RECYCLE_UID, TAO_TO_RAO
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace, WeightingTrace
@@ -30,11 +30,13 @@ def log_scoring_trace(
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
+    success_stats: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
     weighting_traces = weighting_traces or {}
+    success_stats = success_stats or {}
 
     lines = [
         f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
@@ -57,6 +59,8 @@ def log_scoring_trace(
             continue
         crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
         sr = success_rates.get(hk, 1.0)
+        closed = sum(success_stats.get(hk, (0, 0)))
+        ramp = min(1.0, closed / CREDIBILITY_RAMP_OBSERVATIONS)
         wt = weighting_traces.get(hk)
         extras = ''
         if wt is not None:
@@ -66,7 +70,9 @@ def log_scoring_trace(
                 f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
             )
         lines.append(
-            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'
+            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} '
+            f'sr={sr:.3f} ({closed}/{CREDIBILITY_RAMP_OBSERVATIONS} closed, ramp={ramp:.2f})'
+            f'{extras} reward={crown_reward:.3f}'
         )
 
     lines.extend(

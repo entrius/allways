@@ -16,6 +16,7 @@ import numpy as np
 
 from allways.chains import canonical_pair
 from allways.constants import (
+    CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
     RECYCLE_UID,
@@ -192,6 +193,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
+        success_stats=success_stats,
     )
 
     return rewards, set(range(n_uids))
@@ -295,14 +297,15 @@ def read_miner_collateral(self: Validator, hotkey: str) -> int:
 
 
 def success_rate(stats: Optional[Tuple[int, int]]) -> float:
-    """All-time success rate. Zero-outcome miners default to 1.0 (optimistic)."""
-    if stats is None:
-        return 1.0
+    """Credibility-adjusted success rate. Raw ``completed / total`` is scaled
+    by a linear ramp toward full credibility at ``CREDIBILITY_RAMP_OBSERVATIONS``
+    closed swaps. Zero-outcome miners earn no trust by default — they have to
+    serve swaps to climb the ramp."""
+    if not stats or stats == (0, 0):
+        return 0.0
     completed, timed_out = stats
     total = completed + timed_out
-    if total == 0:
-        return 1.0
-    return completed / total
+    return (completed / total) * min(1.0, total / CREDIBILITY_RAMP_OBSERVATIONS)
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────

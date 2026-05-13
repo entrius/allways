@@ -63,6 +63,11 @@ SUCCESS_EXPONENT: int = 3
 # idle crown holder loses half their reward; a fully-participating one keeps
 # all of it.
 VOLUME_WEIGHT_ALPHA: float = 0.5
+# Linear ramp toward full credibility. A miner with zero observed swaps starts
+# at 0% credibility (no benefit of the doubt); credibility rises proportionally
+# with closed swaps and tops out once ``CREDIBILITY_RAMP_OBSERVATIONS`` is hit.
+# Closes the new-miner free-emission hole without adding a hard cliff.
+CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID

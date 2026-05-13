@@ -68,6 +68,7 @@ def make_validator(
     *,
     max_swap_amount: int = 0,
     collaterals: dict[str, int] | None = None,
+    baseline_credibility: bool = True,
 ) -> SimpleNamespace:
     """Build a SimpleNamespace stand-in for the validator.
 
@@ -75,7 +76,14 @@ def make_validator(
     returns 1.0 fail-safe) and provide a zero-collateral stub. Tests that
     exercise capacity weighting pass explicit ``max_swap_amount`` and
     ``collaterals`` overrides.
+
+    ``baseline_credibility`` pre-seeds enough completed swap outcomes per
+    hotkey to keep the credibility ramp at 1.0 — every test that isn't
+    specifically exercising the ramp gets a "fully credible" miner by
+    default. Credibility tests pass ``False`` to start from zero.
     """
+    from allways.constants import CREDIBILITY_RAMP_OBSERVATIONS
+
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     watcher = make_watcher(store, active=set(hotkeys))
     collaterals = collaterals or {}
@@ -83,6 +91,15 @@ def make_validator(
     bounds_cache.max_swap_amount.return_value = max_swap_amount
     contract_client = MagicMock()
     contract_client.get_miner_collateral.side_effect = lambda hk: collaterals.get(hk, 0)
+    if baseline_credibility:
+        for hk_idx, hk in enumerate(hotkeys):
+            for i in range(CREDIBILITY_RAMP_OBSERVATIONS):
+                store.insert_swap_outcome(
+                    swap_id=-(hk_idx * CREDIBILITY_RAMP_OBSERVATIONS + i + 1),
+                    miner_hotkey=hk,
+                    completed=True,
+                    resolved_block=0,
+                )
     return SimpleNamespace(
         block=block,
         metagraph=make_metagraph(hotkeys),
@@ -102,14 +119,35 @@ def pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
 
 
 class TestSuccessRateHelper:
-    def test_none_is_optimistic(self):
-        assert success_rate(None) == 1.0
+    def test_none_is_pessimistic(self):
+        """Zero observations earns no trust — the credibility hole closed."""
+        assert success_rate(None) == 0.0
 
-    def test_zero_total_is_optimistic(self):
-        assert success_rate((0, 0)) == 1.0
+    def test_zero_total_is_pessimistic(self):
+        assert success_rate((0, 0)) == 0.0
 
-    def test_ratio_is_completed_over_total(self):
+    def test_ratio_at_full_ramp_is_raw_rate(self):
+        """At >= CREDIBILITY_RAMP_OBSERVATIONS closed swaps the ramp is a no-op."""
         assert success_rate((8, 2)) == 0.8
+
+    def test_ramp_scales_below_threshold(self):
+        """1 closed swap → ramp 0.1; raw rate is 1.0 → sr = 0.1."""
+        assert success_rate((1, 0)) == 0.1
+
+    def test_ramp_half_at_half_observations(self):
+        """5/5 completed → ramp 0.5, raw 1.0 → sr = 0.5."""
+        assert success_rate((5, 0)) == 0.5
+
+    def test_timed_out_swaps_advance_ramp(self):
+        """A timeout still counts as a closed observation — moves the ramp,
+        drops the raw rate."""
+        # 5 completed + 5 timed_out: total=10, ramp=1.0, raw=0.5 → 0.5
+        assert success_rate((5, 5)) == 0.5
+
+    def test_full_ramp_with_mixed_outcomes(self):
+        """At the ramp cap, sr equals the raw success rate exactly."""
+        assert success_rate((8, 2)) == 0.8
+        assert success_rate((90, 10)) == 0.9
 
 
 class TestCrownHoldersHelper:
@@ -380,8 +418,10 @@ class TestCalculateMinerRewards:
         v.state_store.close()
 
     def test_partial_success_reduces_reward_by_cube(self, tmp_path: Path):
+        # Opt out of the fixture's baseline credibility seed so the test's
+        # explicit 8-completed-2-timed-out profile is the only credibility data.
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys=hotkeys)
+        v = make_validator(tmp_path, hotkeys=hotkeys, baseline_credibility=False)
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -1327,9 +1367,8 @@ class TestVolumeWeighting:
     def test_timed_out_swaps_dont_count_as_volume(self, tmp_path: Path):
         """SwapTimedOut hits credibility, not volume."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys)
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_tao_btc_crown(v, 'hk_a')
-        # Timed-out swap → completed=False → ignored by get_volume_since.
         self.insert_volume(
             v,
             'hk_a',
@@ -1339,8 +1378,9 @@ class TestVolumeWeighting:
         )
         rewards, _ = calculate_miner_rewards(v)
         # Volume aggregator returns 0 → idle network short-circuit → factor 1.0.
-        # But sr is also dropped by the failed swap: 0/(0+1) = 0 → factor 0³.
-        # So reward is zero — but for credibility reasons, not volume.
+        # sr from (0 completed, 1 timed_out) = 0 → cubed = 0 → reward 0 via
+        # credibility, confirming the timed-out swap didn't sneak through as
+        # volume credit.
         assert rewards[0] == 0.0
         v.state_store.close()
 
@@ -1348,9 +1388,8 @@ class TestVolumeWeighting:
         """tao_amount is the canonical TAO side regardless of swap direction —
         get_volume_since sums across both directions per miner."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys)
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_tao_btc_crown(v, 'hk_a')
-        # Two completed swaps, both contribute to volume.
         self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1)
         self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2)
         volumes = v.state_store.get_volume_since(0)
@@ -1361,15 +1400,13 @@ class TestVolumeWeighting:
         """Pre-migration rows have tao_amount = 0 in the schema default — they
         just don't count toward future volume aggregation."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys)
-        # Direct insert simulating a row that predates the column.
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block, tao_amount) VALUES (?, ?, ?, ?, ?)',
             (1, 'hk_a', 1, 9_000, 0),
         )
         conn.commit()
-        # No volume seen → idle-network short-circuit applies.
         volumes = v.state_store.get_volume_since(0)
         assert volumes == {'hk_a': 0}
         v.state_store.close()
@@ -1431,6 +1468,101 @@ class TestCapacityVolumeInteraction:
             tao_amount=400_000_000,
         )
         rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.state_store.close()
+
+
+class TestCredibilityRamp:
+    """End-to-end ramp behavior via calculate_miner_rewards.
+
+    Pessimistic-default + linear ramp closes the new-miner free-emission hole
+    without a hard cliff. A genuinely active miner crosses the ramp in 10
+    closed swaps and is then indistinguishable from a long-running miner with
+    the same raw success rate.
+    """
+
+    def seed_btc_tao_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 200.0) -> None:
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, 'btc', 'tao', rate, 0),
+        )
+        conn.commit()
+
+    def test_zero_observations_earns_nothing(self, tmp_path: Path):
+        """A brand-new miner with no closed swaps earns nothing even with
+        full crown — the old optimistic-default hole."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+    def test_one_completed_earns_thousandth(self, tmp_path: Path):
+        """1/1 completed → sr = 0.1, cubed = 0.001 → effectively zero."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.1**3, atol=1e-6)
+        v.state_store.close()
+
+    def test_five_completed_quarter_of_pool(self, tmp_path: Path):
+        """5/5 completed → sr = 0.5, cubed = 0.125 → 1/8 of the direction pool."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        for i in range(5):
+            v.state_store.insert_swap_outcome(
+                swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
+            )
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.5**3, atol=1e-6)
+        v.state_store.close()
+
+    def test_full_ramp_at_threshold(self, tmp_path: Path):
+        """10/10 completed → sr = 1.0, full pool earned."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        for i in range(10):
+            v.state_store.insert_swap_outcome(
+                swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
+            )
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        v.state_store.close()
+
+    def test_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
+        """5 completed + 5 timed_out → ramp = 1.0, raw = 0.5 → cubed = 0.125."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        for i in range(5):
+            v.state_store.insert_swap_outcome(
+                swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
+            )
+        for i in range(5):
+            v.state_store.insert_swap_outcome(
+                swap_id=100 + i, miner_hotkey='hk_a', completed=False, resolved_block=200 + i
+            )
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.5**3, atol=1e-6)
+        v.state_store.close()
+
+    def test_unearned_ramp_portion_recycles(self, tmp_path: Path):
+        """Ramped-down reward doesn't transfer to other miners — it recycles."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
+        rewards, _ = calculate_miner_rewards(v)
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        # tao→btc pool fully recycles (no holder), btc→tao gives A 0.001;
+        # the remaining 0.499 + 0.5 = 0.999 recycles.
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_TAO * 0.1**3, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
