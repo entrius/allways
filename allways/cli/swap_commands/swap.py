@@ -878,6 +878,11 @@ def swap_now_command(
         )
         user_from_address = click.prompt(f'Your {from_chain.upper()} source address')
 
+    _fp = chain_providers.get(from_chain)
+    if _fp and not _fp.is_valid_address(user_from_address):
+        console.print(f'[red]Invalid {from_chain.upper()} address: {user_from_address}[/red]')
+        return
+
     # Step 6b: Verify sender has enough funds
     if from_chain == 'tao':
         with loading('Checking TAO balance...'):
