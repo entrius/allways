@@ -163,7 +163,7 @@ def diagnose_non_earner(
     if hotkey not in ever_active:
         return 'not_active_during_window'
     if sr <= 0:
-        return 'slashed_credibility_zero'
+        return 'credibility_zero'  # zero observations OR all-timeout history
     parts = [
         f'{direction[0]}→{direction[1]}: own={own:g} vs best={direction_traces[direction].best_rate:g}'
         for direction, own in latest_rates.items()

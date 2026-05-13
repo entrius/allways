@@ -1237,6 +1237,86 @@ class TestCapacityWeighting:
         assert v.contract_client.get_miner_collateral.call_count == 1
         v.state_store.close()
 
+    def test_max_swap_amount_rpc_failure_falls_back_to_unity(self, tmp_path: Path):
+        """bounds_cache failure → max_swap=0 → capacity_factor fail-safes to 1.0
+        so a transient RPC blip can't zero every miner on a scoring pass."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 100_000_000})
+        v.bounds_cache.max_swap_amount.side_effect = RuntimeError('rpc down')
+        self.seed_tao_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v)
+        # Fail-safe: capacity factor 1.0 → hk_a earns the full tao→btc pool.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+
+class TestWeightingTraceRecorders:
+    """The three record_* methods on WeightingTrace own their own math —
+    direct unit coverage so changes there don't have to be inferred from
+    integration tests."""
+
+    def test_record_capacity_sets_both_fields(self):
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_capacity(collateral=250_000_000, factor=0.5)
+        assert wt.collateral == 250_000_000
+        assert wt.capacity_factor == 0.5
+
+    def test_record_volume_computes_share_and_participation(self):
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        # vol 250 of total 1000 = 25% share; crown_share 50% → participation 50%.
+        wt.record_volume(vol_rao=250, total_volume_rao=1_000, crown_share=0.5, factor=0.75)
+        assert wt.volume_rao == 250
+        assert wt.volume_share == 0.25
+        assert wt.crown_share == 0.5
+        assert wt.participation == 0.5
+        assert wt.volume_factor == 0.75
+
+    def test_record_volume_idle_network_zeros_share(self):
+        """total_volume == 0 → volume_share = 0, participation defaults to 1.0
+        only when crown_share also 0; otherwise participation = 0."""
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_volume(vol_rao=0, total_volume_rao=0, crown_share=1.0, factor=1.0)
+        assert wt.volume_share == 0.0
+        assert wt.participation == 0.0  # vol_share / crown_share = 0/1 = 0
+        assert wt.volume_factor == 1.0  # set by caller (idle-network short-circuit)
+
+    def test_record_volume_caps_participation_at_one(self):
+        """Over-serving: vol_share/crown_share > 1 → participation capped."""
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_volume(vol_rao=900, total_volume_rao=1_000, crown_share=0.1, factor=1.0)
+        assert wt.participation == 1.0  # min(1.0, 0.9/0.1)
+
+    def test_record_credibility_computes_ramp(self):
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_credibility(closed_swaps=5, ramp_target=10)
+        assert wt.closed_swaps == 5
+        assert wt.credibility_ramp == 0.5
+
+    def test_record_credibility_caps_at_one(self):
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_credibility(closed_swaps=20, ramp_target=10)
+        assert wt.credibility_ramp == 1.0
+
+    def test_record_credibility_zero_target_is_unity(self):
+        """Defensive: ramp_target=0 → divide-by-zero guarded → 1.0."""
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_credibility(closed_swaps=5, ramp_target=0)
+        assert wt.credibility_ramp == 1.0
+
 
 class TestVolumeWeighting:
     """End-to-end volume weighting via calculate_miner_rewards."""
