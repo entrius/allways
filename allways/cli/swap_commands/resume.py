@@ -31,6 +31,7 @@ from allways.cli.swap_commands.swap import (
     sign_and_broadcast_confirm,
 )
 from allways.contract_client import ContractError
+from allways.utils.misc import is_reserved
 
 
 @click.command('resume-reservation')
@@ -137,7 +138,7 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
         with loading('Reading reservation status...'):
             reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
             current_block = subtensor.get_current_block()
-        reservation_active = reserved_until > current_block
+        reservation_active = is_reserved(reserved_until, current_block)
     except ContractError as e:
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
         return

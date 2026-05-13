@@ -145,7 +145,12 @@ class ValidatorStateStore:
             return int(count)
 
     def purge_expired_pending_confirms(self) -> int:
-        """Drop pending confirms whose reservation has already expired."""
+        """Drop pending confirms whose reservation has already expired.
+
+        ``reserved_until < current_block`` is the SQL inverse of
+        ``is_reserved`` in ``allways.utils.misc`` — keep rows that the helper
+        would still call reserved, delete the rest.
+        """
         if self.current_block_fn is None:
             return 0
         current_block = self.current_block_fn()
