@@ -15,6 +15,7 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
+from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.helpers import (
     PendingSwapState,
     blocks_to_minutes_str,
@@ -1053,6 +1054,9 @@ def swap_now_command(
         )
         if not skip_confirm and not click.confirm('  Send now?', default=True):
             console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
+            return
+
+        if not preflight_send_runway(subtensor, from_chain, reserved_until, skip_confirm):
             return
 
         console.print(f'\n[dim]Step 2/3: Sending {from_chain.upper()}...[/dim]')

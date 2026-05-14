@@ -11,6 +11,7 @@ from allways.chain_providers import create_chain_providers
 from allways.chains import get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
+from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     clear_pending_swap,
@@ -187,6 +188,8 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
             from_tx_hash_opt = saved_tx
             used_saved_tx = True
         elif auto_send:
+            if not preflight_send_runway(subtensor, state.from_chain, reserved_until, skip_confirm):
+                return
             console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
             if state.from_chain == 'tao':
                 send_result = send_tao_transfer(wallet, subtensor, state.miner_from_address, state.from_amount)
