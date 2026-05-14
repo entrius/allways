@@ -22,9 +22,13 @@ def make_subtensor(current_block: int) -> MagicMock:
 class TestPreflightSendRunway:
     def test_ok_runway_passes_silently(self):
         # TAO needs ~6 subtensor blocks for confirmation; 200 blocks left is
-        # comfortably in the OK band — should return True without prompting.
+        # comfortably in the OK band — should return True without prompting
+        # AND without printing anything (covers "no new friction on the
+        # happy-path swap" — equivalent to the manual smoke test).
         sub = make_subtensor(current_block=1000)
-        with patch('allways.cli.preflight.click.confirm') as confirm:
+        with patch('allways.cli.preflight.click.confirm') as confirm, patch(
+            'allways.cli.preflight._console'
+        ) as console_mock:
             result = preflight_send_runway(
                 subtensor=sub,
                 from_chain='tao',
@@ -33,6 +37,7 @@ class TestPreflightSendRunway:
             )
         assert result is True
         confirm.assert_not_called()
+        console_mock.print.assert_not_called()
 
     def test_too_short_hard_refuses_without_prompt(self):
         # Reservation only 5 blocks out — well below the extension floor.
