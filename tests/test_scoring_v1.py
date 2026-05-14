@@ -321,6 +321,38 @@ class TestReplayCrownTime:
         assert crown == {'hk_a': 600.0, 'hk_b': 400.0}
         store.close()
 
+    def test_best_rate_miner_reserved_without_swap_credit_flows_to_runner_up(self, tmp_path: Path):
+        """A holds the best rate but is reserved (no SwapInitiated) through
+        ``reserved_until`` — crown must go to B until the reservation lapses."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_a', 'btc', 'tao', 300.0, 0),
+            ('hk_b', 'btc', 'tao', 200.0, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        # Reserve at 400 with TTL 50 → reserved_until 450; lazy expiry frees at 451.
+        watcher.apply_event(400, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 450})
+        watcher._apply_reservation_expiry_synthetics(451)
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        assert crown == {'hk_a': 949.0, 'hk_b': 51.0}
+        store.close()
+
     def test_solo_miner_busy_pool_recycles(self, tmp_path: Path):
         """Only one miner has a rate, they're busy for part of the window —
         nobody else is eligible, so the busy period earns nothing (recycles)."""
