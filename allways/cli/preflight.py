@@ -46,9 +46,7 @@ def preflight_send_runway(
     ``classify_send_runway`` in allways/chains.py for the categories.
     """
     current_block = subtensor.get_current_block()
-    status, remaining = classify_send_runway(
-        from_chain, current_block, reserved_until_block, EXTEND_THRESHOLD_BLOCKS
-    )
+    status, remaining = classify_send_runway(from_chain, current_block, reserved_until_block, EXTEND_THRESHOLD_BLOCKS)
     if status == RUNWAY_TOO_SHORT:
         chain = get_chain(from_chain)
         confs_min = chain.min_confirmations * chain.seconds_per_block // 60
@@ -59,9 +57,7 @@ def preflight_send_runway(
             f'{from_chain.upper()} confirmation(s) take ~{confs_min} min, so the '
             f'reservation will expire before your tx confirms and the swap will fail.[/red]'
         )
-        _console.print(
-            '[yellow]Start fresh with a new reservation: [cyan]alw swap now[/cyan][/yellow]'
-        )
+        _console.print('[yellow]Start fresh with a new reservation: [cyan]alw swap now[/cyan][/yellow]')
         return False
     if status == RUNWAY_EXTENSION_REQUIRED:
         chain = get_chain(from_chain)
@@ -70,7 +66,7 @@ def preflight_send_runway(
             f'\n[yellow]Reservation has {_blocks_to_minutes_str(remaining)} left, less '
             f'than the ~{confs_min} min needed for {chain.min_confirmations} '
             f'{from_chain.upper()} confirmation(s). Validators will auto-extend once '
-            f"your tx is visible — but if they miss the window, the swap will expire "
+            f'your tx is visible — but if they miss the window, the swap will expire '
             f'before confirmation and your funds may be stranded.[/yellow]'
         )
         if not skip_confirm and not click.confirm('  Send anyway?', default=False):

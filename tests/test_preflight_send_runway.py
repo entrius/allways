@@ -26,9 +26,10 @@ class TestPreflightSendRunway:
         # AND without printing anything (covers "no new friction on the
         # happy-path swap" — equivalent to the manual smoke test).
         sub = make_subtensor(current_block=1000)
-        with patch('allways.cli.preflight.click.confirm') as confirm, patch(
-            'allways.cli.preflight._console'
-        ) as console_mock:
+        with (
+            patch('allways.cli.preflight.click.confirm') as confirm,
+            patch('allways.cli.preflight._console') as console_mock,
+        ):
             result = preflight_send_runway(
                 subtensor=sub,
                 from_chain='tao',
@@ -69,9 +70,7 @@ class TestPreflightSendRunway:
         # above the extension floor but below the confirmation window — should
         # warn and ask. Confirming yes returns True.
         sub = make_subtensor(current_block=1000)
-        with patch(
-            'allways.cli.preflight.click.confirm', return_value=True
-        ) as confirm:
+        with patch('allways.cli.preflight.click.confirm', return_value=True) as confirm:
             result = preflight_send_runway(
                 subtensor=sub,
                 from_chain='btc',
@@ -84,9 +83,7 @@ class TestPreflightSendRunway:
     def test_extension_required_user_declines(self):
         # Same band, user says no — must abort.
         sub = make_subtensor(current_block=1000)
-        with patch(
-            'allways.cli.preflight.click.confirm', return_value=False
-        ) as confirm:
+        with patch('allways.cli.preflight.click.confirm', return_value=False) as confirm:
             result = preflight_send_runway(
                 subtensor=sub,
                 from_chain='btc',

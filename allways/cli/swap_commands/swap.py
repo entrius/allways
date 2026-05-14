@@ -15,6 +15,7 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
+from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.helpers import (
     PendingSwapState,
     blocks_to_minutes_str,
@@ -32,7 +33,6 @@ from allways.cli.swap_commands.helpers import (
     save_pending_swap,
     sign_or_prompt_external,
 )
-from allways.cli.preflight import preflight_send_runway
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY

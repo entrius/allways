@@ -11,6 +11,7 @@ from allways.chain_providers import create_chain_providers
 from allways.chains import get_chain
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
+from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     clear_pending_swap,
@@ -22,7 +23,6 @@ from allways.cli.swap_commands.helpers import (
     mark_pending_swap_tx_sent,
     resolve_source_tx_block,
 )
-from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
