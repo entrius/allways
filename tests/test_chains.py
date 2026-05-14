@@ -5,12 +5,18 @@ import pytest
 from allways.chains import (
     CHAIN_BTC,
     CHAIN_TAO,
+    RUNWAY_EXTENSION_REQUIRED,
+    RUNWAY_OK,
+    RUNWAY_TOO_SHORT,
+    SEND_PROPAGATION_BUFFER_BLOCKS,
     canonical_pair,
+    classify_send_runway,
     compute_extension_target,
     confirmations_to_subtensor_blocks,
     get_chain,
 )
 from allways.constants import (
+    EXTEND_THRESHOLD_BLOCKS,
     EXTENSION_BUCKET_BLOCKS,
     MAX_EXTENSION_BLOCKS,
 )
@@ -103,3 +109,53 @@ class TestComputeExtensionTarget:
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
             compute_extension_target('eth', 0, 1000)
+
+
+class TestClassifySendRunway:
+    # BTC: 2 confs * 600s/12 = 100 subtensor blocks needed for confirmation.
+    # EXTEND_THRESHOLD_BLOCKS is sized for one validator forward step plus the
+    # challenge window — below that, the auto-extension propose tx is doomed.
+
+    def test_full_ttl_is_ok(self):
+        # Fresh 50-block reservation against BTC's 100-block confirmation window:
+        # confirmation can't fit, so EXTENSION_REQUIRED is expected — not OK.
+        status, remaining = classify_send_runway('btc', 0, 50, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_EXTENSION_REQUIRED
+        assert remaining == 50
+
+    def test_tao_full_ttl_is_ok(self):
+        # TAO needs only 6 subtensor blocks for confirmation. A 50-block
+        # reservation comfortably fits — this is the OK path.
+        status, remaining = classify_send_runway('tao', 0, 50, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_OK
+        assert remaining == 50
+
+    def test_below_extension_floor_is_too_short(self):
+        # Remaining = floor - 1: validators can't propose+challenge before deadline.
+        floor = EXTEND_THRESHOLD_BLOCKS + SEND_PROPAGATION_BUFFER_BLOCKS
+        status, remaining = classify_send_runway('btc', 0, floor - 1, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_TOO_SHORT
+        assert remaining == floor - 1
+
+    def test_at_extension_floor_is_extension_required(self):
+        # Exactly at the floor: extension can fire, but confirmation won't fit.
+        floor = EXTEND_THRESHOLD_BLOCKS + SEND_PROPAGATION_BUFFER_BLOCKS
+        status, _ = classify_send_runway('btc', 0, floor, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_EXTENSION_REQUIRED
+
+    def test_zero_remaining_is_too_short(self):
+        status, remaining = classify_send_runway('btc', 100, 100, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_TOO_SHORT
+        assert remaining == 0
+
+    def test_negative_remaining_is_too_short(self):
+        # Reservation already expired — must hard-refuse.
+        status, remaining = classify_send_runway('btc', 200, 150, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_TOO_SHORT
+        assert remaining == -50
+
+    def test_btc_with_long_ttl_is_ok(self):
+        # BTC needs ~100 subtensor blocks for 2 confs + 5-block propagation buffer:
+        # a 200-block reservation clears that easily.
+        status, _ = classify_send_runway('btc', 0, 200, EXTEND_THRESHOLD_BLOCKS)
+        assert status == RUNWAY_OK

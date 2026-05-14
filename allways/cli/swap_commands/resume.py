@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
+    preflight_send_runway,
     resolve_recent_swap_id,
     send_btc,
     send_tao_transfer,
@@ -187,6 +188,8 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
             from_tx_hash_opt = saved_tx
             used_saved_tx = True
         elif auto_send:
+            if not preflight_send_runway(subtensor, state.from_chain, reserved_until, skip_confirm):
+                return
             console.print(f'\n[dim]Sending {send_label} to {state.miner_from_address}...[/dim]')
             if state.from_chain == 'tao':
                 send_result = send_tao_transfer(wallet, subtensor, state.miner_from_address, state.from_amount)

@@ -11,7 +11,14 @@ from rich.panel import Panel
 from rich.table import Table
 
 from allways.chain_providers import create_chain_providers
-from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
+from allways.chains import (
+    RUNWAY_EXTENSION_REQUIRED,
+    RUNWAY_TOO_SHORT,
+    SUPPORTED_CHAINS,
+    canonical_pair,
+    classify_send_runway,
+    get_chain,
+)
 from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
 from allways.cli.help import StyledGroup
@@ -34,7 +41,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY
+from allways.constants import EXTEND_THRESHOLD_BLOCKS, FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
@@ -337,6 +344,54 @@ def broadcast_reserve_with_retry(
 # =========================================================================
 # Swap-specific helpers
 # =========================================================================
+
+
+def preflight_send_runway(
+    subtensor,
+    from_chain: str,
+    reserved_until_block: int,
+    skip_confirm: bool,
+) -> bool:
+    """Refuse / hard-warn before broadcasting source funds into a doomed reservation.
+
+    Re-reads the current subtensor block (the user may have idled at the
+    summary panel) and classifies the remaining TTL against the validator
+    auto-extension floor. Returns True if the caller should proceed with
+    the broadcast, False if the caller should abort. See
+    ``classify_send_runway`` in allways/chains.py for the categories.
+    """
+    current_block = subtensor.get_current_block()
+    status, remaining = classify_send_runway(
+        from_chain, current_block, reserved_until_block, EXTEND_THRESHOLD_BLOCKS
+    )
+    if status == RUNWAY_TOO_SHORT:
+        chain = get_chain(from_chain)
+        confs_min = chain.min_confirmations * chain.seconds_per_block // 60
+        console.print(
+            f'\n[red]Refusing to send: only {blocks_to_minutes_str(max(0, remaining))} '
+            f'left on the reservation — below the {EXTEND_THRESHOLD_BLOCKS}-block '
+            f'floor needed for validators to auto-extend. {chain.min_confirmations} '
+            f'{from_chain.upper()} confirmation(s) take ~{confs_min} min, so the '
+            f'reservation will expire before your tx confirms and the swap will fail.[/red]'
+        )
+        console.print(
+            '[yellow]Start fresh with a new reservation: [cyan]alw swap now[/cyan][/yellow]'
+        )
+        return False
+    if status == RUNWAY_EXTENSION_REQUIRED:
+        chain = get_chain(from_chain)
+        confs_min = chain.min_confirmations * chain.seconds_per_block // 60
+        console.print(
+            f'\n[yellow]Reservation has {blocks_to_minutes_str(remaining)} left, less '
+            f'than the ~{confs_min} min needed for {chain.min_confirmations} '
+            f'{from_chain.upper()} confirmation(s). Validators will auto-extend once '
+            f"your tx is visible — but if they miss the window, the swap will expire "
+            f'before confirmation and your funds may be stranded.[/yellow]'
+        )
+        if not skip_confirm and not click.confirm('  Send anyway?', default=False):
+            console.print('[yellow]Cancelled. Start fresh with: alw swap now[/yellow]')
+            return False
+    return True
 
 
 def display_timeout_notice(swap, dashboard_url: str):
@@ -1053,6 +1108,9 @@ def swap_now_command(
         )
         if not skip_confirm and not click.confirm('  Send now?', default=True):
             console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
+            return
+
+        if not preflight_send_runway(subtensor, from_chain, reserved_until, skip_confirm):
             return
 
         console.print(f'\n[dim]Step 2/3: Sending {from_chain.upper()}...[/dim]')

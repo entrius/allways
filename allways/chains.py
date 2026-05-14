@@ -95,3 +95,49 @@ def compute_extension_target(
     # at MAX_EXTENSION_BLOCKS (lib.rs:670, :1090), so a deadline anchor blows
     # the cap whenever propose fires before the deadline.
     return current_subnet_block + blocks_needed
+
+
+# Status returned by ``classify_send_runway`` — see that function for semantics.
+RUNWAY_OK = 'ok'
+RUNWAY_EXTENSION_REQUIRED = 'extension_required'
+RUNWAY_TOO_SHORT = 'too_short'
+
+# Subtensor blocks set aside for the user's source tx to propagate to
+# validators' RPC view before the extension propose flow can pick it up.
+# ~1 minute covers typical Blockstream/Esplora indexing lag.
+SEND_PROPAGATION_BUFFER_BLOCKS = 5
+
+
+def classify_send_runway(
+    from_chain_id: str,
+    current_subnet_block: int,
+    reserved_until_block: int,
+    extend_threshold_blocks: int,
+) -> tuple[str, int]:
+    """Classify whether broadcasting the source tx now is safe.
+
+    The validator extension flow (optimistic_extensions.py) needs at least
+    ``extend_threshold_blocks`` of runway before the deadline to land a
+    propose tx and let its challenge window elapse — without that, the
+    propose is mechanically doomed and the reservation will expire. The
+    user's tx also needs a ~1 min propagation buffer so the validator can
+    actually see it before proposing.
+
+    Returns ``(status, remaining_blocks)`` where status is one of:
+      * ``RUNWAY_OK`` — full confirmation window fits in remaining TTL.
+        No validator extension needed; broadcast freely.
+      * ``RUNWAY_EXTENSION_REQUIRED`` — confirmations won't fit in TTL,
+        but there is enough runway for validators to auto-extend once
+        the tx is visible. Caller should warn but may proceed.
+      * ``RUNWAY_TOO_SHORT`` — TTL is below the extension floor; even
+        the auto-extension cannot rescue this broadcast. Caller should
+        refuse to send.
+    """
+    remaining = reserved_until_block - current_subnet_block
+    confirmation_subnet_blocks = confirmations_to_subtensor_blocks(from_chain_id)
+
+    if remaining < extend_threshold_blocks + SEND_PROPAGATION_BUFFER_BLOCKS:
+        return (RUNWAY_TOO_SHORT, remaining)
+    if remaining < confirmation_subnet_blocks + SEND_PROPAGATION_BUFFER_BLOCKS:
+        return (RUNWAY_EXTENSION_REQUIRED, remaining)
+    return (RUNWAY_OK, remaining)
