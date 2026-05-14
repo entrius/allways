@@ -22,10 +22,10 @@ from allways.cli.swap_commands.helpers import (
     mark_pending_swap_tx_sent,
     resolve_source_tx_block,
 )
+from allways.cli.preflight import preflight_send_runway
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
     poll_for_swap_with_progress,
-    preflight_send_runway,
     resolve_recent_swap_id,
     send_btc,
     send_tao_transfer,
