@@ -4,7 +4,7 @@ Each forward step calls ``sync_to(current_block)``; the watcher replays
 ``Contracts::ContractEmitted`` events from its cursor up to ``current_block``
 and applies them to in-memory state used by the crown-time scoring replay.
 Tracks three things: the current on-chain active set (for rate-gating),
-per-hotkey busy deltas (reservations → swap resolution), and swap outcomes
+per-hotkey busy deltas (reservation and swap lifetimes), and swap outcomes
 forwarded into ``ValidatorStateStore.insert_swap_outcome`` so the
 credibility ledger survives restarts. Collateral and config scalars are
 trusted to the contract — see ``vote_deactivate`` for the min-raise
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 
 from allways.classes import SwapStatus
-from allways.constants import SCORING_WINDOW_BLOCKS
+from allways.constants import RESERVATION_TTL_BLOCKS, SCORING_WINDOW_BLOCKS
 from allways.utils.scale import (
     decode_account_id,
     decode_bool,
@@ -176,8 +176,10 @@ def to_bytes(val: Any) -> bytes:
 
 @dataclass
 class BusyEvent:
-    """``delta`` is +1 on SwapInitiated and -1 on SwapCompleted/SwapTimedOut.
-    A miner is busy (excluded from crown) whenever the running sum is > 0."""
+    """``delta`` is +1 when a miner becomes unavailable (MinerReserved or
+    SwapInitiated) and -1 when that episode ends (reservation cancel/expiry,
+    SwapCompleted, SwapTimedOut). A miner is busy (excluded from crown)
+    whenever the running sum is > 0."""
 
     hotkey: str
     delta: int
@@ -231,6 +233,15 @@ class ContractEventWatcher:
         # to avoid double-counting — the busy tick is already in open_swap_count.
         # Entries are discarded on the matching terminal event.
         self.bootstrapped_swap_ids: Set[int] = set()
+        # Miners whose reservation +1 was seeded at initialize(); replay skips
+        # the matching MinerReserved for the same reason as bootstrapped_swap_ids.
+        self.bootstrapped_reserved_miners: Set[str] = set()
+        # Miners currently in the reservation-only busy episode (SwapInitiated
+        # converts this to swap busy without incrementing open_swap_count again).
+        self.reservation_busy_miners: Set[str] = set()
+        # miner_hotkey → block where reservation_busy must end (reserved_until + 1).
+        # The contract emits nothing on lazy expiry; we synthesize the -1 there.
+        self.pending_reservation_expiry: Dict[str, int] = {}
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
@@ -317,6 +328,38 @@ class ContractEventWatcher:
                     bt.logging.info(f'EventWatcher bootstrap: seeded {len(seen_hotkeys)} miners as busy from contract')
             except Exception as e:
                 bt.logging.debug(f'EventWatcher bootstrap: active swaps read failed: {e}')
+            # Reservations without a swap row: the miner is unavailable on-chain
+            # but SwapInitiated never fired — mirror swap bootstrap so replay
+            # doesn't double-count MinerReserved.
+            try:
+                ttl = int(contract_client.get_reservation_ttl())
+            except Exception:
+                ttl = RESERVATION_TTL_BLOCKS
+            try:
+                reserved_seeded = 0
+                for hotkey in metagraph_hotkeys:
+                    if hotkey in seen_hotkeys:
+                        continue
+                    try:
+                        ru = int(contract_client.get_miner_reserved_until(hotkey))
+                    except Exception:
+                        continue
+                    if ru < current_block:
+                        continue
+                    reserve_block = max(0, ru - ttl)
+                    self.bootstrapped_reserved_miners.add(hotkey)
+                    self.reservation_busy_miners.add(hotkey)
+                    self.open_swap_count[hotkey] = self.open_swap_count.get(hotkey, 0) + 1
+                    self.busy_events.append(BusyEvent(hotkey=hotkey, delta=+1, block=reserve_block))
+                    self.pending_reservation_expiry[hotkey] = ru + 1
+                    reserved_seeded += 1
+                if reserved_seeded:
+                    self.busy_events.sort(key=lambda ev: ev.block)
+                    bt.logging.info(
+                        f'EventWatcher bootstrap: seeded {reserved_seeded} miners as busy from active reservations'
+                    )
+            except Exception as e:
+                bt.logging.debug(f'EventWatcher bootstrap: active reservations read failed: {e}')
             bt.logging.info(f'EventWatcher initialized: {len(self.active_miners)} active miners')
         self.cursor = max(0, current_block - SCORING_WINDOW_BLOCKS)
         # Anchor the historical active set at the cursor so scoring sees the
@@ -334,6 +377,7 @@ class ContractEventWatcher:
             return
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
         for block_num in range(self.cursor + 1, end + 1):
+            self._apply_reservation_expiry_synthetics(block_num)
             self.process_block(block_num)
         self.cursor = end
         if current_block - self.last_prune_block >= EVENT_PRUNE_INTERVAL_BLOCKS:
@@ -362,6 +406,21 @@ class ContractEventWatcher:
                 # which would re-replay every successful apply_event in the
                 # same block on the next pass and double-apply busy deltas.
                 bt.logging.warning(f'EventWatcher: apply_event {name}@{block_num} failed: {e}')
+
+    def _apply_reservation_expiry_synthetics(self, block_num: int) -> None:
+        """Release reservation-only busy state at ``reserved_until + 1``.
+
+        The contract clears expired reservations lazily with no event; crown
+        replay still needs a busy -1 at the first block the miner is free.
+        """
+        for miner in list(self.pending_reservation_expiry.keys()):
+            if self.pending_reservation_expiry[miner] != block_num:
+                continue
+            self.pending_reservation_expiry.pop(miner, None)
+            if miner not in self.reservation_busy_miners:
+                continue
+            self.reservation_busy_miners.discard(miner)
+            self.apply_busy_delta(block_num, miner, -1)
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
@@ -410,17 +469,44 @@ class ContractEventWatcher:
                 return
             active = bool(values.get('active'))
             self.record_active_transition(block_num, hotkey, active)
+        elif name == 'MinerReserved':
+            miner = values.get('miner', '')
+            reserved_until = values.get('reserved_until')
+            if not miner or not isinstance(reserved_until, int):
+                return
+            if miner in self.bootstrapped_reserved_miners:
+                self.bootstrapped_reserved_miners.discard(miner)
+                self.pending_reservation_expiry[miner] = reserved_until + 1
+                return
+            self.apply_busy_delta(block_num, miner, +1)
+            self.reservation_busy_miners.add(miner)
+            self.pending_reservation_expiry[miner] = reserved_until + 1
+        elif name == 'ReservationCancelled':
+            miner = values.get('miner', '')
+            if not miner:
+                return
+            self.pending_reservation_expiry.pop(miner, None)
+            if miner not in self.reservation_busy_miners:
+                return
+            self.reservation_busy_miners.discard(miner)
+            self.apply_busy_delta(block_num, miner, -1)
         elif name == 'SwapInitiated':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
-            if miner:
-                # Skip if this swap's +1 was already seeded from the contract's
-                # live active-swap list at bootstrap — otherwise a restart
-                # whose replay window covers the original SwapInitiated would
-                # double-count the miner as busy.
-                if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
-                    return
-                self.apply_busy_delta(block_num, miner, +1)
+            if not miner:
+                return
+            # Skip if this swap's +1 was already seeded from the contract's
+            # live active-swap list at bootstrap — otherwise a restart
+            # whose replay window covers the original SwapInitiated would
+            # double-count the miner as busy.
+            if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
+                self.pending_reservation_expiry.pop(miner, None)
+                return
+            self.pending_reservation_expiry.pop(miner, None)
+            if miner in self.reservation_busy_miners:
+                self.reservation_busy_miners.discard(miner)
+                self.apply_busy_delta(block_num, miner, -1)
+            self.apply_busy_delta(block_num, miner, +1)
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -460,6 +546,8 @@ class ContractEventWatcher:
             applied_target = values.get('applied_target')
             if miner and isinstance(applied_target, int):
                 self.state_store.update_reserved_until(miner, applied_target)
+                if miner in self.reservation_busy_miners:
+                    self.pending_reservation_expiry[miner] = applied_target + 1
         elif name == 'TimeoutExtensionFinalized':
             swap_id = values.get('swap_id')
             applied_target = values.get('applied_target')

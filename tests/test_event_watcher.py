@@ -285,6 +285,53 @@ class TestBusyIntervals:
         assert 7 not in w.bootstrapped_swap_ids
         w.state_store.close()
 
+    def test_miner_reserved_marks_busy_until_expiry(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 149})
+        assert w.open_swap_count['hk_a'] == 1
+        assert 'hk_a' in w.reservation_busy_miners
+        w._apply_reservation_expiry_synthetics(150)
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        assert 'hk_a' not in w.reservation_busy_miners
+        w.state_store.close()
+
+    def test_miner_reserved_then_swap_initiated_no_double_busy(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 200})
+        assert w.open_swap_count['hk_a'] == 1
+        w.apply_event(110, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 1
+        w.apply_event(120, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a', 'tao_amount': 0})
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        w.state_store.close()
+
+    def test_reservation_cancel_releases_busy(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 200})
+        w.apply_event(120, 'ReservationCancelled', {'miner': 'hk_a'})
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        w._apply_reservation_expiry_synthetics(201)
+        assert w.open_swap_count.get('hk_a', 0) == 0
+        w.state_store.close()
+
+    def test_bootstrapped_miner_reserved_replay_skips_second_plus_one(self, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = []
+        client.get_reservation_ttl.return_value = 50
+        client.get_miner_reserved_until.side_effect = lambda hk: 150 if hk == 'hk_a' else 0
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+        assert w.open_swap_count['hk_a'] == 1
+        assert 'hk_a' in w.bootstrapped_reserved_miners
+
+        w.apply_event(50, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 150})
+        assert w.open_swap_count['hk_a'] == 1
+        assert 'hk_a' not in w.bootstrapped_reserved_miners
+        w.state_store.close()
+
 
 class TestSCALEDecoder:
     """Decoder fixtures: hand-build event bytes and feed them through.
