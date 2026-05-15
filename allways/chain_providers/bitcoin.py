@@ -183,6 +183,7 @@ class BitcoinProvider(ChainProvider):
         """Verify a Bitcoin transaction using getrawtransaction RPC."""
         raw_tx = self.rpc_call('getrawtransaction', [tx_hash, True])
         if not raw_tx:
+            bt.logging.debug(f'BTC RPC: tx {tx_hash[:16]}... not found')
             return None
 
         confirmations = raw_tx.get('confirmations', 0)
@@ -215,6 +216,9 @@ class BitcoinProvider(ChainProvider):
                     confirmations=confirmations,
                 )
 
+        bt.logging.warning(
+            f'BTC RPC: tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
+        )
         return None
 
     def rpc_resolve_sender(self, raw_tx: dict) -> str:
@@ -259,6 +263,7 @@ class BitcoinProvider(ChainProvider):
         try:
             resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
             if resp.status_code == 404:
+                bt.logging.debug(f'BTC Esplora: tx {tx_hash[:16]}... not found (404)')
                 return None
             resp.raise_for_status()
             data = resp.json()
@@ -305,6 +310,9 @@ class BitcoinProvider(ChainProvider):
                         confirmations=confirmations,
                     )
 
+            bt.logging.warning(
+                f'BTC Esplora: tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
+            )
             return None
         except (requests.ConnectionError, requests.Timeout) as e:
             raise ProviderUnreachableError(f'Esplora API unreachable: {e}') from e
