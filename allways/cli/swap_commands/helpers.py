@@ -18,7 +18,6 @@ from allways.constants import (
     MAX_EXTENSION_BLOCKS,
     MAX_EXTENSIONS_PER_RESERVATION,
     NETUID_FINNEY,
-    TAO_TO_RAO,
 )
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
@@ -159,16 +158,6 @@ def is_local_network(network: str) -> bool:
     if network == 'local':
         return True
     return any(host in network for host in ('127.0.0.1', 'localhost', '0.0.0.0'))
-
-
-def to_rao(amount_tao: float) -> int:
-    """Convert TAO to rao."""
-    return int(amount_tao * TAO_TO_RAO)
-
-
-def from_rao(amount_rao: int) -> float:
-    """Convert rao to TAO."""
-    return amount_rao / TAO_TO_RAO
 
 
 def load_cli_config() -> dict:

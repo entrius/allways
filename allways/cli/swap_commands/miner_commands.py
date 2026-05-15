@@ -15,7 +15,6 @@ from allways.cli.swap_commands.helpers import (
     SWAP_STATUS_COLORS,
     blocks_to_minutes_str,
     console,
-    from_rao,
     get_cli_context,
     loading,
     print_contract_error,
@@ -24,6 +23,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao
 
 
 @click.group('miner', cls=StyledGroup)
