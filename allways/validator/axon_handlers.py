@@ -17,7 +17,7 @@ from Crypto.Hash import keccak
 
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
-from allways.constants import RESERVATION_COOLDOWN_BLOCKS
+from allways.constants import MAX_EXTENSION_BLOCKS, RESERVATION_COOLDOWN_BLOCKS, RESERVATION_TTL_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
@@ -117,17 +117,28 @@ def resolve_swap_direction(
     return from_chain, to_chain, deposit_addr, fulfillment_addr, rate, rate_str
 
 
-def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
+def load_swap_commitment(
+    validator: 'Validator',
+    miner_hotkey: str,
+    block: Optional[int] = None,
+) -> Optional[MinerPair]:
     """Read miner commitment and validate chains differ. Returns commitment or None.
 
     Passes the validator's cached metagraph so read_miner_commitment skips the
     full subnet metagraph download — that sync takes 30s+ on testnet finney and
     was the real source of axon handler timeouts.
+
+    When ``block`` is supplied the commitment is read at that historical
+    block — used by swap-confirm to bind the confirm vote to the same
+    commitment that was active at reserve time, so a miner can't redirect
+    a user's fulfillment by changing their commitment between reserve and
+    confirm.
     """
     commitment = read_miner_commitment(
         subtensor=validator.axon_subtensor,
         netuid=validator.config.netuid,
         hotkey=miner_hotkey,
+        block=block,
         metagraph=validator.metagraph,
     )
     if commitment is None or commitment.from_chain == commitment.to_chain:
@@ -452,7 +463,30 @@ async def handle_swap_confirm(
 
             res_tao_amount, res_source_amount, res_dest_amount = res_data
 
-            commitment = load_swap_commitment(validator, miner)
+            # Bind the confirm to the commitment that was active at reserve
+            # time, not the live one. Without this, a miner could republish
+            # their commitment after the user signed and sent funds, and the
+            # confirm would validate against the new addresses/rate — making
+            # verify_transaction reject a perfectly-valid user tx (and shifting
+            # the swap's miner_to_address / rate that vote_initiate commits to).
+            #
+            # The on-chain reservation does not store its creation block, but
+            # ``reserved_until - RESERVATION_TTL_BLOCKS - extension_count *
+            # MAX_EXTENSION_BLOCKS`` is a safe lower bound: it lands at-or-
+            # before the original vote_reserve and is exact for un-extended
+            # reservations (the common case). Reading commitment at this block
+            # returns the terms the user reserved under whenever the miner has
+            # not republished in the interim.
+            try:
+                extension_count = contract.get_reservation_extension_count(miner)
+            except ContractError:
+                extension_count = 0
+            reservation_block = max(
+                1,
+                reserved_until - RESERVATION_TTL_BLOCKS - extension_count * MAX_EXTENSION_BLOCKS,
+            )
+
+            commitment = load_swap_commitment(validator, miner, block=reservation_block)
             if commitment is None:
                 reject_synapse(synapse, 'No valid commitment', ctx)
                 return synapse
