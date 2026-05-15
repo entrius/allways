@@ -97,6 +97,7 @@ def make_validator(
     contract = MagicMock()
     contract.get_miner_reserved_until.return_value = reserved_until
     contract.get_reservation_data.return_value = reservation_data
+    contract.get_reservation_extension_count.return_value = 0
     validator.axon_contract_client = contract
 
     if providers is None:
@@ -326,6 +327,75 @@ class TestSourceTxVerification:
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
+
+
+class TestCommitmentBoundToReserveBlock:
+    """Issue #61: confirm must read commitment as-of reserve time, not live.
+
+    Without this binding, a miner could republish their commitment between
+    reserve and confirm, redirecting fulfillment or changing the rate the
+    swap initiates under. The reservation creation block is derived from
+    ``reserved_until - RESERVATION_TTL_BLOCKS - extension_count * MAX_EXTENSION_BLOCKS``,
+    which is exact for un-extended reservations and a safe lower bound
+    otherwise.
+    """
+
+    def test_reads_commitment_at_reservation_block_no_extensions(self):
+        """No extensions: read at reserved_until - 50 (RESERVATION_TTL_BLOCKS)."""
+        validator = make_validator(block=1000, reserved_until=1040)
+        with patch(
+            'allways.validator.axon_handlers.read_miner_commitment',
+            return_value=make_commitment(),
+        ) as mock_read:
+            asyncio.run(handle_swap_confirm(validator, make_synapse()))
+        # 1040 (reserved_until) - 50 (TTL) - 0 (extensions) = 990
+        assert mock_read.call_args.kwargs['block'] == 990
+
+    def test_reads_commitment_at_reservation_block_with_extensions(self):
+        """Each extension subtracts MAX_EXTENSION_BLOCKS (250) — keeps the
+        read at-or-before the original reserve regardless of how far
+        reserved_until has been pushed forward by extension finalizations."""
+        validator = make_validator(block=2000, reserved_until=2500)
+        validator.axon_contract_client.get_reservation_extension_count.return_value = 2
+        with patch(
+            'allways.validator.axon_handlers.read_miner_commitment',
+            return_value=make_commitment(),
+        ) as mock_read:
+            asyncio.run(handle_swap_confirm(validator, make_synapse()))
+        # 2500 - 50 - 2 * 250 = 1950
+        assert mock_read.call_args.kwargs['block'] == 1950
+
+    def test_reservation_block_floor_at_one(self):
+        """Newly-bootstrapped chain (low reserved_until) must not produce a
+        negative block — substrate would reject the historical read."""
+        validator = make_validator(block=10, reserved_until=20)
+        with patch(
+            'allways.validator.axon_handlers.read_miner_commitment',
+            return_value=make_commitment(),
+        ) as mock_read:
+            asyncio.run(handle_swap_confirm(validator, make_synapse()))
+        assert mock_read.call_args.kwargs['block'] == 1
+
+    def test_extension_count_contract_error_falls_back_to_zero(self):
+        """RPC failure on extension_count must not crash confirm — fall back
+        to zero, which equals the no-extension lower bound. Verified via the
+        queued-confirm path so we don't depend on SS58 keypair construction."""
+        validator = make_validator(block=1000, reserved_until=1040)
+        validator.axon_contract_client.get_reservation_extension_count.side_effect = ContractError('rpc down')
+        validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
+            confirmed=False,
+            confirmations=1,
+        )
+        with patch(
+            'allways.validator.axon_handlers.read_miner_commitment',
+            return_value=make_commitment(),
+        ) as mock_read:
+            result = asyncio.run(handle_swap_confirm(validator, make_synapse()))
+        # Falls back to 0 extensions → 1040 - 50 - 0 = 990
+        assert mock_read.call_args.kwargs['block'] == 990
+        # And the confirm still proceeds along the queued path.
+        assert result.accepted is True
+        assert 'Queued' in (result.rejection_reason or '')
 
 
 class TestErrorHandling:
