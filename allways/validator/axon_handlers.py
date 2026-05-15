@@ -507,17 +507,13 @@ async def handle_swap_confirm(
                 block_hint=synapse.from_tx_block,
                 expected_sender=synapse.from_address,
             )
-            if tx_info is None:
-                reject_synapse(synapse, 'Source transaction not found, amount or sender mismatch', ctx)
-                return synapse
 
-            # Persist the discovered block even if the user didn't supply
-            # one — the queue drain can then re-verify with O(1) lookup
-            # instead of re-scanning the sliding window.
-            found_tx_block = tx_info.block_number or synapse.from_tx_block
-
-            if not tx_info.confirmed:
-                chain_def = provider.get_chain()
+            # tx_info=None means we couldn't see the tx (propagation lag) or
+            # amount/sender didn't match — queue both rather than rejecting,
+            # so the drain re-verifies and PENDING_CONFIRM_NULL_RETRY_LIMIT
+            # bounds the bogus case. Rejecting here races freshly-broadcast txs.
+            if tx_info is None or not tx_info.confirmed:
+                found_tx_block = (tx_info.block_number if tx_info else 0) or synapse.from_tx_block
                 pending = PendingConfirm(
                     miner_hotkey=miner,
                     from_tx_hash=synapse.from_tx_hash,
@@ -536,11 +532,21 @@ async def handle_swap_confirm(
                 )
                 validator.state_store.enqueue(pending)
                 synapse.accepted = True
-                synapse.rejection_reason = (
-                    f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '
-                    f'Validator will auto-initiate when confirmed.'
-                )
-                bt.logging.info(f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations')
+                if tx_info is None:
+                    synapse.rejection_reason = (
+                        'Queued — source tx not yet visible to validators (propagation lag '
+                        'or pending re-verify). Validator will auto-initiate once seen and confirmed.'
+                    )
+                    bt.logging.info(f'{ctx} queued: source tx not yet visible')
+                else:
+                    chain_def = provider.get_chain()
+                    synapse.rejection_reason = (
+                        f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '
+                        f'Validator will auto-initiate when confirmed.'
+                    )
+                    bt.logging.info(
+                        f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations'
+                    )
                 return synapse
 
             miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())

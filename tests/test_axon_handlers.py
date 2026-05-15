@@ -286,12 +286,33 @@ class TestChainProviderValidation:
 
 
 class TestSourceTxVerification:
-    def test_rejects_when_source_tx_not_found(self):
+    def test_queues_when_source_tx_not_yet_visible(self):
+        """tx_info=None means we couldn't see the tx (propagation lag) or
+        amount/sender mismatch — queue and let the forward drain re-verify
+        instead of rejecting outright. The drain bounds bogus entries via
+        PENDING_CONFIRM_NULL_RETRY_LIMIT."""
         validator = make_validator()
         validator.axon_chain_providers['btc'].verify_transaction.return_value = None
         result = run_handler(validator, make_synapse())
-        assert result.accepted is False
-        assert 'Source transaction not found' in result.rejection_reason
+        assert result.accepted is True
+        assert 'Queued' in (result.rejection_reason or '')
+        assert 'not yet visible' in result.rejection_reason
+        validator.state_store.enqueue.assert_called_once()
+        queued = validator.state_store.enqueue.call_args[0][0]
+        assert queued.from_amount == 100_000  # res_source_amount, not user-supplied
+        assert queued.tao_amount == 345_000_000
+        assert queued.from_tx_hash == 'abc123'
+
+    def test_queued_not_yet_visible_persists_user_block_hint(self):
+        """When the user supplied a from_tx_block hint, persist it on the
+        queued entry so the drain can re-verify in O(1) once the tx lands."""
+        validator = make_validator()
+        validator.axon_chain_providers['btc'].verify_transaction.return_value = None
+        synapse = make_synapse()
+        synapse.from_tx_block = 12345
+        run_handler(validator, synapse)
+        queued = validator.state_store.enqueue.call_args[0][0]
+        assert queued.from_tx_block == 12345
 
     def test_queues_when_source_tx_unconfirmed(self):
         """Visible on-chain but below min_confirmations → accepted + queued."""
