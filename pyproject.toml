@@ -1,6 +1,6 @@
 [project]
 name = "allways"
-version = "0.1.0"
+version = "1.0.3"
 description = "Allways - Universal Transaction Layer: Trustless cross-chain swaps on Bittensor Subnet 7"
 license = "MIT"
 requires-python = ">=3.10,<3.15"
@@ -21,13 +21,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "bittensor==10.1.0",
-    "bittensor-cli==9.17.0",
+    "bittensor==10.3.0",
+    "bittensor-cli==9.21.0",
     "bittensor-commit-reveal==0.4.0",
-    "bittensor-wallet==4.0.0",
+    "bittensor-wallet==4.0.1",
     "wandb==0.21.3",
     "python-dotenv==1.2.1",
-    "substrate-interface",
     "requests",
     "bitcoin-message-tool",
     "click",

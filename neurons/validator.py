@@ -17,9 +17,11 @@ import bittensor as bt
 from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
+from allways.commitments import read_miner_commitments
 from allways.constants import (
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
     FEE_DIVISOR,
+    SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import AllwaysContractClient
 from allways.validator.axon_handlers import (
@@ -33,9 +35,11 @@ from allways.validator.axon_handlers import (
     priority_swap_confirm,
     priority_swap_reserve,
 )
+from allways.validator.bounds_cache import BoundsCache
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
+from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
@@ -55,10 +59,17 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        self.contract_client = AllwaysContractClient(subtensor=self.subtensor)
+        self.contract_client = AllwaysContractClient(
+            subtensor=self.subtensor,
+            reconnect_subtensor=self.reconnect_and_propagate,
+        )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
-        timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        try:
+            timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        except Exception as e:
+            bt.logging.warning(f'fulfillment_timeout read failed at init, using default: {e}')
+            timeout_blocks = DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
         # Single store owning every validator-local table. Must be created
@@ -74,14 +85,21 @@ class Validator(BaseValidatorNeuron):
             current_block_fn=lambda: self.block,
         )
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
-        # (miner_hotkey, from_tx_hash) → reserved_until at vote time. Skips
-        # redundant vote_extend_reservation extrinsics — auto-clears once the
-        # contract bumps reserved_until past the voted value, so the next
-        # extension round is open.
-        self.extend_reservation_voted_at: dict[tuple[str, str], int] = {}
         # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
         # Used to absorb mempool propagation lag before dropping a pending entry.
         self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
+        # Forces one scoring pass per fresh process so a mid-window restart
+        # doesn't leave self.scores stale until the next 1200-step boundary
+        # (which would route emissions to RECYCLE via the empty-norm fallback).
+        self.initial_scoring_done = False
+
+        # Optimistic propose/challenge/finalize for reservation + timeout
+        # extensions. Stateless decision class — the forward loop drives it
+        # per-iteration with the state it already has in hand.
+        self.optimistic_extensions = OptimisticExtensionWatcher(
+            contract_client=self.contract_client,
+            wallet=self.wallet,
+        )
 
         # Event-sourced miner state. ``sync_to(current_block)`` runs each
         # forward step; scoring reads the active set from the watcher's
@@ -99,12 +117,13 @@ class Validator(BaseValidatorNeuron):
             metagraph_hotkeys=list(self.metagraph.hotkeys),
             contract_client=self.contract_client,
         )
+        self.bootstrap_miner_rates()
 
-        self.swap_tracker = SwapTracker(
-            client=self.contract_client,
-            fulfillment_timeout_blocks=timeout_blocks,
-        )
-        self.swap_tracker.initialize(self.block)
+        self.swap_tracker = SwapTracker(client=self.contract_client)
+        self.swap_tracker.initialize()
+        # Late-bind the tracker so TimeoutExtensionFinalized events can write
+        # the new timeout_block straight into the in-memory active swap.
+        self.event_watcher.swap_tracker = self.swap_tracker
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
 
         self.swap_verifier = SwapVerifier(
@@ -117,13 +136,64 @@ class Validator(BaseValidatorNeuron):
         # to prevent "cannot call recv while another coroutine is already running recv" errors.
         self.axon_lock = threading.Lock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_contract_client = AllwaysContractClient(subtensor=self.axon_subtensor)
+        self.axon_contract_client = AllwaysContractClient(
+            subtensor=self.axon_subtensor,
+            reconnect_subtensor=self.reconnect_axon_subtensor,
+        )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
+        # Must read the current block via axon_subtensor — the block getter on
+        # self (self.block) goes through self.subtensor, which the forward loop
+        # is already using; concurrent axon + forward reads collide on the same
+        # websocket and raise ConcurrencyError.
+        self.bounds_cache = BoundsCache(
+            self.axon_contract_client,
+            self.axon_subtensor.get_current_block,
+        )
 
         # Attach synapse handlers to axon
         self.attach_axon_handlers()
 
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
+
+    def bootstrap_miner_rates(self) -> None:
+        """Cold-start anchor for rate events. Without this, a validator with a
+        fresh state.db (first run, or a container recreate that loses the
+        writable layer) has no rate visible at window_start on the first
+        scoring pass, so every miner reads as 'no rate posted' and the entire
+        pool recycles to RECYCLE_UID. Read current commitments from chain and
+        seed one anchor event per (hotkey, direction) at cursor — mirrors the
+        active-flag anchor that event_watcher.initialize already does."""
+        try:
+            pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+        except Exception as e:
+            bt.logging.warning(f'Rate bootstrap: commitment read failed: {e}')
+            return
+
+        anchor_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
+        current_hotkeys = set(self.metagraph.hotkeys)
+        seeded = 0
+        for pair in pairs:
+            if pair.hotkey not in current_hotkeys:
+                continue
+            for from_c, to_c, r in (
+                (pair.from_chain, pair.to_chain, pair.rate),
+                (pair.to_chain, pair.from_chain, pair.counter_rate),
+            ):
+                if r <= 0:
+                    continue
+                self.last_known_rates[(pair.hotkey, from_c, to_c)] = r
+                existing = self.state_store.get_latest_rate_before(pair.hotkey, from_c, to_c, anchor_block)
+                if existing is None:
+                    self.state_store.insert_rate_event(
+                        hotkey=pair.hotkey,
+                        from_chain=from_c,
+                        to_chain=to_c,
+                        rate=r,
+                        block=anchor_block,
+                    )
+                    seeded += 1
+        if seeded:
+            bt.logging.info(f'Rate bootstrap: seeded {seeded} anchor(s) at block {anchor_block}')
 
     def attach_axon_handlers(self):
         """Attach all synapse handlers to the axon."""
@@ -141,6 +211,25 @@ class Validator(BaseValidatorNeuron):
             priority_fn=partial(priority_swap_confirm, self),
         )
         bt.logging.info('Axon handlers attached: MinerActivate, SwapReserve, SwapConfirm')
+
+    def reconnect_and_propagate(self):
+        """Rebuild the main subtensor and update components that hold it."""
+        self.reconnect_subtensor()
+        self.contract_client.subtensor = self.subtensor
+        tao_provider = self.chain_providers.get('tao')
+        if tao_provider and hasattr(tao_provider, 'subtensor'):
+            tao_provider.subtensor = self.subtensor
+
+    def reconnect_axon_subtensor(self):
+        """Rebuild the axon-side subtensor used by handler threads."""
+        bt.logging.info('Reconnecting axon subtensor...')
+        old = self.axon_subtensor
+        self.axon_subtensor = bt.Subtensor(config=self.config)
+        self.axon_contract_client.subtensor = self.axon_subtensor
+        try:
+            old.close()
+        except Exception:
+            pass
 
     async def forward(self):
         """Validator forward pass - delegates to allways.validator.forward."""

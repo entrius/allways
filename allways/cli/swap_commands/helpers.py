@@ -11,9 +11,14 @@ import click
 from rich.console import Console
 
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.classes import MinerPair, SwapStatus
+from allways.classes import MinerPair, Swap, SwapStatus
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
-from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.constants import (
+    MAX_EXTENSION_BLOCKS,
+    MAX_EXTENSIONS_PER_RESERVATION,
+    NETUID_FINNEY,
+    TAO_TO_RAO,
+)
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
 ALLWAYS_DIR = Path.home() / '.allways'
@@ -23,6 +28,12 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 console = Console()
 
 SECONDS_PER_BLOCK = 12
+
+
+def blocks_to_minutes_str(blocks: int) -> str:
+    """Render a block count as an approximate minutes string like '~5 min'."""
+    return f'~{blocks * SECONDS_PER_BLOCK / 60:.0f} min'
+
 
 SWAP_STATUS_COLORS = {
     SwapStatus.ACTIVE: 'yellow',
@@ -121,7 +132,7 @@ def is_valid_ss58(address: str) -> bool:
     extrinsic whose typo would silently fail.
     """
     try:
-        from scalecodec.utils.ss58 import ss58_decode
+        from bittensor.utils import ss58_decode
 
         ss58_decode(address)
         return True
@@ -252,29 +263,64 @@ def get_cli_context(
 
 @dataclass
 class PendingSwapState:
+    """In-memory view of a user's pending swap.
+
+    Persisted fields (written to ~/.allways/pending_swap.json) are only those
+    the contract / current_miners table can't tell us:
+      miner_hotkey, request_hash, receive_address, netuid, wallet_name,
+      hotkey_name, from_tx_hash.
+
+    Everything else (chains, amounts, miner addresses, etc.) is hydrated from
+    `client.get_reservation(miner_hotkey)` + the miner commitment in
+    ``hydrate_pending_swap`` so the contract stays the source of truth.
+    """
+
+    # Persisted (user-only — contract can't tell us)
     miner_hotkey: str
-    miner_uid: int
-    from_chain: str
-    to_chain: str
-    from_amount: int
-    to_amount: int
-    tao_amount: int
-    user_receives: int
-    rate_str: str
-    miner_from_address: str
-    user_from_address: str
     receive_address: str
-    reserved_until_block: int
     netuid: int
     wallet_name: str
     hotkey_name: str
-    created_at: float
+    from_tx_hash: str = ''
+    # Contract correlation key — keys our reservation lookup. Default-empty
+    # for backwards compat with state files written before this PR.
+    request_hash: str = ''
+    # Hydrated lazily from the contract — see ``hydrate_pending_swap``.
+    miner_uid: int = 0
+    from_chain: str = ''
+    to_chain: str = ''
+    from_amount: int = 0
+    to_amount: int = 0
+    tao_amount: int = 0
+    user_receives: int = 0
+    rate_str: str = ''
+    miner_from_address: str = ''
+    user_from_address: str = ''
+    reserved_until_block: int = 0
+    created_at: float = 0.0
+
+
+# Persisted subset — contract owns the rest.
+_PERSISTED_FIELDS = {
+    'miner_hotkey',
+    'receive_address',
+    'netuid',
+    'wallet_name',
+    'hotkey_name',
+    'from_tx_hash',
+    'request_hash',
+    # created_at is local timing — not derivable from the contract
+    # (the on-chain MinerReserved event has a block, not a wall-clock).
+    'created_at',
+}
 
 
 def save_pending_swap(state: PendingSwapState) -> None:
     """Atomically write pending swap state to ~/.allways/pending_swap.json."""
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(asdict(state), indent=2)
+    full = asdict(state)
+    slim = {k: v for k, v in full.items() if k in _PERSISTED_FIELDS}
+    data = json.dumps(slim, indent=2)
     fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
     try:
         with os.fdopen(fd, 'w') as f:
@@ -287,14 +333,80 @@ def save_pending_swap(state: PendingSwapState) -> None:
 
 
 def load_pending_swap() -> Optional[PendingSwapState]:
-    """Load pending swap state. Returns None if file doesn't exist or is invalid."""
+    """Load pending swap state. Returns None if file doesn't exist or is invalid.
+
+    Only the user-only fields are persisted; call ``hydrate_pending_swap``
+    afterwards with a contract client to populate the contract-derived fields.
+    Older fat state files still load (extra keys are accepted via setattr).
+    """
     if not PENDING_SWAP_FILE.exists():
         return None
     try:
         data = json.loads(PENDING_SWAP_FILE.read_text())
-        return PendingSwapState(**data)
+        # Accept legacy state files with the old fat shape — keep only fields
+        # the dataclass knows about so unknown keys don't crash construction.
+        known = {f.name for f in PendingSwapState.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return PendingSwapState(**filtered)
     except Exception:
         return None
+
+
+def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
+    """Fill contract-derivable fields on ``state`` in place.
+
+    Returns True when the on-chain reservation matches state.request_hash and
+    fields were populated. Returns False if the reservation is gone or the
+    hash doesn't match; caller can still read whatever derivable fields were
+    already populated (legacy state, post-broadcast cache).
+    """
+    if not state.miner_hotkey:
+        return False
+    try:
+        res = client.get_reservation(state.miner_hotkey)
+    except ContractError:
+        return False
+    if not res:
+        return False
+    if state.request_hash and res.hash != state.request_hash:
+        return False
+    state.from_chain = res.from_chain
+    state.to_chain = res.to_chain
+    state.from_amount = res.from_amount
+    state.to_amount = res.to_amount
+    state.tao_amount = res.tao_amount
+    state.user_from_address = res.from_addr
+    state.reserved_until_block = res.reserved_until
+    if not state.request_hash:
+        state.request_hash = res.hash
+    # Miner-commitment fields (rate, miner source addr, uid) live in
+    # current_miners — best-effort fetch, leave defaults on miss.
+    try:
+        from allways.commitments import read_miner_commitment
+
+        subtensor = getattr(client, 'subtensor', None)
+        metagraph = subtensor.metagraph(state.netuid) if subtensor is not None else None
+        miner_pair = read_miner_commitment(subtensor, state.netuid, state.miner_hotkey, metagraph=metagraph)
+        if miner_pair:
+            state.miner_uid = miner_pair.uid
+            # Commitment is stored canonical (alphabetical chains). For a
+            # reverse-direction swap the miner's receiving address lives in
+            # ``to_address``, not ``from_address`` — keep the side that
+            # matches state.from_chain so view-reservation labels line up.
+            if state.from_chain == miner_pair.from_chain:
+                state.miner_from_address = miner_pair.from_address
+                state.rate_str = miner_pair.rate_str
+            else:
+                state.miner_from_address = miner_pair.to_address
+                state.rate_str = miner_pair.counter_rate_str
+    except Exception:
+        pass
+    # User receives = gross dest amount minus 1% protocol fee.
+    if state.to_amount and not state.user_receives:
+        from allways.constants import FEE_DIVISOR
+
+        state.user_receives = state.to_amount - state.to_amount // FEE_DIVISOR
+    return True
 
 
 def clear_pending_swap() -> None:
@@ -302,10 +414,134 @@ def clear_pending_swap() -> None:
     PENDING_SWAP_FILE.unlink(missing_ok=True)
 
 
+def mark_pending_swap_tx_sent(tx_hash: str) -> None:
+    """Record that the source-chain tx has been broadcast for the pending swap.
+
+    Best-effort — silently no-ops when the pending file is missing or the hash
+    is empty. Without this, `alw view reservation` keeps instructing the user
+    to send funds even after they already have, and the wizard's polling /
+    Ctrl+C exit paths leave that state behind.
+    """
+    tx_hash = (tx_hash or '').strip()
+    if not tx_hash:
+        return
+    state = load_pending_swap()
+    if not state:
+        return
+    state.from_tx_hash = tx_hash
+    save_pending_swap(state)
+
+
 # Fallback when the contract's reservation TTL can't be read. Mirrors the
 # contract default (see ``reservation_ttl`` init in
 # allways/smart-contracts/ink/lib.rs); update both together.
-_DEFAULT_RESERVATION_TTL_BLOCKS = 4032
+_DEFAULT_RESERVATION_TTL_BLOCKS = 50  # ~10 min
+
+
+@dataclass
+class ReservationStatus:
+    """Result of reconciling pending_swap.json against on-chain state.
+
+    ``kind`` is one of:
+      - ``ours_active``: reservation still on chain and matches our local row
+      - ``our_swap``: reservation already advanced into a swap on the same
+        miner that matches our user addresses; ``swap`` is set
+      - ``replaced``: a different reservation now occupies the miner — ours
+        is gone (expired or consumed-and-completed)
+      - ``expired``: no reservation on chain and no matching active swap
+      - ``rpc_error``: contract reads failed; caller should not act on result
+    """
+
+    kind: str
+    swap: Optional[Swap] = None
+    reserved_until: int = 0
+
+
+def probe_pending_reservation(client, state: PendingSwapState, current_block: int) -> ReservationStatus:
+    """Reconcile a saved pending_swap.json against on-chain state.
+
+    The naive ``reserved_until > current_block`` check (the old logic) breaks
+    in two ways:
+
+      1. ``finalize_extend_reservation`` advances ``reserved_until`` in-place
+         when a validator's optimistic propose lands, so the saved value can
+         legitimately lag the on-chain value. Equality with the saved block is wrong.
+      2. After our reservation is consumed (vote_initiate) and the resulting
+         swap completes, the swap is pruned but the miner can be re-reserved
+         by another user. The miner's new ``reserved_until`` is in the future
+         — the old check then mis-reports our stale local row as "ACTIVE".
+
+    Resolution order (strongest signal first):
+
+      Step 1 — probe ``get_miner_active_swaps`` and match by user addresses.
+        Survives extension and into FULFILLED. If hit, our reservation has
+        already advanced into a swap.
+
+      Step 2 — read on-chain reservation. No row + no swap match means our
+        reservation is gone (expired or consumed-and-pruned) — ``expired``.
+
+      Step 3 — ``reserved_until`` is in the past. The contract leaves expired
+        rows in the map until the miner is re-reserved (lazy clear in
+        ``vote_reserve``), so a non-zero stale row is still expired — ours
+        if amounts match, someone else's if not, but either way the local
+        file is dead. ``expired``.
+
+      Step 4 — if a row exists but the amounts differ from our saved state,
+        it's someone else's reservation — ``replaced``.
+
+      Step 5 — amounts match but ``reserved_until`` has grown beyond what
+        the optimistic-extension flow could legitimately push it to: each
+        finalize bumps reserved_until by at most ``MAX_EXTENSION_BLOCKS``,
+        and the contract caps the count at ``MAX_EXTENSIONS_PER_RESERVATION``.
+        So total growth from our saved value is bounded by their product;
+        anything beyond is a replacement that happens to share our amounts —
+        ``replaced``.
+
+      Step 6 — within tolerance: ``ours_active``.
+    """
+    # Cheap-bool short-circuit: skip the swap-range scan when the miner has
+    # no active swap, which is the common case for the status/swap-now path.
+    try:
+        if client.get_miner_has_active_swap(state.miner_hotkey):
+            for swap in client.get_miner_active_swaps(state.miner_hotkey):
+                if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
+                    return ReservationStatus(kind='our_swap', swap=swap)
+    except ContractError:
+        return ReservationStatus(kind='rpc_error')
+
+    # Strongest signal: the contract returns the full Reservation including the
+    # request_hash. If our saved hash matches, the row is ours full stop. Saved
+    # state from before request_hash was tracked falls through to the legacy
+    # amount-based reconciliation below.
+    if state.request_hash:
+        try:
+            on_chain = client.get_reservation(state.miner_hotkey)
+        except ContractError:
+            return ReservationStatus(kind='rpc_error')
+        if on_chain is None or on_chain.reserved_until < current_block:
+            return ReservationStatus(kind='expired')
+        if on_chain.hash != state.request_hash:
+            return ReservationStatus(kind='replaced')
+        return ReservationStatus(kind='ours_active', reserved_until=on_chain.reserved_until)
+
+    try:
+        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
+        on_chain = client.get_reservation_data(state.miner_hotkey)
+    except ContractError:
+        return ReservationStatus(kind='rpc_error')
+
+    if reserved_until == 0 or on_chain is None or reserved_until < current_block:
+        return ReservationStatus(kind='expired')
+
+    chain_tao, chain_from, chain_to = on_chain
+    if chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount:
+        return ReservationStatus(kind='replaced')
+
+    max_extension_growth = MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS
+    if reserved_until - state.reserved_until_block > max_extension_growth:
+        return ReservationStatus(kind='replaced')
+
+    return ReservationStatus(kind='ours_active', reserved_until=reserved_until)
 
 
 def resolve_source_tx_block(
@@ -358,7 +594,12 @@ def resolve_source_tx_block(
         console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
         return int(tx_info.block_number)
 
-    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks on your local node.[/yellow]')
+    # In lightweight mode there is no local node — the lookup goes through a
+    # remote API (e.g. Blockstream for BTC), so don't claim "your local node".
+    source = (
+        'via lightweight wallet lookup' if getattr(provider, 'mode', None) == 'lightweight' else 'on your local node'
+    )
+    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks {source}.[/yellow]')
     console.print(
         '[dim]  Validators will scan too; if they reject, retry with: '
         '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'

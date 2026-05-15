@@ -81,6 +81,7 @@ def broadcast_synapse(
     import asyncio
 
     dendrite = bt.Dendrite(wallet=wallet)
+    timeout = resolve_dendrite_timeout(timeout)
 
     loop = asyncio.new_event_loop()
     try:
@@ -89,3 +90,16 @@ def broadcast_synapse(
         loop.close()
 
     return responses
+
+
+def resolve_dendrite_timeout(default: float) -> float:
+    """Honor ALW_DENDRITE_TIMEOUT as an override for slow chains (e.g. testnet)."""
+    import os
+
+    override = os.environ.get('ALW_DENDRITE_TIMEOUT')
+    if not override:
+        return default
+    try:
+        return float(override)
+    except ValueError:
+        return default

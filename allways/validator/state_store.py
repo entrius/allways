@@ -114,6 +114,21 @@ class ValidatorStateStore:
             conn.commit()
         return self.row_to_pending(row)
 
+    def update_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
+        """Refresh the cached reserved_until on an existing pending_confirms row.
+
+        Called after the contract's reservation has been extended on-chain — without
+        this, the row's stale value causes ``purge_expired_pending_confirms`` to
+        delete a still-live entry the moment the original TTL elapses.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
+                (reserved_until, miner_hotkey),
+            )
+            conn.commit()
+
     def has(self, miner_hotkey: str) -> bool:
         with self.lock:
             conn = self.require_connection()
@@ -247,15 +262,17 @@ class ValidatorStateStore:
         miner_hotkey: str,
         completed: bool,
         resolved_block: int,
+        tao_amount: int = 0,
     ) -> None:
         with self.lock:
             conn = self.require_connection()
             conn.execute(
                 """
-                INSERT OR REPLACE INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO swap_outcomes
+                    (swap_id, miner_hotkey, completed, resolved_block, tao_amount)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (swap_id, miner_hotkey, 1 if completed else 0, resolved_block),
+                (swap_id, miner_hotkey, 1 if completed else 0, resolved_block, int(tao_amount or 0)),
             )
             conn.commit()
 
@@ -276,6 +293,22 @@ class ValidatorStateStore:
                 (since_block,),
             ).fetchall()
         return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
+
+    def get_volume_since(self, since_block: int) -> Dict[str, int]:
+        """Sum ``tao_amount`` of completed swaps per miner (rao) since
+        ``since_block``. Timed-out swaps don't count toward volume."""
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT miner_hotkey, SUM(tao_amount) AS total
+                FROM swap_outcomes
+                WHERE resolved_block >= ? AND completed = 1
+                GROUP BY miner_hotkey
+                """,
+                (since_block,),
+            ).fetchall()
+        return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 
     def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
         if cutoff_block <= 0:
@@ -366,7 +399,8 @@ class ValidatorStateStore:
                     swap_id         INTEGER PRIMARY KEY,
                     miner_hotkey    TEXT NOT NULL,
                     completed       INTEGER NOT NULL,
-                    resolved_block  INTEGER NOT NULL
+                    resolved_block  INTEGER NOT NULL,
+                    tao_amount      INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
                     ON swap_outcomes(miner_hotkey);
@@ -379,9 +413,13 @@ class ValidatorStateStore:
             # the PRAGMA-then-ALTER pattern races when two validators share the
             # same DB file: both read "column missing" and both try to add it.
             # Catching the duplicate-column error is the simplest correct form.
-            try:
-                conn.execute('ALTER TABLE pending_confirms ADD COLUMN from_tx_block INTEGER NOT NULL DEFAULT 0')
-            except sqlite3.OperationalError as e:
-                if 'duplicate column' not in str(e).lower():
-                    raise
+            for table, column, ddl in (
+                ('pending_confirms', 'from_tx_block', 'INTEGER NOT NULL DEFAULT 0'),
+                ('swap_outcomes', 'tao_amount', 'INTEGER NOT NULL DEFAULT 0'),
+            ):
+                try:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+                except sqlite3.OperationalError as e:
+                    if 'duplicate column' not in str(e).lower():
+                        raise
             conn.commit()
