@@ -9,13 +9,13 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
 from allways.cli.swap_commands.helpers import (
     console,
     find_matching_miners,
-    from_rao,
     get_cli_context,
     loading,
     read_miner_commitments,
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 

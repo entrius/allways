@@ -7,7 +7,6 @@ from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     console,
-    from_rao,
     get_cli_context,
     hydrate_pending_swap,
     load_pending_swap,
@@ -17,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao
 
 
 @click.command('status', cls=StyledCommand)

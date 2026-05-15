@@ -21,7 +21,6 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     find_matching_miners,
-    from_rao,
     get_cli_context,
     is_local_network,
     load_pending_swap,
@@ -37,6 +36,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.misc import from_rao
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 

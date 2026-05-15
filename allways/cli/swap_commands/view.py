@@ -19,7 +19,6 @@ from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     clear_pending_swap,
     console,
-    from_rao,
     get_cli_context,
     hydrate_pending_swap,
     load_pending_swap,
@@ -35,6 +34,7 @@ from allways.constants import (
     MAX_EXTENSIONS_PER_SWAP,
 )
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao
 
 DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
 

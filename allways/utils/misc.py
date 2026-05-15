@@ -3,6 +3,18 @@ from functools import lru_cache, update_wrapper
 from math import floor
 from typing import Any, Callable
 
+from allways.constants import TAO_TO_RAO
+
+
+def to_rao(amount_tao: float) -> int:
+    """Convert TAO to rao."""
+    return int(amount_tao * TAO_TO_RAO)
+
+
+def from_rao(amount_rao: int) -> float:
+    """Convert rao to TAO."""
+    return amount_rao / TAO_TO_RAO
+
 
 # LRU Cache with TTL
 def ttl_cache(maxsize: int = 128, typed: bool = False, ttl: int = -1):

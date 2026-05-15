@@ -6,9 +6,10 @@ import click
 
 from allways.classes import SwapStatus
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, print_contract_error
+from allways.cli.swap_commands.helpers import console, get_cli_context, loading, print_contract_error
 from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao
 
 
 @click.command('claim', cls=StyledCommand, show_disclaimer=True)

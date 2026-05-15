@@ -7,14 +7,13 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     console,
-    from_rao,
     get_cli_context,
     loading,
     print_contract_error,
-    to_rao,
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
 from allways.contract_client import ContractError, is_contract_rejection
+from allways.utils.misc import from_rao, to_rao
 
 
 @click.group('collateral', cls=StyledGroup, show_disclaimer=True)

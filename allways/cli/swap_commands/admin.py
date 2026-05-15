@@ -6,14 +6,13 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     console,
-    from_rao,
     get_cli_context,
     is_valid_ss58,
     loading,
     print_contract_error,
-    to_rao,
 )
 from allways.contract_client import ContractError
+from allways.utils.misc import from_rao, to_rao
 
 
 def _run_setter(title, getter, setter, noun, format_current, new_display, success_msg):
