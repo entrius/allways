@@ -15,12 +15,14 @@ from allways.classes import MinerPair, Swap, SwapStatus
 from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
 from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
 from allways.constants import (
+    FEE_DIVISOR,
     MAX_EXTENSION_BLOCKS,
     MAX_EXTENSIONS_PER_RESERVATION,
     NETUID_FINNEY,
     TAO_TO_RAO,
 )
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.utils.rate import apply_fee_deduction
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -402,11 +404,8 @@ def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
                 state.rate_str = miner_pair.counter_rate_str
     except Exception:
         pass
-    # User receives = gross dest amount minus 1% protocol fee.
     if state.to_amount and not state.user_receives:
-        from allways.constants import FEE_DIVISOR
-
-        state.user_receives = state.to_amount - state.to_amount // FEE_DIVISOR
+        state.user_receives = apply_fee_deduction(state.to_amount, FEE_DIVISOR)
     return True
 
 
