@@ -11,7 +11,7 @@ import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from substrateinterface.utils.ss58 import ss58_decode
+from bittensor.utils import ss58_decode
 
 from allways.validator.event_watcher import (
     ContractEventWatcher,
@@ -107,6 +107,63 @@ class TestSwapOutcomePersistence:
         assert stats['hk_a'] == (2, 1)
         w.state_store.close()
 
+    def test_completed_event_resolves_tracker(self, tmp_path: Path):
+        from allways.validator.swap_tracker import SwapTracker
+
+        w = make_watcher(tmp_path)
+        tracker = SwapTracker(client=MagicMock())
+        from allways.classes import Swap, SwapStatus
+
+        tracker.active[42] = Swap(
+            id=42,
+            user_hotkey='u',
+            miner_hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=1,
+            to_amount=1,
+            tao_amount=1,
+            user_from_address='u',
+            user_to_address='u',
+            status=SwapStatus.FULFILLED,
+            initiated_block=1,
+            timeout_block=100,
+        )
+        w.swap_tracker = tracker
+
+        w.apply_event(150, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
+
+        assert 42 not in tracker.active
+        w.state_store.close()
+
+    def test_timed_out_event_resolves_tracker(self, tmp_path: Path):
+        from allways.classes import Swap, SwapStatus
+        from allways.validator.swap_tracker import SwapTracker
+
+        w = make_watcher(tmp_path)
+        tracker = SwapTracker(client=MagicMock())
+        tracker.active[43] = Swap(
+            id=43,
+            user_hotkey='u',
+            miner_hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=1,
+            to_amount=1,
+            tao_amount=1,
+            user_from_address='u',
+            user_to_address='u',
+            status=SwapStatus.FULFILLED,
+            initiated_block=1,
+            timeout_block=100,
+        )
+        w.swap_tracker = tracker
+
+        w.apply_event(200, 'SwapTimedOut', {'swap_id': 43, 'miner': 'hk_a'})
+
+        assert 43 not in tracker.active
+        w.state_store.close()
+
 
 class TestBusyIntervals:
     def test_initiate_marks_busy_then_complete_frees(self, tmp_path: Path):
@@ -166,6 +223,66 @@ class TestBusyIntervals:
         assert w.open_swap_count == {'hk_a': 1, 'hk_b': 1}
         busy_now = w.get_busy_miners_at(100)
         assert busy_now == {'hk_a': 1, 'hk_b': 1}
+        w.state_store.close()
+
+    def test_bootstrapped_swap_initiated_replay_is_idempotent(self, tmp_path: Path):
+        """Restart scenario: a swap that was live at bootstrap is seeded with
+        +1 from the contract, then its SwapInitiated event replays during
+        sync_to. The replay must NOT add a second +1."""
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 42, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+        assert w.open_swap_count['hk_a'] == 1
+
+        # sync_to replays the SwapInitiated event for swap 42 — must be a no-op.
+        w.apply_event(50, 'SwapInitiated', {'swap_id': 42, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 1, 'bootstrapped swap must not double-count on replay'
+
+        # And when the matching terminal event fires, count returns to 0.
+        w.apply_event(120, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 42 not in w.bootstrapped_swap_ids
+        w.state_store.close()
+
+    def test_non_bootstrapped_initiated_still_increments(self, tmp_path: Path):
+        """A SwapInitiated whose id wasn't in the bootstrap set (new swap
+        after startup) applies the +1 normally."""
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 42, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        # swap_id 99 was not in the bootstrap set — treat normally.
+        w.apply_event(110, 'SwapInitiated', {'swap_id': 99, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 2
+        w.state_store.close()
+
+    def test_bootstrapped_swap_timeout_also_clears_set(self, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = [
+            type('S', (), {'id': 7, 'miner_hotkey': 'hk_a', 'initiated_block': 50})(),
+        ]
+        w.initialize(current_block=100, metagraph_hotkeys=['hk_a'], contract_client=client)
+        assert 7 in w.bootstrapped_swap_ids
+
+        w.apply_event(130, 'SwapTimedOut', {'swap_id': 7, 'miner': 'hk_a'})
+        assert w.open_swap_count['hk_a'] == 0
+        assert 7 not in w.bootstrapped_swap_ids
         w.state_store.close()
 
 

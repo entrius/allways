@@ -21,7 +21,6 @@ pub enum SwapStatus {
 pub enum VoteType {
     Confirm = 0,
     Timeout = 1,
-    ExtendTimeout = 2,
 }
 
 /// Confirmed reservation for a miner after validator quorum.
@@ -35,10 +34,27 @@ pub enum VoteType {
 pub struct Reservation {
     pub hash: Hash,
     pub from_addr: String,
+    pub from_chain: String,
+    pub to_chain: String,
     pub tao_amount: Balance,
     pub from_amount: Balance,
     pub to_amount: Balance,
     pub reserved_until: u32,
+}
+
+/// One pending optimistic extension proposal.
+///
+/// Created by `propose_extend_*`, consumed by `finalize_extend_*` after the
+/// challenge window passes, or deleted by `challenge_extend_*` (no
+/// `challenged: bool` flag — the entry just goes away and any validator can
+/// re-propose). Used for both reservation and timeout extensions; the keying
+/// (miner vs swap_id) lives in the storage Mapping, not on the struct.
+#[derive(Debug, Clone, Encode, Decode)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout))]
+pub struct PendingExtension {
+    pub submitter: AccountId,
+    pub target_block: u32,
+    pub proposed_at: u32,
 }
 
 /// Full swap data stored on-chain
