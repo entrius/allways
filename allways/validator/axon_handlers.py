@@ -510,8 +510,8 @@ async def handle_swap_confirm(
 
             # tx_info=None means we couldn't see the tx (propagation lag) or
             # amount/sender didn't match — queue both rather than rejecting,
-            # so the drain re-verifies and PENDING_CONFIRM_NULL_RETRY_LIMIT
-            # bounds the bogus case. Rejecting here races freshly-broadcast txs.
+            # so the drain re-verifies until the reservation expires (purge
+            # bounds the bogus case). Rejecting here races freshly-broadcast txs.
             if tx_info is None or not tx_info.confirmed:
                 found_tx_block = (tx_info.block_number if tx_info else 0) or synapse.from_tx_block
                 pending = PendingConfirm(

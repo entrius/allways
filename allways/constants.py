@@ -70,11 +70,6 @@ RECYCLE_UID = 53  # Subnet owner UID
 RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
 RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
 MAX_RESERVATIONS_PER_ADDRESS = 1
-# A user's tx is often invisible to a validator's RPC for the first few seconds
-# after submission (mempool propagation lag, regional RPC differences). Treat
-# "not found" as transient until the same entry has polled null this many times.
-PENDING_CONFIRM_NULL_RETRY_LIMIT = 3
-
 # ─── Optimistic Extensions ───────────────────────────────
 # Tunables for the propose/challenge/finalize extension flow. Per-chain timing
 # (block time, confirmations) lives in allways/chains.py; the contract enforces

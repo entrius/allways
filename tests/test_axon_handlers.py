@@ -289,8 +289,8 @@ class TestSourceTxVerification:
     def test_queues_when_source_tx_not_yet_visible(self):
         """tx_info=None means we couldn't see the tx (propagation lag) or
         amount/sender mismatch — queue and let the forward drain re-verify
-        instead of rejecting outright. The drain bounds bogus entries via
-        PENDING_CONFIRM_NULL_RETRY_LIMIT."""
+        instead of rejecting outright. Bogus entries are bounded by the
+        reservation expiry (purge_expired_pending_confirms)."""
         validator = make_validator()
         validator.axon_chain_providers['btc'].verify_transaction.return_value = None
         result = run_handler(validator, make_synapse())
