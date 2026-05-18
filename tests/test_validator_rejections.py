@@ -43,6 +43,25 @@ def test_all_queued_counted_separately():
     assert info.queued == 2
 
 
+def test_queued_not_yet_visible_counted_as_queued():
+    """Upgraded validators queue when the source tx isn't visible yet
+    (propagation lag) instead of rejecting — the CLI should treat the
+    new wording the same way it treats `Queued — N/M confirmations`."""
+    responses = [
+        FakeResp(
+            accepted=True,
+            rejection_reason=(
+                'Queued — source tx not yet visible to validators (propagation lag '
+                'or pending re-verify). Validator will auto-initiate once seen and confirmed.'
+            ),
+        ),
+    ]
+    info = render_and_aggregate(_silent_console(), responses)
+    assert info.accepted == 1
+    assert info.queued == 1
+    assert info.rejected == 0
+
+
 def test_insufficient_source_balance_translates():
     responses = [FakeResp(accepted=False, rejection_reason='Insufficient source balance')]
     info = render_and_aggregate(

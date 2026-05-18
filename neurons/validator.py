@@ -85,9 +85,6 @@ class Validator(BaseValidatorNeuron):
             current_block_fn=lambda: self.block,
         )
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
-        # (miner_hotkey, from_tx_hash) → consecutive "tx not found" poll count.
-        # Used to absorb mempool propagation lag before dropping a pending entry.
-        self.pending_confirm_null_polls: dict[tuple[str, str], int] = {}
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next 1200-step boundary
         # (which would route emissions to RECYCLE via the empty-norm fallback).

@@ -194,6 +194,7 @@ class SubtensorProvider(ChainProvider):
             blocks_to_check = [current_block - offset for offset in range(window) if current_block - offset >= 0]
 
         try:
+            tx_hash_seen = False
             for block_num in blocks_to_check:
                 block = self.get_block(block_num)
                 if not block or 'extrinsics' not in block:
@@ -206,6 +207,7 @@ class SubtensorProvider(ChainProvider):
                     if match is None:
                         continue
 
+                    tx_hash_seen = True
                     dest, amount, sender = match
                     confs = current_block - block_num
                     if dest == expected_recipient and amount >= expected_amount:
@@ -219,6 +221,12 @@ class SubtensorProvider(ChainProvider):
                             confirmations=confs,
                         )
 
+            if tx_hash_seen:
+                bt.logging.warning(
+                    f'TAO scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
+                )
+            else:
+                bt.logging.debug(f'TAO scan: tx {tx_hash[:16]}... not found in scan window')
             return None
         except ProviderUnreachableError:
             raise

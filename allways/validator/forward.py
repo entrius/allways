@@ -13,7 +13,6 @@ from allways.commitments import read_miner_commitments
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
-    PENDING_CONFIRM_NULL_RETRY_LIMIT,
     SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
@@ -99,12 +98,6 @@ def initialize_pending_user_reservations(self: Validator) -> None:
     from bittensor import Keypair
 
     items = self.state_store.get_all()
-    # Drop per-entry receipts whose pending_confirm has been removed
-    # (vote_initiate landed, tx not found, expired, etc.).
-    live_keys = {(item.miner_hotkey, item.from_tx_hash) for item in items}
-    for stale_key in [k for k in self.pending_confirm_null_polls if k not in live_keys]:
-        del self.pending_confirm_null_polls[stale_key]
-
     if not items:
         return
 
@@ -154,24 +147,14 @@ def initialize_pending_user_reservations(self: Validator) -> None:
             continue
 
         if tx_info is None:
-            null_key = (item.miner_hotkey, item.from_tx_hash)
-            attempts = self.pending_confirm_null_polls.get(null_key, 0) + 1
-            if attempts < PENDING_CONFIRM_NULL_RETRY_LIMIT:
-                self.pending_confirm_null_polls[null_key] = attempts
-                bt.logging.info(
-                    f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... '
-                    f'not found (attempt {attempts}/{PENDING_CONFIRM_NULL_RETRY_LIMIT}), retrying'
-                )
-                try_extend_reservation(self, item, current_block, swap_label, miner_short, tx_info=None)
-                continue
-            self.state_store.remove(item.miner_hotkey)
-            bt.logging.warning(
+            log_on_change(
+                f'null:{item.miner_hotkey}:{item.from_tx_hash}',
+                'not_found',
                 f'PendingConfirm [{swap_label} {miner_short}]: tx {item.from_tx_hash[:16]}... '
-                f'not found after {PENDING_CONFIRM_NULL_RETRY_LIMIT} attempts, dropping'
+                f'not yet visible, will retry until reservation expires',
             )
+            try_extend_reservation(self, item, current_block, swap_label, miner_short, tx_info=None)
             continue
-
-        self.pending_confirm_null_polls.pop((item.miner_hotkey, item.from_tx_hash), None)
 
         log_on_change(
             f'confs:{item.miner_hotkey}',
