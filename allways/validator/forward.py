@@ -479,6 +479,15 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         if tx_info is None:
             continue  # dest tx invisible — neither tier qualifies
 
+        # A finalize this step may have just pushed the deadline out. Mirror
+        # the reservation-side gate in try_extend_reservation: once the swap
+        # is no longer near timeout, skip challenge/propose so the next
+        # extension anchors on the new deadline, not this block. Without this,
+        # finalizing extension N and proposing extension N+1 in the same step
+        # collapses N+1's runway to a handful of blocks.
+        if swap.timeout_block >= current_block + EXTEND_THRESHOLD_BLOCKS:
+            continue
+
         try:
             extension_count = self.contract_client.get_swap_extension_count(swap.id)
         except Exception as e:
