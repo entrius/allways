@@ -9,7 +9,7 @@ Covers three layers:
 
 import struct
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bittensor.utils import ss58_decode
 
@@ -31,13 +31,15 @@ METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways
 TEST_CONTRACT_ADDRESS = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
 
 
-def make_watcher(tmp_path: Path) -> ContractEventWatcher:
+def make_watcher(tmp_path: Path, *, netuid=None, subtensor=None) -> ContractEventWatcher:
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     return ContractEventWatcher(
         substrate=MagicMock(),
         contract_address=TEST_CONTRACT_ADDRESS,
         metadata_path=METADATA_PATH,
         state_store=store,
+        netuid=netuid,
+        subtensor=subtensor,
     )
 
 
@@ -372,6 +374,135 @@ class TestSCALEDecoder:
         assert 'first' in values
         assert 'second' not in values
         assert 'third' not in values
+
+
+def make_pinned_commitment(
+    from_chain: str = 'btc',
+    to_chain: str = 'tao',
+    from_address: str = 'bc1-miner',
+    to_address: str = '5miner',
+    rate_str: str = '345',
+    counter_rate_str: str = '0.0029',
+):
+    """A MinerPair as read_miner_commitment would return it."""
+    from allways.classes import MinerPair
+
+    return MinerPair(
+        uid=1,
+        hotkey='hk_a',
+        from_chain=from_chain,
+        from_address=from_address,
+        to_chain=to_chain,
+        to_address=to_address,
+        rate=float(rate_str),
+        rate_str=rate_str,
+        counter_rate=float(counter_rate_str) if counter_rate_str else 0.0,
+        counter_rate_str=counter_rate_str,
+    )
+
+
+class TestReservationPin:
+    """MinerReserved → reservation pin index, plus the lifecycle clears that
+    drop or refresh the pin."""
+
+    def test_miner_reserved_writes_expected_pin(self, tmp_path: Path):
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        commitment = make_pinned_commitment()
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=commitment,
+        ) as mock_read:
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        # Commitment read pinned to the reservation block so every validator
+        # derives a byte-identical pin.
+        assert mock_read.call_args.kwargs['block'] == 900
+
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin is not None
+        assert pin.reserve_block == 900
+        assert pin.reserved_until == 1000
+        assert pin.from_chain == 'btc'
+        assert pin.to_chain == 'tao'
+        assert pin.rate_str == '345'
+        assert pin.counter_rate_str == '0.0029'
+        assert pin.miner_from_address == 'bc1-miner'
+        assert pin.miner_to_address == '5miner'
+        w.state_store.close()
+
+    def test_commitment_read_raising_writes_no_pin(self, tmp_path: Path):
+        """A transient RPC error or a pruned block must not write a pin and
+        must not let the exception escape apply_event."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            side_effect=RuntimeError('rpc down'),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        w.state_store.close()
+
+    def test_none_commitment_writes_no_pin(self, tmp_path: Path):
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=None,
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        w.state_store.close()
+
+    def test_watcher_without_subtensor_is_noop(self, tmp_path: Path):
+        """The test helper (and any watcher built without subtensor/netuid)
+        must no-op the MinerReserved handler rather than crash."""
+        w = make_watcher(tmp_path)  # no netuid/subtensor
+        with patch('allways.validator.event_watcher.read_miner_commitment') as mock_read:
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        mock_read.assert_not_called()
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        w.state_store.close()
+
+    def test_swap_initiated_clears_pin(self, tmp_path: Path):
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+        assert w.state_store.get_reservation_pin('hk_a') is not None
+
+        w.apply_event(950, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        w.state_store.close()
+
+    def test_swap_timed_out_clears_pin(self, tmp_path: Path):
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        w.apply_event(1100, 'SwapTimedOut', {'swap_id': 1, 'miner': 'hk_a'})
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        w.state_store.close()
+
+    def test_reservation_extension_finalized_bumps_pin_ttl(self, tmp_path: Path):
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        w.apply_event(990, 'ReservationExtensionFinalized', {'miner': 'hk_a', 'applied_target': 1400})
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin is not None
+        assert pin.reserved_until == 1400
+        w.state_store.close()
 
 
 class TestBootstrap:
