@@ -34,7 +34,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
@@ -188,6 +188,7 @@ def broadcast_reserve_with_retry(
     netuid: int,
     skip_confirm: bool = False,
     max_retries: int = 2,
+    slippage_bps: int = 200,
 ):
     """Reserve miner via multi-validator consensus with retry.
 
@@ -239,6 +240,7 @@ def broadcast_reserve_with_retry(
             block_anchor=current_block,
             from_chain=from_chain,
             to_chain=to_chain,
+            slippage_bps=slippage_bps,
         )
 
         with loading(f'Broadcasting reservation to {len(validator_axons)} validators...'):
@@ -568,6 +570,17 @@ def swap_group():
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 @click.option(
+    '--slippage',
+    'slippage',
+    type=float,
+    default=2.0,
+    help=(
+        'Maximum rate slippage (in percent) between your quote and the reservation. '
+        "The reservation is rejected if the miner's current rate would give you more than "
+        'this percentage less than your quoted amount. Default: 2.0%.'
+    ),
+)
+@click.option(
     '--btc-fee-rate',
     'btc_fee_rate_opt',
     type=click.IntRange(min=1),
@@ -588,6 +601,7 @@ def swap_now_command(
     from_tx_hash_opt: Optional[str],
     auto_select: bool,
     skip_confirm: bool,
+    slippage: float,
     btc_fee_rate_opt: Optional[int],
 ):
     """Guided interactive swap - step by step.
@@ -821,6 +835,24 @@ def swap_now_command(
         f' (after {preview_fee_pct:g}% fee)'
     )
 
+    # Convert slippage percent to bps and apply the ceiling clamp.
+    slippage_bps = round(slippage * 100)
+    if slippage_bps > RESERVE_SLIPPAGE_MAX_BPS:
+        console.print(
+            f'[yellow]Warning: --slippage {slippage}% exceeds the protocol ceiling '
+            f'({RESERVE_SLIPPAGE_MAX_BPS // 100}%) — will be capped.[/yellow]'
+        )
+        slippage_bps = RESERVE_SLIPPAGE_MAX_BPS
+    if slippage > 10.0:
+        console.print(
+            f'[yellow]Warning: slippage is set to {slippage}%, which is unusually high. '
+            'Consider a lower value to protect against adverse rate moves.[/yellow]'
+        )
+    console.print(
+        f"  Slippage {slippage:g}% — reservation is rejected if the miner's rate has moved "
+        f'more than {slippage:g}% below your quote.'
+    )
+
     tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
 
     # Validate against contract min/max swap bounds + selected miner's
@@ -985,6 +1017,7 @@ def swap_now_command(
         from_key,
         netuid,
         skip_confirm=skip_confirm,
+        slippage_bps=slippage_bps,
     )
     if result is None:
         return

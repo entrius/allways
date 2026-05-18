@@ -447,37 +447,141 @@ def run_reserve_handler(validator, synapse, commitment=_DEFAULT):
 
 
 class TestReserveRateRecompute:
+    # ------------------------------------------------------------------ #
+    # exact match / within band                                            #
+    # ------------------------------------------------------------------ #
+
     def test_accepts_when_amounts_match_commitment_rate(self):
-        """A correctly-quoted reservation passes the recompute gate and votes."""
+        """A correctly-quoted reservation (exact match) passes and votes."""
         validator = make_reserve_validator()
         result = run_reserve_handler(validator, make_reserve_synapse())
         assert result.accepted is True
         validator.axon_contract_client.vote_reserve.assert_called_once()
 
-    def test_rejects_stale_to_amount(self):
-        """A to_amount that doesn't match the commitment rate is rejected — the
-        rate moved after the quote was computed."""
+    def test_accepts_within_default_slippage_band(self):
+        """Rate dropped 1% after the user's quote — within the default 2% band."""
         validator = make_reserve_validator()
-        synapse = make_reserve_synapse(to_amount=_RESERVE_TO_AMOUNT + 1_000_000)
-        result = run_reserve_handler(validator, synapse)
+        # User quoted at rate 345 → to_amount = 345_000_000.
+        # Rate moved to ~341.55 (1% down) → recomputed ≈ 341_550_000.
+        # Simulate by patching the commitment rate so recomputed < quoted by 1%.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.99)  # '341.55'
+        moved.rate = 345 * 0.99
+        # User's synapse still reflects the old 345 quote
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is True
+        validator.axon_contract_client.vote_reserve.assert_called_once()
+
+    def test_rejects_beyond_default_slippage_band(self):
+        """Rate dropped 3% after the user's quote — exceeds the default 2% band."""
+        validator = make_reserve_validator()
+        # Rate moved to ~334.65 (3% down) → recomputed ≈ 334_650_000.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.97)
+        moved.rate = 345 * 0.97
+        # User's synapse still reflects the old 345 quote
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
         assert result.accepted is False
-        assert 'rate moved' in result.rejection_reason
+        assert 'slippage band' in result.rejection_reason
         validator.axon_contract_client.vote_reserve.assert_not_called()
 
-    def test_rejects_stale_tao_amount(self):
-        """tao_amount must also be rate-consistent — it flows into the contract
-        bounds check and the initiate hash."""
+    def test_accepts_favorable_move_recomputed_above_quoted(self):
+        """A favorable rate move (recomputed > quoted) always passes.
+
+        The user quoted conservatively at 330; the miner's rate is still 345
+        so recomputed (345_000_000) > quoted (330_000_000) — always passes.
+        """
+        validator = make_reserve_validator()
+        # User quoted at 330 rate → to_amount = 330_000_000
+        conservative_rate = 330.0
+        conservative_to = int(_RESERVE_FROM_AMOUNT * conservative_rate * 10**9 // 10**8)  # sat→rao
+        synapse = make_reserve_synapse(to_amount=conservative_to, tao_amount=conservative_to)
+        # Commitment still at 345 → recomputed = 345_000_000 > conservative_to
+        result = run_reserve_handler(validator, synapse)
+        assert result.accepted is True
+
+    def test_rejects_swap79_scale_gap(self):
+        """A quote ~7x above the recomputed amount (swap-79 scenario) rejects."""
+        validator = make_reserve_validator()
+        # User quoted at 345 rate but miner moved to 49 (7x gap)
+        moved = make_commitment()
+        moved.rate_str = '49'
+        moved.rate = 49.0
+        # from_amount=100_000 sat at rate '49' → 49_000_000 rao
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    def test_tighter_user_slippage_rejects_small_drift(self):
+        """Rate dropped 0.5% — within the default 2% band but rejected with
+        --slippage 0.3% (30 bps)."""
+        validator = make_reserve_validator()
+        # Rate moved to 99.5% of 345 → recomputed ≈ 99.5% of 345_000_000
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.995)
+        moved.rate = 345 * 0.995
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = 30  # 0.3%
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+
+    def test_wider_user_slippage_accepts_large_drift(self):
+        """Rate dropped 4% — the default 2% band rejects it, but --slippage 5%
+        (500 bps) accepts it."""
+        validator = make_reserve_validator()
+        # Rate moved to 96% of 345 → recomputed ≈ 96% of 345_000_000
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.96)
+        moved.rate = 345 * 0.96
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = 500  # 5%
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        assert result.accepted is True
+
+    def test_slippage_max_bps_clamp_applied(self):
+        """slippage_bps above RESERVE_SLIPPAGE_MAX_BPS is clamped, not errored.
+
+        With the clamp applied, even a very large drift (rate dropped 90%)
+        passes the slippage gate because MAX_BPS >= 10_000 makes the threshold
+        non-positive.
+        """
+        from allways.constants import RESERVE_SLIPPAGE_MAX_BPS
+
+        validator = make_reserve_validator()
+        # Rate dropped 90% → recomputed = 10% of 345_000_000 = 34_500_000.
+        # Default 2% band would reject this, but MAX_BPS uncaps it.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.10)
+        moved.rate = 345 * 0.10
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = RESERVE_SLIPPAGE_MAX_BPS + 1_000_000  # absurdly large — clamped
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        # With MAX_BPS applied, gate passes; default 2% would reject
+        assert result.accepted is True
+
+    # ------------------------------------------------------------------ #
+    # tao_amount internal consistency                                      #
+    # ------------------------------------------------------------------ #
+
+    def test_rejects_inconsistent_tao_amount(self):
+        """tao_amount must equal derive_tao_leg(from_amount, to_amount) — an
+        inconsistent triple is rejected before the slippage gate."""
         validator = make_reserve_validator()
         synapse = make_reserve_synapse(tao_amount=_RESERVE_TAO_AMOUNT + 5)
         result = run_reserve_handler(validator, synapse)
         assert result.accepted is False
-        assert 'rate moved' in result.rejection_reason
+        assert 'inconsistent' in result.rejection_reason
         validator.axon_contract_client.vote_reserve.assert_not_called()
 
+    # ------------------------------------------------------------------ #
+    # rate moved after quote                                               #
+    # ------------------------------------------------------------------ #
+
     def test_rejects_when_rate_moved_after_quote(self):
-        """User quotes against rate 345, but the miner re-committed to 300
-        before the reservation reaches the validator — reject so the user
-        re-quotes against the live rate."""
+        """User quotes against rate 345, miner re-committed to 300 — the quote
+        is now ~15% above recomputed, outside the default 2% band."""
         validator = make_reserve_validator()
         moved = make_commitment()
         moved.rate_str = '300'
@@ -485,11 +589,15 @@ class TestReserveRateRecompute:
         # User still submits the amounts from the old 345 quote.
         result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
         assert result.accepted is False
-        assert 'rate moved' in result.rejection_reason
+        assert 'slippage band' in result.rejection_reason
         validator.axon_contract_client.vote_reserve.assert_not_called()
 
     def test_recompute_runs_before_vote(self):
-        """A stale quote must be rejected without ever calling vote_reserve."""
+        """A stale quote (rate moved 7x) is rejected before vote_reserve is called."""
         validator = make_reserve_validator()
-        run_reserve_handler(validator, make_reserve_synapse(to_amount=1))
+        # Rate moved from 345 down to 49 — user's old quote is ~7x above recomputed.
+        moved = make_commitment()
+        moved.rate_str = '49'
+        moved.rate = 49.0
+        run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
         validator.axon_contract_client.vote_reserve.assert_not_called()

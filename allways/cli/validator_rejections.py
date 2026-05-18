@@ -93,7 +93,7 @@ _RULES: list[_Rule] = [
     ),
     (
         'rate_moved',
-        'quoted amount no longer matches the miner rate',
+        'quoted amount is below your slippage band',
         True,
         lambda ctx: (
             f'Miner UID {_ctx_get(ctx, "miner_uid")} changed its rate after you got your quote. '

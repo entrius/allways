@@ -18,11 +18,11 @@ from Crypto.Hash import keccak
 from allways.chains import canonical_pair, get_chain
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
-from allways.constants import RESERVATION_COOLDOWN_BLOCKS
+from allways.constants import RESERVATION_COOLDOWN_BLOCKS, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
-from allways.utils.rate import calculate_to_amount, derive_tao_leg
+from allways.utils.rate import calculate_to_amount, derive_tao_leg, quote_within_slippage
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -356,23 +356,35 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
 
-            # Recompute to_amount/tao_amount from the commitment rate read here
-            # at reserve time. The reservation pins amounts but not the miner's
-            # rate, so a quote computed against a momentarily-bad rate would
-            # otherwise be locked in. Reject a mismatch so the user re-quotes
-            # against the current rate. The contract stores these amounts and
-            # they flow straight into the initiate hash, so they must be
-            # rate-consistent before the reservation is voted on-chain.
-            expected_to_amount, expected_tao_amount = recompute_reserve_amounts(
+            # Recompute expected to_amount from the commitment rate read here at
+            # reserve time. The reservation pins amounts but not the miner's
+            # rate, so a quote computed against a stale rate would otherwise be
+            # locked in.
+            #
+            # tao_amount is pure arithmetic from the submitted amounts — reject
+            # any inconsistency before voting so the contract always sees a
+            # self-consistent triple.
+            expected_to_amount, _ = recompute_reserve_amounts(
                 commitment,
                 synapse.from_chain,
                 synapse.to_chain,
                 synapse.from_amount,
             )
-            if synapse.to_amount != expected_to_amount or synapse.tao_amount != expected_tao_amount:
+            expected_tao_amount = derive_tao_leg(
+                synapse.from_chain, synapse.from_amount, synapse.to_chain, synapse.to_amount
+            )
+            if synapse.tao_amount != expected_tao_amount:
                 reject_synapse(
                     synapse,
-                    'Quoted amount no longer matches the miner rate — the rate moved, re-quote and retry',
+                    'tao_amount is inconsistent with from_amount/to_amount — re-quote and retry',
+                    ctx,
+                )
+                return synapse
+            slippage_bps = max(0, min(synapse.slippage_bps, RESERVE_SLIPPAGE_MAX_BPS))
+            if not quote_within_slippage(synapse.to_amount, expected_to_amount, slippage_bps):
+                reject_synapse(
+                    synapse,
+                    'Quoted amount is below your slippage band — the miner rate moved, re-quote and retry',
                     ctx,
                 )
                 return synapse

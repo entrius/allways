@@ -78,7 +78,7 @@ def test_address_cooldown_includes_raw_reason():
 
 
 def test_rate_moved_translates():
-    raw = 'Quoted amount no longer matches the miner rate — the rate moved, re-quote and retry'
+    raw = 'Quoted amount is below your slippage band — the miner rate moved, re-quote and retry'
     info = render_and_aggregate(
         _silent_console(),
         [FakeResp(accepted=False, rejection_reason=raw)],
