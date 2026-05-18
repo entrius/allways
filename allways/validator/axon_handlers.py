@@ -15,12 +15,14 @@ import bittensor as bt
 from bittensor import Keypair
 from Crypto.Hash import keccak
 
+from allways.chains import canonical_pair, get_chain
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
+from allways.utils.rate import calculate_to_amount, derive_tao_leg
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -115,6 +117,35 @@ def resolve_swap_direction(
     if rate <= 0:
         return None
     return from_chain, to_chain, deposit_addr, fulfillment_addr, rate, rate_str
+
+
+def recompute_reserve_amounts(
+    commitment: MinerPair,
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+) -> Tuple[int, int]:
+    """Recompute (to_amount, tao_amount) from the miner's commitment rate.
+
+    The reservation pins the *amounts*, not the miner's rate — so the validator
+    must derive to_amount/tao_amount itself from the rate it reads at reserve
+    time rather than trusting the user-submitted values. A CLI quote computed
+    against a momentarily-bad (or stale) rate would otherwise get locked into
+    the reservation. Mirrors the CLI quote path in cli/swap_commands/swap.py so
+    a correctly-quoted reservation always matches.
+    """
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    is_reverse = from_chain != canon_from
+    _, rate_str = commitment.get_rate_for_direction(from_chain)
+    to_amount = calculate_to_amount(
+        from_amount,
+        rate_str,
+        is_reverse,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
+    )
+    tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
+    return to_amount, tao_amount
 
 
 def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
@@ -323,6 +354,27 @@ async def handle_swap_reserve(
             reserve_rate, _ = commitment.get_rate_for_direction(synapse.from_chain)
             if reserve_rate <= 0:
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
+                return synapse
+
+            # Recompute to_amount/tao_amount from the commitment rate read here
+            # at reserve time. The reservation pins amounts but not the miner's
+            # rate, so a quote computed against a momentarily-bad rate would
+            # otherwise be locked in. Reject a mismatch so the user re-quotes
+            # against the current rate. The contract stores these amounts and
+            # they flow straight into the initiate hash, so they must be
+            # rate-consistent before the reservation is voted on-chain.
+            expected_to_amount, expected_tao_amount = recompute_reserve_amounts(
+                commitment,
+                synapse.from_chain,
+                synapse.to_chain,
+                synapse.from_amount,
+            )
+            if synapse.to_amount != expected_to_amount or synapse.tao_amount != expected_tao_amount:
+                reject_synapse(
+                    synapse,
+                    'Quoted amount no longer matches the miner rate — the rate moved, re-quote and retry',
+                    ctx,
+                )
                 return synapse
 
             collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
