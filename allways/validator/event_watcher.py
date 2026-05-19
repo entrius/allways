@@ -413,8 +413,9 @@ class ContractEventWatcher:
             if not hotkey:
                 return
             active = bool(values.get('active'))
-            applied = self.record_active_transition(block_num, hotkey, active)
-            if applied:
+            state_changed = (hotkey in self.active_miners) != active
+            self.record_active_transition(block_num, hotkey, active)
+            if state_changed:
                 bt.logging.info(
                     f'EventWatcher: {self._label(hotkey)} MinerActivated(active={active}) @ block {block_num}'
                 )
@@ -493,16 +494,15 @@ class ContractEventWatcher:
     def _label(self, hotkey: str) -> str:
         return _miner_label(self.metagraph, hotkey)
 
-    def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> bool:
+    def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
         snapshot and the historical event log. A no-op if the flag already
-        matches — duplicate MinerActivated emissions don't pollute the log.
-        Returns True when the state actually changed."""
+        matches — duplicate MinerActivated emissions don't pollute the log."""
         if not hotkey:
-            return False
+            return
         currently_active = hotkey in self.active_miners
         if currently_active == active:
-            return False
+            return
         if active:
             self.active_miners.add(hotkey)
         else:
@@ -510,7 +510,6 @@ class ContractEventWatcher:
         event = ActiveEvent(hotkey=hotkey, active=active, block=block_num)
         self.active_events.append(event)
         self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
-        return True
 
     def apply_busy_delta(self, block_num: int, hotkey: str, delta: int) -> None:
         """Apply a ±1 transition. Drops any -1 with no matching prior +1

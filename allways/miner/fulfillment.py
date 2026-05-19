@@ -192,14 +192,10 @@ class SwapFulfiller:
                 require_confirmed=True,
             )
             if tx_info is None:
-                # Log once per (swap, attempt) so a miner waiting on confirmations
-                # surfaces in the INFO stream rather than only DEBUG. The base
-                # helper rate-limits its own confs progress at debug; this is
-                # the chronological breadcrumb at INFO.
                 log_on_change(
                     f'src_waiting:{swap.id}',
                     True,
-                    f'Swap {swap.id}: source tx not yet ready (waiting on visibility/confirmations/sender) — will retry',
+                    f'Swap {swap.id}: source tx not yet ready, will retry',
                 )
                 return False
 
@@ -278,8 +274,7 @@ class SwapFulfiller:
 
         user_receives_amount, my_source_address = safety_result
 
-        # Step 2: Verify user sent source funds — verify_user_sent_funds logs
-        # confirmation progress via log_on_change, so no extra line here.
+        # Step 2: Verify user sent source funds
         if not self.verify_user_sent_funds(swap, my_source_address):
             return False
 
