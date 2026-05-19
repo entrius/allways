@@ -8,6 +8,8 @@ from allways.classes import Swap, SwapStatus
 from allways.contract_client import AllwaysContractClient
 
 RESCAN_WINDOW = 16
+ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
+MAX_REFRESH_MISSES = 3
 
 
 class SwapPoller:
@@ -24,6 +26,7 @@ class SwapPoller:
         self.miner_hotkey = miner_hotkey
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
+        self.active_miss_counts: Dict[int, int] = {}
         self.last_poll_ok: bool = True
 
     def poll(self) -> Tuple[List[Swap], List[Swap]]:
@@ -43,15 +46,20 @@ class SwapPoller:
         next_id = self.client.get_next_swap_id()
         start = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
         for swap_id in range(start, next_id):
-            swap = self.client.get_swap(swap_id)
+            try:
+                swap = self.client.get_swap(swap_id)
+            except Exception as e:
+                bt.logging.debug(f'SwapPoller discovery({swap_id}) failed, will retry: {e}')
+                continue
             if swap and swap.miner_hotkey == self.miner_hotkey:
-                if swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
+                if swap.status in ACTIVE_STATUSES:
                     if swap.id not in self.active:
                         bt.logging.info(
                             f'Discovered swap {swap.id}: {swap.from_chain} -> {swap.to_chain}, '
                             f'tao_amount={swap.tao_amount}, status={swap.status.name}'
                         )
                     self.active[swap.id] = swap
+                    self.active_miss_counts.pop(swap.id, None)
                     fresh.add(swap.id)
         if next_id > 1:
             self.last_scanned_id = next_id - 1
@@ -61,14 +69,26 @@ class SwapPoller:
         for swap_id in list(self.active):
             if swap_id in fresh:
                 continue
-            swap = self.client.get_swap(swap_id)
-            if swap is None or swap.status not in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
-                terminal = swap.status.name if swap is not None else 'GONE'
+            try:
+                swap = self.client.get_swap(swap_id)
+            except Exception as e:
+                bt.logging.debug(f'SwapPoller refresh({swap_id}) failed, will retry: {e}')
+                continue
+            if swap is None:
+                misses = self.active_miss_counts.get(swap_id, 0) + 1
+                self.active_miss_counts[swap_id] = misses
+                if misses >= MAX_REFRESH_MISSES:
+                    resolved.append((swap_id, f'GONE_AFTER_{misses}_MISSES'))
+                continue
+            if swap.status not in ACTIVE_STATUSES:
+                terminal = swap.status.name
                 resolved.append((swap_id, terminal))
             else:
                 self.active[swap_id] = swap
+                self.active_miss_counts.pop(swap_id, None)
         for sid, terminal in resolved:
             self.active.pop(sid, None)
+            self.active_miss_counts.pop(sid, None)
             bt.logging.info(f'Swap {sid}: dropped from active (status={terminal})')
 
         # 3. Return categorized by contract status
