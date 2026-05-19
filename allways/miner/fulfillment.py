@@ -172,11 +172,7 @@ class SwapFulfiller:
         return user_receives_amount, swap.miner_from_address
 
     def verify_user_sent_funds(self, swap: Swap, miner_from_address: str) -> bool:
-        """Verify that the user sent funds on the source chain.
-
-        Uses ``require_confirmed=False`` so we can log confirmation progress on
-        partial txs via ``log_on_change`` — without this, a miner waiting on
-        confirmations sees only a silent DEBUG line and looks stuck."""
+        """Verify that the user sent funds on the source chain."""
         provider = self.providers.get(swap.from_chain)
         if not provider:
             bt.logging.error(f'No provider for chain: {swap.from_chain}')
@@ -193,23 +189,17 @@ class SwapFulfiller:
                 expected_amount=swap.from_amount,
                 block_hint=swap.from_tx_block,
                 expected_sender=swap.user_from_address,
-                require_confirmed=False,
+                require_confirmed=True,
             )
             if tx_info is None:
+                # Log once per (swap, attempt) so a miner waiting on confirmations
+                # surfaces in the INFO stream rather than only DEBUG. The base
+                # helper rate-limits its own confs progress at debug; this is
+                # the chronological breadcrumb at INFO.
                 log_on_change(
-                    f'src_visible:{swap.id}',
-                    False,
-                    f'Swap {swap.id}: source tx not yet visible (or sender/amount mismatch) — will retry',
-                )
-                return False
-
-            min_confs = provider.get_chain().min_confirmations
-            if not tx_info.confirmed:
-                log_on_change(
-                    f'src_confs:{swap.id}',
-                    tx_info.confirmations,
-                    f'Swap {swap.id}: waiting for source funds '
-                    f'({tx_info.confirmations}/{min_confs} confs, from {tx_info.sender})',
+                    f'src_waiting:{swap.id}',
+                    True,
+                    f'Swap {swap.id}: source tx not yet ready (waiting on visibility/confirmations/sender) — will retry',
                 )
                 return False
 
