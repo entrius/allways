@@ -211,13 +211,16 @@ class SwapFulfiller:
             bt.logging.error(f'Swap {swap.id}: no provider for dest chain: {swap.to_chain}')
             return None
 
-        # Miner's own dest-chain sending address — cached from this miner's
-        # committed pair at startup (refreshed when the CLI signals a new
-        # post). For TAO we don't need a from_address hint because the wallet
-        # keypair fully identifies the sender. For non-TAO chains we pass the
-        # cached address so the provider can skip UTXO probing. Signing
-        # credentials live on the provider itself.
-        from_address = None if swap.to_chain == 'tao' else self.my_addresses.get(swap.to_chain)
+        # The validator verifies destination tx sender against the address
+        # snapshotted onto the swap, so non-TAO sends must use that same address.
+        from_address = None
+        if swap.to_chain != 'tao':
+            if not swap.miner_to_address:
+                bt.logging.error(
+                    f'Swap {swap.id}: missing miner_to_address for {swap.to_chain} fulfillment; refusing to send'
+                )
+                return None
+            from_address = swap.miner_to_address
 
         bt.logging.info(
             f'Swap {swap.id}: initiating dest send of {user_receives_amount} to {swap.user_to_address} '

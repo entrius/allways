@@ -1,10 +1,4 @@
-"""SwapFulfiller — timeout cushion, sender verification, send-path behavior.
-
-These tests stay at the verify_swap_safety layer, which is the only part
-of SwapFulfiller that's exercised on every forward step and that the
-refactor branch changed meaningfully (cushion env hot-reload, post-fee
-user_receives_amount naming).
-"""
+"""SwapFulfiller timeout cushion, sender verification, and send-path behavior."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -16,7 +10,11 @@ from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.miner.fulfillment import SwapFulfiller, load_timeout_cushion_blocks
 
 
-def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
+def make_fulfiller(
+    cushion_env: str | None = None,
+    chain_providers: dict | None = None,
+    my_addresses: dict | None = None,
+) -> SwapFulfiller:
     """Build a SwapFulfiller with mocked deps. Optionally seed the env var."""
     env = {k: v for k, v in os.environ.items() if k != 'MINER_TIMEOUT_CUSHION_BLOCKS'}
     if cushion_env is not None:
@@ -24,25 +22,34 @@ def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
     with patch.dict(os.environ, env, clear=True):
         return SwapFulfiller(
             contract_client=MagicMock(),
-            chain_providers={},
+            chain_providers=chain_providers or {},
             wallet=MagicMock(),
             subtensor=MagicMock(),
+            my_addresses=my_addresses,
         )
 
 
-def make_swap(timeout_block: int = 500, rate: str = '345', miner_from: str = 'bc1q-miner') -> Swap:
+def make_swap(
+    timeout_block: int = 500,
+    rate: str = '345',
+    miner_from: str = 'bc1q-miner',
+    to_chain: str = 'tao',
+    user_to: str = '5user',
+    miner_to: str = '5miner',
+) -> Swap:
     return Swap(
         id=1,
         user_hotkey='user',
         miner_hotkey='miner',
         from_chain='btc',
-        to_chain='tao',
+        to_chain=to_chain,
         from_amount=1_000_000,
         to_amount=345_000_000,
         tao_amount=345_000_000,
         user_from_address='bc1q-user',
-        user_to_address='5user',
+        user_to_address=user_to,
         miner_from_address=miner_from,
+        miner_to_address=miner_to,
         rate=rate,
         status=SwapStatus.ACTIVE,
         initiated_block=100,
@@ -145,6 +152,108 @@ class TestVerifySwapSafetyReturnsUserReceives:
         # Pre-fee: 0.01 BTC @ 345 = 3.45 TAO = 3_450_000_000 rao
         # Post-fee: 3_450_000_000 - 34_500_000 = 3_415_500_000 rao
         assert user_receives_amount == 3_415_500_000
+
+
+class TestSendDestFundsSourceAddress:
+    @pytest.mark.parametrize(
+        ('to_chain', 'miner_to', 'my_addresses', 'expected_from_address', 'expect_send'),
+        [
+            ('btc', 'bc1q-pinned-miner', {}, 'bc1q-pinned-miner', True),
+            ('btc', 'bc1q-pinned-miner', {'btc': 'bc1q-stale-cache'}, 'bc1q-pinned-miner', True),
+            ('btc', '', {'btc': 'bc1q-cache-address'}, None, False),
+            ('tao', '', {'tao': '5cached'}, None, True),
+        ],
+    )
+    def test_send_dest_funds_source_address_invariants(
+        self,
+        to_chain,
+        miner_to,
+        my_addresses,
+        expected_from_address,
+        expect_send,
+    ):
+        provider = MagicMock()
+        provider.send_amount.return_value = ('tx-hash', 123)
+        fulfiller = make_fulfiller(chain_providers={to_chain: provider}, my_addresses=my_addresses)
+        swap = make_swap(to_chain=to_chain, user_to=f'{to_chain}-user-dest', miner_to=miner_to)
+
+        result = fulfiller.send_dest_funds(swap, 50_000)
+
+        if not expect_send:
+            assert result is None
+            provider.send_amount.assert_not_called()
+            return
+
+        assert result == ('tx-hash', 123)
+        provider.send_amount.assert_called_once_with(
+            f'{to_chain}-user-dest',
+            50_000,
+            from_address=expected_from_address,
+        )
+
+    def test_btc_send_uses_swap_pinned_miner_to_address_with_empty_cache(self):
+        provider = MagicMock()
+        provider.send_amount.return_value = ('btc-tx', 123)
+        fulfiller = make_fulfiller(chain_providers={'btc': provider}, my_addresses={})
+        swap = make_swap(to_chain='btc', user_to='bc1q-user-dest', miner_to='bc1q-pinned-miner')
+
+        result = fulfiller.send_dest_funds(swap, 50_000)
+
+        assert result == ('btc-tx', 123)
+        provider.send_amount.assert_called_once_with(
+            'bc1q-user-dest',
+            50_000,
+            from_address='bc1q-pinned-miner',
+        )
+
+    def test_btc_send_ignores_stale_cached_address_when_swap_has_pinned_address(self):
+        provider = MagicMock()
+        provider.send_amount.return_value = ('btc-tx', 123)
+        fulfiller = make_fulfiller(
+            chain_providers={'btc': provider},
+            my_addresses={'btc': 'bc1q-stale-cache'},
+        )
+        swap = make_swap(to_chain='btc', user_to='bc1q-user-dest', miner_to='bc1q-pinned-miner')
+
+        result = fulfiller.send_dest_funds(swap, 50_000)
+
+        assert result == ('btc-tx', 123)
+        provider.send_amount.assert_called_once_with(
+            'bc1q-user-dest',
+            50_000,
+            from_address='bc1q-pinned-miner',
+        )
+
+    def test_btc_send_without_swap_pinned_address_fails_before_broadcast(self):
+        provider = MagicMock()
+        fulfiller = make_fulfiller(
+            chain_providers={'btc': provider},
+            my_addresses={'btc': 'bc1q-cache-address'},
+        )
+        swap = make_swap(to_chain='btc', user_to='bc1q-user-dest', miner_to='')
+
+        result = fulfiller.send_dest_funds(swap, 50_000)
+
+        assert result is None
+        provider.send_amount.assert_not_called()
+
+    def test_tao_send_does_not_pass_source_address_hint(self):
+        provider = MagicMock()
+        provider.send_amount.return_value = ('tao-tx', 456)
+        fulfiller = make_fulfiller(
+            chain_providers={'tao': provider},
+            my_addresses={'tao': '5cached'},
+        )
+        swap = make_swap(to_chain='tao', user_to='5user-dest', miner_to='')
+
+        result = fulfiller.send_dest_funds(swap, 3_415_500_000)
+
+        assert result == ('tao-tx', 456)
+        provider.send_amount.assert_called_once_with(
+            '5user-dest',
+            3_415_500_000,
+            from_address=None,
+        )
 
 
 if __name__ == '__main__':
