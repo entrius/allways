@@ -28,10 +28,6 @@ MAX_INIT_GAP = 20
 RESCAN_WINDOW = 16
 
 
-def _swap_label(swap: Swap) -> str:
-    return f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
-
-
 class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
