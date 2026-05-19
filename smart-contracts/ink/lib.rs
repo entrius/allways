@@ -867,6 +867,12 @@ mod allways_swap_manager {
             }
 
             self.consensus_vote(miner, REQ_INITIATE, request_hash, move |this| {
+                // Re-check at closure time. vote_deactivate clears in-flight
+                // REQ_INITIATE rounds on quorum, but guard the closure anyway
+                // so a same-block race can't slip through.
+                if !this.miner_active.get(miner).unwrap_or(false) {
+                    return Err(Error::MinerNotActive);
+                }
                 let miner_collateral = this.collateral.get(miner).unwrap_or(0);
                 if tao_amount > miner_collateral {
                     return Err(Error::InsufficientCollateral);
@@ -1282,6 +1288,12 @@ mod allways_swap_manager {
             self.consensus_vote(miner, REQ_DEACTIVATE, Hash::default(), move |this| {
                 this.miner_active.insert(miner, &false);
                 this.miner_deactivation_block.insert(miner, &this.env().block_number());
+                // Cancel any in-flight miner-keyed rounds so a later vote landing
+                // on a pending reserve/initiate/activate can't reach quorum and
+                // run its closure against a now-deactivated miner.
+                this.clear_request(miner, REQ_ACTIVATE);
+                this.clear_request(miner, REQ_RESERVE);
+                this.clear_request(miner, REQ_INITIATE);
                 this.env().emit_event(MinerActivated { miner, active: false });
                 Ok(())
             })
