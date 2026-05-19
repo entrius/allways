@@ -144,12 +144,12 @@ def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
 
 
 def miner_label(validator: 'Validator', miner_hotkey: str) -> str:
-    """Return ``UID N (hotkey[:8])`` for logs — same shape forward.py uses."""
+    """Return ``UID N / hotkey[:8]`` — leads every miner log line with the UID."""
     try:
         uid = validator.metagraph.hotkeys.index(miner_hotkey)
     except (ValueError, IndexError):
         uid = '?'
-    return f'UID {uid} ({miner_hotkey[:8]})'
+    return f'UID {uid} / {miner_hotkey[:8]}'
 
 
 # =============================================================================
@@ -189,9 +189,9 @@ async def handle_miner_activate(
     """Process miner activation: verify commitment + vote on contract."""
     miner_hotkey = synapse.dendrite.hotkey
     contract: AllwaysContractClient = validator.axon_contract_client
-    bt.logging.info(f'MinerActivate request from {miner_hotkey}')
-
-    ctx = f'MinerActivate({miner_hotkey})'
+    label = miner_label(validator, miner_hotkey)
+    ctx = f'[{label}] MinerActivate'
+    bt.logging.info(f'{ctx}: REQUEST received (full hotkey={miner_hotkey})')
 
     try:
         with validator.axon_lock:
@@ -225,7 +225,7 @@ async def handle_miner_activate(
 
             contract.vote_activate(wallet=validator.wallet, miner_hotkey=miner_hotkey)
             synapse.accepted = True
-            bt.logging.info(f'Voted to activate miner {miner_hotkey}')
+            bt.logging.info(f'{ctx}: ACTIVATED — vote_activate submitted')
 
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
@@ -269,13 +269,12 @@ async def handle_swap_reserve(
     miner = synapse.miner_hotkey
     label = miner_label(validator, miner)
     direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
+    ctx = f'[{label}] SwapReserve {direction}'
     bt.logging.info(
-        f'SwapReserve REQUEST received: miner={label} dir={direction} '
-        f'tao={synapse.tao_amount} from_amount={synapse.from_amount} to_amount={synapse.to_amount} '
+        f'{ctx}: REQUEST received — tao={synapse.tao_amount} '
+        f'from_amount={synapse.from_amount} to_amount={synapse.to_amount} '
         f'user_from_address={synapse.from_address} block_anchor={synapse.block_anchor}'
     )
-
-    ctx = f'SwapReserve[{label} {direction}]'
 
     try:
         # Cheap, local checks BEFORE axon_lock — invalid signatures, missing fields,
@@ -406,7 +405,7 @@ async def handle_swap_reserve(
             )
             synapse.accepted = True
             bt.logging.info(
-                f'{ctx}: RESERVED — vote_reserve submitted for {label} '
+                f'{ctx}: RESERVED — vote_reserve submitted '
                 f'(tao={synapse.tao_amount}, rate={reserve_rate_str or reserve_rate})'
             )
 
@@ -453,13 +452,12 @@ async def handle_swap_confirm(
     miner = synapse.reservation_id  # reservation_id is miner_hotkey (reservation keyed by miner)
     label = miner_label(validator, miner)
     direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
+    ctx = f'[{label}] SwapConfirm {direction}'
     bt.logging.info(
-        f'SwapConfirm REQUEST received (post-reserve, user claims source tx sent): '
-        f'miner={label} dir={direction} from_tx={synapse.from_tx_hash} '
-        f'user_from_address={synapse.from_address} user_to_address={synapse.to_address} '
-        f'from_tx_block_hint={synapse.from_tx_block}'
+        f'{ctx}: REQUEST received (post-reserve, user claims source tx sent) — '
+        f'from_tx={synapse.from_tx_hash} user_from_address={synapse.from_address} '
+        f'user_to_address={synapse.to_address} from_tx_block_hint={synapse.from_tx_block}'
     )
-    ctx = f'SwapConfirm[{label} {direction}]'
 
     try:
         if not synapse.from_address or not synapse.from_tx_proof:
