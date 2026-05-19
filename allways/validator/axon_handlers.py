@@ -20,6 +20,7 @@ from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
@@ -145,11 +146,7 @@ def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
 
 def miner_label(validator: 'Validator', miner_hotkey: str) -> str:
     """Return ``UID N / hotkey[:8]`` — leads every miner log line with the UID."""
-    try:
-        uid = validator.metagraph.hotkeys.index(miner_hotkey)
-    except (ValueError, IndexError):
-        uid = '?'
-    return f'UID {uid} / {miner_hotkey[:8]}'
+    return _miner_label(getattr(validator, 'metagraph', None), miner_hotkey)
 
 
 # =============================================================================

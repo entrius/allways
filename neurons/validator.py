@@ -108,6 +108,7 @@ class Validator(BaseValidatorNeuron):
             contract_address=self.contract_client.contract_address,
             metadata_path=metadata_path,
             state_store=self.state_store,
+            metagraph=self.metagraph,
         )
         self.event_watcher.initialize(
             current_block=self.block,
@@ -116,7 +117,7 @@ class Validator(BaseValidatorNeuron):
         )
         self.bootstrap_miner_rates()
 
-        self.swap_tracker = SwapTracker(client=self.contract_client)
+        self.swap_tracker = SwapTracker(client=self.contract_client, metagraph=self.metagraph)
         self.swap_tracker.initialize()
         # Late-bind the tracker so TimeoutExtensionFinalized events can write
         # the new timeout_block straight into the in-memory active swap.
@@ -126,6 +127,7 @@ class Validator(BaseValidatorNeuron):
         self.swap_verifier = SwapVerifier(
             chain_providers=self.chain_providers,
             fee_divisor=self.fee_divisor,
+            metagraph=self.metagraph,
         )
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).

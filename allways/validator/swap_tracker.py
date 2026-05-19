@@ -3,13 +3,14 @@ so the forward loop knows what to verify, vote on, and time out. Swap
 outcomes (credibility ledger writes) are owned by ``ContractEventWatcher``."""
 
 import asyncio
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import bittensor as bt
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import EXTEND_THRESHOLD_BLOCKS
 from allways.contract_client import AllwaysContractClient
+from allways.utils.logging import swap_label as _swap_label_with_uid
 
 ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
 
@@ -35,11 +36,15 @@ class SwapTracker:
     """Discovery scans new swap IDs since the last poll; monitoring re-fetches
     all tracked ACTIVE/FULFILLED swaps each poll."""
 
-    def __init__(self, client: AllwaysContractClient):
+    def __init__(self, client: AllwaysContractClient, metagraph: Optional[Any] = None):
         self.client = client
+        self.metagraph = metagraph
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
+
+    def _label(self, swap: Swap) -> str:
+        return _swap_label_with_uid(swap, self.metagraph)
 
     def initialize(self):
         """Cold start: scan backward from latest swap to seed active set.
@@ -84,7 +89,7 @@ class SwapTracker:
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)
-        bt.logging.info(f'Swap {swap_id}: dropped from active ({status.name} at block {block})')
+        bt.logging.info(f'{self._label(swap)}: dropped from active ({status.name} at block {block})')
 
     def mark_voted(self, swap_id: int):
         """Mark a swap as voted on to prevent redundant confirm/timeout extrinsics."""
@@ -133,7 +138,7 @@ class SwapTracker:
                 continue
             if swap.status in ACTIVE_STATUSES:
                 if swap.id not in self.active:
-                    bt.logging.info(f'Swap {swap.id} [{_swap_label(swap)}]: now {swap.status.name}, monitoring')
+                    bt.logging.info(f'{self._label(swap)}: now {swap.status.name}, monitoring')
                 self.active[swap.id] = swap
                 fresh.add(swap.id)
 
@@ -160,7 +165,7 @@ class SwapTracker:
             if result.status in ACTIVE_STATUSES:
                 prev = self.active.get(sid)
                 if prev is not None and prev.status != result.status:
-                    bt.logging.info(f'Swap {sid} [{_swap_label(result)}]: {prev.status.name} -> {result.status.name}')
+                    bt.logging.info(f'{self._label(result)}: {prev.status.name} -> {result.status.name}')
                 self.active[sid] = result
             else:
                 # Terminal status from chain — drop with reason for observability.

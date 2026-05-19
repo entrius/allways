@@ -17,6 +17,7 @@ from allways.constants import (
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
+from allways.utils.logging import swap_label as _swap_label
 from allways.utils.scale import strip_hex_prefix
 from allways.validator import voting
 from allways.validator.axon_handlers import (
@@ -39,6 +40,15 @@ async def forward(self: Validator) -> None:
     verifier: SwapVerifier = self.swap_verifier
 
     self.check_block_progress(self.reconnect_and_propagate)
+
+    pending_count = len(self.state_store.get_all())
+    active_count = len(tracker.active)
+    near_timeout = len(tracker.get_near_timeout_fulfilled(self.block))
+    bt.logging.info(
+        f'forward step #{self.step} @ block {self.block}: '
+        f'pending_confirms={pending_count} active_swaps={active_count} '
+        f'near_timeout_fulfilled={near_timeout}'
+    )
 
     clear_provider_caches(self)
 
@@ -395,22 +405,25 @@ async def confirm_miner_fulfillments(
         *[verifier.verify_miner_fulfillment(swap) for swap in fulfilled],
         return_exceptions=True,
     )
+    metagraph = getattr(self, 'metagraph', None)
     for swap, result in zip(fulfilled, results):
+        label = _swap_label(swap, metagraph)
         if isinstance(result, ProviderUnreachableError):
-            bt.logging.warning(f'Swap {swap.id}: provider unreachable, deferring verification')
+            bt.logging.warning(f'{label}: provider unreachable, deferring verification')
             uncertain.add(swap.id)
             continue
         if isinstance(result, Exception):
-            bt.logging.error(f'Swap {swap.id}: verification error: {result}')
+            bt.logging.error(f'{label}: verification error: {result}')
             continue
         if result:
-            if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
+            bt.logging.info(f'{label}: verification ok → voting confirm_swap')
+            if voting.confirm_swap(self.contract_client, self.wallet, swap.id, label=label):
                 tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
-                bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
+                bt.logging.success(f'{label}: verified complete, confirmed')
             # On vote failure, voting.confirm_swap already logs the error;
             # the entry stays in tracker and retries next step.
         else:
-            bt.logging.debug(f'Swap {swap.id}: verification incomplete this cycle, deferring confirm')
+            bt.logging.debug(f'{label}: verification incomplete this cycle, deferring confirm')
     return uncertain
 
 
@@ -423,9 +436,9 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
     tracker: SwapTracker = self.swap_tracker
     current_block = self.block
 
+    metagraph = getattr(self, 'metagraph', None)
     for swap in tracker.get_near_timeout_fulfilled(current_block):
-        swap_label = f'{swap.from_chain.upper()}->{swap.to_chain.upper()}'
-        ctx = f'Swap #{swap.id} [{swap_label}]'
+        ctx = _swap_label(swap, metagraph)
 
         # One pending-extension fetch shared across finalize/challenge/propose.
         pending = self.optimistic_extensions.fetch_pending_timeout(swap.id)
@@ -509,14 +522,17 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
 
 def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps: Set[int]) -> None:
     """Timeout expired swaps, skipping uncertain_swaps where the provider was unreachable this cycle."""
+    metagraph = getattr(self, 'metagraph', None)
     for swap in tracker.get_timed_out(self.block):
         if tracker.is_voted(swap.id):
             continue
+        label = _swap_label(swap, metagraph)
         if swap.id in uncertain_swaps:
-            bt.logging.warning(f'Swap {swap.id}: deferring timeout, provider was unreachable')
+            bt.logging.warning(f'{label}: deferring timeout, provider was unreachable')
             continue
 
-        if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
+        bt.logging.info(f'{label}: past timeout_block={swap.timeout_block} → voting timeout_swap')
+        if voting.timeout_swap(self.contract_client, self.wallet, swap.id, label=label):
             tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
-            bt.logging.warning(f'Swap {swap.id}: timed out')
+            bt.logging.warning(f'{label}: timed out')
         # On vote failure, voting.timeout_swap already logs the error.

@@ -12,6 +12,7 @@ from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.utils.logging import log_on_change
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -171,7 +172,11 @@ class SwapFulfiller:
         return user_receives_amount, swap.miner_from_address
 
     def verify_user_sent_funds(self, swap: Swap, miner_from_address: str) -> bool:
-        """Verify that the user sent funds on the source chain."""
+        """Verify that the user sent funds on the source chain.
+
+        Uses ``require_confirmed=False`` so we can log confirmation progress on
+        partial txs via ``log_on_change`` — without this, a miner waiting on
+        confirmations sees only a silent DEBUG line and looks stuck."""
         provider = self.providers.get(swap.from_chain)
         if not provider:
             bt.logging.error(f'No provider for chain: {swap.from_chain}')
@@ -188,10 +193,24 @@ class SwapFulfiller:
                 expected_amount=swap.from_amount,
                 block_hint=swap.from_tx_block,
                 expected_sender=swap.user_from_address,
-                require_confirmed=True,
+                require_confirmed=False,
             )
             if tx_info is None:
-                bt.logging.debug(f'Swap {swap.id}: source tx not ready (not found, unconfirmed, or sender mismatch)')
+                log_on_change(
+                    f'src_visible:{swap.id}',
+                    False,
+                    f'Swap {swap.id}: source tx not yet visible (or sender/amount mismatch) — will retry',
+                )
+                return False
+
+            min_confs = provider.get_chain().min_confirmations
+            if not tx_info.confirmed:
+                log_on_change(
+                    f'src_confs:{swap.id}',
+                    tx_info.confirmations,
+                    f'Swap {swap.id}: waiting for source funds '
+                    f'({tx_info.confirmations}/{min_confs} confs, from {tx_info.sender})',
+                )
                 return False
 
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} from {tx_info.sender})')
@@ -269,9 +288,9 @@ class SwapFulfiller:
 
         user_receives_amount, my_source_address = safety_result
 
-        # Step 2: Verify user sent source funds
+        # Step 2: Verify user sent source funds — verify_user_sent_funds logs
+        # confirmation progress via log_on_change, so no extra line here.
         if not self.verify_user_sent_funds(swap, my_source_address):
-            bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
             return False
 
         # Step 3: Send destination funds — unless we already did on a previous

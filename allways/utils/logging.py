@@ -1,7 +1,7 @@
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from typing import Any
+from typing import Any, Optional
 
 import bittensor as bt
 
@@ -46,3 +46,26 @@ def log_on_change(key: str, value: Any, message: str) -> None:
     if _last_seen.get(key) != value:
         _last_seen[key] = value
         bt.logging.info(message)
+
+
+def miner_label(metagraph: Optional[Any], hotkey: str) -> str:
+    """Return ``UID N / hotkey[:8]`` so a glance at any log line ties it to a UID.
+
+    ``metagraph`` is optional so unit tests and offline tools can pass None
+    and fall back to the hotkey-only label."""
+    if not hotkey:
+        return 'UID ? / ????????'
+    uid: Any = '?'
+    if metagraph is not None:
+        try:
+            uid = metagraph.hotkeys.index(hotkey)
+        except (ValueError, IndexError, AttributeError):
+            uid = '?'
+    return f'UID {uid} / {hotkey[:8]}'
+
+
+def swap_label(swap: Any, metagraph: Optional[Any] = None) -> str:
+    """Format a swap log prefix: ``Swap #N [DIR UID … / hotkey]``."""
+    direction = f'{(swap.from_chain or "?").upper()}->{(swap.to_chain or "?").upper()}'
+    miner = miner_label(metagraph, getattr(swap, 'miner_hotkey', ''))
+    return f'Swap #{swap.id} [{direction} {miner}]'

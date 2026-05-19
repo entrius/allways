@@ -1,13 +1,14 @@
 """Verifies both sides of a swap using chain providers and on-chain swap data."""
 
 import asyncio
-from typing import Dict, Set
+from typing import Any, Dict, Optional, Set
 
 import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.classes import Swap
 from allways.utils.logging import log_on_change
+from allways.utils.logging import swap_label as _swap_label
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -22,11 +23,16 @@ class SwapVerifier:
         self,
         chain_providers: Dict[str, ChainProvider],
         fee_divisor: int = 100,
+        metagraph: Optional[Any] = None,
     ):
         self.providers = chain_providers
         self.fee_divisor = fee_divisor
+        self.metagraph = metagraph
         self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
         self.source_verified_ids: Set[int] = set()  # source tx is final once confirmed
+
+    def _label(self, swap: Swap) -> str:
+        return _swap_label(swap, self.metagraph)
 
     def verify_tx(
         self,
@@ -47,11 +53,11 @@ class SwapVerifier:
         """
         provider = self.providers.get(chain)
         if not provider:
-            bt.logging.warning(f'Swap {swap.id}: no provider for chain {chain}')
+            bt.logging.warning(f'{self._label(swap)}: no provider for chain {chain}')
             return False
 
         if not tx_hash:
-            bt.logging.debug(f'Swap {swap.id}: empty tx_hash for {chain}, skipping verification')
+            bt.logging.debug(f'{self._label(swap)}: empty tx_hash for {chain}, skipping verification')
             return False
 
         try:
@@ -64,23 +70,23 @@ class SwapVerifier:
             )
             if tx_info is None:
                 bt.logging.debug(
-                    f'Swap {swap.id}: verify_transaction returned None on {chain} '
+                    f'{self._label(swap)}: verify_transaction returned None on {chain} '
                     f'(tx={tx_hash[:16]}... block_hint={block_hint})'
                 )
                 return False
             if not tx_info.confirmed:
-                self.log_confs_progress(swap.id, chain, tx_hash, tx_info, expected_recipient, expected_amount)
+                self.log_confs_progress(swap, chain, tx_hash, tx_info, expected_recipient, expected_amount)
                 return False
             return True
         except ProviderUnreachableError:
             raise
         except Exception as e:
-            bt.logging.error(f'Swap {swap.id}: verification error on {chain}: {e}')
+            bt.logging.error(f'{self._label(swap)}: verification error on {chain}: {e}')
             return False
 
     def log_confs_progress(
         self,
-        swap_id: int,
+        swap: Swap,
         chain: str,
         tx_hash: str,
         tx_info: TransactionInfo,
@@ -88,12 +94,12 @@ class SwapVerifier:
         expected_amount: int,
     ) -> None:
         """Rate-limited debug log for confirmations progress on unconfirmed txs."""
-        log_key = f'{swap_id}:{chain}'
+        log_key = f'{swap.id}:{chain}'
         if self.last_logged_confs.get(log_key) == tx_info.confirmations:
             return
         self.last_logged_confs[log_key] = tx_info.confirmations
         bt.logging.debug(
-            f'Swap {swap_id}: tx found but not confirmed on {chain} '
+            f'{self._label(swap)}: tx found but not confirmed on {chain} '
             f'(confs={tx_info.confirmations} tx={tx_hash[:16]}... '
             f'addr={expected_recipient[:16]}... expected={expected_amount})'
         )
@@ -105,17 +111,18 @@ class SwapVerifier:
         (snapshotted at initiation), so this works regardless of miner registration.
         """
         if not swap.rate or not swap.miner_from_address:
-            bt.logging.warning(f'Swap {swap.id}: missing rate or miner_from_address on swap struct')
+            bt.logging.warning(f'{self._label(swap)}: missing rate or miner_from_address on swap struct')
             return False
 
         _, expected_user_receives = expected_swap_amounts(swap, self.fee_divisor)
         if expected_user_receives == 0:
-            bt.logging.warning(f'Swap {swap.id}: rate produces 0 to_amount after fees')
+            bt.logging.warning(f'{self._label(swap)}: rate produces 0 to_amount after fees')
             return False
 
         if int(swap.to_amount) != expected_user_receives:
             bt.logging.warning(
-                f'Swap {swap.id}: to_amount mismatch — expected {expected_user_receives}, contract has {swap.to_amount}'
+                f'{self._label(swap)}: to_amount mismatch — expected {expected_user_receives}, '
+                f'contract has {swap.to_amount}'
             )
             return False
 
@@ -150,7 +157,7 @@ class SwapVerifier:
             log_on_change(
                 f'partial:{swap.id}',
                 (source_ok, dest_ok),
-                f'Swap {swap.id}: partial verification (source={source_ok}, dest={dest_ok}) — '
+                f'{self._label(swap)}: partial verification (source={source_ok}, dest={dest_ok}) — '
                 f'{"dest" if source_ok else "source"} side blocking confirm',
             )
 
