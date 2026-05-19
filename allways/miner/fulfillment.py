@@ -12,6 +12,7 @@ from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
+from allways.utils.logging import log_on_change
 from allways.utils.rate import expected_swap_amounts
 
 
@@ -191,7 +192,11 @@ class SwapFulfiller:
                 require_confirmed=True,
             )
             if tx_info is None:
-                bt.logging.debug(f'Swap {swap.id}: source tx not ready (not found, unconfirmed, or sender mismatch)')
+                log_on_change(
+                    f'src_waiting:{swap.id}',
+                    True,
+                    f'Swap {swap.id}: source tx not yet ready, will retry',
+                )
                 return False
 
             bt.logging.info(f'Swap {swap.id}: source funds verified ({tx_info.amount} from {tx_info.sender})')
@@ -271,7 +276,6 @@ class SwapFulfiller:
 
         # Step 2: Verify user sent source funds
         if not self.verify_user_sent_funds(swap, my_source_address):
-            bt.logging.debug(f'Swap {swap.id}: waiting for source funds confirmation')
             return False
 
         # Step 3: Send destination funds — unless we already did on a previous

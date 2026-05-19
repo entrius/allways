@@ -22,6 +22,7 @@ import bittensor as bt
 
 from allways.classes import SwapStatus
 from allways.constants import SCORING_WINDOW_BLOCKS
+from allways.utils.logging import miner_label as _miner_label
 from allways.utils.scale import (
     decode_account_id,
     decode_bool,
@@ -209,6 +210,7 @@ class ContractEventWatcher:
         metadata_path: Path,
         state_store: ValidatorStateStore,
         swap_tracker: Optional[SwapTracker] = None,
+        metagraph: Optional[Any] = None,
     ):
         self.substrate = substrate
         self.contract_address = contract_address
@@ -217,6 +219,8 @@ class ContractEventWatcher:
         # watcher (cycle in current init order). Timeout extension finalize
         # writes are skipped until this is set.
         self.swap_tracker = swap_tracker
+        # Optional — used purely for UID-resolved log labels.
+        self.metagraph = metagraph
         self.registry = load_event_registry(metadata_path)
         self.cursor: int = 0
         self.last_prune_block: int = 0
@@ -409,7 +413,12 @@ class ContractEventWatcher:
             if not hotkey:
                 return
             active = bool(values.get('active'))
+            state_changed = (hotkey in self.active_miners) != active
             self.record_active_transition(block_num, hotkey, active)
+            if state_changed:
+                bt.logging.info(
+                    f'EventWatcher: {self._label(hotkey)} MinerActivated(active={active}) @ block {block_num}'
+                )
         elif name == 'SwapInitiated':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -421,21 +430,26 @@ class ContractEventWatcher:
                 if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
                     return
                 self.apply_busy_delta(block_num, miner, +1)
+                bt.logging.info(f'EventWatcher: {self._label(miner)} SwapInitiated swap=#{swap_id} @ block {block_num}')
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
+                tao = int(values.get('tao_amount') or 0)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
                     completed=True,
                     resolved_block=block_num,
-                    tao_amount=int(values.get('tao_amount') or 0),
+                    tao_amount=tao,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
                 self.bootstrapped_swap_ids.discard(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
+                bt.logging.info(
+                    f'EventWatcher: {self._label(miner)} SwapCompleted swap=#{swap_id} tao={tao} @ block {block_num}'
+                )
         elif name == 'SwapTimedOut':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
@@ -450,6 +464,9 @@ class ContractEventWatcher:
                 self.bootstrapped_swap_ids.discard(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
+                bt.logging.warning(
+                    f'EventWatcher: {self._label(miner)} SwapTimedOut swap=#{swap_id} @ block {block_num} (slash)'
+                )
         elif name == 'ReservationExtensionFinalized':
             # Event-driven cache update for the local pending_confirms row —
             # replaces the polling refresh that the legacy vote-extend flow
@@ -460,11 +477,22 @@ class ContractEventWatcher:
             applied_target = values.get('applied_target')
             if miner and isinstance(applied_target, int):
                 self.state_store.update_reserved_until(miner, applied_target)
+                bt.logging.info(
+                    f'EventWatcher: {self._label(miner)} ReservationExtensionFinalized '
+                    f'applied_target={applied_target} @ block {block_num}'
+                )
         elif name == 'TimeoutExtensionFinalized':
             swap_id = values.get('swap_id')
             applied_target = values.get('applied_target')
             if self.swap_tracker is not None and isinstance(swap_id, int) and isinstance(applied_target, int):
                 self.swap_tracker.update_timeout_block(swap_id, applied_target)
+                bt.logging.info(
+                    f'EventWatcher: TimeoutExtensionFinalized swap=#{swap_id} '
+                    f'applied_target={applied_target} @ block {block_num}'
+                )
+
+    def _label(self, hotkey: str) -> str:
+        return _miner_label(self.metagraph, hotkey)
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
