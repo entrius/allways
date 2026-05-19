@@ -405,7 +405,7 @@ async def confirm_miner_fulfillments(
             continue
         if result:
             if voting.confirm_swap(self.contract_client, self.wallet, swap.id):
-                tracker.resolve(swap.id, SwapStatus.COMPLETED, current_block)
+                tracker.mark_voted(swap.id)
                 bt.logging.success(f'Swap {swap.id}: verified complete, confirmed')
             # On vote failure, voting.confirm_swap already logs the error;
             # the entry stays in tracker and retries next step.
@@ -517,6 +517,6 @@ def enforce_swap_timeouts(self: Validator, tracker: SwapTracker, uncertain_swaps
             continue
 
         if voting.timeout_swap(self.contract_client, self.wallet, swap.id):
-            tracker.resolve(swap.id, SwapStatus.TIMED_OUT, self.block)
+            tracker.mark_voted(swap.id)
             bt.logging.warning(f'Swap {swap.id}: timed out')
         # On vote failure, voting.timeout_swap already logs the error.
