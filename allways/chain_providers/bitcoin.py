@@ -171,10 +171,20 @@ class BitcoinProvider(ChainProvider):
         block_hint: int = 0,
         max_scan_blocks: int = 150,  # unused — BTC backends index by tx hash
     ) -> Optional[TransactionInfo]:
-        """Look up a Bitcoin tx via RPC with Esplora fallback."""
+        """Look up a Bitcoin tx via local RPC, falling back to Esplora.
+
+        A pruned local node only resolves mempool/wallet txs, so most
+        confirmed-tx lookups fall through to Esplora. Which backend served the
+        result is logged at debug so that reliance is visible, not silent.
+        """
+        if self.mode == 'lightweight':
+            return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
+
         result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
         if result is not None:
+            bt.logging.debug(f'BTC verify: served by local RPC (tx {tx_hash[:16]}...)')
             return result
+        bt.logging.debug(f'BTC verify: local RPC had no match, falling back to Esplora (tx {tx_hash[:16]}...)')
         return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
 
     def rpc_verify_transaction(
@@ -183,7 +193,9 @@ class BitcoinProvider(ChainProvider):
         """Verify a Bitcoin transaction using getrawtransaction RPC."""
         raw_tx = self.rpc_call('getrawtransaction', [tx_hash, True])
         if not raw_tx:
-            bt.logging.debug(f'BTC RPC: tx {tx_hash[:16]}... not found')
+            # None = absent from mempool/wallet (a pruned node can't serve
+            # confirmed txs it doesn't own) or an RPC error already logged by
+            # rpc_call. The fallback is logged by the caller.
             return None
 
         confirmations = raw_tx.get('confirmations', 0)
@@ -324,9 +336,11 @@ class BitcoinProvider(ChainProvider):
 
     def get_balance(self, address: str) -> int:
         """Get balance for a Bitcoin address in satoshis via RPC with Esplora fallback."""
-        result = self.rpc_call('getreceivedbyaddress', [address, 0])
-        if result is not None:
-            return int(round(result * BTC_TO_SAT))
+        if self.mode != 'lightweight':
+            result = self.rpc_call('getreceivedbyaddress', [address, 0])
+            if result is not None:
+                return int(round(result * BTC_TO_SAT))
+            bt.logging.debug(f'BTC balance: local RPC had no result for {address}, falling back to Esplora')
         return self.api_get_balance(address)
 
     def btc_api_bases(self) -> Tuple[str, ...]:
