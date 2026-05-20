@@ -1,10 +1,4 @@
-"""SwapFulfiller — timeout cushion, sender verification, send-path behavior.
-
-These tests stay at the verify_swap_safety layer, which is the only part
-of SwapFulfiller that's exercised on every forward step and that the
-refactor branch changed meaningfully (cushion env hot-reload, post-fee
-user_receives_amount naming).
-"""
+"""SwapFulfiller — timeout cushion, send-cache, and send-path behavior."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -13,7 +7,8 @@ import pytest
 
 from allways.classes import Swap, SwapStatus
 from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-from allways.miner.fulfillment import SwapFulfiller, load_timeout_cushion_blocks
+from allways.miner.fulfillment import SentSwap, SwapFulfiller, load_timeout_cushion_blocks
+from allways.miner.swap_poller import MAX_REFRESH_MISSES, SwapPoller
 
 
 def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
@@ -145,6 +140,65 @@ class TestVerifySwapSafetyReturnsUserReceives:
         # Pre-fee: 0.01 BTC @ 345 = 3.45 TAO = 3_450_000_000 rao
         # Post-fee: 3_450_000_000 - 34_500_000 = 3_415_500_000 rao
         assert user_receives_amount == 3_415_500_000
+
+
+class TestSentCacheCleanup:
+    def test_unmarked_stale_sends_are_retained(self):
+        fulfiller = make_fulfiller()
+        fulfiller.sent = {
+            1: SentSwap('unmarked-stale-tx', 101, marked_fulfilled=False),
+            2: SentSwap('marked-stale-tx', 102, marked_fulfilled=True),
+            3: SentSwap('active-unmarked-tx', 103, marked_fulfilled=False),
+        }
+        fulfiller.mark_fulfilled_attempts = {1: 2, 2: 3, 3: 1}
+
+        fulfiller.cleanup_stale_sends(active_swap_ids={3})
+
+        assert fulfiller.sent == {
+            1: SentSwap('unmarked-stale-tx', 101, marked_fulfilled=False),
+            3: SentSwap('active-unmarked-tx', 103, marked_fulfilled=False),
+        }
+        assert fulfiller.mark_fulfilled_attempts == {1: 2, 3: 1}
+
+    def test_retained_send_cache_blocks_resend_after_poller_misses_and_rediscovery(self):
+        swap = make_swap()
+        poll_client = MagicMock()
+        poll_client.get_next_swap_id.return_value = swap.id + 1
+        poll_client.get_swap.return_value = None
+        poller = SwapPoller(contract_client=poll_client, miner_hotkey=swap.miner_hotkey)
+        poller.active[swap.id] = swap
+        poller.last_scanned_id = swap.id
+
+        fulfiller = make_fulfiller()
+        fulfiller.sent[swap.id] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False)
+
+        for _ in range(MAX_REFRESH_MISSES):
+            poller.poll()
+
+        assert poller.active == {}
+
+        fulfiller.cleanup_stale_sends(active_swap_ids=set(poller.active))
+        assert fulfiller.sent[swap.id] == SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False)
+
+        poll_client.get_swap.return_value = swap
+        poller.poll()
+        assert poller.active == {swap.id: swap}
+
+        fulfiller.verify_swap_safety = MagicMock(return_value=(3_415_500_000, swap.miner_from_address))
+        fulfiller.verify_user_sent_funds = MagicMock(return_value=True)
+        fulfiller.send_dest_funds = MagicMock(return_value=('second-dest-tx', 888))
+
+        assert fulfiller.process_swap(swap) is True
+
+        fulfiller.send_dest_funds.assert_not_called()
+        fulfiller.client.mark_fulfilled.assert_called_once_with(
+            wallet=fulfiller.wallet,
+            swap_id=swap.id,
+            to_tx_hash='already-sent-dest-tx',
+            to_amount=3_415_500_000,
+            to_tx_block=777,
+        )
+        assert fulfiller.sent[swap.id].marked_fulfilled is True
 
 
 if __name__ == '__main__':

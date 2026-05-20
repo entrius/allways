@@ -82,6 +82,7 @@ class SwapFulfiller:
         self.sent: Dict[int, SentSwap] = {}
         self.mark_fulfilled_attempts: Dict[int, int] = {}
         self.cushion_warned: Set[int] = set()
+        self.unmarked_stale_warned: Set[int] = set()
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
 
@@ -116,21 +117,32 @@ class SwapFulfiller:
             bt.logging.error(f'CRITICAL: Failed to persist sent cache: {e}')
 
     def cleanup_stale_sends(self, active_swap_ids: Set[int]):
-        """Remove cached send results for swaps no longer active."""
+        """Remove completed cached send results for swaps no longer active.
+
+        Unmarked send records are retained even when the poller no longer sees
+        the swap. A temporary contract/indexer gap can make an active swap look
+        gone; dropping its cached destination tx would allow a rediscovered
+        swap to send funds a second time.
+        """
         stale = [sid for sid in self.sent if sid not in active_swap_ids]
-        unmarked = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
-        for sid in stale:
+        removable = [sid for sid in stale if self.sent[sid].marked_fulfilled]
+        retained_unmarked = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
+        for sid in removable:
             self.sent.pop(sid)
             self.mark_fulfilled_attempts.pop(sid, None)
+            self.unmarked_stale_warned.discard(sid)
         self.cushion_warned -= self.cushion_warned - active_swap_ids
-        if stale:
-            bt.logging.info(f'Cleaned up stale send cache for {len(stale)} swap(s): {stale}')
-            if unmarked:
-                bt.logging.warning(
-                    f'Stale send(s) without confirmed mark_fulfilled — funds may have been sent without '
-                    f'on-chain credit: {unmarked}'
-                )
+        self.unmarked_stale_warned -= active_swap_ids
+        if removable:
+            bt.logging.info(f'Cleaned up stale send cache for {len(removable)} marked swap(s): {removable}')
             self.save_sent_cache()
+        newly_retained = [sid for sid in retained_unmarked if sid not in self.unmarked_stale_warned]
+        if newly_retained:
+            bt.logging.warning(
+                f'Retaining stale send(s) without confirmed mark_fulfilled to avoid duplicate destination sends: '
+                f'{newly_retained}'
+            )
+            self.unmarked_stale_warned.update(newly_retained)
 
     def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill.
@@ -248,9 +260,10 @@ class SwapFulfiller:
 
         Idempotent across forward steps — the ``sent`` cache tracks both the
         dest-tx outcome and whether ``mark_fulfilled`` has landed, so retry
-        polls never double-send and never double-call the contract. Cache
+        polls never double-send and never double-call the contract. Marked
         entries live until ``cleanup_stale_sends`` drops them once the swap
-        leaves the active set.
+        leaves the active set; unmarked entries are retained to keep a
+        rediscovered swap from sending destination funds again.
 
         Three possible starting states when this runs:
           - no prior record → send dest funds, then mark fulfilled
