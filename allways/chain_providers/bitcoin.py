@@ -364,55 +364,58 @@ class BitcoinProvider(ChainProvider):
             defaults = ('https://blockstream.info/api', 'https://mempool.space/api')
         return [(url, None) for url in defaults]
 
-    def should_failover(self, resp: requests.Response, base: str, path: str) -> bool:
-        """Log the response status and return True if we should try the next base.
+    def failover_reason(self, resp: requests.Response) -> Optional[str]:
+        """Reason to fall through to the next provider, or None to use this response.
 
-        Retries on rate limits (429), bad/expired keys (401/403), and server
-        errors (5xx) so a throttled or misconfigured endpoint falls through to a
-        free one instead of failing the call. 404 (not found) is authoritative
-        and silent; other 4xx are logged but returned to the caller.
+        Retries past rate limits (429), bad/expired keys (401/403), and server
+        errors (5xx). 404 (not found) is authoritative; other 4xx are returned.
         """
         code = resp.status_code
         if code in (401, 403):
-            bt.logging.warning(f'Esplora {base}{path} auth failed ({code}); trying next endpoint')
-            return True
+            return f'auth failed ({code})'
         if code == 429:
-            bt.logging.warning(f'Esplora {base}{path} rate-limited (429); trying next endpoint')
-            return True
+            return f'rate-limited ({code})'
         if code >= 500:
-            bt.logging.warning(f'Esplora {base}{path} server error ({code}); trying next endpoint')
-            return True
-        if code >= 400 and code != 404:
-            bt.logging.warning(f'Esplora {base}{path} client error ({code}): {resp.text[:200].strip()}')
-        return False
+            return f'server error ({code})'
+        return None
+
+    def btc_api_request(self, method: str, path: str, timeout: int, **kwargs) -> requests.Response:
+        """Try each Esplora provider in order, narrating every failover.
+
+        Logs read as a sequence — which provider was tried, the response, and
+        which provider is next — so a debugging session reads top-to-bottom.
+        """
+        bases = self.btc_api_bases()
+        last_err: Optional[Exception] = None
+        for i, (base, headers) in enumerate(bases):
+            pos = f'[{i + 1}/{len(bases)}]'
+            nxt = bases[i + 1][0] if i + 1 < len(bases) else None
+            tail = f'falling back to next provider: {nxt}' if nxt else 'no providers left, giving up'
+            try:
+                resp = self.http.request(method, f'{base}{path}', timeout=timeout, headers=headers, **kwargs)
+            except Exception as e:
+                last_err = e
+                bt.logging.warning(f'Esplora {pos} {base}{path} → request error: {e}; {tail}')
+                continue
+
+            reason = self.failover_reason(resp)
+            if reason:
+                last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
+                bt.logging.warning(f'Esplora {pos} {base}{path} → {reason}; {tail}')
+                continue
+
+            if resp.status_code >= 400 and resp.status_code != 404:
+                bt.logging.warning(f'Esplora {pos} {base}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
+            elif i > 0:
+                bt.logging.info(f'Esplora {pos} {base}{path} → {resp.status_code} (served after {i} fallback(s))')
+            return resp
+        raise last_err or RuntimeError('all BTC APIs failed')
 
     def btc_api_get(self, path: str, timeout: int = 15) -> requests.Response:
-        last_err: Optional[Exception] = None
-        for base, headers in self.btc_api_bases():
-            try:
-                resp = self.http.get(f'{base}{path}', timeout=timeout, headers=headers)
-                if self.should_failover(resp, base, path):
-                    last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
-                    continue
-                return resp
-            except Exception as e:
-                bt.logging.debug(f'Esplora {base}{path} request failed: {e}; trying next endpoint')
-                last_err = e
-        raise last_err or RuntimeError('all BTC APIs failed')
+        return self.btc_api_request('GET', path, timeout)
 
     def btc_api_post(self, path: str, data, timeout: int = 30) -> requests.Response:
-        last_err: Optional[Exception] = None
-        for base, headers in self.btc_api_bases():
-            try:
-                resp = self.http.post(f'{base}{path}', data=data, timeout=timeout, headers=headers)
-                if self.should_failover(resp, base, path):
-                    last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
-                    continue
-                return resp
-            except Exception as e:
-                bt.logging.debug(f'Esplora {base}{path} request failed: {e}; trying next endpoint')
-                last_err = e
-        raise last_err or RuntimeError('all BTC APIs failed')
+        return self.btc_api_request('POST', path, timeout, data=data)
 
     def tx_exists(self, txid: str) -> bool:
         try:
