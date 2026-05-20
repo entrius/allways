@@ -445,9 +445,7 @@ class ValidatorStateStore:
             ).fetchall()
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 
-    def get_volume_by_direction_since(
-        self, since_block: int, from_chain: str, to_chain: str
-    ) -> Dict[str, int]:
+    def get_volume_by_direction_since(self, since_block: int, from_chain: str, to_chain: str) -> Dict[str, int]:
         """Per-miner volume (rao) restricted to one swap direction. Outcomes
         missing direction (pre-migration legacy rows) are excluded — they
         contribute no volume credit, same as legacy rows with tao_amount=0."""
