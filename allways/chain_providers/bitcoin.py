@@ -65,11 +65,13 @@ def to_mainnet_address(address: str) -> str:
     return address
 
 
-def parse_esplora_urls(raw: str) -> list[tuple[str, Optional[dict]]]:
+def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tuple[str, Optional[dict]]]:
     """Parse BTC_ESPLORA_URLS into (base_url, headers) pairs, tried in order.
 
-    Comma-separated; each entry is ``url`` or ``url|api_key``. A key sends
-    ``Authorization: Bearer <key>`` to that endpoint only — others stay anonymous.
+    Comma-separated; each entry is ``url`` or ``url|api_key``. A keyed entry
+    sends the key via ``auth_header`` to that endpoint only — others stay
+    anonymous. The default ``Authorization`` header carries a ``Bearer`` prefix;
+    any other header (e.g. Maestro's ``api-key``) sends the raw key.
     """
     bases = []
     for entry in raw.split(','):
@@ -78,7 +80,12 @@ def parse_esplora_urls(raw: str) -> list[tuple[str, Optional[dict]]]:
         if not url:
             continue
         key = key.strip()
-        bases.append((url, {'Authorization': f'Bearer {key}'} if key else None))
+        if not key:
+            bases.append((url, None))
+        elif auth_header.lower() == 'authorization':
+            bases.append((url, {auth_header: f'Bearer {key}'}))
+        else:
+            bases.append((url, {auth_header: key}))
     return bases
 
 
@@ -130,7 +137,10 @@ class BitcoinProvider(ChainProvider):
 
         # Optional operator-supplied Esplora endpoints (paid/private), tried
         # before the public defaults. Empty → public blockstream → mempool.
-        self.esplora_bases = parse_esplora_urls(os.environ.get('BTC_ESPLORA_URLS', ''))
+        self.esplora_bases = parse_esplora_urls(
+            os.environ.get('BTC_ESPLORA_URLS', ''),
+            os.environ.get('BTC_ESPLORA_API_KEY_HEADER', 'Authorization'),
+        )
 
     def _send_error(self, msg: str) -> None:
         self.last_send_error = msg
