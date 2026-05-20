@@ -124,28 +124,19 @@ def recompute_reserve_amounts(
     from_chain: str,
     to_chain: str,
     from_amount: int,
-) -> Tuple[int, int]:
-    """Recompute (to_amount, tao_amount) from the miner's commitment rate.
-
-    The reservation pins the *amounts*, not the miner's rate — so the validator
-    must derive to_amount/tao_amount itself from the rate it reads at reserve
-    time rather than trusting the user-submitted values. A CLI quote computed
-    against a momentarily-bad (or stale) rate would otherwise get locked into
-    the reservation. Mirrors the CLI quote path in cli/swap_commands/swap.py so
-    a correctly-quoted reservation always matches.
-    """
+) -> int:
+    """Recompute to_amount from the miner's commitment rate, mirroring the CLI
+    quote path so a correctly-quoted reservation matches the reserve-time rate."""
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     _, rate_str = commitment.get_rate_for_direction(from_chain)
-    to_amount = calculate_to_amount(
+    return calculate_to_amount(
         from_amount,
         rate_str,
         is_reverse,
         get_chain(canon_to).decimals,
         get_chain(canon_from).decimals,
     )
-    tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
-    return to_amount, tao_amount
 
 
 def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
@@ -356,15 +347,9 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
 
-            # Recompute expected to_amount from the commitment rate read here at
-            # reserve time. The reservation pins amounts but not the miner's
-            # rate, so a quote computed against a stale rate would otherwise be
-            # locked in.
-            #
-            # tao_amount is pure arithmetic from the submitted amounts — reject
-            # any inconsistency before voting so the contract always sees a
-            # self-consistent triple.
-            expected_to_amount, _ = recompute_reserve_amounts(
+            # Gate the user's quote against the rate read at reserve time, and
+            # reject a tao_amount that doesn't match the submitted from/to legs.
+            expected_to_amount = recompute_reserve_amounts(
                 commitment,
                 synapse.from_chain,
                 synapse.to_chain,

@@ -34,7 +34,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
 from allways.commitments import read_miner_commitments
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_MAX_BPS
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_DEFAULT_BPS, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
@@ -188,7 +188,7 @@ def broadcast_reserve_with_retry(
     netuid: int,
     skip_confirm: bool = False,
     max_retries: int = 2,
-    slippage_bps: int = 200,
+    slippage_bps: int = RESERVE_SLIPPAGE_DEFAULT_BPS,
 ):
     """Reserve miner via multi-validator consensus with retry.
 
@@ -575,9 +575,9 @@ def swap_group():
     type=float,
     default=2.0,
     help=(
-        'Maximum rate slippage (in percent) between your quote and the reservation. '
-        "The reservation is rejected if the miner's current rate would give you more than "
-        'this percentage less than your quoted amount. Default: 2.0%.'
+        'Maximum rate slippage as a percent (e.g. 2.0 means 2%) between your quote and '
+        "the reservation. The reservation is rejected if the miner's current rate would "
+        'give you more than this percentage less than your quoted amount. Default: 2.0%.'
     ),
 )
 @click.option(
