@@ -17,6 +17,10 @@ class SwapVerifier:
 
     Rate and miner source address are stored on the swap struct at initiation,
     so verification is self-contained — no commitment lookup needed.
+
+    Dest-tx replay defense: snapshots the dest chain's tip on first sighting
+    of a swap and rejects later dest txs whose block predates the snapshot —
+    a validator-side stand-in for a contract-level ``used_to_tx`` mirror.
     """
 
     def __init__(
@@ -30,6 +34,35 @@ class SwapVerifier:
         self.metagraph = metagraph
         self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
         self.source_verified_ids: Set[int] = set()  # source tx is final once confirmed
+        self.dest_tip_at_init: Dict[int, int] = {}  # swap_id -> dest tip at first sighting (non-TAO only)
+
+    def observe_initiation(self, swap: Swap) -> None:
+        """Snapshot the dest chain's tip on first sighting of a non-TAO swap.
+        Idempotent; fails open with a one-time warning on RPC error."""
+        if swap.to_chain == 'tao' or swap.id in self.dest_tip_at_init:
+            return
+        provider = self.providers.get(swap.to_chain)
+        if provider is None:
+            return
+        # Broad except (vs verify_tx's re-raise of ProviderUnreachableError):
+        # this runs inside a forward-loop iteration and must not break it.
+        try:
+            tip = provider.get_current_block_height()
+        except Exception:
+            tip = None
+        if tip and tip > 0:
+            self.dest_tip_at_init[swap.id] = tip
+        else:
+            log_on_change(
+                f'snapshot_unavailable:{swap.id}',
+                True,
+                f'{self._label(swap)}: dest-tip snapshot failed on {swap.to_chain} — replay defense off until retry',
+            )
+
+    def prune_to_active(self, active_ids: Set[int]) -> None:
+        """Drop per-swap state for swaps no longer being tracked."""
+        self.dest_tip_at_init = {sid: v for sid, v in self.dest_tip_at_init.items() if sid in active_ids}
+        self.source_verified_ids &= active_ids
 
     def _label(self, swap: Swap) -> str:
         return _swap_label(swap, self.metagraph)
@@ -43,7 +76,7 @@ class SwapVerifier:
         expected_amount: int,
         block_hint: int = 0,
         expected_sender: str = '',
-    ) -> bool:
+    ) -> Optional[TransactionInfo]:
         """Verify a confirmed transaction on a specific chain.
 
         Defers tx lookup, amount, and sender checks to the provider's
@@ -54,11 +87,11 @@ class SwapVerifier:
         provider = self.providers.get(chain)
         if not provider:
             bt.logging.warning(f'{self._label(swap)}: no provider for chain {chain}')
-            return False
+            return None
 
         if not tx_hash:
             bt.logging.debug(f'{self._label(swap)}: empty tx_hash for {chain}, skipping verification')
-            return False
+            return None
 
         try:
             tx_info = provider.verify_transaction(
@@ -73,16 +106,31 @@ class SwapVerifier:
                     f'{self._label(swap)}: verify_transaction returned None on {chain} '
                     f'(tx={tx_hash[:16]}... block_hint={block_hint})'
                 )
-                return False
+                return None
             if not tx_info.confirmed:
                 self.log_confs_progress(swap, chain, tx_hash, tx_info, expected_recipient, expected_amount)
-                return False
-            return True
+                return None
+            return tx_info
         except ProviderUnreachableError:
             raise
         except Exception as e:
             bt.logging.error(f'{self._label(swap)}: verification error on {chain}: {e}')
+            return None
+
+    def is_dest_tx_fresh(self, swap: Swap, dest_info: TransactionInfo) -> bool:
+        """Reject a dest tx mined before the swap was initiated (replay defense)."""
+        if dest_info.block_number is None:
+            return True
+        lower = swap.initiated_block if swap.to_chain == 'tao' else self.dest_tip_at_init.get(swap.id)
+        if lower is None:
+            return True  # fail-open; observe_initiation already logged
+        if dest_info.block_number < lower:
+            bt.logging.warning(
+                f'{self._label(swap)}: dest tx at block {dest_info.block_number} < initiated {lower} — '
+                f'rejecting as replay (tx={swap.to_tx_hash[:16]}...)'
+            )
             return False
+        return True
 
     def log_confs_progress(
         self,
@@ -124,7 +172,7 @@ class SwapVerifier:
         if swap.id in self.source_verified_ids:
             source_ok = True
         else:
-            source_ok = await asyncio.to_thread(
+            source_info = await asyncio.to_thread(
                 self.verify_tx,
                 swap,
                 swap.from_chain,
@@ -133,10 +181,11 @@ class SwapVerifier:
                 swap.from_amount,
                 swap.from_tx_block,
             )
+            source_ok = source_info is not None
             if source_ok:
                 self.source_verified_ids.add(swap.id)
 
-        dest_ok = await asyncio.to_thread(
+        dest_info = await asyncio.to_thread(
             self.verify_tx,
             swap,
             swap.to_chain,
@@ -146,6 +195,7 @@ class SwapVerifier:
             swap.to_tx_block,
             swap.miner_to_address,
         )
+        dest_ok = dest_info is not None and self.is_dest_tx_fresh(swap, dest_info)
 
         if source_ok != dest_ok:
             log_on_change(

@@ -86,6 +86,11 @@ async def forward(self: Validator) -> None:
     await tracker.poll()
     bt.logging.info('forward: tracker polled')
 
+    # Snapshot dest-chain tip on first sighting for the dest-tx replay defense.
+    for swap in tracker.active.values():
+        verifier.observe_initiation(swap)
+    verifier.prune_to_active(set(tracker.active.keys()))
+
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
     # set is swap IDs where the provider was unreachable this cycle, so the
     # timeout phase knows to skip them (transient outage shouldn't slash).

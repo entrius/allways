@@ -122,6 +122,11 @@ class ChainProvider(ABC):
         return tx_info
 
     @abstractmethod
+    def get_current_block_height(self) -> Optional[int]:
+        """Chain tip block height. None on transient backend failure."""
+        ...
+
+    @abstractmethod
     def get_balance(self, address: str) -> int: ...
 
     @abstractmethod

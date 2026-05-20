@@ -272,6 +272,13 @@ class SubtensorProvider(ChainProvider):
 
         return dest, amount, sender
 
+    def get_current_block_height(self) -> Optional[int]:
+        try:
+            return int(self.subtensor.get_current_block())
+        except Exception as e:
+            bt.logging.debug(f'TAO get_current_block_height failed: {e}')
+            return None
+
     def get_balance(self, address: str) -> int:
         """Get balance for a TAO address in rao."""
         try:
