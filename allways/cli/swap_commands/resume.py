@@ -21,6 +21,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     mark_pending_swap_tx_sent,
     resolve_source_tx_block,
+    safe_reservation_remaining,
 )
 from allways.cli.swap_commands.swap import (
     from_smallest_unit,
@@ -132,30 +133,28 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
     except ContractError:
         pass
 
-    # Check reservation status — if expired, there's nothing to resume
+    # Check reservation status — if expired or inside the safety cushion, there's nothing to resume
     try:
         with loading('Reading reservation status...'):
             reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
             current_block = subtensor.get_current_block()
-        reservation_active = reserved_until > current_block
     except ContractError as e:
         console.print(f'[red]Failed to read reservation status: {e}[/red]')
         return
 
-    if not reservation_active:
-        # Reservation is cleared either on expiry or when vote_initiate succeeds.
+    remaining = safe_reservation_remaining(reserved_until, current_block)
+    if remaining is None:
+        # Reservation is cleared on expiry or when vote_initiate succeeds.
         # A silent initiate means the swap is already in flight or has completed —
         # surface both possibilities rather than assuming expiry.
         clear_pending_swap()
-        console.print('\n[yellow]Reservation is no longer active.[/yellow]')
         console.print(
-            '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
-            'or completed. Check with: alw view active-swaps[/dim]\n'
+            '[dim]Your swap may already have initiated and be in progress or completed. '
+            'Check with: alw view active-swaps[/dim]\n'
         )
         console.print('[dim]Start a new swap with: alw swap now[/dim]')
         return
 
-    remaining = reserved_until - current_block
     console.print(f'\n[green]Reservation still active ({blocks_to_minutes_str(remaining)} left)[/green]')
 
     # Set up chain provider
