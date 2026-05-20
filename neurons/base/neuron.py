@@ -69,6 +69,7 @@ class BaseNeuron(ABC):
             f'using network: {self.subtensor.chain_endpoint}'
         )
         self.step = 0
+        self.last_forward_time = time.time()
         self.last_seen_block = 0
         self.stale_block_polls = 0
 

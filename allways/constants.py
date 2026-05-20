@@ -14,6 +14,9 @@ MINER_POLL_INTERVAL_SECONDS = 12
 VALIDATOR_POLL_INTERVAL_SECONDS = 12
 # Consecutive polls of zero block progress before we force a substrate reconnect.
 STALE_BLOCK_POLL_THRESHOLD = 30
+# Seconds without a completed forward step before the supervisor declares the
+# loop dead/hung and exits non-zero for the process manager to restart.
+FORWARD_STALL_THRESHOLD_SECONDS = 600
 
 # ─── Commitment Format ────────────────────────────────────
 COMMITMENT_VERSION = 1
