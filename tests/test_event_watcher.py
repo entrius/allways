@@ -9,7 +9,7 @@ Covers three layers:
 
 import struct
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from bittensor.utils import ss58_decode
 
@@ -932,4 +932,59 @@ class TestSwapOutcomesIdempotency:
         rows = w.state_store.get_success_rates_since(0)
         # Two SwapCompleted apply()s, but swap_outcomes is keyed by swap_id (INSERT OR REPLACE).
         assert rows.get('hk_a') == (1, 0)
+        w.state_store.close()
+
+
+class TestSyncToRetryFailures:
+    def test_clean_sync_advances_cursor_to_end(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 10
+        w.substrate.get_block_hash.side_effect = lambda block_num: f'hash-{block_num}'
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(13)
+
+        assert w.cursor == 13
+        assert w.substrate.get_block_hash.call_args_list == [call(11), call(12), call(13)]
+        w.state_store.close()
+
+    def test_transient_block_fetch_failure_stops_cursor_before_failed_block(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 10
+
+        def get_block_hash(block_num: int):
+            if block_num == 12:
+                raise RuntimeError('rpc timeout')
+            return f'hash-{block_num}'
+
+        w.substrate.get_block_hash.side_effect = get_block_hash
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(14)
+
+        assert w.cursor == 11
+        assert w.substrate.get_block_hash.call_args_list == [call(11), call(12)]
+        w.state_store.close()
+
+    def test_failed_block_is_retried_on_next_sync(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 10
+
+        def flaky_get_block_hash(block_num: int):
+            if block_num == 12:
+                raise RuntimeError('rpc timeout')
+            return f'hash-{block_num}'
+
+        w.substrate.get_block_hash.side_effect = flaky_get_block_hash
+        w.substrate.get_events.return_value = []
+        w.sync_to(14)
+        assert w.cursor == 11
+
+        w.substrate.get_block_hash.reset_mock()
+        w.substrate.get_block_hash.side_effect = lambda block_num: f'hash-{block_num}'
+
+        w.sync_to(14)
+
+        assert w.cursor == 14
+        assert w.substrate.get_block_hash.call_args_list == [call(12), call(13), call(14)]
         w.state_store.close()

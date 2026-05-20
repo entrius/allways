@@ -420,7 +420,13 @@ class ContractEventWatcher:
         self.pruned_block_last = None
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
         for block_num in range(self.cursor + 1, end + 1):
-            self.process_block(block_num)
+            if not self.process_block(block_num):
+                break
+        if self.cursor < end:
+            bt.logging.warning(
+                f'EventWatcher: sync stopped at block {self.cursor} before requested block {end} '
+                f'(current_block={current_block}); will retry from block {self.cursor + 1}'
+            )
         if current_block - self.last_prune_block >= EVENT_PRUNE_INTERVAL_BLOCKS:
             self.prune_old_events(current_block)
             self.last_prune_block = current_block
@@ -431,11 +437,13 @@ class ContractEventWatcher:
                 'RPC node retains only recent state'
             )
 
-    def process_block(self, block_num: int) -> None:
+    def process_block(self, block_num: int) -> bool:
         try:
             block_hash = self.substrate.get_block_hash(block_num)
             if not block_hash:
-                return
+                self.cursor = block_num
+                self.state_store.set_event_cursor(block_num)
+                return True
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
             msg = str(e).lower()
@@ -448,10 +456,11 @@ class ContractEventWatcher:
                 self.pruned_block_last = block_num
                 self.cursor = block_num
                 self.state_store.set_event_cursor(block_num)
+                return True
             else:
                 # Transient: hold the cursor so the block is retried next sync.
                 bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
-            return
+            return False
 
         for event_record in events:
             decoded = self.decode_contract_event(event_record)
@@ -467,6 +476,7 @@ class ContractEventWatcher:
                 bt.logging.warning(f'EventWatcher: apply_event {name}@{block_num} failed: {e}')
         self.cursor = block_num
         self.state_store.set_event_cursor(block_num)
+        return True
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
