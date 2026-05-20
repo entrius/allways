@@ -40,6 +40,30 @@ class PendingConfirm:
     queued_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class ReservationPin:
+    """A snapshot of a miner's commitment as of the block its reservation was
+    created. ``handle_swap_confirm`` resolves the swap's rate and addresses
+    from this pin instead of the live commitment, so a miner moving its rate
+    or deposit address after the user reserves cannot shortchange or rob the
+    user.
+
+    Stores the full commitment — ``MinerReserved`` does not reveal the swap
+    direction, so direction is resolved later from the requested chains.
+    """
+
+    miner_hotkey: str
+    reserve_block: int
+    from_chain: str
+    to_chain: str
+    rate_str: str
+    counter_rate_str: str
+    miner_from_address: str
+    miner_to_address: str
+    reserved_until: int
+    created_at: float = field(default_factory=time.time)
+
+
 class ValidatorStateStore:
     def __init__(
         self,
@@ -179,6 +203,102 @@ class ValidatorStateStore:
             reserved_until=row['reserved_until'],
             from_tx_block=int(from_tx_block or 0),
             queued_at=row['queued_at'],
+        )
+
+    # ─── reservation_pins ───────────────────────────────────────────────
+
+    def upsert_reservation_pin(self, pin: ReservationPin) -> None:
+        """Persist (or overwrite) the commitment snapshot for a miner's
+        reservation. Keyed on ``miner_hotkey`` — a miner has at most one live
+        reservation, so a fresh ``MinerReserved`` replaces any stale pin."""
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO reservation_pins (
+                    miner_hotkey, reserve_block, from_chain, to_chain,
+                    rate_str, counter_rate_str, miner_from_address,
+                    miner_to_address, reserved_until, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pin.miner_hotkey,
+                    pin.reserve_block,
+                    pin.from_chain,
+                    pin.to_chain,
+                    pin.rate_str,
+                    pin.counter_rate_str,
+                    pin.miner_from_address,
+                    pin.miner_to_address,
+                    pin.reserved_until,
+                    pin.created_at,
+                ),
+            )
+            conn.commit()
+
+    def get_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
+        with self.lock:
+            conn = self.require_connection()
+            row = conn.execute(
+                'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
+                (miner_hotkey,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.row_to_reservation_pin(row)
+
+    def remove_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
+        with self.lock:
+            conn = self.require_connection()
+            row = conn.execute(
+                'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
+                (miner_hotkey,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (miner_hotkey,))
+            conn.commit()
+        return self.row_to_reservation_pin(row)
+
+    def update_reservation_pin_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
+        """Refresh the cached reserved_until on an existing pin row.
+
+        Mirrors ``update_reserved_until`` — called after the contract extends
+        the reservation, so ``purge_expired_reservation_pins`` doesn't drop a
+        still-live pin at its stale TTL.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'UPDATE reservation_pins SET reserved_until = ? WHERE miner_hotkey = ?',
+                (reserved_until, miner_hotkey),
+            )
+            conn.commit()
+
+    def purge_expired_reservation_pins(self) -> int:
+        """Drop pins whose reservation has already expired."""
+        if self.current_block_fn is None:
+            return 0
+        current_block = self.current_block_fn()
+        with self.lock:
+            conn = self.require_connection()
+            cursor = conn.execute('DELETE FROM reservation_pins WHERE reserved_until < ?', (current_block,))
+            conn.commit()
+            return cursor.rowcount
+
+    @staticmethod
+    def row_to_reservation_pin(row: sqlite3.Row) -> ReservationPin:
+        return ReservationPin(
+            miner_hotkey=row['miner_hotkey'],
+            reserve_block=row['reserve_block'],
+            from_chain=row['from_chain'],
+            to_chain=row['to_chain'],
+            rate_str=row['rate_str'],
+            counter_rate_str=row['counter_rate_str'],
+            miner_from_address=row['miner_from_address'],
+            miner_to_address=row['miner_to_address'],
+            reserved_until=row['reserved_until'],
+            created_at=row['created_at'],
         )
 
     # ─── rate_events ────────────────────────────────────────────────────
@@ -325,6 +445,7 @@ class ValidatorStateStore:
             conn = self.require_connection()
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
+            conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (hotkey,))
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
@@ -406,6 +527,21 @@ class ValidatorStateStore:
                     ON swap_outcomes(miner_hotkey);
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_resolved_block
                     ON swap_outcomes(resolved_block);
+
+                CREATE TABLE IF NOT EXISTS reservation_pins (
+                    miner_hotkey        TEXT PRIMARY KEY,
+                    reserve_block       INTEGER NOT NULL,
+                    from_chain          TEXT NOT NULL,
+                    to_chain            TEXT NOT NULL,
+                    rate_str            TEXT NOT NULL,
+                    counter_rate_str    TEXT NOT NULL,
+                    miner_from_address  TEXT NOT NULL,
+                    miner_to_address    TEXT NOT NULL,
+                    reserved_until      INTEGER NOT NULL,
+                    created_at          REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reservation_pins_reserved_until
+                    ON reservation_pins(reserved_until);
                 """
             )
             # Ensure newer columns exist on DBs created by older validator

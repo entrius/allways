@@ -16,6 +16,7 @@ from allways.classes import MinerPair
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.validator.axon_handlers import handle_swap_confirm, handle_swap_reserve
+from allways.validator.state_store import ReservationPin
 
 
 def make_synapse(
@@ -55,6 +56,30 @@ def make_commitment(
         rate_str='345',
         counter_rate=counter_rate,
         counter_rate_str=counter_rate_str,
+    )
+
+
+def make_pin(
+    from_chain: str = 'btc',
+    to_chain: str = 'tao',
+    miner_from_address: str = 'bc1-miner',
+    miner_to_address: str = '5miner',
+    rate_str: str = '345',
+    counter_rate_str: str = '0.0029',
+    reserve_block: int = 900,
+    reserved_until: int = 2000,
+) -> ReservationPin:
+    """A reservation pin as event_watcher.record_reservation_pin would write."""
+    return ReservationPin(
+        miner_hotkey='miner-hotkey',
+        reserve_block=reserve_block,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        rate_str=rate_str,
+        counter_rate_str=counter_rate_str,
+        miner_from_address=miner_from_address,
+        miner_to_address=miner_to_address,
+        reserved_until=reserved_until,
     )
 
 
@@ -113,6 +138,9 @@ def make_validator(
     validator.axon_chain_providers = providers
 
     validator.state_store = MagicMock()
+    # No reservation pin by default — handler falls back to the live
+    # commitment. Tests exercising the pinned path set this explicitly.
+    validator.state_store.get_reservation_pin.return_value = None
     validator.wallet = MagicMock()
     return validator
 
@@ -622,3 +650,96 @@ class TestReserveRateRecompute:
         moved.rate = 49.0
         run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
         validator.axon_contract_client.vote_reserve.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Reservation pin — rate-swing and address-theft regressions
+# ---------------------------------------------------------------------------
+
+
+# A valid SS58 (Alice from the substrate dev keyring) — tests that reach the
+# vote_initiate path need a parseable hotkey for the request_hash keypair.
+VALID_MINER_SS58 = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+
+
+class TestReservationPin:
+    """When a pin exists, the swap must settle against the *pinned* commitment,
+    not the miner's live commitment — a miner that moved its rate or deposit
+    address after the user reserved cannot shortchange or rob the user."""
+
+    def test_address_theft_uses_pinned_deposit_address(self):
+        """A miner changes its committed deposit address after the user sends
+        BTC. The pinned (original) address must be the one verify_transaction
+        checks — otherwise the user's funds go to the wrong place."""
+        validator = make_validator()
+        # Pinned at the original deposit address.
+        validator.state_store.get_reservation_pin.return_value = make_pin(miner_from_address='bc1-ORIGINAL')
+        # Live commitment moved to an attacker-controlled address.
+        moved = make_commitment()
+        moved.from_address = 'bc1-ATTACKER'
+
+        run_handler(validator, make_synapse(reservation_id=VALID_MINER_SS58), commitment=moved)
+
+        call = validator.axon_chain_providers['btc'].verify_transaction.call_args
+        assert call.kwargs['expected_recipient'] == 'bc1-ORIGINAL'
+
+    def test_rate_swing_uses_pinned_rate(self):
+        """A miner moves its rate in the reserve→confirm window. vote_initiate
+        must hash + carry the pinned rate, not the moved one."""
+        validator = make_validator()
+        validator.state_store.get_reservation_pin.return_value = make_pin(rate_str='345')
+        # Live commitment swung to a worse rate for the user.
+        swung = make_commitment()
+        swung.rate_str = '999'
+        swung.rate = 999.0
+
+        run_handler(validator, make_synapse(reservation_id=VALID_MINER_SS58), commitment=swung)
+
+        validator.axon_contract_client.vote_initiate.assert_called_once()
+        assert validator.axon_contract_client.vote_initiate.call_args.kwargs['rate'] == '345'
+
+    def test_pinned_fulfillment_address_flows_to_vote_initiate(self):
+        validator = make_validator()
+        validator.state_store.get_reservation_pin.return_value = make_pin(miner_to_address='5PINNED')
+        moved = make_commitment()
+        moved.to_address = '5MOVED'
+
+        run_handler(validator, make_synapse(reservation_id=VALID_MINER_SS58), commitment=moved)
+
+        validator.axon_contract_client.vote_initiate.assert_called_once()
+        assert validator.axon_contract_client.vote_initiate.call_args.kwargs['miner_to_address'] == '5PINNED'
+
+    def test_slow_path_enqueue_carries_pinned_values(self):
+        """When the source tx isn't yet confirmed the handler enqueues a
+        PendingConfirm — that row must carry the pinned address + rate so the
+        forward drain initiates against the pin, not the live commitment."""
+        validator = make_validator()
+        validator.state_store.get_reservation_pin.return_value = make_pin(
+            miner_from_address='bc1-ORIGINAL', rate_str='345'
+        )
+        validator.axon_chain_providers['btc'].verify_transaction.return_value = make_tx_info(
+            confirmed=False, confirmations=2
+        )
+        moved = make_commitment()
+        moved.from_address = 'bc1-ATTACKER'
+        moved.rate_str = '999'
+        moved.rate = 999.0
+
+        run_handler(validator, make_synapse(), commitment=moved)
+
+        validator.state_store.enqueue.assert_called_once()
+        queued = validator.state_store.enqueue.call_args[0][0]
+        assert queued.miner_from_address == 'bc1-ORIGINAL'
+        assert queued.rate_str == '345'
+
+    def test_no_pin_falls_back_to_live_commitment(self):
+        """A reservation made before the pin index existed has no pin — the
+        handler falls back to the live commitment, unchanged from prior behavior."""
+        validator = make_validator()
+        validator.state_store.get_reservation_pin.return_value = None
+
+        run_handler(validator, make_synapse(reservation_id=VALID_MINER_SS58), commitment=make_commitment())
+
+        validator.axon_contract_client.vote_initiate.assert_called_once()
+        call = validator.axon_chain_providers['btc'].verify_transaction.call_args
+        assert call.kwargs['expected_recipient'] == 'bc1-miner'

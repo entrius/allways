@@ -76,6 +76,10 @@ async def forward(self: Validator) -> None:
             f'forward: purged {purged} expired pending_confirms (reservations elapsed without tx confirmation)'
         )
 
+    purged_pins = self.state_store.purge_expired_reservation_pins()
+    if purged_pins:
+        bt.logging.info(f'forward: purged {purged_pins} expired reservation_pins (reservations elapsed without a swap)')
+
     poll_commitments(self)
 
     # Pull newly-initiated and resolved swaps off the contract.

@@ -527,10 +527,33 @@ async def handle_swap_confirm(
 
             res_tao_amount, res_source_amount, res_dest_amount = res_data
 
-            commitment = load_swap_commitment(validator, miner)
-            if commitment is None:
-                reject_synapse(synapse, 'No valid commitment', ctx)
-                return synapse
+            # Prefer the commitment snapshot pinned when the user reserved.
+            # A miner moving its rate or deposit address after the reservation
+            # cannot then shortchange or rob the user — the swap settles
+            # against the commitment as it was at reserve time. A reservation
+            # made before this index existed has no pin; fall back to the live
+            # commitment so in-flight swaps still complete.
+            pin = validator.state_store.get_reservation_pin(miner)
+            if pin is not None:
+                commitment = MinerPair(
+                    uid=0,
+                    hotkey=miner,
+                    from_chain=pin.from_chain,
+                    from_address=pin.miner_from_address,
+                    to_chain=pin.to_chain,
+                    to_address=pin.miner_to_address,
+                    rate=float(pin.rate_str) if pin.rate_str else 0.0,
+                    rate_str=pin.rate_str,
+                    counter_rate=float(pin.counter_rate_str) if pin.counter_rate_str else 0.0,
+                    counter_rate_str=pin.counter_rate_str,
+                )
+                bt.logging.info(f'{ctx}: using pinned commitment from reservation block {pin.reserve_block}')
+            else:
+                commitment = load_swap_commitment(validator, miner)
+                if commitment is None:
+                    reject_synapse(synapse, 'No valid commitment', ctx)
+                    return synapse
+                bt.logging.info(f'{ctx}: no reservation pin, falling back to live commitment')
 
             direction = resolve_swap_direction(commitment, synapse.from_chain, synapse.to_chain)
             if direction is None:

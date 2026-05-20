@@ -105,10 +105,11 @@ class SwapVerifier:
         )
 
     async def verify_miner_fulfillment(self, swap: Swap) -> bool:
-        """Verify rate, to_amount, user send, and miner fulfillment.
+        """Verify the user funded the swap and the miner delivered the rate-derived amount.
 
         Rate and miner source address are read directly from the swap struct
-        (snapshotted at initiation), so this works regardless of miner registration.
+        (snapshotted at initiation), so settlement keys off the rate pinned at
+        reservation rather than a live commitment the miner could move.
         """
         if not swap.rate or not swap.miner_from_address:
             bt.logging.warning(f'{self._label(swap)}: missing rate or miner_from_address on swap struct')
@@ -117,13 +118,6 @@ class SwapVerifier:
         _, expected_user_receives = expected_swap_amounts(swap, self.fee_divisor)
         if expected_user_receives == 0:
             bt.logging.warning(f'{self._label(swap)}: rate produces 0 to_amount after fees')
-            return False
-
-        if int(swap.to_amount) != expected_user_receives:
-            bt.logging.warning(
-                f'{self._label(swap)}: to_amount mismatch — expected {expected_user_receives}, '
-                f'contract has {swap.to_amount}'
-            )
             return False
 
         # Sequential — parallel threads contend on the shared substrate WS.

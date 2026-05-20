@@ -1,0 +1,155 @@
+"""Unit tests for the ``reservation_pins`` table in ValidatorStateStore.
+
+The pin table snapshots a miner's commitment as of the reservation block so a
+swap settles against the miner's rate + addresses as they were when the user
+reserved — closing the rate-swing and address-theft windows. Coverage:
+round-trip, overwrite, expiry purge, TTL refresh, delete_hotkey cleanup, and a
+fresh ``init_db()`` creating the table.
+"""
+
+from dataclasses import replace
+from pathlib import Path
+
+from allways.validator.state_store import ReservationPin, ValidatorStateStore
+
+PIN_SAMPLE1 = ReservationPin(
+    miner_hotkey='miner-1',
+    reserve_block=900,
+    from_chain='btc',
+    to_chain='tao',
+    rate_str='345',
+    counter_rate_str='0.0029',
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
+    reserved_until=1000,
+    created_at=1.0,
+)
+
+PIN_SAMPLE2 = ReservationPin(
+    miner_hotkey='miner-2',
+    reserve_block=905,
+    from_chain='btc',
+    to_chain='tao',
+    rate_str='350',
+    counter_rate_str='0.0028',
+    miner_from_address='bc1-miner-2',
+    miner_to_address='5miner2',
+    reserved_until=1005,
+    created_at=2.0,
+)
+
+
+class TestReservationPinRoundTrip:
+    def test_upsert_and_get_round_trip(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+
+        pin = store.get_reservation_pin('miner-1')
+        assert pin == PIN_SAMPLE1
+        store.close()
+
+    def test_persists_across_store_instances(self, tmp_path: Path):
+        db_path = tmp_path / 'state.db'
+        store1 = ValidatorStateStore(db_path=db_path)
+        store1.upsert_reservation_pin(PIN_SAMPLE1)
+        store1.close()
+
+        store2 = ValidatorStateStore(db_path=db_path)
+        assert store2.get_reservation_pin('miner-1') == PIN_SAMPLE1
+        store2.close()
+
+    def test_get_unknown_hotkey_returns_none(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert store.get_reservation_pin('miner-unknown') is None
+        store.close()
+
+    def test_upsert_overwrites_existing_row(self, tmp_path: Path):
+        """A fresh MinerReserved for a miner replaces any stale pin —
+        INSERT OR REPLACE keyed on miner_hotkey, so exactly one row remains."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+        store.upsert_reservation_pin(replace(PIN_SAMPLE1, reserve_block=1500, rate_str='999', reserved_until=1600))
+
+        pin = store.get_reservation_pin('miner-1')
+        assert pin.reserve_block == 1500
+        assert pin.rate_str == '999'
+        assert pin.reserved_until == 1600
+        store.close()
+
+    def test_remove_returns_and_deletes(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+
+        removed = store.remove_reservation_pin('miner-1')
+        assert removed == PIN_SAMPLE1
+        assert store.get_reservation_pin('miner-1') is None
+        store.close()
+
+    def test_remove_unknown_hotkey_is_noop(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert store.remove_reservation_pin('miner-unknown') is None
+        store.close()
+
+
+class TestReservationPinPurge:
+    def test_purge_drops_only_expired_rows(self, tmp_path: Path):
+        store = ValidatorStateStore(
+            db_path=tmp_path / 'state.db',
+            current_block_fn=lambda: 1001,
+        )
+        store.upsert_reservation_pin(PIN_SAMPLE1)  # reserved_until=1000 → expired at 1001
+        store.upsert_reservation_pin(PIN_SAMPLE2)  # reserved_until=1005 → still live
+
+        purged = store.purge_expired_reservation_pins()
+        assert purged == 1
+        assert store.get_reservation_pin('miner-1') is None
+        assert store.get_reservation_pin('miner-2') == PIN_SAMPLE2
+        store.close()
+
+    def test_purge_without_current_block_fn_is_noop(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+        assert store.purge_expired_reservation_pins() == 0
+        assert store.get_reservation_pin('miner-1') == PIN_SAMPLE1
+        store.close()
+
+    def test_update_reserved_until_keeps_row_a_purge_would_drop(self, tmp_path: Path):
+        """Regression: after the contract extends a reservation, refreshing the
+        pin's reserved_until must keep it alive past its original TTL — exactly
+        as update_reserved_until does for pending_confirms."""
+        store = ValidatorStateStore(
+            db_path=tmp_path / 'state.db',
+            current_block_fn=lambda: 1003,
+        )
+        store.upsert_reservation_pin(PIN_SAMPLE1)  # reserved_until=1000, would be purged at 1003
+        store.update_reservation_pin_reserved_until('miner-1', 1300)
+
+        pin = store.get_reservation_pin('miner-1')
+        assert pin.reserved_until == 1300
+
+        assert store.purge_expired_reservation_pins() == 0
+        assert store.get_reservation_pin('miner-1') is not None
+        store.close()
+
+    def test_update_reserved_until_unknown_hotkey_is_noop(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.update_reservation_pin_reserved_until('miner-unknown', 9999)
+        assert store.get_reservation_pin('miner-unknown') is None
+        store.close()
+
+
+class TestReservationPinCrossTable:
+    def test_delete_hotkey_clears_the_pin(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+
+        store.delete_hotkey('miner-1')
+        assert store.get_reservation_pin('miner-1') is None
+        store.close()
+
+    def test_fresh_init_db_has_reservation_pins_table(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        conn = store.require_connection()
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reservation_pins'").fetchone()
+        assert row is not None
+        store.close()

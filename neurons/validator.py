@@ -111,6 +111,8 @@ class Validator(BaseValidatorNeuron):
             metadata_path=metadata_path,
             state_store=self.state_store,
             metagraph=self.metagraph,
+            netuid=self.config.netuid,
+            subtensor=self.subtensor,
         )
         self.event_watcher.initialize(
             current_block=self.block,
