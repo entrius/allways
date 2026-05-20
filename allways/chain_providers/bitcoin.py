@@ -322,6 +322,25 @@ class BitcoinProvider(ChainProvider):
             bt.logging.error(f'Esplora tx lookup failed for {tx_hash}: {e}')
             return None
 
+    def get_current_block_height(self) -> Optional[int]:
+        """Bitcoin chain tip via RPC with Esplora fallback. None on failure."""
+        if self.mode == 'node':
+            result = self.rpc_call('getblockcount', [])
+            if result is not None:
+                try:
+                    return int(result)
+                except (TypeError, ValueError):
+                    pass
+        try:
+            resp = self.btc_api_get('/blocks/tip/height', timeout=10)
+            if resp.ok:
+                return int(resp.text.strip())
+        except (requests.ConnectionError, requests.Timeout) as e:
+            bt.logging.debug(f'BTC get_current_block_height: Esplora unreachable ({e})')
+        except Exception as e:
+            bt.logging.debug(f'BTC get_current_block_height failed: {e}')
+        return None
+
     def get_balance(self, address: str) -> int:
         """Get balance for a Bitcoin address in satoshis via RPC with Esplora fallback."""
         result = self.rpc_call('getreceivedbyaddress', [address, 0])
