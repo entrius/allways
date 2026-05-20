@@ -33,7 +33,7 @@ from allways.cli.swap_commands.helpers import (
     sign_or_prompt_external,
 )
 from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
-from allways.commitments import read_miner_commitments
+from allways.commitments import read_miner_commitment, read_miner_commitments
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_DEFAULT_BPS, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
@@ -1024,6 +1024,20 @@ def swap_now_command(
 
     reserved_until, validator_axons, ephemeral_wallet = result
 
+    # Send to the miner's deposit address as of the reservation block — the
+    # snapshot the validator pins and verifies against, not the quote-time value
+    # (a miner could move its address between quote and reserve). Fall back to
+    # the quoted address on any read failure.
+    deposit_address = selected_pair.from_address
+    try:
+        reserve_block = reserved_until - client.get_reservation_ttl()
+        pinned = read_miner_commitment(subtensor, netuid, selected_pair.hotkey, block=reserve_block)
+        pinned_match = find_matching_miners([pinned], from_chain, to_chain) if pinned else []
+        if pinned_match:
+            deposit_address = pinned_match[0].from_address
+    except Exception:
+        pass
+
     # Pull the contract-side request_hash so the local state can correlate to
     # active_reservations and the user can deep-link to the dashboard. A
     # transient RPC failure here must not abort the swap — fall back to the
@@ -1045,7 +1059,7 @@ def swap_now_command(
         tao_amount=tao_amount,
         user_receives=user_receives,
         rate_str=selected_pair.rate_str,
-        miner_from_address=selected_pair.from_address,
+        miner_from_address=deposit_address,
         user_from_address=user_from_address,
         receive_address=receive_address,
         reserved_until_block=reserved_until,
@@ -1073,7 +1087,7 @@ def swap_now_command(
         from_tx_block = resolve_source_tx_block(
             provider=provider,
             tx_hash=from_tx_hash,
-            expected_recipient=selected_pair.from_address,
+            expected_recipient=deposit_address,
             expected_amount=from_amount,
             subtensor=subtensor,
             client=client,
@@ -1082,7 +1096,7 @@ def swap_now_command(
     else:
         human_send = from_smallest_unit(from_amount, from_chain)
         console.print(
-            f'\n  Ready to send [bold]{human_send} {from_chain.upper()}[/bold] to miner at [cyan]{selected_pair.from_address}[/cyan]'
+            f'\n  Ready to send [bold]{human_send} {from_chain.upper()}[/bold] to miner at [cyan]{deposit_address}[/cyan]'
         )
         if not skip_confirm and not click.confirm('  Send now?', default=True):
             console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
@@ -1093,7 +1107,7 @@ def swap_now_command(
         from_tx_hash = None
         if from_chain == 'tao':
             for attempt in range(2):
-                send_result = send_tao_transfer(wallet, subtensor, selected_pair.from_address, from_amount)
+                send_result = send_tao_transfer(wallet, subtensor, deposit_address, from_amount)
                 if send_result is not None:
                     from_tx_hash, from_tx_block = send_result
                     mark_pending_swap_tx_sent(from_tx_hash)
@@ -1113,7 +1127,7 @@ def swap_now_command(
             send_result = send_btc(
                 chain_providers,
                 config,
-                selected_pair.from_address,
+                deposit_address,
                 from_amount,
                 from_address=user_from_address,
                 fee_rate_override=pinned_btc_fee_rate,
