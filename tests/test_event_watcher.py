@@ -948,9 +948,11 @@ class TestSyncToRetryFailures:
         assert w.substrate.get_block_hash.call_args_list == [call(11), call(12), call(13)]
         w.state_store.close()
 
-    def test_transient_block_fetch_failure_stops_cursor_before_failed_block(self, tmp_path: Path):
+    def test_transient_block_fetch_failure_stops_cursor_before_failed_block(self, tmp_path: Path, monkeypatch):
         w = make_watcher(tmp_path)
         w.cursor = 10
+        warning = MagicMock()
+        monkeypatch.setattr('allways.validator.event_watcher.bt.logging.warning', warning)
 
         def get_block_hash(block_num: int):
             if block_num == 12:
@@ -964,6 +966,10 @@ class TestSyncToRetryFailures:
 
         assert w.cursor == 11
         assert w.substrate.get_block_hash.call_args_list == [call(11), call(12)]
+        warning.assert_called_once_with(
+            'EventWatcher: sync stopped at block 11 before requested block 14 '
+            '(current_block=14); will retry from block 12'
+        )
         w.state_store.close()
 
     def test_failed_block_is_retried_on_next_sync(self, tmp_path: Path):
@@ -987,4 +993,34 @@ class TestSyncToRetryFailures:
 
         assert w.cursor == 14
         assert w.substrate.get_block_hash.call_args_list == [call(12), call(13), call(14)]
+        w.state_store.close()
+
+    def test_failed_event_fetch_is_retried_on_next_sync(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.cursor = 10
+        w.substrate.get_block_hash.side_effect = lambda block_num: f'hash-{block_num}'
+
+        def flaky_get_events(block_hash: str):
+            if block_hash == 'hash-12':
+                raise RuntimeError('rpc timeout')
+            return []
+
+        w.substrate.get_events.side_effect = flaky_get_events
+        w.sync_to(14)
+        assert w.cursor == 11
+
+        w.substrate.get_block_hash.reset_mock()
+        w.substrate.get_events.reset_mock()
+        w.substrate.get_events.side_effect = None
+        w.substrate.get_events.return_value = []
+
+        w.sync_to(14)
+
+        assert w.cursor == 14
+        assert w.substrate.get_block_hash.call_args_list == [call(12), call(13), call(14)]
+        assert w.substrate.get_events.call_args_list == [
+            call(block_hash='hash-12'),
+            call(block_hash='hash-13'),
+            call(block_hash='hash-14'),
+        ]
         w.state_store.close()
