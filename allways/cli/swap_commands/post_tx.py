@@ -16,7 +16,6 @@ from allways.cli.swap_commands.helpers import (
     mark_pending_swap_tx_sent,
     print_contract_error,
     resolve_source_tx_block,
-    safe_reservation_remaining,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
@@ -70,12 +69,13 @@ def post_tx_command(tx_hash: str, tx_block: int):
         print_contract_error('Failed to read reservation status', e)
         return
 
-    remaining = safe_reservation_remaining(reserved_until, current_block)
-    if remaining is None:
+    if reserved_until <= current_block:
         clear_pending_swap()
+        console.print('[red]Reservation has expired.[/red]')
         console.print('[dim]Run `alw swap now` to start a new swap.[/dim]')
         return
 
+    remaining = reserved_until - current_block
     human_amount = from_smallest_unit(state.from_amount, state.from_chain)
 
     console.print('\n[bold]Pending Swap[/bold]\n')

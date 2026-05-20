@@ -101,15 +101,13 @@ VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
 # runway the propose is orphaned and the reservation expires anyway.
 EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
 
-# Cushions applied by the miner (timeout) and the user CLI (reservation)
-# before each respective deadline. Both pinned to EXTEND_THRESHOLD_BLOCKS so
-# the miner won't start a fulfill — and the user won't broadcast a confirm
-# — inside the window where validators can no longer land a propose +
+# Cushion the miner subtracts from each swap's timeout before agreeing to
+# fulfill. Pinned to EXTEND_THRESHOLD_BLOCKS so the miner won't start a
+# fulfill inside the window where validators can no longer land a propose +
 # challenge before expiry. Not env-overridable: the right value is system-
 # determined (validator extension runway), not operator preference. Edit
 # this file directly if you need a different value.
 MINER_TIMEOUT_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
-USER_POST_TX_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
 
 # Tiered escalation. First extension fires on tx visibility alone (mempool
 # OK) and buys time for one block; second extension requires ≥1 confirmation
