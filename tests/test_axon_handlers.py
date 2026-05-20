@@ -12,11 +12,11 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from allways.chain_providers.base import TransactionInfo
-from allways.classes import MinerPair
+from allways.classes import MinerPair, Reservation
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.validator.axon_handlers import handle_swap_confirm, handle_swap_reserve
-from allways.validator.state_store import ReservationPin
+from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
 
 
 def make_synapse(
@@ -100,11 +100,37 @@ def make_tx_info(
     )
 
 
+def make_reservation(
+    *,
+    from_addr: str = 'bc1-user',
+    from_chain: str = 'btc',
+    to_chain: str = 'tao',
+    tao_amount: int = 345_000_000,
+    from_amount: int = 100_000,
+    to_amount: int = 345_000_000,
+    reserved_until: int = 2000,
+) -> Reservation:
+    return Reservation(
+        hash='reservation-hash',
+        from_addr=from_addr,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        tao_amount=tao_amount,
+        from_amount=from_amount,
+        to_amount=to_amount,
+        reserved_until=reserved_until,
+    )
+
+
+_DEFAULT_RESERVATION = object()
+
+
 def make_validator(
     *,
     block: int = 1000,
     reserved_until: int = 2000,
     reservation_data: tuple | None = (345_000_000, 100_000, 345_000_000),
+    reservation: Reservation | None | object = _DEFAULT_RESERVATION,
     providers: dict | None = None,
 ) -> MagicMock:
     """Build a Validator mock with default-happy contract/chain state.
@@ -122,6 +148,9 @@ def make_validator(
     contract = MagicMock()
     contract.get_miner_reserved_until.return_value = reserved_until
     contract.get_reservation_data.return_value = reservation_data
+    if reservation is _DEFAULT_RESERVATION:
+        reservation = make_reservation(reserved_until=reserved_until)
+    contract.get_reservation.return_value = reservation
     validator.axon_contract_client = contract
 
     if providers is None:
@@ -215,6 +244,80 @@ class TestReservationValidation:
         result = run_handler(validator, make_synapse())
         assert result.accepted is False
         assert 'Reservation data not found' in result.rejection_reason
+        validator.axon_contract_client.get_reservation.assert_not_called()
+
+    def test_rejects_missing_full_reservation_record(self):
+        validator = make_validator(reservation=None)
+        result = run_handler(validator, make_synapse())
+        assert result.accepted is False
+        assert 'Reservation record not found' in result.rejection_reason
+        validator.axon_chain_providers['btc'].verify_from_proof.assert_not_called()
+        validator.axon_chain_providers['btc'].verify_transaction.assert_not_called()
+        validator.state_store.enqueue.assert_not_called()
+
+    def test_rejects_source_address_mismatch_with_reservation_owner(self):
+        validator = make_validator(reservation=make_reservation(from_addr='bc1-reserved-owner'))
+        result = run_handler(validator, make_synapse(from_address='bc1-attacker'))
+        assert result.accepted is False
+        assert 'Source address does not match active reservation' in result.rejection_reason
+        validator.axon_chain_providers['btc'].verify_from_proof.assert_not_called()
+        validator.axon_chain_providers['btc'].verify_transaction.assert_not_called()
+        validator.state_store.enqueue.assert_not_called()
+        validator.axon_contract_client.vote_initiate.assert_not_called()
+
+    def test_mismatched_invisible_source_tx_cannot_overwrite_pending_confirm(self):
+        """The owner check must run before tx lookup and queue insertion. A
+        bogus invisible tx for another source address must not replace the
+        single pending_confirms row for the reserved miner."""
+        validator = make_validator(reservation=make_reservation(from_addr='bc1-reserved-owner'))
+        validator.axon_chain_providers['btc'].verify_transaction.return_value = None
+
+        result = run_handler(validator, make_synapse(from_address='bc1-attacker'))
+
+        assert result.accepted is False
+        assert 'Source address does not match active reservation' in result.rejection_reason
+        validator.axon_chain_providers['btc'].verify_transaction.assert_not_called()
+        validator.state_store.enqueue.assert_not_called()
+
+    def test_mismatched_confirm_preserves_existing_pending_row(self, tmp_path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        try:
+            store.enqueue(
+                PendingConfirm(
+                    miner_hotkey='miner-hotkey',
+                    from_tx_hash='honest-tx',
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_address='bc1-reserved-owner',
+                    to_address='5honest',
+                    tao_amount=345_000_000,
+                    from_amount=100_000,
+                    to_amount=345_000_000,
+                    miner_from_address='bc1-miner',
+                    miner_to_address='5miner',
+                    rate_str='345',
+                    reserved_until=2000,
+                    from_tx_block=111,
+                    queued_at=1.0,
+                )
+            )
+            validator = make_validator(reservation=make_reservation(from_addr='bc1-reserved-owner'))
+            validator.state_store = store
+            validator.axon_chain_providers['btc'].verify_transaction.return_value = None
+
+            result = run_handler(
+                validator,
+                make_synapse(from_tx_hash='attacker-tx', from_address='bc1-attacker', to_address='5attacker'),
+            )
+
+            assert result.accepted is False
+            pending = store.get_all()
+            assert len(pending) == 1
+            assert pending[0].from_tx_hash == 'honest-tx'
+            assert pending[0].from_address == 'bc1-reserved-owner'
+            assert pending[0].to_address == '5honest'
+        finally:
+            store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +351,8 @@ class TestCommitmentValidation:
         swap request must be rejected with the direction-support message."""
         one_way = make_commitment(counter_rate=0.0, counter_rate_str='')
         synapse = make_synapse(from_chain='tao', to_chain='btc', from_address='5user', to_address='bc1-dest')
-        result = run_handler(make_validator(), synapse, commitment=one_way)
+        validator = make_validator(reservation=make_reservation(from_addr='5user', from_chain='tao', to_chain='btc'))
+        result = run_handler(validator, synapse, commitment=one_way)
         assert result.accepted is False
         assert 'does not support this swap direction' in result.rejection_reason
 
