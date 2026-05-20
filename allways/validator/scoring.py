@@ -143,7 +143,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
         )
-        total_crown = sum(crown_blocks.values())
+        total_crown_dir = sum(crown_blocks.values())
         volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
         total_volume_dir = sum(volumes_dir.values())
         for hk, v in volumes_dir.items():
@@ -151,9 +151,14 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         network_volume_total += int(total_volume_dir)
         for hk, blk in crown_blocks.items():
             miner_crown_total[hk] = miner_crown_total.get(hk, 0.0) + blk
-        network_crown_total += total_crown
+        network_crown_total += total_crown_dir
 
-        if total_crown == 0:
+        bt.logging.debug(
+            f'V1 scoring [{from_chain}→{to_chain}]: '
+            f'total_crown={total_crown_dir:.1f} blk, total_volume_rao={total_volume_dir}'
+        )
+
+        if total_crown_dir == 0:
             continue  # empty bucket — pool recycles via the remainder below
 
         for hotkey, blocks in crown_blocks.items():
@@ -173,12 +178,19 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
                 closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
                 ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
             )
-            crown_share_dir = blocks / total_crown
+            crown_share_dir = blocks / total_crown_dir
             vol_dir = volumes_dir.get(hotkey, 0)
+            vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
             base = pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
             unweighted_rewards[uid] += base
             rewards[uid] += base * vol_factor
+            if vol_factor < 1.0:
+                bt.logging.debug(
+                    f'V1 scoring [{from_chain}→{to_chain}] {hotkey[:8]}: '
+                    f'crown_share={crown_share_dir:.3f} vol_share={vol_share_dir:.3f} '
+                    f'vol_factor={vol_factor:.3f}'
+                )
 
     record_volume_traces(
         weighting_traces=weighting_traces,

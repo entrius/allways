@@ -386,6 +386,10 @@ class ValidatorStateStore:
         from_chain: str = '',
         to_chain: str = '',
     ) -> None:
+        # Direction is normalized to lowercase on write so the per-direction
+        # volume query is robust to upstream case drift. SQLite text
+        # comparisons are case-sensitive and DIRECTION_POOLS keys are
+        # lowercase.
         with self.lock:
             conn = self.require_connection()
             conn.execute(
@@ -400,8 +404,8 @@ class ValidatorStateStore:
                     1 if completed else 0,
                     resolved_block,
                     int(tao_amount or 0),
-                    from_chain or '',
-                    to_chain or '',
+                    (from_chain or '').lower(),
+                    (to_chain or '').lower(),
                 ),
             )
             conn.commit()
@@ -448,7 +452,10 @@ class ValidatorStateStore:
     def get_volume_by_direction_since(self, since_block: int, from_chain: str, to_chain: str) -> Dict[str, int]:
         """Per-miner volume (rao) restricted to one swap direction. Outcomes
         missing direction (pre-migration legacy rows) are excluded — they
-        contribute no volume credit, same as legacy rows with tao_amount=0."""
+        contribute no volume credit, same as legacy rows with tao_amount=0.
+
+        Lookup is lowercased to match the normalization applied in
+        ``insert_swap_outcome``."""
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute(
@@ -461,7 +468,7 @@ class ValidatorStateStore:
                   AND to_chain = ?
                 GROUP BY miner_hotkey
                 """,
-                (since_block, from_chain, to_chain),
+                (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
             ).fetchall()
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 

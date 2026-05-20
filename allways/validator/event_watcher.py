@@ -540,7 +540,7 @@ class ContractEventWatcher:
         swap = self.swap_tracker.active.get(swap_id)
         if swap is None:
             return '', ''
-        return swap.from_chain, swap.to_chain
+        return (swap.from_chain or '').lower(), (swap.to_chain or '').lower()
 
     def record_reservation_pin(self, block_num: int, miner: str, reserved_until: int) -> None:
         """Pin the miner's commitment as of the reservation block ``block_num``.
