@@ -6,12 +6,14 @@ by another user, and stale local file shown as ACTIVE because the contract
 leaves expired rows in the reservation map until lazy clear.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
 from allways.cli.swap_commands.helpers import (
     PendingSwapState,
     ReservationStatus,
+    hydrate_pending_swap,
     probe_pending_reservation,
 )
 from allways.contract_client import ContractError
@@ -75,6 +77,28 @@ def make_client(*, active_swaps=(), reserved_until=0, reservation_data=None):
     client.get_miner_reserved_until.return_value = reserved_until
     client.get_reservation_data.return_value = reservation_data
     return client
+
+
+def test_hydrate_pending_swap_sets_fee_adjusted_user_receives(monkeypatch):
+    state = make_state(request_hash='req-hash', to_amount=0, tao_amount=0, user_receives=0)
+    client = MagicMock()
+    client.subtensor = None
+    client.get_reservation.return_value = SimpleNamespace(
+        hash='req-hash',
+        from_chain='btc',
+        to_chain='tao',
+        from_amount=100_000,
+        to_amount=101,
+        tao_amount=101,
+        from_addr='tb1quser',
+        reserved_until=1_000_100,
+    )
+    monkeypatch.setattr('allways.commitments.read_miner_commitment', lambda *args, **kwargs: None)
+
+    assert hydrate_pending_swap(state, client) is True
+
+    assert state.to_amount == 101
+    assert state.user_receives == 100
 
 
 def test_our_swap_when_active_swaps_match_user_addresses():
