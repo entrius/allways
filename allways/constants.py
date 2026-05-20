@@ -115,6 +115,14 @@ EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WIN
 MAX_EXTENSIONS_PER_RESERVATION = 2
 MAX_EXTENSIONS_PER_SWAP = 2
 
+# User-side analogue of MINER_TIMEOUT_CUSHION_BLOCKS: refuse to broadcast a
+# source-tx confirm when remaining reservation runway is inside this window.
+# Validators won't propose_extend_reservation once current + CHALLENGE_WINDOW
+# >= reserved_until, so a confirm submitted inside that range has no
+# extension rescue path. On tao→btc that means losing the source TAO —
+# reservations have no escrow and no slash-to-user on failure.
+USER_POST_TX_CUSHION_BLOCKS = CHALLENGE_WINDOW_BLOCKS
+
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.
 FEE_DIVISOR = 100

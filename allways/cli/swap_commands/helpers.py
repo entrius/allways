@@ -19,6 +19,7 @@ from allways.constants import (
     MAX_EXTENSIONS_PER_RESERVATION,
     NETUID_FINNEY,
     TAO_TO_RAO,
+    USER_POST_TX_CUSHION_BLOCKS,
 )
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 
@@ -34,6 +35,33 @@ SECONDS_PER_BLOCK = 12
 def blocks_to_minutes_str(blocks: int) -> str:
     """Render a block count as an approximate minutes string like '~5 min'."""
     return f'~{blocks * SECONDS_PER_BLOCK / 60:.0f} min'
+
+
+def safe_reservation_remaining(reserved_until: int, current_block: int) -> Optional[int]:
+    """Return remaining reservation blocks if safe to broadcast confirm, else ``None``.
+
+    Prints a user-facing reason when ``None`` is returned. Caller handles any
+    state cleanup (e.g. ``clear_pending_swap()``) and CLI exit.
+
+    Validators refuse propose_extend_reservation once
+    ``current + CHALLENGE_WINDOW_BLOCKS >= reserved_until`` — confirms
+    broadcast inside that window have no extension rescue path. On tao→btc
+    the source TAO is sent to the miner before the swap row exists, so a
+    failed reservation is an unrecoverable loss.
+    """
+    remaining = reserved_until - current_block
+    if remaining <= 0:
+        console.print('[red]Reservation has expired.[/red]')
+        return None
+    if remaining <= USER_POST_TX_CUSHION_BLOCKS:
+        console.print(
+            f'[red]Reservation has only {remaining} blocks remaining — inside the '
+            f'{USER_POST_TX_CUSHION_BLOCKS}-block safety cushion. Validators may not '
+            f'be able to extend it in time, and a failed reservation on tao→btc loses '
+            f'the source funds.[/red]'
+        )
+        return None
+    return remaining
 
 
 SWAP_STATUS_COLORS = {
