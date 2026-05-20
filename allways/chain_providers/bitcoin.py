@@ -65,6 +65,23 @@ def to_mainnet_address(address: str) -> str:
     return address
 
 
+def parse_esplora_urls(raw: str) -> list[tuple[str, Optional[dict]]]:
+    """Parse BTC_ESPLORA_URLS into (base_url, headers) pairs, tried in order.
+
+    Comma-separated; each entry is ``url`` or ``url|api_key``. A key sends
+    ``Authorization: Bearer <key>`` to that endpoint only — others stay anonymous.
+    """
+    bases = []
+    for entry in raw.split(','):
+        url, _, key = entry.strip().partition('|')
+        url = url.strip().rstrip('/')
+        if not url:
+            continue
+        key = key.strip()
+        bases.append((url, {'Authorization': f'Bearer {key}'} if key else None))
+    return bases
+
+
 class BitcoinProvider(ChainProvider):
     """Bitcoin chain provider. Supports two modes:
 
@@ -110,6 +127,10 @@ class BitcoinProvider(ChainProvider):
         # Scopes find_recent_outgoing reuse to this process — a fresh `alw swap`
         # run can't return a tx hash already consumed by an earlier swap.
         self.broadcasted_txids: set[str] = set()
+
+        # Optional operator-supplied Esplora endpoints (paid/private), tried
+        # before the public defaults. Empty → public blockstream → mempool.
+        self.esplora_bases = parse_esplora_urls(os.environ.get('BTC_ESPLORA_URLS', ''))
 
     def _send_error(self, msg: str) -> None:
         self.last_send_error = msg
@@ -329,23 +350,25 @@ class BitcoinProvider(ChainProvider):
             return int(round(result * BTC_TO_SAT))
         return self.api_get_balance(address)
 
-    def btc_api_bases(self) -> Tuple[str, ...]:
-        """Esplora-compatible bases tried in order; mempool.space is the fallback when blockstream is flaky."""
+    def btc_api_bases(self) -> list[tuple[str, Optional[dict]]]:
+        """Esplora (base_url, headers) pairs tried in order.
+
+        Defaults to public blockstream → mempool. Override with BTC_ESPLORA_URLS
+        (comma-separated ``url`` or ``url|api_key``) to use paid/private endpoints.
+        """
+        if self.esplora_bases:
+            return self.esplora_bases
         if self.network == 'testnet':
-            return (
-                'https://blockstream.info/testnet/api',
-                'https://mempool.space/testnet/api',
-            )
-        return (
-            'https://blockstream.info/api',
-            'https://mempool.space/api',
-        )
+            defaults = ('https://blockstream.info/testnet/api', 'https://mempool.space/testnet/api')
+        else:
+            defaults = ('https://blockstream.info/api', 'https://mempool.space/api')
+        return [(url, None) for url in defaults]
 
     def btc_api_get(self, path: str, timeout: int = 15) -> requests.Response:
         last_err: Optional[Exception] = None
-        for base in self.btc_api_bases():
+        for base, headers in self.btc_api_bases():
             try:
-                resp = self.http.get(f'{base}{path}', timeout=timeout)
+                resp = self.http.get(f'{base}{path}', timeout=timeout, headers=headers)
                 if resp.status_code >= 500:
                     last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
                     continue
@@ -356,9 +379,9 @@ class BitcoinProvider(ChainProvider):
 
     def btc_api_post(self, path: str, data, timeout: int = 30) -> requests.Response:
         last_err: Optional[Exception] = None
-        for base in self.btc_api_bases():
+        for base, headers in self.btc_api_bases():
             try:
-                resp = self.http.post(f'{base}{path}', data=data, timeout=timeout)
+                resp = self.http.post(f'{base}{path}', data=data, timeout=timeout, headers=headers)
                 if resp.status_code >= 500:
                     last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
                     continue
