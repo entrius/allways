@@ -105,6 +105,20 @@ def derive_tao_leg(from_chain: str, from_amount: int, to_chain: str, to_amount: 
     return 0
 
 
+def quote_within_slippage(quoted: int, recomputed: int, slippage_bps: int) -> bool:
+    """True if `recomputed` is no more than `slippage_bps` below `quoted`.
+
+    One-sided (DEX 'minimum received'): a favorable move — recomputed >= quoted —
+    always passes. Pure integer math for determinism across validators. When
+    slippage_bps >= 10_000 the threshold is non-positive, so it always passes.
+    """
+    if quoted <= 0 or recomputed <= 0:
+        return False
+    if recomputed >= quoted:
+        return True
+    return recomputed * 10_000 >= quoted * (10_000 - slippage_bps)
+
+
 def check_swap_viability(
     tao_amount_rao: int,
     miner_collateral_rao: int,

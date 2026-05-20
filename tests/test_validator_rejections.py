@@ -96,6 +96,21 @@ def test_address_cooldown_includes_raw_reason():
     assert info.headline.lower().count('address on cooldown') == 0
 
 
+def test_rate_moved_translates():
+    raw = 'Quoted amount is below your slippage band — the miner rate moved, re-quote and retry'
+    info = render_and_aggregate(
+        _silent_console(),
+        [FakeResp(accepted=False, rejection_reason=raw)],
+        context={'miner_uid': 7},
+    )
+    assert info.category == 'rate_moved'
+    # Deterministic: retrying with the same stale quote cannot succeed — the
+    # user must re-quote first.
+    assert info.deterministic is True
+    assert 'UID 7' in info.headline
+    assert 'rate' in info.headline.lower()
+
+
 def test_miner_busy_is_not_deterministic():
     info = render_and_aggregate(
         _silent_console(),

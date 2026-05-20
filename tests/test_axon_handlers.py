@@ -1,4 +1,4 @@
-"""Tests for validator axon_handlers.handle_swap_confirm.
+"""Tests for validator axon_handlers.handle_swap_confirm and handle_swap_reserve.
 
 Covers every rejection branch plus the queued-confirmation path. The
 vote_initiate success path is not unit-tested here — it requires mocking
@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 from allways.chain_providers.base import TransactionInfo
 from allways.classes import MinerPair
 from allways.contract_client import ContractError
-from allways.synapses import SwapConfirmSynapse
-from allways.validator.axon_handlers import handle_swap_confirm
+from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
+from allways.validator.axon_handlers import handle_swap_confirm, handle_swap_reserve
 
 
 def make_synapse(
@@ -378,3 +378,247 @@ class TestErrorHandling:
         result = run_handler(validator, make_synapse())
         assert result.accepted is False
         assert 'boom' in result.rejection_reason
+
+
+# ===========================================================================
+# handle_swap_reserve — reserve-time rate recompute
+# ===========================================================================
+#
+# The reservation pins amounts but not the miner's rate. handle_swap_reserve
+# must recompute to_amount/tao_amount from the commitment rate it reads at
+# reserve time and reject a request whose user-submitted amounts don't match —
+# otherwise a quote computed against a momentarily-bad rate gets locked in.
+
+
+# btc→tao, from_amount=100_000 sat at rate '345' → to_amount/tao_amount.
+_RESERVE_FROM_AMOUNT = 100_000
+_RESERVE_TO_AMOUNT = 345_000_000
+_RESERVE_TAO_AMOUNT = 345_000_000
+
+# handle_swap_reserve computes the request hash from the miner's public key
+# before the lock, so the reserve fixtures need a real SS58 (the //Alice key).
+_RESERVE_MINER_SS58 = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+
+
+def make_reserve_synapse(
+    miner_hotkey: str = _RESERVE_MINER_SS58,
+    tao_amount: int = _RESERVE_TAO_AMOUNT,
+    from_amount: int = _RESERVE_FROM_AMOUNT,
+    to_amount: int = _RESERVE_TO_AMOUNT,
+    from_address: str = 'bc1-user',
+    from_address_proof: str = 'proof',
+    from_chain: str = 'btc',
+    to_chain: str = 'tao',
+) -> SwapReserveSynapse:
+    return SwapReserveSynapse(
+        miner_hotkey=miner_hotkey,
+        tao_amount=tao_amount,
+        from_amount=from_amount,
+        to_amount=to_amount,
+        from_address=from_address,
+        from_address_proof=from_address_proof,
+        block_anchor=1000,
+        from_chain=from_chain,
+        to_chain=to_chain,
+    )
+
+
+def make_reserve_validator(
+    *,
+    block: int = 1000,
+    reserved_until: int = 0,
+    collateral: int = 10_000_000_000,
+    active: bool = True,
+    has_swap: bool = False,
+) -> MagicMock:
+    """Validator mock with default-happy state for handle_swap_reserve.
+
+    get_miner_snapshot returns (collateral, active, has_swap, reserved_until,
+    deactivation_block); get_cooldown returns (strikes, last_expired).
+    """
+    validator = MagicMock()
+    validator.block = block
+    validator.axon_subtensor.get_current_block.return_value = block
+    validator.config.netuid = 2
+    validator.axon_lock = threading.Lock()
+
+    contract = MagicMock()
+    contract.get_miner_snapshot.return_value = (collateral, active, has_swap, reserved_until, 0)
+    contract.get_cooldown.return_value = (0, 0)
+    validator.axon_contract_client = contract
+
+    btc = MagicMock()
+    btc.verify_from_proof.return_value = True
+    btc.get_balance.return_value = 10**18
+    validator.axon_chain_providers = {'btc': btc, 'tao': MagicMock()}
+
+    validator.bounds_cache = MagicMock()
+    validator.bounds_cache.min_collateral.return_value = 0
+    validator.bounds_cache.min_swap_amount.return_value = 0
+    validator.bounds_cache.max_swap_amount.return_value = 0
+    validator.wallet = MagicMock()
+    return validator
+
+
+def run_reserve_handler(validator, synapse, commitment=_DEFAULT):
+    """Patch read_miner_commitment and drive handle_swap_reserve synchronously."""
+    cmt = make_commitment() if commitment is _DEFAULT else commitment
+    with patch('allways.validator.axon_handlers.read_miner_commitment', return_value=cmt):
+        return asyncio.run(handle_swap_reserve(validator, synapse))
+
+
+class TestReserveRateRecompute:
+    # ------------------------------------------------------------------ #
+    # exact match / within band                                            #
+    # ------------------------------------------------------------------ #
+
+    def test_accepts_when_amounts_match_commitment_rate(self):
+        """A correctly-quoted reservation (exact match) passes and votes."""
+        validator = make_reserve_validator()
+        result = run_reserve_handler(validator, make_reserve_synapse())
+        assert result.accepted is True
+        validator.axon_contract_client.vote_reserve.assert_called_once()
+
+    def test_accepts_within_default_slippage_band(self):
+        """Rate dropped 1% after the user's quote — within the default 2% band."""
+        validator = make_reserve_validator()
+        # User quoted at rate 345 → to_amount = 345_000_000.
+        # Rate moved to ~341.55 (1% down) → recomputed ≈ 341_550_000.
+        # Simulate by patching the commitment rate so recomputed < quoted by 1%.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.99)  # '341.55'
+        moved.rate = 345 * 0.99
+        # User's synapse still reflects the old 345 quote
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is True
+        validator.axon_contract_client.vote_reserve.assert_called_once()
+
+    def test_rejects_beyond_default_slippage_band(self):
+        """Rate dropped 3% after the user's quote — exceeds the default 2% band."""
+        validator = make_reserve_validator()
+        # Rate moved to ~334.65 (3% down) → recomputed ≈ 334_650_000.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.97)
+        moved.rate = 345 * 0.97
+        # User's synapse still reflects the old 345 quote
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    def test_accepts_favorable_move_recomputed_above_quoted(self):
+        """A favorable rate move (recomputed > quoted) always passes.
+
+        The user quoted conservatively at 330; the miner's rate is still 345
+        so recomputed (345_000_000) > quoted (330_000_000) — always passes.
+        """
+        validator = make_reserve_validator()
+        # User quoted at 330 rate → to_amount = 330_000_000
+        conservative_rate = 330.0
+        conservative_to = int(_RESERVE_FROM_AMOUNT * conservative_rate * 10**9 // 10**8)  # sat→rao
+        synapse = make_reserve_synapse(to_amount=conservative_to, tao_amount=conservative_to)
+        # Commitment still at 345 → recomputed = 345_000_000 > conservative_to
+        result = run_reserve_handler(validator, synapse)
+        assert result.accepted is True
+
+    def test_rejects_swap79_scale_gap(self):
+        """A quote ~7x above the recomputed amount (swap-79 scenario) rejects."""
+        validator = make_reserve_validator()
+        # User quoted at 345 rate but miner moved to 49 (7x gap)
+        moved = make_commitment()
+        moved.rate_str = '49'
+        moved.rate = 49.0
+        # from_amount=100_000 sat at rate '49' → 49_000_000 rao
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    def test_tighter_user_slippage_rejects_small_drift(self):
+        """Rate dropped 0.5% — within the default 2% band but rejected with
+        --slippage 0.3% (30 bps)."""
+        validator = make_reserve_validator()
+        # Rate moved to 99.5% of 345 → recomputed ≈ 99.5% of 345_000_000
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.995)
+        moved.rate = 345 * 0.995
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = 30  # 0.3%
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+
+    def test_wider_user_slippage_accepts_large_drift(self):
+        """Rate dropped 4% — the default 2% band rejects it, but --slippage 5%
+        (500 bps) accepts it."""
+        validator = make_reserve_validator()
+        # Rate moved to 96% of 345 → recomputed ≈ 96% of 345_000_000
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.96)
+        moved.rate = 345 * 0.96
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = 500  # 5%
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        assert result.accepted is True
+
+    def test_slippage_max_bps_clamp_applied(self):
+        """slippage_bps above RESERVE_SLIPPAGE_MAX_BPS is clamped, not errored.
+
+        With the clamp applied, even a very large drift (rate dropped 90%)
+        passes the slippage gate because MAX_BPS >= 10_000 makes the threshold
+        non-positive.
+        """
+        from allways.constants import RESERVE_SLIPPAGE_MAX_BPS
+
+        validator = make_reserve_validator()
+        # Rate dropped 90% → recomputed = 10% of 345_000_000 = 34_500_000.
+        # Default 2% band would reject this, but MAX_BPS uncaps it.
+        moved = make_commitment()
+        moved.rate_str = str(345 * 0.10)
+        moved.rate = 345 * 0.10
+        synapse = make_reserve_synapse()
+        synapse.slippage_bps = RESERVE_SLIPPAGE_MAX_BPS + 1_000_000  # absurdly large — clamped
+        result = run_reserve_handler(validator, synapse, commitment=moved)
+        # With MAX_BPS applied, gate passes; default 2% would reject
+        assert result.accepted is True
+
+    # ------------------------------------------------------------------ #
+    # tao_amount internal consistency                                      #
+    # ------------------------------------------------------------------ #
+
+    def test_rejects_inconsistent_tao_amount(self):
+        """tao_amount must equal derive_tao_leg(from_amount, to_amount) — an
+        inconsistent triple is rejected before the slippage gate."""
+        validator = make_reserve_validator()
+        synapse = make_reserve_synapse(tao_amount=_RESERVE_TAO_AMOUNT + 5)
+        result = run_reserve_handler(validator, synapse)
+        assert result.accepted is False
+        assert 'inconsistent' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    # ------------------------------------------------------------------ #
+    # rate moved after quote                                               #
+    # ------------------------------------------------------------------ #
+
+    def test_rejects_when_rate_moved_after_quote(self):
+        """User quotes against rate 345, miner re-committed to 300 — the quote
+        is now ~15% above recomputed, outside the default 2% band."""
+        validator = make_reserve_validator()
+        moved = make_commitment()
+        moved.rate_str = '300'
+        moved.rate = 300.0
+        # User still submits the amounts from the old 345 quote.
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    def test_recompute_runs_before_vote(self):
+        """A stale quote (rate moved 7x) is rejected before vote_reserve is called."""
+        validator = make_reserve_validator()
+        # Rate moved from 345 down to 49 — user's old quote is ~7x above recomputed.
+        moved = make_commitment()
+        moved.rate_str = '49'
+        moved.rate = 49.0
+        run_reserve_handler(validator, make_reserve_synapse(), commitment=moved)
+        validator.axon_contract_client.vote_reserve.assert_not_called()

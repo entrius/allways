@@ -15,13 +15,15 @@ import bittensor as bt
 from bittensor import Keypair
 from Crypto.Hash import keccak
 
+from allways.chains import canonical_pair, get_chain
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
-from allways.constants import RESERVATION_COOLDOWN_BLOCKS
+from allways.constants import RESERVATION_COOLDOWN_BLOCKS, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
+from allways.utils.rate import calculate_to_amount, derive_tao_leg, quote_within_slippage
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm
 
@@ -116,6 +118,26 @@ def resolve_swap_direction(
     if rate <= 0:
         return None
     return from_chain, to_chain, deposit_addr, fulfillment_addr, rate, rate_str
+
+
+def recompute_reserve_amounts(
+    commitment: MinerPair,
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+) -> int:
+    """Recompute to_amount from the miner's commitment rate, mirroring the CLI
+    quote path so a correctly-quoted reservation matches the reserve-time rate."""
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    is_reverse = from_chain != canon_from
+    _, rate_str = commitment.get_rate_for_direction(from_chain)
+    return calculate_to_amount(
+        from_amount,
+        rate_str,
+        is_reverse,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
+    )
 
 
 def load_swap_commitment(validator: 'Validator', miner_hotkey: str) -> Optional[MinerPair]:
@@ -339,6 +361,33 @@ async def handle_swap_reserve(
                 f'{ctx}: commitment ok — miner_rate={reserve_rate_str or reserve_rate} '
                 f'miner_from={commitment.from_address} miner_to={commitment.to_address}'
             )
+
+            # Gate the user's quote against the rate read at reserve time, and
+            # reject a tao_amount that doesn't match the submitted from/to legs.
+            expected_to_amount = recompute_reserve_amounts(
+                commitment,
+                synapse.from_chain,
+                synapse.to_chain,
+                synapse.from_amount,
+            )
+            expected_tao_amount = derive_tao_leg(
+                synapse.from_chain, synapse.from_amount, synapse.to_chain, synapse.to_amount
+            )
+            if synapse.tao_amount != expected_tao_amount:
+                reject_synapse(
+                    synapse,
+                    'tao_amount is inconsistent with from_amount/to_amount — re-quote and retry',
+                    ctx,
+                )
+                return synapse
+            slippage_bps = max(0, min(synapse.slippage_bps, RESERVE_SLIPPAGE_MAX_BPS))
+            if not quote_within_slippage(synapse.to_amount, expected_to_amount, slippage_bps):
+                reject_synapse(
+                    synapse,
+                    'Quoted amount is below your slippage band — the miner rate moved, re-quote and retry',
+                    ctx,
+                )
+                return synapse
 
             collateral, active, has_swap, reserved_until, _ = contract.get_miner_snapshot(miner)
             if not active:

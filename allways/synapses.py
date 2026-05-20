@@ -10,6 +10,8 @@ from typing import Optional
 
 import bittensor as bt
 
+from allways.constants import RESERVE_SLIPPAGE_DEFAULT_BPS
+
 
 class MinerActivateSynapse(bt.Synapse):
     """Miner broadcasts activation request to all validators.
@@ -45,6 +47,7 @@ class SwapReserveSynapse(bt.Synapse):
     block_anchor: int
     from_chain: str = ''  # User's source chain (for bilateral pair support)
     to_chain: str = ''  # User's dest chain
+    slippage_bps: int = RESERVE_SLIPPAGE_DEFAULT_BPS
 
     # Response fields (validator fills)
     accepted: Optional[bool] = None
