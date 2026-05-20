@@ -7,6 +7,7 @@ Usage:
 """
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 
 from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitment
-from allways.constants import FEE_DIVISOR
+from allways.constants import FEE_DIVISOR, FORWARD_STALL_THRESHOLD_SECONDS
 from allways.contract_client import AllwaysContractClient
 from allways.miner.fulfillment import SwapFulfiller
 from allways.miner.swap_poller import SwapPoller
@@ -183,5 +184,15 @@ class Miner(BaseMinerNeuron):
 if __name__ == '__main__':
     with Miner() as miner:
         while True:
-            bt.logging.info(f'Miner running... step={miner.step}')
+            forward_age = time.time() - miner.last_forward_time
+            if not miner.thread.is_alive():
+                bt.logging.error(f'Forward thread is dead (last forward {forward_age:.0f}s ago) — exiting for restart')
+                sys.exit(1)
+            if forward_age > FORWARD_STALL_THRESHOLD_SECONDS:
+                bt.logging.error(
+                    f'Forward progress stalled for {forward_age:.0f}s '
+                    f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
+                )
+                sys.exit(1)
+            bt.logging.info(f'Miner running... step={miner.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)

@@ -8,6 +8,7 @@ Usage:
     python neurons/validator.py --netuid 7 --wallet.name default --wallet.hotkey default
 """
 
+import sys
 import threading
 import time
 from functools import partial
@@ -21,6 +22,7 @@ from allways.commitments import read_miner_commitments
 from allways.constants import (
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
     FEE_DIVISOR,
+    FORWARD_STALL_THRESHOLD_SECONDS,
     SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import AllwaysContractClient
@@ -245,5 +247,15 @@ class Validator(BaseValidatorNeuron):
 if __name__ == '__main__':
     with Validator() as validator:
         while True:
-            bt.logging.info(f'Validator running... step={validator.step}')
+            forward_age = time.time() - validator.last_forward_time
+            if not validator.thread.is_alive():
+                bt.logging.error(f'Forward thread is dead (last forward {forward_age:.0f}s ago) — exiting for restart')
+                sys.exit(1)
+            if forward_age > FORWARD_STALL_THRESHOLD_SECONDS:
+                bt.logging.error(
+                    f'Forward progress stalled for {forward_age:.0f}s '
+                    f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
+                )
+                sys.exit(1)
+            bt.logging.info(f'Validator running... step={validator.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)

@@ -50,12 +50,16 @@ class BaseMinerNeuron(BaseNeuron):
                         self.sync()
 
                     consecutive_errors = 0
+                    self.last_forward_time = time.time()
                 except KeyboardInterrupt:
                     raise
                 except Exception as step_err:
                     consecutive_errors += 1
                     bt.logging.error(f'Step {self.step} error ({consecutive_errors} consecutive): {step_err}')
-                    self.reconnect_subtensor()
+                    try:
+                        self.reconnect_subtensor()
+                    except Exception as reconnect_err:
+                        bt.logging.error(f'Reconnect failed during error recovery: {reconnect_err}')
                     time.sleep(min(2**consecutive_errors, 30))
 
                 self.step += 1
@@ -64,6 +68,9 @@ class BaseMinerNeuron(BaseNeuron):
         except KeyboardInterrupt:
             bt.logging.success('Miner killed by keyboard interrupt.')
             self.should_exit = True
+        except Exception as fatal_err:
+            bt.logging.critical(f'Forward loop exited unexpectedly: {fatal_err}', exc_info=True)
+            raise
 
     def run_in_background_thread(self):
         """Starts the miner's operations in a separate background thread."""

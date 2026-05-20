@@ -107,12 +107,16 @@ class BaseValidatorNeuron(BaseNeuron):
                     self.loop.run_until_complete(self.concurrent_forward())
                     self.sync()
                     consecutive_errors = 0
+                    self.last_forward_time = time.time()
                 except KeyboardInterrupt:
                     raise
                 except Exception as step_err:
                     consecutive_errors += 1
                     bt.logging.error(f'Step {self.step} error ({consecutive_errors} consecutive): {step_err}')
-                    self.reconnect_subtensor()
+                    try:
+                        self.reconnect_subtensor()
+                    except Exception as reconnect_err:
+                        bt.logging.error(f'Reconnect failed during error recovery: {reconnect_err}')
                     time.sleep(min(2**consecutive_errors, 30))
 
                 if self.should_exit:
@@ -132,6 +136,9 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.axon.stop()
             bt.logging.success('Validator killed by keyboard interrupt.')
             self.should_exit = True
+        except Exception as fatal_err:
+            bt.logging.critical(f'Forward loop exited unexpectedly: {fatal_err}', exc_info=True)
+            raise
 
     def run_in_background_thread(self):
         """Starts the validator's operations in a background thread."""
