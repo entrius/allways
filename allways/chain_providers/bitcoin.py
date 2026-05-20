@@ -193,9 +193,6 @@ class BitcoinProvider(ChainProvider):
         """Verify a Bitcoin transaction using getrawtransaction RPC."""
         raw_tx = self.rpc_call('getrawtransaction', [tx_hash, True])
         if not raw_tx:
-            # None = absent from mempool/wallet (a pruned node can't serve
-            # confirmed txs it doesn't own) or an RPC error already logged by
-            # rpc_call. The fallback is logged by the caller.
             return None
 
         confirmations = raw_tx.get('confirmations', 0)
