@@ -441,9 +441,8 @@ class ContractEventWatcher:
         try:
             block_hash = self.substrate.get_block_hash(block_num)
             if not block_hash:
-                self.cursor = block_num
-                self.state_store.set_event_cursor(block_num)
-                return True
+                bt.logging.debug(f'EventWatcher: block {block_num} hash unavailable')
+                return False
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
             msg = str(e).lower()

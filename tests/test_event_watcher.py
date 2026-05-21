@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 from bittensor.utils import ss58_decode
 
 from allways.validator.event_watcher import (
@@ -993,6 +994,40 @@ class TestSyncToRetryFailures:
 
         assert w.cursor == 14
         assert w.substrate.get_block_hash.call_args_list == [call(12), call(13), call(14)]
+        w.state_store.close()
+
+    @pytest.mark.parametrize('falsy_hash', [None, '', 0])
+    def test_falsy_block_hash_is_retried_on_next_sync(self, tmp_path: Path, falsy_hash):
+        w = make_watcher(tmp_path)
+        w.cursor = 10
+
+        def flaky_get_block_hash(block_num: int):
+            if block_num == 12:
+                return falsy_hash
+            return f'hash-{block_num}'
+
+        w.substrate.get_block_hash.side_effect = flaky_get_block_hash
+        w.substrate.get_events.return_value = []
+        w.sync_to(14)
+        assert w.cursor == 11
+        assert w.state_store.get_event_cursor() == 11
+        assert w.substrate.get_block_hash.call_args_list == [call(11), call(12)]
+        assert w.substrate.get_events.call_args_list == [call(block_hash='hash-11')]
+
+        w.substrate.get_block_hash.reset_mock()
+        w.substrate.get_events.reset_mock()
+        w.substrate.get_block_hash.side_effect = lambda block_num: f'hash-{block_num}'
+
+        w.sync_to(14)
+
+        assert w.cursor == 14
+        assert w.state_store.get_event_cursor() == 14
+        assert w.substrate.get_block_hash.call_args_list == [call(12), call(13), call(14)]
+        assert w.substrate.get_events.call_args_list == [
+            call(block_hash='hash-12'),
+            call(block_hash='hash-13'),
+            call(block_hash='hash-14'),
+        ]
         w.state_store.close()
 
     def test_failed_event_fetch_is_retried_on_next_sync(self, tmp_path: Path):
