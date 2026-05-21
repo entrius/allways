@@ -244,13 +244,9 @@ class ContractEventWatcher:
         # Swap IDs whose +1 was seeded directly from the contract's active-swap
         # list during initialize(). Replay must skip their SwapInitiated event
         # to avoid double-counting — the busy tick is already in open_swap_count.
-        # Entries are discarded on the matching terminal event. Persisted to
-        # bootstrapped_swaps so a warm restart preserves the skip-list.
+        # Discarded on the terminal event; persisted so warm restart keeps it.
         self.bootstrapped_swap_ids: Set[int] = set()
-        # Pruned-block counters: each sync_to resets these and emits a single
-        # summary INFO line at the end if any blocks were skipped because their
-        # state had been pruned by the RPC node (public finney nodes keep only
-        # ~240 blocks of state, but the watcher replays a full scoring window).
+        # Per-sync_to counters; collapse pruned-block skips into one summary line.
         self.pruned_block_count: int = 0
         self.pruned_block_first: Optional[int] = None
         self.pruned_block_last: Optional[int] = None
@@ -441,15 +437,9 @@ class ContractEventWatcher:
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
             msg = str(e).lower()
-            # Public finney nodes drop state past ~240 blocks; replaying a full
-            # scoring window after restart hits this on every old block.
-            # Substrate-interface raises this as "State already discarded" or
-            # "state pruned" — match liberally on either word. The block is
-            # permanently unavailable, so advance the cursor past it: otherwise
-            # a cold start (cursor = head − 600) would loop on the first pruned
-            # block forever and never reach the live region. Counters collapse
-            # the noise into one summary line per sync_to.
             if ('state' in msg and 'discarded' in msg) or 'pruned' in msg:
+                # Permanently pruned: advance past it, else cold start loops
+                # the first pruned block forever and never reaches live state.
                 self.pruned_block_count += 1
                 if self.pruned_block_first is None:
                     self.pruned_block_first = block_num
@@ -457,8 +447,7 @@ class ContractEventWatcher:
                 self.cursor = block_num
                 self.state_store.set_event_cursor(block_num)
             else:
-                # Transient (RPC hiccup, node lag): leave the cursor so the
-                # block is retried on the next sync_to.
+                # Transient: hold the cursor so the block is retried next sync.
                 bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
             return
 
