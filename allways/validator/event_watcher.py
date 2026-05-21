@@ -456,12 +456,15 @@ class ContractEventWatcher:
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
                 tao = int(values.get('tao_amount') or 0)
+                from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
                     completed=True,
                     resolved_block=block_num,
                     tao_amount=tao,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
                 )
                 self.apply_busy_delta(block_num, miner, -1)
                 self.bootstrapped_swap_ids.discard(swap_id)
@@ -474,11 +477,14 @@ class ContractEventWatcher:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
+                from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
                     completed=False,
                     resolved_block=block_num,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
                 )
                 # Defensive: a SwapInitiated this validator missed would leave
                 # a stale pin behind — clear it on the terminal event too.
@@ -519,6 +525,22 @@ class ContractEventWatcher:
 
     def _label(self, hotkey: str) -> str:
         return _miner_label(self.metagraph, hotkey)
+
+    def _lookup_swap_direction(self, swap_id: int) -> Tuple[str, str]:
+        """Resolve (from_chain, to_chain) for a swap that's just terminated.
+
+        SwapCompleted/SwapTimedOut events carry no direction. The tracker still
+        holds the Swap (resolve() runs after we record the outcome), so it's
+        the authoritative source. Returns ('', '') when the tracker is unset
+        or doesn't know the swap — e.g. a swap that completed/timed out before
+        the validator caught up. Empty direction means the outcome won't
+        contribute to per-direction volume sums, which is the safe default."""
+        if self.swap_tracker is None:
+            return '', ''
+        swap = self.swap_tracker.active.get(swap_id)
+        if swap is None:
+            return '', ''
+        return (swap.from_chain or '').lower(), (swap.to_chain or '').lower()
 
     def record_reservation_pin(self, block_num: int, miner: str, reserved_until: int) -> None:
         """Pin the miner's commitment as of the reservation block ``block_num``.

@@ -383,16 +383,30 @@ class ValidatorStateStore:
         completed: bool,
         resolved_block: int,
         tao_amount: int = 0,
+        from_chain: str = '',
+        to_chain: str = '',
     ) -> None:
+        # Direction is normalized to lowercase on write so the per-direction
+        # volume query is robust to upstream case drift. SQLite text
+        # comparisons are case-sensitive and DIRECTION_POOLS keys are
+        # lowercase.
         with self.lock:
             conn = self.require_connection()
             conn.execute(
                 """
                 INSERT OR REPLACE INTO swap_outcomes
-                    (swap_id, miner_hotkey, completed, resolved_block, tao_amount)
-                VALUES (?, ?, ?, ?, ?)
+                    (swap_id, miner_hotkey, completed, resolved_block, tao_amount, from_chain, to_chain)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (swap_id, miner_hotkey, 1 if completed else 0, resolved_block, int(tao_amount or 0)),
+                (
+                    swap_id,
+                    miner_hotkey,
+                    1 if completed else 0,
+                    resolved_block,
+                    int(tao_amount or 0),
+                    (from_chain or '').lower(),
+                    (to_chain or '').lower(),
+                ),
             )
             conn.commit()
 
@@ -416,7 +430,12 @@ class ValidatorStateStore:
 
     def get_volume_since(self, since_block: int) -> Dict[str, int]:
         """Sum ``tao_amount`` of completed swaps per miner (rao) since
-        ``since_block``. Timed-out swaps don't count toward volume."""
+        ``since_block``. Timed-out swaps don't count toward volume.
+
+        Aggregates across directions — kept for callers that don't care about
+        direction breakdown. Volume-weighted scoring uses
+        ``get_volume_by_direction_since`` so a miner serving one direction
+        isn't diluted by network volume on the other direction."""
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute(
@@ -427,6 +446,29 @@ class ValidatorStateStore:
                 GROUP BY miner_hotkey
                 """,
                 (since_block,),
+            ).fetchall()
+        return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
+
+    def get_volume_by_direction_since(self, since_block: int, from_chain: str, to_chain: str) -> Dict[str, int]:
+        """Per-miner volume (rao) restricted to one swap direction. Outcomes
+        missing direction (pre-migration legacy rows) are excluded — they
+        contribute no volume credit, same as legacy rows with tao_amount=0.
+
+        Lookup is lowercased to match the normalization applied in
+        ``insert_swap_outcome``."""
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT miner_hotkey, SUM(tao_amount) AS total
+                FROM swap_outcomes
+                WHERE resolved_block >= ?
+                  AND completed = 1
+                  AND from_chain = ?
+                  AND to_chain = ?
+                GROUP BY miner_hotkey
+                """,
+                (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
             ).fetchall()
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 
@@ -521,7 +563,9 @@ class ValidatorStateStore:
                     miner_hotkey    TEXT NOT NULL,
                     completed       INTEGER NOT NULL,
                     resolved_block  INTEGER NOT NULL,
-                    tao_amount      INTEGER NOT NULL DEFAULT 0
+                    tao_amount      INTEGER NOT NULL DEFAULT 0,
+                    from_chain      TEXT NOT NULL DEFAULT '',
+                    to_chain        TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
                     ON swap_outcomes(miner_hotkey);
@@ -552,6 +596,8 @@ class ValidatorStateStore:
             for table, column, ddl in (
                 ('pending_confirms', 'from_tx_block', 'INTEGER NOT NULL DEFAULT 0'),
                 ('swap_outcomes', 'tao_amount', 'INTEGER NOT NULL DEFAULT 0'),
+                ('swap_outcomes', 'from_chain', "TEXT NOT NULL DEFAULT ''"),
+                ('swap_outcomes', 'to_chain', "TEXT NOT NULL DEFAULT ''"),
             ):
                 try:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')

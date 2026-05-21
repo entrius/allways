@@ -89,7 +89,12 @@ def prune_swap_outcomes(self: Validator) -> None:
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (pool × crown_share × sr³ × capacity × volume_factor), recycle the rest."""
+    (pool × crown_share × sr³ × capacity × volume_factor), recycle the rest.
+
+    Volume weighting is *per direction*: a miner earning crown on btc→tao is
+    compared only to btc→tao volume on the network, not to the total of both
+    directions. Otherwise heavy tao→btc flow from other miners would dilute
+    a btc→tao earner's vol_share even though they own that direction."""
     n_uids = self.metagraph.n.item()
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
@@ -107,6 +112,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     hotkey_to_uid: Dict[str, int] = {self.metagraph.hotkeys[uid]: uid for uid in range(n_uids)}
 
     rewards = np.zeros(n_uids, dtype=np.float32)
+    unweighted_rewards = np.zeros(n_uids, dtype=np.float32)
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
     success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
@@ -119,6 +125,10 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         bt.logging.warning(f'max_swap_amount read failed: {e}')
         max_swap_amount = 0
     collaterals: Dict[str, int] = {}
+    miner_volume_total: Dict[str, int] = {}
+    miner_crown_total: Dict[str, float] = {}
+    network_volume_total: int = 0
+    network_crown_total: float = 0.0
 
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         trace = DirectionTrace(pool=pool)
@@ -133,8 +143,22 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
         )
-        total = sum(crown_blocks.values())
-        if total == 0:
+        total_crown_dir = sum(crown_blocks.values())
+        volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
+        total_volume_dir = sum(volumes_dir.values())
+        for hk, v in volumes_dir.items():
+            miner_volume_total[hk] = miner_volume_total.get(hk, 0) + int(v)
+        network_volume_total += int(total_volume_dir)
+        for hk, blk in crown_blocks.items():
+            miner_crown_total[hk] = miner_crown_total.get(hk, 0.0) + blk
+        network_crown_total += total_crown_dir
+
+        bt.logging.debug(
+            f'V1 scoring [{from_chain}→{to_chain}]: '
+            f'total_crown={total_crown_dir:.1f} blk, total_volume_rao={total_volume_dir}'
+        )
+
+        if total_crown_dir == 0:
             continue  # empty bucket — pool recycles via the remainder below
 
         for hotkey, blocks in crown_blocks.items():
@@ -154,16 +178,29 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
                 closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
                 ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
             )
-            share = blocks / total
-            rewards[uid] += pool * share * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
+            crown_share_dir = blocks / total_crown_dir
+            vol_dir = volumes_dir.get(hotkey, 0)
+            vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
+            vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
+            base = pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
+            unweighted_rewards[uid] += base
+            rewards[uid] += base * vol_factor
+            if vol_factor < 1.0:
+                bt.logging.debug(
+                    f'V1 scoring [{from_chain}→{to_chain}] {hotkey[:8]}: '
+                    f'crown_share={crown_share_dir:.3f} vol_share={vol_share_dir:.3f} '
+                    f'vol_factor={vol_factor:.3f}'
+                )
 
-    apply_volume_weighting(
-        self,
-        rewards=rewards,
-        hotkey_to_uid=hotkey_to_uid,
-        direction_traces=direction_traces,
+    record_volume_traces(
         weighting_traces=weighting_traces,
-        window_start=window_start,
+        hotkey_to_uid=hotkey_to_uid,
+        rewards=rewards,
+        unweighted_rewards=unweighted_rewards,
+        miner_volume_total=miner_volume_total,
+        miner_crown_total=miner_crown_total,
+        network_volume_total=network_volume_total,
+        network_crown_total=network_crown_total,
     )
 
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
@@ -209,40 +246,35 @@ def volume_factor(
     return (1.0 - alpha) + alpha * participation
 
 
-def apply_volume_weighting(
-    self: Validator,
+def record_volume_traces(
     *,
-    rewards: np.ndarray,
-    hotkey_to_uid: Dict[str, int],
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
     weighting_traces: Dict[str, WeightingTrace],
-    window_start: int,
+    hotkey_to_uid: Dict[str, int],
+    rewards: np.ndarray,
+    unweighted_rewards: np.ndarray,
+    miner_volume_total: Dict[str, int],
+    miner_crown_total: Dict[str, float],
+    network_volume_total: int,
+    network_crown_total: float,
 ) -> None:
-    """Multiply each crown earner's reward by their volume_factor."""
-    volumes = self.state_store.get_volume_since(window_start)
-    crown_per_hotkey: Dict[str, float] = {}
-    for trace in direction_traces.values():
-        for hk, blk in trace.crown_blocks.items():
-            crown_per_hotkey[hk] = crown_per_hotkey.get(hk, 0.0) + blk
-
-    total_crown = sum(crown_per_hotkey.values())
-    total_volume = sum(volumes.values())
-    if total_crown <= 0:
-        return
-
-    for hotkey, crown in crown_per_hotkey.items():
+    """Populate the per-miner volume rows of the scoring log. Volume gating is
+    already applied inline in ``calculate_miner_rewards``; this only records
+    aggregate counters and the effective per-miner multiplier
+    (weighted / unweighted) for human-readable diagnosis."""
+    for hotkey, wt in weighting_traces.items():
         uid = hotkey_to_uid.get(hotkey)
-        if uid is None or rewards[uid] <= 0:
+        if uid is None:
             continue
-        crown_share = crown / total_crown
-        vol = volumes.get(hotkey, 0)
-        factor = volume_factor(vol, total_volume, crown_share)
-        rewards[uid] *= factor
-        weighting_traces.setdefault(hotkey, WeightingTrace()).record_volume(
-            vol_rao=vol,
-            total_volume_rao=total_volume,
+        unweighted = float(unweighted_rewards[uid])
+        weighted = float(rewards[uid])
+        effective = (weighted / unweighted) if unweighted > 0 else 1.0
+        crown = miner_crown_total.get(hotkey, 0.0)
+        crown_share = (crown / network_crown_total) if network_crown_total > 0 else 0.0
+        wt.record_volume(
+            vol_rao=miner_volume_total.get(hotkey, 0),
+            total_volume_rao=network_volume_total,
             crown_share=crown_share,
-            factor=factor,
+            factor=effective,
         )
 
 
