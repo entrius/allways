@@ -443,15 +443,22 @@ class ContractEventWatcher:
             msg = str(e).lower()
             # Public finney nodes drop state past ~240 blocks; replaying a full
             # scoring window after restart hits this on every old block.
-            # Collapse into one summary line per sync_to instead of logging
-            # per-block. Substrate-interface raises this as "State already
-            # discarded" or "state pruned" — match liberally on either word.
+            # Substrate-interface raises this as "State already discarded" or
+            # "state pruned" — match liberally on either word. The block is
+            # permanently unavailable, so advance the cursor past it: otherwise
+            # a cold start (cursor = head − 600) would loop on the first pruned
+            # block forever and never reach the live region. Counters collapse
+            # the noise into one summary line per sync_to.
             if ('state' in msg and 'discarded' in msg) or 'pruned' in msg:
                 self.pruned_block_count += 1
                 if self.pruned_block_first is None:
                     self.pruned_block_first = block_num
                 self.pruned_block_last = block_num
+                self.cursor = block_num
+                self.state_store.set_event_cursor(block_num)
             else:
+                # Transient (RPC hiccup, node lag): leave the cursor so the
+                # block is retried on the next sync_to.
                 bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
             return
 

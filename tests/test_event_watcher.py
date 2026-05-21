@@ -817,17 +817,50 @@ class TestEventWatcherLogHygiene:
         assert w.pruned_block_count == 5
         assert w.pruned_block_first == 1
         assert w.pruned_block_last == 5
-        # Cursor doesn't advance through prune-state-discarded errors (process_block returns early).
-        assert w.cursor == 0
+        # Cursor MUST advance through pruned blocks — they are permanently
+        # unavailable, so stalling here would never reach the live region.
+        assert w.cursor == 5
+        assert w.state_store.get_event_cursor() == 5
         w.state_store.close()
 
-    def test_unrelated_exception_still_uses_debug_path(self, tmp_path: Path):
+    def test_cursor_does_not_stall_on_pruned_cold_start_region(self, tmp_path: Path):
+        """Regression: a cold start whose first blocks are all pruned must
+        still march the cursor forward until it reaches a live block, rather
+        than looping on the first pruned block forever."""
+        from allways.validator import event_watcher as ew_module
+
+        w = make_watcher(tmp_path)
+        original_chunk = ew_module.MAX_BLOCKS_PER_SYNC
+        ew_module.MAX_BLOCKS_PER_SYNC = 100
+        try:
+            live_from = 60
+
+            def events_for(block_hash):
+                block = int(block_hash, 16)
+                if block < live_from:
+                    raise RuntimeError('State already discarded')
+                return []
+
+            w.substrate.get_block_hash.side_effect = lambda block: f'0x{block:064x}'
+            w.substrate.get_events.side_effect = events_for
+            w.cursor = 0
+            w.sync_to(80)
+            # Walked through the 1..59 pruned zone and on to the live tail.
+            assert w.cursor == 80
+            assert w.state_store.get_event_cursor() == 80
+        finally:
+            ew_module.MAX_BLOCKS_PER_SYNC = original_chunk
+        w.state_store.close()
+
+    def test_unrelated_exception_holds_cursor_for_retry(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.substrate.get_block_hash.side_effect = RuntimeError('connection refused')
         w.cursor = 0
         w.sync_to(2)
-        # Unrelated exception is not pruned-state — counter stays at zero.
+        # Transient error is not pruned-state — counter stays at zero AND the
+        # cursor holds so the block is retried next sync.
         assert w.pruned_block_count == 0
+        assert w.cursor == 0
         w.state_store.close()
 
     def test_pruned_block_counter_resets_between_sync_calls(self, tmp_path: Path):
