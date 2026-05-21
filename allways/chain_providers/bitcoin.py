@@ -93,6 +93,13 @@ def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tup
     return bases
 
 
+def esplora_tag(base: str) -> str:
+    """Short, log-friendly host label for an Esplora endpoint (e.g. 'blockstream', 'gomaestro-api')."""
+    host = (urlparse(base).netloc or base).split(':')[0].removeprefix('www.')
+    parts = host.split('.')
+    return parts[-2] if len(parts) >= 2 else host
+
+
 class BitcoinProvider(ChainProvider):
     """Bitcoin chain provider. Supports two modes:
 
@@ -439,25 +446,26 @@ class BitcoinProvider(ChainProvider):
         last_err: Optional[Exception] = None
         for i, (base, headers) in enumerate(bases):
             pos = f'[{i + 1}/{len(bases)}]'
-            nxt = bases[i + 1][0] if i + 1 < len(bases) else None
-            tail = f'falling back to next provider: {nxt}' if nxt else 'no providers left, giving up'
+            tag = esplora_tag(base)
+            nxt = esplora_tag(bases[i + 1][0]) if i + 1 < len(bases) else None
+            tail = f'falling back to: {nxt}' if nxt else 'no providers left, giving up'
             try:
                 resp = self.http.request(method, f'{base}{path}', timeout=timeout, headers=headers, **kwargs)
             except Exception as e:
                 last_err = e
-                bt.logging.warning(f'Esplora {pos} {base}{path} → request error: {e}; {tail}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → request error: {e}; {tail}')
                 continue
 
             reason = self.failover_reason(resp)
             if reason:
                 last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
-                bt.logging.warning(f'Esplora {pos} {base}{path} → {reason}; {tail}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → {reason}; {tail}')
                 continue
 
             if resp.status_code >= 400 and resp.status_code != 404:
-                bt.logging.warning(f'Esplora {pos} {base}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
             elif i > 0:
-                bt.logging.info(f'Esplora {pos} {base}{path} → {resp.status_code} (served after {i} fallback(s))')
+                bt.logging.info(f'Esplora {pos} {tag}{path} → {resp.status_code} (served after {i} fallback(s))')
             return resp
         raise last_err or RuntimeError('all BTC APIs failed')
 
