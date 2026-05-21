@@ -701,6 +701,37 @@ class TestEventWatcherWarmRestart:
         assert w2.cursor == current_block - SCORING_WINDOW_BLOCKS
         w2.state_store.close()
 
+    def test_cold_bootstrap_is_idempotent_against_crashed_prior_boot(self, tmp_path: Path):
+        """A cold boot that wrote anchors but died before the cursor write must
+        not leave duplicate anchors when the next cold boot runs."""
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        # Simulate a crashed prior cold boot: anchor rows present, no cursor.
+        anchor_block = (SCORING_WINDOW_BLOCKS + 500) - SCORING_WINDOW_BLOCKS
+        store.insert_active_event(anchor_block, 'hk_a', True)
+        store.add_bootstrapped_swap(7)
+        assert store.get_event_cursor() is None  # cursor never landed
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        client = MagicMock()
+        client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
+        client.get_active_swaps.return_value = []
+        w.initialize(current_block=SCORING_WINDOW_BLOCKS + 500, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        # Exactly one anchor for hk_a — the stale row was wiped, not duplicated.
+        rows = w.state_store.load_all_active_events()
+        assert rows == [{'block_num': anchor_block, 'hotkey': 'hk_a', 'active': True}]
+        # Orphaned bootstrapped swap from the crashed boot is gone.
+        assert w.state_store.load_bootstrapped_swaps() == set()
+        w.state_store.close()
+
     def test_warm_restart_rebuilds_open_swap_count_with_multiple_swaps(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         store.set_event_cursor(1000)

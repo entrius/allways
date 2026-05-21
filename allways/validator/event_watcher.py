@@ -320,7 +320,6 @@ class ContractEventWatcher:
                 f'current {current_block} (> SCORING_WINDOW_BLOCKS={SCORING_WINDOW_BLOCKS}). '
                 'Resetting persistence and falling back to cold bootstrap.'
             )
-            self.state_store.reset_event_watcher_state()
             self.cold_bootstrap(current_block, metagraph_hotkeys, contract_client)
             return
         self.hydrate_from_db()
@@ -334,6 +333,9 @@ class ContractEventWatcher:
         """Snapshot contract state for every metagraph miner, persist the
         anchors, then rewind the cursor by one scoring window so ``sync_to``
         backfills it before the first scoring pass runs."""
+        # Wipe first so a crashed prior cold boot (anchors written, cursor not)
+        # or a stale-cursor fallback can't leave duplicate/orphaned rows.
+        self.state_store.reset_event_watcher_state()
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
