@@ -1,6 +1,7 @@
 import os
 import time
 from typing import Any, Optional, Tuple
+from urllib.parse import urlparse
 
 import base58
 import bech32
@@ -16,6 +17,9 @@ ADDR_TYPE_P2PKH = 'p2pkh'
 ADDR_TYPE_P2SH_P2WPKH = 'p2wpkh-p2sh'
 ADDR_TYPE_P2WPKH = 'p2wpkh'
 ADDR_TYPE_P2TR = 'p2tr'
+
+LOG_RPC = '[BTC-RPC]'
+LOG_ESPLORA = '[Esplora]'
 
 
 def detect_address_type(address: str) -> str:
@@ -89,6 +93,13 @@ def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tup
     return bases
 
 
+def esplora_tag(base: str) -> str:
+    """Short, log-friendly host label for an Esplora endpoint (e.g. 'blockstream', 'gomaestro-api')."""
+    host = (urlparse(base).netloc or base).split(':')[0].removeprefix('www.')
+    parts = host.split('.')
+    return parts[-2] if len(parts) >= 2 else host
+
+
 class BitcoinProvider(ChainProvider):
     """Bitcoin chain provider. Supports two modes:
 
@@ -151,6 +162,12 @@ class BitcoinProvider(ChainProvider):
     def get_chain(self) -> ChainDefinition:
         return CHAIN_BTC
 
+    def describe(self) -> str:
+        hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
+        if self.mode == 'lightweight':
+            return f'Esplora API ({self.network}): {hosts}'
+        return f'Core RPC {self.rpc_url} (primary) + Esplora fallback: {hosts}'
+
     def check_connection(self, require_send: bool = True) -> None:
         if self.mode == 'lightweight':
             if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
@@ -163,7 +180,7 @@ class BitcoinProvider(ChainProvider):
                 resp = self.btc_api_get('/blocks/tip/height', timeout=10)
                 resp.raise_for_status()
                 tip = int(resp.text.strip())
-                bt.logging.success(f'BTC lightweight mode: network={self.network}, Esplora tip={tip}')
+                bt.logging.success(f'{LOG_ESPLORA} connected: network={self.network}, tip={tip}')
             except Exception as e:
                 raise ConnectionError(f'Cannot reach Esplora API: {e}') from e
             return
@@ -171,7 +188,7 @@ class BitcoinProvider(ChainProvider):
         result = self.rpc_call('getblockchaininfo', [])
         if result is None:
             raise ConnectionError(f'Cannot reach Bitcoin RPC at {self.rpc_url}')
-        bt.logging.success(f'BTC RPC connected: chain={result.get("chain")}, blocks={result.get("blocks")}')
+        bt.logging.success(f'{LOG_RPC} connected: chain={result.get("chain")}, blocks={result.get("blocks")}')
 
     def rpc_call(self, method: str, params: Optional[list] = None) -> Optional[dict]:
         """Generic JSON-RPC helper for BTC Core."""
@@ -189,11 +206,11 @@ class BitcoinProvider(ChainProvider):
             response.raise_for_status()
             result = response.json()
             if result.get('error'):
-                bt.logging.error(f'BTC RPC error ({method}): {result["error"]}')
+                bt.logging.error(f'{LOG_RPC} error ({method}): {result["error"]}')
                 return None
             return result.get('result')
         except Exception as e:
-            bt.logging.error(f'BTC RPC call failed ({method}): {e}')
+            bt.logging.error(f'{LOG_RPC} call failed ({method}): {e}')
             return None
 
     def fetch_matching_tx(
@@ -215,9 +232,9 @@ class BitcoinProvider(ChainProvider):
 
         result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
         if result is not None:
-            bt.logging.debug(f'BTC verify: served by local RPC (tx {tx_hash[:16]}...)')
+            bt.logging.debug(f'{LOG_RPC} served tx {tx_hash[:16]}...')
             return result
-        bt.logging.debug(f'BTC verify: local RPC had no match, falling back to Esplora (tx {tx_hash[:16]}...)')
+        bt.logging.debug(f'{LOG_RPC} no match for tx {tx_hash[:16]}..., falling back to Esplora')
         return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
 
     def rpc_verify_transaction(
@@ -259,7 +276,7 @@ class BitcoinProvider(ChainProvider):
                 )
 
         bt.logging.warning(
-            f'BTC RPC: tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
+            f'{LOG_RPC} tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
         )
         return None
 
@@ -305,7 +322,7 @@ class BitcoinProvider(ChainProvider):
         try:
             resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
             if resp.status_code == 404:
-                bt.logging.debug(f'BTC Esplora: tx {tx_hash[:16]}... not found (404)')
+                bt.logging.debug(f'{LOG_ESPLORA} tx {tx_hash[:16]}... not found (404)')
                 return None
             resp.raise_for_status()
             data = resp.json()
@@ -331,7 +348,7 @@ class BitcoinProvider(ChainProvider):
                         if status_resp.ok and status_resp.json().get('in_best_chain') is False:
                             return None  # block was reorged out
                 except Exception as e:
-                    bt.logging.debug(f'canonical-chain check skipped for {tx_hash}: {e}')
+                    bt.logging.debug(f'{LOG_ESPLORA} canonical-chain check skipped for {tx_hash}: {e}')
 
             for vout in data.get('vout', []):
                 addr = vout.get('scriptpubkey_address', '')
@@ -353,7 +370,7 @@ class BitcoinProvider(ChainProvider):
                     )
 
             bt.logging.warning(
-                f'BTC Esplora: tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
+                f'{LOG_ESPLORA} tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
             )
             return None
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -434,25 +451,26 @@ class BitcoinProvider(ChainProvider):
         last_err: Optional[Exception] = None
         for i, (base, headers) in enumerate(bases):
             pos = f'[{i + 1}/{len(bases)}]'
-            nxt = bases[i + 1][0] if i + 1 < len(bases) else None
-            tail = f'falling back to next provider: {nxt}' if nxt else 'no providers left, giving up'
+            tag = esplora_tag(base)
+            nxt = esplora_tag(bases[i + 1][0]) if i + 1 < len(bases) else None
+            tail = f'falling back to: {nxt}' if nxt else 'no providers left, giving up'
             try:
                 resp = self.http.request(method, f'{base}{path}', timeout=timeout, headers=headers, **kwargs)
             except Exception as e:
                 last_err = e
-                bt.logging.warning(f'Esplora {pos} {base}{path} → request error: {e}; {tail}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → request error: {e}; {tail}')
                 continue
 
             reason = self.failover_reason(resp)
             if reason:
                 last_err = requests.HTTPError(f'{base}{path}: {resp.status_code}', response=resp)
-                bt.logging.warning(f'Esplora {pos} {base}{path} → {reason}; {tail}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → {reason}; {tail}')
                 continue
 
             if resp.status_code >= 400 and resp.status_code != 404:
-                bt.logging.warning(f'Esplora {pos} {base}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
+                bt.logging.warning(f'Esplora {pos} {tag}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
             elif i > 0:
-                bt.logging.info(f'Esplora {pos} {base}{path} → {resp.status_code} (served after {i} fallback(s))')
+                bt.logging.info(f'Esplora {pos} {tag}{path} → {resp.status_code} (served after {i} fallback(s))')
             return resp
         raise last_err or RuntimeError('all BTC APIs failed')
 

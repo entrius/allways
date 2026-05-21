@@ -8,6 +8,8 @@ from bittensor.utils import is_valid_ss58_address, ss58_encode
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition
 
+LOG_SUB = '[Subtensor]'
+
 
 class SubtensorProvider(ChainProvider):
     """TAO chain provider using bt.Subtensor and substrate-interface.
@@ -30,10 +32,13 @@ class SubtensorProvider(ChainProvider):
     def get_chain(self) -> ChainDefinition:
         return CHAIN_TAO
 
+    def describe(self) -> str:
+        return f'Subtensor {self.subtensor.chain_endpoint}'
+
     def check_connection(self, **kwargs) -> None:
         try:
             block = self.subtensor.get_current_block()
-            bt.logging.success(f'Subtensor connected: block={block}')
+            bt.logging.success(f'{LOG_SUB} connected: block={block}')
         except Exception as e:
             raise ConnectionError(f'Cannot reach Subtensor: {e}') from e
 
@@ -222,10 +227,10 @@ class SubtensorProvider(ChainProvider):
 
             if tx_hash_seen:
                 bt.logging.warning(
-                    f'TAO scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
+                    f'{LOG_SUB} scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
                 )
             else:
-                bt.logging.debug(f'TAO scan: tx {tx_hash[:16]}... not found in scan window')
+                bt.logging.debug(f'{LOG_SUB} scan: tx {tx_hash[:16]}... not found in scan window')
             return None
         except ProviderUnreachableError:
             raise
