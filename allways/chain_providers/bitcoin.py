@@ -1,6 +1,7 @@
 import os
 import time
 from typing import Any, Optional, Tuple
+from urllib.parse import urlparse
 
 import base58
 import bech32
@@ -153,9 +154,10 @@ class BitcoinProvider(ChainProvider):
         return CHAIN_BTC
 
     def describe(self) -> str:
+        hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         if self.mode == 'lightweight':
-            return f'Esplora API ({self.network})'
-        return f'Core RPC {self.rpc_url} (primary) + Esplora (fallback)'
+            return f'Esplora API ({self.network}): {hosts}'
+        return f'Core RPC {self.rpc_url} (primary) + Esplora fallback: {hosts}'
 
     def check_connection(self, require_send: bool = True) -> None:
         if self.mode == 'lightweight':
