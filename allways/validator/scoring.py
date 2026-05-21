@@ -1,7 +1,8 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``pool × crown_share × sr³ × capacity × volume_factor``;
-any shortfall recycles to ``RECYCLE_UID``. Entry point is
+Reward per miner is ``pool × crown_share × sr³ × ramp × capacity ×
+volume_factor``; the credibility ramp is applied linearly, not cubed. Any
+shortfall recycles to ``RECYCLE_UID``. Entry point is
 ``score_and_reward_miners(validator)``.
 """
 
@@ -89,7 +90,7 @@ def prune_swap_outcomes(self: Validator) -> None:
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (pool × crown_share × sr³ × capacity × volume_factor), recycle the rest.
+    (pool × crown_share × sr³ × ramp × capacity × volume_factor), recycle the rest.
 
     Volume weighting is *per direction*: a miner earning crown on btc→tao is
     compared only to btc→tao volume on the network, not to the total of both
@@ -116,6 +117,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
     success_stats = self.state_store.get_success_rates_since(credibility_since)
     success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
+    credibility_ramps = {hk: credibility_ramp(success_stats.get(hk)) for hk in rewardable_hotkeys}
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -182,7 +184,9 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             vol_dir = volumes_dir.get(hotkey, 0)
             vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
-            base = pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * cap
+            base = (
+                pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * credibility_ramps[hotkey] * cap
+            )
             unweighted_rewards[uid] += base
             rewards[uid] += base * vol_factor
             if vol_factor < 1.0:
@@ -279,13 +283,19 @@ def record_volume_traces(
 
 
 def success_rate(stats: Optional[Tuple[int, int]]) -> float:
-    """Raw success rate × linear ramp to full credibility at
-    CREDIBILITY_RAMP_OBSERVATIONS closed swaps. Zero observations → 0."""
+    """Raw completed / closed ratio. Cubed in the reward. Zero observations → 0."""
     if not stats or stats == (0, 0):
         return 0.0
     completed, timed_out = stats
-    total = completed + timed_out
-    return (completed / total) * min(1.0, total / CREDIBILITY_RAMP_OBSERVATIONS)
+    return completed / (completed + timed_out)
+
+
+def credibility_ramp(stats: Optional[Tuple[int, int]]) -> float:
+    """Linear ramp to full credibility at CREDIBILITY_RAMP_OBSERVATIONS closed
+    swaps. Applied linearly to the reward, not cubed. Zero observations → 0."""
+    if not stats or stats == (0, 0):
+        return 0.0
+    return min(1.0, sum(stats) / CREDIBILITY_RAMP_OBSERVATIONS)
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────

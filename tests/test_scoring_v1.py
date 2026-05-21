@@ -10,6 +10,7 @@ from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
 from allways.validator.event_watcher import ActiveEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
+    credibility_ramp,
     crown_holders_at_instant,
     replay_crown_time_window,
     score_and_reward_miners,
@@ -126,28 +127,32 @@ class TestSuccessRateHelper:
     def test_zero_total_is_pessimistic(self):
         assert success_rate((0, 0)) == 0.0
 
-    def test_ratio_at_full_ramp_is_raw_rate(self):
-        """At >= CREDIBILITY_RAMP_OBSERVATIONS closed swaps the ramp is a no-op."""
-        assert success_rate((8, 2)) == 0.8
-
-    def test_ramp_scales_below_threshold(self):
-        """1 closed swap → ramp 0.1; raw rate is 1.0 → sr = 0.1."""
-        assert success_rate((1, 0)) == 0.1
-
-    def test_ramp_half_at_half_observations(self):
-        """5/5 completed → ramp 0.5, raw 1.0 → sr = 0.5."""
-        assert success_rate((5, 0)) == 0.5
-
-    def test_timed_out_swaps_advance_ramp(self):
-        """A timeout still counts as a closed observation — moves the ramp,
-        drops the raw rate."""
-        # 5 completed + 5 timed_out: total=10, ramp=1.0, raw=0.5 → 0.5
-        assert success_rate((5, 5)) == 0.5
-
-    def test_full_ramp_with_mixed_outcomes(self):
-        """At the ramp cap, sr equals the raw success rate exactly."""
+    def test_raw_ratio_ignores_ramp(self):
+        """success_rate is the raw completed/closed ratio — no ramp folded in."""
+        assert success_rate((1, 0)) == 1.0
+        assert success_rate((5, 0)) == 1.0
         assert success_rate((8, 2)) == 0.8
         assert success_rate((90, 10)) == 0.9
+
+    def test_timed_out_swaps_drop_raw_rate(self):
+        # 5 completed + 5 timed_out → raw = 0.5
+        assert success_rate((5, 5)) == 0.5
+
+
+class TestCredibilityRampHelper:
+    def test_none_is_zero(self):
+        assert credibility_ramp(None) == 0.0
+        assert credibility_ramp((0, 0)) == 0.0
+
+    def test_scales_linearly_below_threshold(self):
+        """1 closed swap → ramp 0.1; 5 closed → 0.5. Counts timeouts too."""
+        assert credibility_ramp((1, 0)) == 0.1
+        assert credibility_ramp((5, 0)) == 0.5
+        assert credibility_ramp((2, 3)) == 0.5
+
+    def test_caps_at_full_ramp(self):
+        assert credibility_ramp((10, 0)) == 1.0
+        assert credibility_ramp((90, 10)) == 1.0
 
 
 class TestCrownHoldersHelper:
@@ -1622,18 +1627,18 @@ class TestCredibilityRamp:
         assert rewards[0] == 0.0
         v.state_store.close()
 
-    def test_one_completed_earns_thousandth(self, tmp_path: Path):
-        """1/1 completed → sr = 0.1, cubed = 0.001 → effectively zero."""
+    def test_one_completed_earns_tenth(self, tmp_path: Path):
+        """1/1 completed → raw 1.0, ramp 0.1 → 1.0³ × 0.1 = 0.1 of the pool."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
         v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.1**3, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.1, atol=1e-6)
         v.state_store.close()
 
-    def test_five_completed_quarter_of_pool(self, tmp_path: Path):
-        """5/5 completed → sr = 0.5, cubed = 0.125 → 1/8 of the direction pool."""
+    def test_five_completed_half_of_pool(self, tmp_path: Path):
+        """5/5 completed → raw 1.0, ramp 0.5 → 1.0³ × 0.5 = half the pool."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
@@ -1642,7 +1647,7 @@ class TestCredibilityRamp:
                 swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
             )
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.5**3, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_full_ramp_at_threshold(self, tmp_path: Path):
@@ -1659,7 +1664,7 @@ class TestCredibilityRamp:
         v.state_store.close()
 
     def test_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
-        """5 completed + 5 timed_out → ramp = 1.0, raw = 0.5 → cubed = 0.125."""
+        """5 completed + 5 timed_out → ramp = 1.0, raw = 0.5 → 0.5³ × 1.0 = 0.125."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
@@ -1683,9 +1688,9 @@ class TestCredibilityRamp:
         v.state_store.insert_swap_outcome(swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100)
         rewards, _ = calculate_miner_rewards(v)
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        # tao→btc pool fully recycles (no holder), btc→tao gives A 0.001;
-        # the remaining 0.499 + 0.5 = 0.999 recycles.
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_TAO * 0.1**3, atol=1e-6)
+        # tao→btc pool fully recycles (no holder), btc→tao gives A 0.05;
+        # the remaining 0.45 + 0.5 = 0.95 recycles.
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_TAO * 0.1, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
