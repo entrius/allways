@@ -34,6 +34,10 @@ class ChainProvider(ABC):
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
 
+    def describe(self) -> str:
+        """One-line summary of the backend/API this provider talks to, for startup logs."""
+        return self.get_chain().name
+
     @abstractmethod
     def check_connection(self, **kwargs) -> None:
         """Verify the chain provider can reach its backend (RPC node, subtensor, etc).
