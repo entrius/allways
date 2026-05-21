@@ -110,7 +110,9 @@ class BitcoinProvider(ChainProvider):
             self.rpc_user = os.environ.get('BTC_RPC_USER', '')
             self.rpc_pass = os.environ.get('BTC_RPC_PASS', '')
             if not self.network:
-                if any(p in self.rpc_url for p in [':18332', ':18443', 'testnet']):
+                if ':48332' in self.rpc_url:
+                    self.network = 'testnet4'
+                elif any(p in self.rpc_url for p in [':18332', ':18443', 'testnet']):
                     self.network = 'testnet'
                 else:
                     self.network = 'mainnet'
@@ -398,7 +400,10 @@ class BitcoinProvider(ChainProvider):
         """
         if self.esplora_bases:
             return self.esplora_bases
-        if self.network == 'testnet':
+        if self.network == 'testnet4':
+            # Blockstream serves no testnet4 API; mempool.space is the only public Esplora.
+            defaults = ('https://mempool.space/testnet4/api',)
+        elif self.network == 'testnet':
             defaults = ('https://blockstream.info/testnet/api', 'https://mempool.space/testnet/api')
         else:
             defaults = ('https://blockstream.info/api', 'https://mempool.space/api')
@@ -620,7 +625,7 @@ class BitcoinProvider(ChainProvider):
             return None
 
         try:
-            network = NETWORKS['test'] if self.network == 'testnet' else NETWORKS['main']
+            network = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
             privkey = EmbitPrivateKey.from_wif(wif)
             pubkey = privkey.get_public_key()
             segwit_script = p2wpkh(pubkey)
