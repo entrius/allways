@@ -1,13 +1,14 @@
-import re
 from hashlib import blake2b
 from typing import Any, Dict, Optional, Tuple
 
 import bittensor as bt
 from bittensor import Keypair
-from bittensor.utils import ss58_encode
+from bittensor.utils import is_valid_ss58_address, ss58_encode
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition
+
+LOG_SUB = '[Subtensor]'
 
 
 class SubtensorProvider(ChainProvider):
@@ -31,10 +32,13 @@ class SubtensorProvider(ChainProvider):
     def get_chain(self) -> ChainDefinition:
         return CHAIN_TAO
 
+    def describe(self) -> str:
+        return f'Subtensor {self.subtensor.chain_endpoint}'
+
     def check_connection(self, **kwargs) -> None:
         try:
             block = self.subtensor.get_current_block()
-            bt.logging.success(f'Subtensor connected: block={block}')
+            bt.logging.success(f'{LOG_SUB} connected: block={block}')
         except Exception as e:
             raise ConnectionError(f'Cannot reach Subtensor: {e}') from e
 
@@ -223,10 +227,10 @@ class SubtensorProvider(ChainProvider):
 
             if tx_hash_seen:
                 bt.logging.warning(
-                    f'TAO scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
+                    f'{LOG_SUB} scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
                 )
             else:
-                bt.logging.debug(f'TAO scan: tx {tx_hash[:16]}... not found in scan window')
+                bt.logging.debug(f'{LOG_SUB} scan: tx {tx_hash[:16]}... not found in scan window')
             return None
         except ProviderUnreachableError:
             raise
@@ -272,6 +276,13 @@ class SubtensorProvider(ChainProvider):
 
         return dest, amount, sender
 
+    def get_current_block_height(self) -> Optional[int]:
+        try:
+            return int(self.subtensor.get_current_block())
+        except Exception as e:
+            bt.logging.debug(f'TAO get_current_block_height failed: {e}')
+            return None
+
     def get_balance(self, address: str) -> int:
         """Get balance for a TAO address in rao."""
         try:
@@ -284,9 +295,9 @@ class SubtensorProvider(ChainProvider):
     def is_valid_address(self, address: str) -> bool:
         """Validate an SS58 address."""
         try:
-            if not address or len(address) != 48:
+            if not isinstance(address, str) or len(address) != 48:
                 return False
-            return bool(re.match(r'^[1-9A-HJ-NP-Za-km-z]{48}$', address))
+            return is_valid_ss58_address(address)
         except Exception:
             return False
 

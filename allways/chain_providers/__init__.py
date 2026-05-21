@@ -42,4 +42,9 @@ def create_chain_providers(check: bool = False, require_send: bool = True, **kwa
                 raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
             bt.logging.warning(f'{cls.__name__} not available: {e}')
 
+    if check and providers:
+        bt.logging.info('Chain providers ready:')
+        for chain_id, provider in providers.items():
+            bt.logging.info(f'  {chain_id} → {provider.describe()}')
+
     return providers

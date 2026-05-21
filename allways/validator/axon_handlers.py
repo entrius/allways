@@ -527,6 +527,14 @@ async def handle_swap_confirm(
 
             res_tao_amount, res_source_amount, res_dest_amount = res_data
 
+            reservation = contract.get_reservation(miner)
+            if reservation is None:
+                reject_synapse(synapse, 'Reservation record not found', ctx)
+                return synapse
+            if reservation.from_addr != synapse.from_address:
+                reject_synapse(synapse, 'Source address does not match active reservation', ctx)
+                return synapse
+
             # Prefer the commitment snapshot pinned when the user reserved.
             # A miner moving its rate or deposit address after the reservation
             # cannot then shortchange or rob the user — the swap settles

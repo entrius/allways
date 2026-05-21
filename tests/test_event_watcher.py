@@ -535,3 +535,401 @@ class TestBootstrap:
         assert w.active_miners == set()
         assert w.cursor == 0
         w.state_store.close()
+
+
+class TestStateStoreEventTables:
+    """Direct exercise of the new event-watcher tables on ValidatorStateStore."""
+
+    def test_init_db_creates_event_tables(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        conn = store.require_connection()
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        for expected in ('active_events', 'busy_events', 'event_watcher_meta', 'bootstrapped_swaps'):
+            assert expected in names
+        store.close()
+
+    def test_init_db_is_idempotent(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_active_event(100, 'hk_a', True)
+        store.close()
+        store2 = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert store2.load_all_active_events() == [{'block_num': 100, 'hotkey': 'hk_a', 'active': True}]
+        store2.close()
+
+    def test_insert_and_load_active_events_round_trip(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_active_event(100, 'hk_a', True)
+        store.insert_active_event(200, 'hk_b', False)
+        store.insert_active_event(150, 'hk_a', False)
+        loaded = store.load_all_active_events()
+        assert loaded == [
+            {'block_num': 100, 'hotkey': 'hk_a', 'active': True},
+            {'block_num': 150, 'hotkey': 'hk_a', 'active': False},
+            {'block_num': 200, 'hotkey': 'hk_b', 'active': False},
+        ]
+        store.close()
+
+    def test_insert_and_load_busy_events_round_trip(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_busy_event(100, 'hk_a', +1, 7)
+        store.insert_busy_event(150, 'hk_a', -1, 7)
+        store.insert_busy_event(120, 'hk_b', +1, None)
+        loaded = store.load_all_busy_events()
+        assert loaded == [
+            {'block_num': 100, 'hotkey': 'hk_a', 'delta': 1, 'swap_id': 7},
+            {'block_num': 120, 'hotkey': 'hk_b', 'delta': 1, 'swap_id': None},
+            {'block_num': 150, 'hotkey': 'hk_a', 'delta': -1, 'swap_id': 7},
+        ]
+        store.close()
+
+    def test_event_cursor_default_is_none_then_round_trips(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert store.get_event_cursor() is None
+        store.set_event_cursor(1234)
+        assert store.get_event_cursor() == 1234
+        store.set_event_cursor(5678)
+        assert store.get_event_cursor() == 5678
+        store.close()
+
+    def test_prune_active_events_preserves_latest_per_hotkey(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_active_event(100, 'hk_a', True)
+        store.insert_active_event(200, 'hk_a', False)
+        store.insert_active_event(100, 'hk_b', True)
+        store.prune_active_events(cutoff_block=300)
+        remaining = store.load_all_active_events()
+        # hk_a's (100, True) is dropped; (200, False) is its latest anchor.
+        # hk_b's only row is preserved as its own anchor even though < cutoff.
+        assert remaining == [
+            {'block_num': 100, 'hotkey': 'hk_b', 'active': True},
+            {'block_num': 200, 'hotkey': 'hk_a', 'active': False},
+        ]
+        store.close()
+
+    def test_prune_busy_events_preserves_open_swaps(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_busy_event(100, 'hk_a', +1, 1)
+        store.insert_busy_event(150, 'hk_a', -1, 1)  # hk_a SUM=0 → fully prunable
+        store.insert_busy_event(100, 'hk_b', +1, 2)  # hk_b SUM=+1 → keep
+        store.prune_busy_events(cutoff_block=200)
+        remaining = store.load_all_busy_events()
+        assert remaining == [{'block_num': 100, 'hotkey': 'hk_b', 'delta': 1, 'swap_id': 2}]
+        store.close()
+
+    def test_bootstrapped_swaps_add_remove_load(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.add_bootstrapped_swap(7)
+        store.add_bootstrapped_swap(9)
+        store.add_bootstrapped_swap(7)  # idempotent
+        assert store.load_bootstrapped_swaps() == {7, 9}
+        store.remove_bootstrapped_swap(7)
+        assert store.load_bootstrapped_swaps() == {9}
+        store.close()
+
+    def test_reset_event_watcher_state_wipes_all_four_tables(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_active_event(100, 'hk_a', True)
+        store.insert_busy_event(100, 'hk_a', +1, 1)
+        store.set_event_cursor(123)
+        store.add_bootstrapped_swap(1)
+        store.reset_event_watcher_state()
+        assert store.load_all_active_events() == []
+        assert store.load_all_busy_events() == []
+        assert store.get_event_cursor() is None
+        assert store.load_bootstrapped_swaps() == set()
+        store.close()
+
+
+class TestEventWatcherWarmRestart:
+    """Persisted cursor branches initialize() into hydrate-from-DB vs. cold."""
+
+    def make_swap(self, swap_id: int, hotkey: str, initiated_block: int):
+        s = MagicMock()
+        s.id = swap_id
+        s.miner_hotkey = hotkey
+        s.initiated_block = initiated_block
+        return s
+
+    def test_cold_bootstrap_writes_anchors_and_cursor(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        w = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.side_effect = lambda hk: hk in {'hk_a', 'hk_b'}
+        client.get_active_swaps.return_value = [self.make_swap(42, 'hk_a', initiated_block=950)]
+
+        current_block = SCORING_WINDOW_BLOCKS + 500
+        w.initialize(current_block=current_block, metagraph_hotkeys=['hk_a', 'hk_b'], contract_client=client)
+
+        cursor_expected = current_block - SCORING_WINDOW_BLOCKS
+        assert w.state_store.get_event_cursor() == cursor_expected
+        loaded_active = w.state_store.load_all_active_events()
+        assert {(r['hotkey'], r['active']) for r in loaded_active} == {('hk_a', True), ('hk_b', True)}
+        loaded_busy = w.state_store.load_all_busy_events()
+        assert loaded_busy == [{'block_num': 950, 'hotkey': 'hk_a', 'delta': 1, 'swap_id': 42}]
+        assert w.state_store.load_bootstrapped_swaps() == {42}
+        w.state_store.close()
+
+    def test_warm_restart_hydrates_without_contract_reads(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        # First boot: cold.
+        w1 = make_watcher(tmp_path)
+        client = MagicMock()
+        client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
+        client.get_active_swaps.return_value = [self.make_swap(99, 'hk_a', initiated_block=900)]
+        current_block = SCORING_WINDOW_BLOCKS + 500
+        w1.initialize(current_block=current_block, metagraph_hotkeys=['hk_a'], contract_client=client)
+        w1.state_store.close()
+
+        # Second boot: contract_client must NOT be called.
+        w2 = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        strict_client = MagicMock()
+        strict_client.get_miner_active_flag.side_effect = AssertionError('warm restart must not call contract')
+        strict_client.get_active_swaps.side_effect = AssertionError('warm restart must not call contract')
+        # Second boot at the same head — keeps gap within SCORING_WINDOW_BLOCKS.
+        w2.initialize(current_block=current_block, metagraph_hotkeys=['hk_a'], contract_client=strict_client)
+
+        assert w2.active_miners == {'hk_a'}
+        assert w2.open_swap_count == {'hk_a': 1}
+        assert w2.bootstrapped_swap_ids == {99}
+        assert w2.cursor == current_block - SCORING_WINDOW_BLOCKS
+        w2.state_store.close()
+
+    def test_cold_bootstrap_is_idempotent_against_crashed_prior_boot(self, tmp_path: Path):
+        """A cold boot that wrote anchors but died before the cursor write must
+        not leave duplicate anchors when the next cold boot runs."""
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        # Simulate a crashed prior cold boot: anchor rows present, no cursor.
+        anchor_block = (SCORING_WINDOW_BLOCKS + 500) - SCORING_WINDOW_BLOCKS
+        store.insert_active_event(anchor_block, 'hk_a', True)
+        store.add_bootstrapped_swap(7)
+        assert store.get_event_cursor() is None  # cursor never landed
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        client = MagicMock()
+        client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_a'
+        client.get_active_swaps.return_value = []
+        w.initialize(current_block=SCORING_WINDOW_BLOCKS + 500, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        # Exactly one anchor for hk_a — the stale row was wiped, not duplicated.
+        rows = w.state_store.load_all_active_events()
+        assert rows == [{'block_num': anchor_block, 'hotkey': 'hk_a', 'active': True}]
+        # Orphaned bootstrapped swap from the crashed boot is gone.
+        assert w.state_store.load_bootstrapped_swaps() == set()
+        w.state_store.close()
+
+    def test_warm_restart_rebuilds_open_swap_count_with_multiple_swaps(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_event_cursor(1000)
+        store.insert_busy_event(500, 'hk_a', +1, 1)
+        store.insert_busy_event(600, 'hk_a', +1, 2)
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        w.initialize(current_block=1100)
+        assert w.open_swap_count == {'hk_a': 2}
+        w.state_store.close()
+
+    def test_warm_restart_drops_closed_hotkeys_from_open_swap_count(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_event_cursor(1000)
+        store.insert_busy_event(500, 'hk_a', +1, 1)
+        store.insert_busy_event(600, 'hk_a', -1, 1)
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        w.initialize(current_block=1100)
+        assert 'hk_a' not in w.open_swap_count
+        w.state_store.close()
+
+    def test_long_outage_falls_back_to_cold_bootstrap(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        # Persist a stale cursor far behind head.
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_event_cursor(100)
+        store.insert_active_event(50, 'hk_old', True)
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        client = MagicMock()
+        client.get_miner_active_flag.side_effect = lambda hk: hk == 'hk_new'
+        client.get_active_swaps.return_value = []
+        current_block = 100 + SCORING_WINDOW_BLOCKS + 50
+        w.initialize(current_block=current_block, metagraph_hotkeys=['hk_new'], contract_client=client)
+
+        # Stale rows were wiped; new cold-bootstrap anchor for hk_new exists.
+        loaded = w.state_store.load_all_active_events()
+        assert {r['hotkey'] for r in loaded} == {'hk_new'}
+        assert w.active_miners == {'hk_new'}
+        assert w.cursor == current_block - SCORING_WINDOW_BLOCKS
+        w.state_store.close()
+
+    def test_terminal_event_removes_bootstrapped_swap_from_db(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.state_store.add_bootstrapped_swap(42)
+        w.bootstrapped_swap_ids.add(42)
+        w.apply_event(2000, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a', 'tao_amount': 100})
+        assert 42 not in w.state_store.load_bootstrapped_swaps()
+        assert 42 not in w.bootstrapped_swap_ids
+        w.state_store.close()
+
+
+class TestEventWatcherWriteThrough:
+    """In-memory transitions also persist."""
+
+    def test_record_active_transition_writes_to_db(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.record_active_transition(500, 'hk_a', True)
+        loaded = w.state_store.load_all_active_events()
+        assert loaded == [{'block_num': 500, 'hotkey': 'hk_a', 'active': True}]
+        w.state_store.close()
+
+    def test_apply_busy_delta_writes_to_db_with_swap_id(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_busy_delta(500, 'hk_a', +1, swap_id=7)
+        loaded = w.state_store.load_all_busy_events()
+        assert loaded == [{'block_num': 500, 'hotkey': 'hk_a', 'delta': 1, 'swap_id': 7}]
+        w.state_store.close()
+
+    def test_process_block_advances_cursor_per_block(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.substrate.get_block_hash.side_effect = lambda b: f'0x{b:064x}'
+        w.substrate.get_events.return_value = []
+        w.cursor = 99
+        w.sync_to(101)
+        assert w.cursor == 101
+        assert w.state_store.get_event_cursor() == 101
+        w.state_store.close()
+
+
+class TestEventWatcherLogHygiene:
+    """Pruned-block errors collapse into a single summary line."""
+
+    def test_pruned_block_error_increments_counter_silently(self, tmp_path: Path, caplog):
+        import logging
+
+        w = make_watcher(tmp_path)
+        w.substrate.get_block_hash.side_effect = RuntimeError(
+            'Other error: -32603: Unable to fetch block at hash 0x...: State already discarded'
+        )
+        w.cursor = 0
+        caplog.set_level(logging.INFO)
+        w.sync_to(5)
+        assert w.pruned_block_count == 5
+        assert w.pruned_block_first == 1
+        assert w.pruned_block_last == 5
+        # Cursor MUST advance through pruned blocks — they are permanently
+        # unavailable, so stalling here would never reach the live region.
+        assert w.cursor == 5
+        assert w.state_store.get_event_cursor() == 5
+        w.state_store.close()
+
+    def test_cursor_does_not_stall_on_pruned_cold_start_region(self, tmp_path: Path):
+        """Regression: a cold start whose first blocks are all pruned must
+        still march the cursor forward until it reaches a live block, rather
+        than looping on the first pruned block forever."""
+        from allways.validator import event_watcher as ew_module
+
+        w = make_watcher(tmp_path)
+        original_chunk = ew_module.MAX_BLOCKS_PER_SYNC
+        ew_module.MAX_BLOCKS_PER_SYNC = 100
+        try:
+            live_from = 60
+
+            def events_for(block_hash):
+                block = int(block_hash, 16)
+                if block < live_from:
+                    raise RuntimeError('State already discarded')
+                return []
+
+            w.substrate.get_block_hash.side_effect = lambda block: f'0x{block:064x}'
+            w.substrate.get_events.side_effect = events_for
+            w.cursor = 0
+            w.sync_to(80)
+            # Walked through the 1..59 pruned zone and on to the live tail.
+            assert w.cursor == 80
+            assert w.state_store.get_event_cursor() == 80
+        finally:
+            ew_module.MAX_BLOCKS_PER_SYNC = original_chunk
+        w.state_store.close()
+
+    def test_unrelated_exception_holds_cursor_for_retry(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.substrate.get_block_hash.side_effect = RuntimeError('connection refused')
+        w.cursor = 0
+        w.sync_to(2)
+        # Transient error is not pruned-state — counter stays at zero AND the
+        # cursor holds so the block is retried next sync.
+        assert w.pruned_block_count == 0
+        assert w.cursor == 0
+        w.state_store.close()
+
+    def test_pruned_block_counter_resets_between_sync_calls(self, tmp_path: Path):
+        from allways.validator import event_watcher as ew_module
+
+        w = make_watcher(tmp_path)
+        original_chunk = ew_module.MAX_BLOCKS_PER_SYNC
+        ew_module.MAX_BLOCKS_PER_SYNC = 10
+        try:
+            calls = {'n': 0}
+
+            def hash_for(block):
+                calls['n'] += 1
+                if calls['n'] <= 3:
+                    raise RuntimeError('State already discarded')
+                return f'0x{block:064x}'
+
+            w.substrate.get_block_hash.side_effect = hash_for
+            w.substrate.get_events.return_value = []
+            w.cursor = 0
+            w.sync_to(10)
+            assert w.pruned_block_count == 3
+            w.sync_to(20)
+            # All later blocks succeed → counter should reset to zero.
+            assert w.pruned_block_count == 0
+        finally:
+            ew_module.MAX_BLOCKS_PER_SYNC = original_chunk
+        w.state_store.close()
+
+
+class TestSwapOutcomesIdempotency:
+    """Re-applying terminal events doesn't duplicate swap_outcomes rows."""
+
+    def test_replaying_swap_completed_does_not_duplicate_outcome(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.apply_event(1000, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a', 'tao_amount': 500})
+        w.apply_event(1000, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a', 'tao_amount': 500})
+        rows = w.state_store.get_success_rates_since(0)
+        # Two SwapCompleted apply()s, but swap_outcomes is keyed by swap_id (INSERT OR REPLACE).
+        assert rows.get('hk_a') == (1, 0)
+        w.state_store.close()

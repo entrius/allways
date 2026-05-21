@@ -34,6 +34,10 @@ class ChainProvider(ABC):
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
 
+    def describe(self) -> str:
+        """One-line summary of the backend/API this provider talks to, for startup logs."""
+        return self.get_chain().name
+
     @abstractmethod
     def check_connection(self, **kwargs) -> None:
         """Verify the chain provider can reach its backend (RPC node, subtensor, etc).
@@ -120,6 +124,11 @@ class ChainProvider(ABC):
             return None
 
         return tx_info
+
+    @abstractmethod
+    def get_current_block_height(self) -> Optional[int]:
+        """Chain tip block height. None on transient backend failure."""
+        ...
 
     @abstractmethod
     def get_balance(self, address: str) -> int: ...

@@ -244,8 +244,12 @@ class ContractEventWatcher:
         # Swap IDs whose +1 was seeded directly from the contract's active-swap
         # list during initialize(). Replay must skip their SwapInitiated event
         # to avoid double-counting — the busy tick is already in open_swap_count.
-        # Entries are discarded on the matching terminal event.
+        # Discarded on the terminal event; persisted so warm restart keeps it.
         self.bootstrapped_swap_ids: Set[int] = set()
+        # Per-sync_to counters; collapse pruned-block skips into one summary line.
+        self.pruned_block_count: int = 0
+        self.pruned_block_first: Optional[int] = None
+        self.pruned_block_last: Optional[int] = None
 
     # ─── Public API consumed by scoring ─────────────────────────────────
 
@@ -301,9 +305,37 @@ class ContractEventWatcher:
         metagraph_hotkeys: Optional[List[str]] = None,
         contract_client: Any = None,
     ) -> None:
-        """Cold start: snapshot contract state for every metagraph miner, then
-        rewind the cursor by one scoring window so ``sync_to`` backfills it
-        before the first scoring pass runs."""
+        """Branch on persisted cursor: warm restart hydrates from state.db so
+        sync_to picks up where the last process left off (no contract reads,
+        no replay of pre-cursor history). A fresh DB or a cursor more than
+        one scoring window behind falls back to cold bootstrap."""
+        persisted_cursor = self.state_store.get_event_cursor()
+        if persisted_cursor is None:
+            self.cold_bootstrap(current_block, metagraph_hotkeys, contract_client)
+            return
+        gap = current_block - persisted_cursor
+        if gap > SCORING_WINDOW_BLOCKS:
+            bt.logging.warning(
+                f'EventWatcher: persisted cursor {persisted_cursor} is {gap} blocks behind '
+                f'current {current_block} (> SCORING_WINDOW_BLOCKS={SCORING_WINDOW_BLOCKS}). '
+                'Resetting persistence and falling back to cold bootstrap.'
+            )
+            self.cold_bootstrap(current_block, metagraph_hotkeys, contract_client)
+            return
+        self.hydrate_from_db()
+
+    def cold_bootstrap(
+        self,
+        current_block: int,
+        metagraph_hotkeys: Optional[List[str]] = None,
+        contract_client: Any = None,
+    ) -> None:
+        """Snapshot contract state for every metagraph miner, persist the
+        anchors, then rewind the cursor by one scoring window so ``sync_to``
+        backfills it before the first scoring pass runs."""
+        # Wipe first so a crashed prior cold boot (anchors written, cursor not)
+        # or a stale-cursor fallback can't leave duplicate/orphaned rows.
+        self.state_store.reset_event_watcher_state()
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
@@ -324,9 +356,13 @@ class ContractEventWatcher:
                     swap_id = getattr(swap, 'id', None)
                     if isinstance(swap_id, int):
                         self.bootstrapped_swap_ids.add(swap_id)
+                        self.state_store.add_bootstrapped_swap(swap_id)
                     seen_hotkeys.add(hk)
                     self.open_swap_count[hk] = self.open_swap_count.get(hk, 0) + 1
                     self.busy_events.append(BusyEvent(hotkey=hk, delta=+1, block=init_block))
+                    self.state_store.insert_busy_event(
+                        init_block, hk, +1, swap_id if isinstance(swap_id, int) else None
+                    )
                 if seen_hotkeys:
                     self.busy_events.sort(key=lambda ev: ev.block)
                     bt.logging.info(f'EventWatcher bootstrap: seeded {len(seen_hotkeys)} miners as busy from contract')
@@ -341,19 +377,59 @@ class ContractEventWatcher:
             event = ActiveEvent(hotkey=hotkey, active=True, block=self.cursor)
             self.active_events.append(event)
             self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
+            self.state_store.insert_active_event(self.cursor, hotkey, True)
+        self.state_store.set_event_cursor(self.cursor)
+
+    def hydrate_from_db(self) -> None:
+        """Rebuild every in-memory mirror from state.db. Called on warm restart
+        when the persisted cursor is within one scoring window of head — the
+        contract is bypassed entirely; DB is treated as source of truth."""
+        self.cursor = self.state_store.get_event_cursor() or 0
+        self.bootstrapped_swap_ids = self.state_store.load_bootstrapped_swaps()
+
+        active_rows = self.state_store.load_all_active_events()
+        self.active_events = [
+            ActiveEvent(hotkey=r['hotkey'], active=bool(r['active']), block=r['block_num']) for r in active_rows
+        ]
+        self.active_events_by_hotkey = {}
+        latest_active: Dict[str, bool] = {}
+        for ev in self.active_events:
+            self.active_events_by_hotkey.setdefault(ev.hotkey, []).append(ev)
+            latest_active[ev.hotkey] = ev.active
+        self.active_miners = {hk for hk, is_active in latest_active.items() if is_active}
+
+        busy_rows = self.state_store.load_all_busy_events()
+        self.busy_events = [BusyEvent(hotkey=r['hotkey'], delta=r['delta'], block=r['block_num']) for r in busy_rows]
+        counts: Dict[str, int] = {}
+        for ev in self.busy_events:
+            counts[ev.hotkey] = counts.get(ev.hotkey, 0) + ev.delta
+        self.open_swap_count = {hk: c for hk, c in counts.items() if c > 0}
+
+        bt.logging.info(
+            f'EventWatcher hydrated from DB: cursor={self.cursor}, '
+            f'{len(self.active_miners)} active, {sum(self.open_swap_count.values())} open swaps'
+        )
 
     def sync_to(self, current_block: int) -> None:
         """Catch up from cursor to ``current_block`` in MAX_BLOCKS_PER_SYNC
         chunks so a long outage doesn't freeze the forward loop."""
         if current_block <= self.cursor:
             return
+        self.pruned_block_count = 0
+        self.pruned_block_first = None
+        self.pruned_block_last = None
         end = min(current_block, self.cursor + MAX_BLOCKS_PER_SYNC)
         for block_num in range(self.cursor + 1, end + 1):
             self.process_block(block_num)
-        self.cursor = end
         if current_block - self.last_prune_block >= EVENT_PRUNE_INTERVAL_BLOCKS:
             self.prune_old_events(current_block)
             self.last_prune_block = current_block
+        if self.pruned_block_count > 0:
+            bt.logging.info(
+                f'EventWatcher: {self.pruned_block_count} pruned blocks skipped '
+                f'(blocks {self.pruned_block_first}..{self.pruned_block_last}) — '
+                'RPC node retains only recent state'
+            )
 
     def process_block(self, block_num: int) -> None:
         try:
@@ -362,7 +438,19 @@ class ContractEventWatcher:
                 return
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
-            bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
+            msg = str(e).lower()
+            if ('state' in msg and 'discarded' in msg) or 'pruned' in msg:
+                # Permanently pruned: advance past it, else cold start loops
+                # the first pruned block forever and never reaches live state.
+                self.pruned_block_count += 1
+                if self.pruned_block_first is None:
+                    self.pruned_block_first = block_num
+                self.pruned_block_last = block_num
+                self.cursor = block_num
+                self.state_store.set_event_cursor(block_num)
+            else:
+                # Transient: hold the cursor so the block is retried next sync.
+                bt.logging.debug(f'EventWatcher: block {block_num} events unavailable: {e}')
             return
 
         for event_record in events:
@@ -377,6 +465,8 @@ class ContractEventWatcher:
                 # which would re-replay every successful apply_event in the
                 # same block on the next pass and double-apply busy deltas.
                 bt.logging.warning(f'EventWatcher: apply_event {name}@{block_num} failed: {e}')
+        self.cursor = block_num
+        self.state_store.set_event_cursor(block_num)
 
     def decode_contract_event(self, event_record: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         record = event_record.value if hasattr(event_record, 'value') else event_record
@@ -449,22 +539,26 @@ class ContractEventWatcher:
                 # double-count the miner as busy.
                 if isinstance(swap_id, int) and swap_id in self.bootstrapped_swap_ids:
                     return
-                self.apply_busy_delta(block_num, miner, +1)
+                self.apply_busy_delta(block_num, miner, +1, swap_id if isinstance(swap_id, int) else None)
                 bt.logging.info(f'EventWatcher: {self._label(miner)} SwapInitiated swap=#{swap_id} @ block {block_num}')
         elif name == 'SwapCompleted':
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
                 tao = int(values.get('tao_amount') or 0)
+                from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
                     completed=True,
                     resolved_block=block_num,
                     tao_amount=tao,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
                 )
-                self.apply_busy_delta(block_num, miner, -1)
+                self.apply_busy_delta(block_num, miner, -1, swap_id)
                 self.bootstrapped_swap_ids.discard(swap_id)
+                self.state_store.remove_bootstrapped_swap(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.COMPLETED, block_num)
                 bt.logging.info(
@@ -474,17 +568,21 @@ class ContractEventWatcher:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
+                from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
                     completed=False,
                     resolved_block=block_num,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
                 )
                 # Defensive: a SwapInitiated this validator missed would leave
                 # a stale pin behind — clear it on the terminal event too.
                 self.state_store.remove_reservation_pin(miner)
-                self.apply_busy_delta(block_num, miner, -1)
+                self.apply_busy_delta(block_num, miner, -1, swap_id)
                 self.bootstrapped_swap_ids.discard(swap_id)
+                self.state_store.remove_bootstrapped_swap(swap_id)
                 if self.swap_tracker is not None:
                     self.swap_tracker.resolve(swap_id, SwapStatus.TIMED_OUT, block_num)
                 bt.logging.warning(
@@ -519,6 +617,22 @@ class ContractEventWatcher:
 
     def _label(self, hotkey: str) -> str:
         return _miner_label(self.metagraph, hotkey)
+
+    def _lookup_swap_direction(self, swap_id: int) -> Tuple[str, str]:
+        """Resolve (from_chain, to_chain) for a swap that's just terminated.
+
+        SwapCompleted/SwapTimedOut events carry no direction. The tracker still
+        holds the Swap (resolve() runs after we record the outcome), so it's
+        the authoritative source. Returns ('', '') when the tracker is unset
+        or doesn't know the swap — e.g. a swap that completed/timed out before
+        the validator caught up. Empty direction means the outcome won't
+        contribute to per-direction volume sums, which is the safe default."""
+        if self.swap_tracker is None:
+            return '', ''
+        swap = self.swap_tracker.active.get(swap_id)
+        if swap is None:
+            return '', ''
+        return (swap.from_chain or '').lower(), (swap.to_chain or '').lower()
 
     def record_reservation_pin(self, block_num: int, miner: str, reserved_until: int) -> None:
         """Pin the miner's commitment as of the reservation block ``block_num``.
@@ -593,10 +707,12 @@ class ContractEventWatcher:
         event = ActiveEvent(hotkey=hotkey, active=active, block=block_num)
         self.active_events.append(event)
         self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
+        self.state_store.insert_active_event(block_num, hotkey, active)
 
-    def apply_busy_delta(self, block_num: int, hotkey: str, delta: int) -> None:
+    def apply_busy_delta(self, block_num: int, hotkey: str, delta: int, swap_id: Optional[int] = None) -> None:
         """Apply a ±1 transition. Drops any -1 with no matching prior +1
-        rather than letting the open-swap count go negative."""
+        rather than letting the open-swap count go negative. ``swap_id`` is
+        persisted on the row for traceability and pairing of +1/-1's."""
         if delta == 0:
             return
         current = self.open_swap_count.get(hotkey, 0)
@@ -609,12 +725,14 @@ class ContractEventWatcher:
             return
         self.open_swap_count[hotkey] = new_count
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
+        self.state_store.insert_busy_event(block_num, hotkey, delta, swap_id)
 
     def prune_old_events(self, current_block: int) -> None:
         """Drop busy and active events older than one scoring window. Latest
         active event per hotkey is preserved as a state-reconstruction anchor;
         busy events are kept while the open-swap count is still > 0 so the
-        matching -1 isn't orphaned."""
+        matching -1 isn't orphaned. Mirrors the prune onto the SQL tables so
+        warm restarts see the same anchor invariants."""
         cutoff = current_block - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return
@@ -635,3 +753,5 @@ class ContractEventWatcher:
                     self.active_events_by_hotkey[hotkey] = pruned
                 else:
                     del self.active_events_by_hotkey[hotkey]
+        self.state_store.prune_active_events(cutoff)
+        self.state_store.prune_busy_events(cutoff)

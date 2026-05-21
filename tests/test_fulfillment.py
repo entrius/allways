@@ -1,28 +1,28 @@
-"""SwapFulfiller — timeout cushion, send-cache, and send-path behavior."""
+"""SwapFulfiller - timeout cushion, send-cache, and send-path behavior.
 
-import os
-from unittest.mock import MagicMock, patch
+These tests stay at the verify_swap_safety layer, which is the only part
+of SwapFulfiller that's exercised on every forward step. The send-cache
+regressions cover the idempotency invariant for already-sent destination funds.
+"""
+
+from unittest.mock import MagicMock
 
 import pytest
 
 from allways.classes import Swap, SwapStatus
-from allways.constants import DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-from allways.miner.fulfillment import SentSwap, SwapFulfiller, load_timeout_cushion_blocks
+from allways.constants import MINER_TIMEOUT_CUSHION_BLOCKS
+from allways.miner.fulfillment import SentSwap, SwapFulfiller
 from allways.miner.swap_poller import MAX_REFRESH_MISSES, SwapPoller
 
 
-def make_fulfiller(cushion_env: str | None = None) -> SwapFulfiller:
-    """Build a SwapFulfiller with mocked deps. Optionally seed the env var."""
-    env = {k: v for k, v in os.environ.items() if k != 'MINER_TIMEOUT_CUSHION_BLOCKS'}
-    if cushion_env is not None:
-        env['MINER_TIMEOUT_CUSHION_BLOCKS'] = cushion_env
-    with patch.dict(os.environ, env, clear=True):
-        return SwapFulfiller(
-            contract_client=MagicMock(),
-            chain_providers={},
-            wallet=MagicMock(),
-            subtensor=MagicMock(),
-        )
+def make_fulfiller() -> SwapFulfiller:
+    """Build a SwapFulfiller with mocked deps."""
+    return SwapFulfiller(
+        contract_client=MagicMock(),
+        chain_providers={},
+        wallet=MagicMock(),
+        subtensor=MagicMock(),
+    )
 
 
 def make_swap(timeout_block: int = 500, rate: str = '345', miner_from: str = 'bc1q-miner') -> Swap:
@@ -45,74 +45,30 @@ def make_swap(timeout_block: int = 500, rate: str = '345', miner_from: str = 'bc
     )
 
 
-class TestLoadTimeoutCushionBlocks:
-    def test_unset_env_returns_default(self):
-        with patch.dict(os.environ, {}, clear=True):
-            assert load_timeout_cushion_blocks() == DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-
-    def test_empty_string_returns_default(self):
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': ''}, clear=False):
-            assert load_timeout_cushion_blocks() == DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-
-    def test_valid_int_is_used(self):
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': '12'}, clear=False):
-            assert load_timeout_cushion_blocks() == 12
-
-    def test_zero_is_allowed(self):
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': '0'}, clear=False):
-            assert load_timeout_cushion_blocks() == 0
-
-    def test_negative_is_clamped_to_zero(self):
-        """A sign-flip typo shouldn't disable the safety margin."""
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': '-5'}, clear=False):
-            assert load_timeout_cushion_blocks() == 0
-
-    def test_invalid_string_falls_back_to_default(self):
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': 'not-a-number'}, clear=False):
-            assert load_timeout_cushion_blocks() == DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS
-
-
 class TestVerifySwapSafetyCushion:
-    """The cushion is re-read on every verify call so operators can tune it
-    without restarting the miner."""
+    """The cushion is a hardcoded constant pinned to EXTEND_THRESHOLD_BLOCKS —
+    miners stop fulfilling that many blocks before the timeout so the
+    validator extension flow still has runway to rescue the swap."""
 
-    def test_default_cushion_allows_swap_before_deadline(self):
+    def test_allows_swap_well_before_cushion_window(self):
         fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 400
-        # deadline = 500 - 5 = 495, current 400 < 495 → allowed
+        # Comfortably outside the cushion: deadline = 500 - cushion, current well below.
+        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS - 10
         result = fulfiller.verify_swap_safety(make_swap(timeout_block=500))
         assert result is not None
         assert result[1] == 'bc1q-miner'
 
-    def test_default_cushion_blocks_swap_inside_window(self):
+    def test_blocks_swap_inside_cushion_window(self):
         fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 497
-        # deadline = 500 - 5 = 495, current 497 >= 495 → blocked
+        # One block inside the cushion: current >= timeout - cushion → refused.
+        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS + 1
         assert fulfiller.verify_swap_safety(make_swap(timeout_block=500)) is None
 
-    def test_env_change_takes_effect_without_reconstruction(self):
-        """Call verify_swap_safety twice; between calls change the env.
-        The second call should see the new cushion value."""
-        fulfiller = make_fulfiller(cushion_env='5')
-        fulfiller.subtensor.get_current_block.return_value = 490
-        swap = make_swap(timeout_block=500)
-
-        # With cushion=5, effective deadline=495, current 490 → allowed
-        assert fulfiller.verify_swap_safety(swap) is not None
-
-        # Tighten the cushion at runtime — no restart
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': '15'}, clear=False):
-            # effective deadline = 500 - 15 = 485, current 490 >= 485 → blocked
-            assert fulfiller.verify_swap_safety(swap) is None
-
-    def test_zero_cushion_allows_right_up_to_timeout(self):
-        fulfiller = make_fulfiller(cushion_env='0')
-        fulfiller.subtensor.get_current_block.return_value = 499
-        # Re-patch inside the call so the hot-reload sees MINER_TIMEOUT_CUSHION_BLOCKS=0
-        with patch.dict(os.environ, {'MINER_TIMEOUT_CUSHION_BLOCKS': '0'}, clear=False):
-            result = fulfiller.verify_swap_safety(make_swap(timeout_block=500))
-        # deadline = 500 - 0 = 500, current 499 < 500 → allowed
-        assert result is not None
+    def test_blocks_swap_at_cushion_boundary(self):
+        fulfiller = make_fulfiller()
+        # Exact boundary: current == timeout - cushion is unsafe (>= check).
+        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS
+        assert fulfiller.verify_swap_safety(make_swap(timeout_block=500)) is None
 
     def test_missing_rate_or_miner_from_address_fails_safety(self):
         fulfiller = make_fulfiller()
