@@ -471,6 +471,8 @@ class BitcoinProvider(ChainProvider):
                 bt.logging.warning(f'Esplora {pos} {tag}{path} → HTTP {resp.status_code}: {resp.text[:200].strip()}')
             elif i > 0:
                 bt.logging.info(f'Esplora {pos} {tag}{path} → {resp.status_code} (served after {i} fallback(s))')
+            else:
+                bt.logging.debug(f'Esplora {pos} {tag}{path} → {resp.status_code}')
             return resp
         raise last_err or RuntimeError('all BTC APIs failed')
 
