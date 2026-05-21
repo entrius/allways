@@ -1,11 +1,14 @@
 """SQLite-backed store for all validator-local state.
 
 Tables: ``pending_confirms`` (axon→forward queue), ``rate_events`` (crown-time
-input), ``swap_outcomes`` (credibility ledger). Single connection guarded by
-one lock; opened with ``check_same_thread=False``. ``busy_timeout`` is set
-before ``journal_mode=WAL`` because the WAL flip takes a brief exclusive lock
-that concurrent openers would otherwise hit as "database is locked" — the
-local dev env runs two validators against the same file.
+input), ``swap_outcomes`` (credibility ledger), ``active_events`` +
+``busy_events`` + ``event_watcher_meta`` + ``bootstrapped_swaps`` (event
+watcher persistence — warm restarts hydrate from these instead of replaying
+contract history). Single connection guarded by one lock; opened with
+``check_same_thread=False``. ``busy_timeout`` is set before
+``journal_mode=WAL`` because the WAL flip takes a brief exclusive lock that
+concurrent openers would otherwise hit as "database is locked" — the local
+dev env runs two validators against the same file.
 """
 
 import sqlite3
@@ -13,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -480,6 +483,129 @@ class ValidatorStateStore:
             conn.execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
             conn.commit()
 
+    # ─── event_watcher state ────────────────────────────────────────────
+
+    def insert_active_event(self, block_num: int, hotkey: str, active: bool) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'INSERT INTO active_events (block_num, hotkey, active) VALUES (?, ?, ?)',
+                (block_num, hotkey, 1 if active else 0),
+            )
+            conn.commit()
+
+    def insert_busy_event(self, block_num: int, hotkey: str, delta: int, swap_id: Optional[int] = None) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'INSERT INTO busy_events (block_num, hotkey, delta, swap_id) VALUES (?, ?, ?, ?)',
+                (block_num, hotkey, delta, swap_id),
+            )
+            conn.commit()
+
+    def load_all_active_events(self) -> List[dict]:
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                'SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC'
+            ).fetchall()
+        return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'active': bool(r['active'])} for r in rows]
+
+    def load_all_busy_events(self) -> List[dict]:
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                'SELECT block_num, hotkey, delta, swap_id FROM busy_events ORDER BY block_num ASC, id ASC'
+            ).fetchall()
+        return [
+            {'block_num': r['block_num'], 'hotkey': r['hotkey'], 'delta': r['delta'], 'swap_id': r['swap_id']}
+            for r in rows
+        ]
+
+    def get_event_cursor(self) -> Optional[int]:
+        with self.lock:
+            conn = self.require_connection()
+            row = conn.execute('SELECT value FROM event_watcher_meta WHERE key = ?', ('cursor',)).fetchone()
+        return int(row['value']) if row is not None else None
+
+    def set_event_cursor(self, block_num: int) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                INSERT INTO event_watcher_meta (key, value) VALUES ('cursor', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (block_num,),
+            )
+            conn.commit()
+
+    def add_bootstrapped_swap(self, swap_id: int) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute('INSERT OR IGNORE INTO bootstrapped_swaps (swap_id) VALUES (?)', (swap_id,))
+            conn.commit()
+
+    def remove_bootstrapped_swap(self, swap_id: int) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute('DELETE FROM bootstrapped_swaps WHERE swap_id = ?', (swap_id,))
+            conn.commit()
+
+    def load_bootstrapped_swaps(self) -> Set[int]:
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute('SELECT swap_id FROM bootstrapped_swaps').fetchall()
+        return {int(r['swap_id']) for r in rows}
+
+    def prune_active_events(self, cutoff_block: int) -> None:
+        """Drop active events older than ``cutoff_block``, preserving the latest
+        row per hotkey as a state-reconstruction anchor (mirrors the in-memory
+        prune's anchor-preservation rule)."""
+        if cutoff_block <= 0:
+            return
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                DELETE FROM active_events
+                WHERE block_num < ?
+                  AND id NOT IN (SELECT MAX(id) FROM active_events GROUP BY hotkey)
+                """,
+                (cutoff_block,),
+            )
+            conn.commit()
+
+    def prune_busy_events(self, cutoff_block: int) -> None:
+        """Drop busy events older than ``cutoff_block`` except for hotkeys whose
+        SUM(delta) > 0 — those still have an open swap, so we keep their full
+        +1/-1 history so a future SwapCompleted's -1 isn't orphaned."""
+        if cutoff_block <= 0:
+            return
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                DELETE FROM busy_events
+                WHERE block_num < ?
+                  AND hotkey NOT IN (SELECT hotkey FROM busy_events GROUP BY hotkey HAVING SUM(delta) > 0)
+                """,
+                (cutoff_block,),
+            )
+            conn.commit()
+
+    def reset_event_watcher_state(self) -> None:
+        """Wipe all event-watcher persistence. Used when the cursor is more than
+        a scoring window behind current — the chain has moved past replayable
+        history so we fall back to cold bootstrap from the contract."""
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute('DELETE FROM active_events')
+            conn.execute('DELETE FROM busy_events')
+            conn.execute("DELETE FROM event_watcher_meta WHERE key = 'cursor'")
+            conn.execute('DELETE FROM bootstrapped_swaps')
+            conn.commit()
+
     # ─── cross-table maintenance ────────────────────────────────────────
 
     def delete_hotkey(self, hotkey: str) -> None:
@@ -586,6 +712,38 @@ class ValidatorStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_reservation_pins_reserved_until
                     ON reservation_pins(reserved_until);
+
+                CREATE TABLE IF NOT EXISTS active_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_num   INTEGER NOT NULL,
+                    hotkey      TEXT NOT NULL,
+                    active      INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_active_events_block
+                    ON active_events(block_num);
+                CREATE INDEX IF NOT EXISTS idx_active_events_hotkey
+                    ON active_events(hotkey);
+
+                CREATE TABLE IF NOT EXISTS busy_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_num   INTEGER NOT NULL,
+                    hotkey      TEXT NOT NULL,
+                    delta       INTEGER NOT NULL,
+                    swap_id     INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_busy_events_block
+                    ON busy_events(block_num);
+                CREATE INDEX IF NOT EXISTS idx_busy_events_hotkey
+                    ON busy_events(hotkey);
+
+                CREATE TABLE IF NOT EXISTS event_watcher_meta (
+                    key     TEXT PRIMARY KEY,
+                    value   INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bootstrapped_swaps (
+                    swap_id INTEGER PRIMARY KEY
+                );
                 """
             )
             # Ensure newer columns exist on DBs created by older validator
