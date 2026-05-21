@@ -62,9 +62,6 @@ needs to persist across restarts.
 
 ## Miner Environment Variables
 
-- `MINER_TIMEOUT_CUSHION_BLOCKS` — defaults to 5. Miner skips fulfilling a
-  swap when fewer than this many blocks remain before its timeout, trading
-  a skipped swap for avoided slashes on slow dest-chain inclusion.
 - `BTC_MODE`, `BTC_PRIVATE_KEY`, `BTC_RPC_URL`, etc. — see `.env.example`.
 
 ## Running a Local Subtensor Lite Node (Validators)

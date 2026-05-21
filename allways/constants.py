@@ -45,12 +45,6 @@ BTC_MIN_FEE_RATE = 5
 # 'reliably confirms within ~30 min', not 'next block at any cost'.
 BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 
-# ─── Miner ───────────────────────────────────────────────
-# Cushion subtracted from each swap's timeout before the miner agrees to
-# fulfill, protecting against slow dest-chain inclusion. Overridable via
-# MINER_TIMEOUT_CUSHION_BLOCKS.
-DEFAULT_MINER_TIMEOUT_CUSHION_BLOCKS = 5
-
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 600  # ~2 hours at 12s/block — also the scoring cadence
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
@@ -106,6 +100,14 @@ VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
 # to land the propose tx and the challenge window to elapse — without that
 # runway the propose is orphaned and the reservation expires anyway.
 EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
+
+# Cushion the miner subtracts from each swap's timeout before agreeing to
+# fulfill. Pinned to EXTEND_THRESHOLD_BLOCKS so the miner won't start a
+# fulfill inside the window where validators can no longer land a propose +
+# challenge before expiry. Not env-overridable: the right value is system-
+# determined (validator extension runway), not operator preference. Edit
+# this file directly if you need a different value.
+MINER_TIMEOUT_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
 
 # Tiered escalation. First extension fires on tx visibility alone (mempool
 # OK) and buys time for one block; second extension requires ≥1 confirmation
