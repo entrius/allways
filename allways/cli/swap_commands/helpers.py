@@ -2,13 +2,17 @@ import json
 import os
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
 import click
+import requests
 from rich.console import Console
+from rich.text import Text
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, Swap, SwapStatus
@@ -31,6 +35,123 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 console = Console()
 
 SECONDS_PER_BLOCK = 12
+
+# --- Miner reliability (swap success rate) -------------------------------
+# The CLI reads miner state from chain/contract, but per-miner success rate is
+# not on-chain. `view rates` and `swap now` fetch resolved-swap history from
+# this API and aggregate it. Override with ALLWAYS_API_URL for testnet or a
+# self-hosted indexer.
+DEFAULT_API_URL = 'https://api.all-ways.io'
+RELIABILITY_CACHE_TTL = 600  # seconds — stats move slowly; avoid re-paging every call
+RELIABILITY_WINDOW_DAYS = 30  # matches the subnet's 30-day credibility window
+
+
+def _api_url() -> str:
+    return os.environ.get('ALLWAYS_API_URL', DEFAULT_API_URL).rstrip('/')
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp (tolerating a trailing 'Z'); None on failure."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+
+
+def fetch_miner_reliability(window_days: int = RELIABILITY_WINDOW_DAYS, use_cache: bool = True) -> Optional[dict]:
+    """Per-miner, per-direction swap success counts from the allways API.
+
+    Returns ``{hotkey: {'btc->tao': (completed, total), ...}}`` over the last
+    ``window_days`` — counting only resolved swaps (COMPLETED + TIMED_OUT), the
+    same basis the subnet's success_rate uses. Returns ``None`` if the API is
+    unreachable: callers must degrade gracefully, since `view rates` and
+    `swap now` have to work whether or not the indexer is up.
+    """
+    cache_file = ALLWAYS_DIR / 'miner_reliability_cache.json'
+    api_url = _api_url()
+    if use_cache and cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text())
+            fresh = time.time() - cached.get('fetched_at', 0) < RELIABILITY_CACHE_TTL
+            # A cache from a different API host or window must not be reused.
+            same = cached.get('api_url') == api_url and cached.get('window_days') == window_days
+            if fresh and same:
+                return {hk: {d: tuple(v) for d, v in dirs.items()} for hk, dirs in cached['stats'].items()}
+        except (json.JSONDecodeError, KeyError, OSError):
+            pass  # stale/corrupt cache — fall through and refetch
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    # The API rejects unknown user agents; identify ourselves explicitly.
+    headers = {'User-Agent': f'allways-cli/{__import__("allways").__version__}'}
+    swaps: list = []
+    try:
+        for offset in range(0, 100_000, 50):
+            resp = requests.get(
+                f'{api_url}/swaps',
+                params={'limit': 50, 'offset': offset},
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            # A JSON error object (dict) instead of a list must not be iterated.
+            if not isinstance(page, list) or not page:
+                break
+            swaps.extend(page)
+            # Swaps are newest-first; once the oldest on a page predates the
+            # window, every later page does too — stop paging.
+            oldest = _parse_iso(page[-1].get('createdAt'))
+            if oldest is not None and oldest < cutoff:
+                break
+    except (requests.RequestException, ValueError):
+        return None
+
+    stats: dict = {}
+    for s in swaps:
+        hk = s.get('minerHotkey')
+        status = s.get('status')
+        if not hk or status not in ('COMPLETED', 'TIMED_OUT'):
+            continue
+        resolved = _parse_iso(s.get('resolvedAt')) or _parse_iso(s.get('updatedAt'))
+        if resolved is None or resolved < cutoff:
+            continue
+        direction = f"{s.get('sourceChain')}->{s.get('destChain')}"
+        comp, tot = stats.setdefault(hk, {}).get(direction, (0, 0))
+        stats[hk][direction] = (comp + (status == 'COMPLETED'), tot + 1)
+
+    try:
+        ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps(
+                {
+                    'fetched_at': int(time.time()),
+                    'api_url': api_url,
+                    'window_days': window_days,
+                    'stats': {hk: {d: list(v) for d, v in dirs.items()} for hk, dirs in stats.items()},
+                }
+            )
+        )
+    except OSError:
+        pass  # cache write is best-effort
+    return stats
+
+
+def reliability_text(hotkey: str, src: str, dst: str, reliability: Optional[dict]) -> Text:
+    """Colored ``completed/total`` for one swap direction.
+
+    Green ≥90%, yellow ≥50%, red below; dim ``—`` when reliability is
+    unavailable or the miner has no resolved swap in that direction.
+    """
+    if reliability is None:
+        return Text('—', style='dim')
+    comp, tot = reliability.get(hotkey, {}).get(f'{src}->{dst}', (0, 0))
+    if tot == 0:
+        return Text('—', style='dim')
+    pct = comp / tot
+    style = 'green' if pct >= 0.9 else 'yellow' if pct >= 0.5 else 'red'
+    return Text(f'{comp}/{tot}', style=style)
 
 
 def blocks_to_minutes_str(blocks: int) -> str:

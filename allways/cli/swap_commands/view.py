@@ -19,6 +19,7 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     dashboard_url,
+    fetch_miner_reliability,
     from_rao,
     get_cli_context,
     hydrate_pending_swap,
@@ -26,6 +27,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     probe_pending_reservation,
     read_miner_commitments,
+    reliability_text,
 )
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
@@ -39,6 +41,23 @@ from allways.contract_client import ContractError
 
 def _dashboard_url() -> str:
     return dashboard_url()
+
+
+def _reliability_cell(hotkey: str, src: str, dst: str, reliability: dict | None) -> Text:
+    """Combined two-direction success cell for one `view rates` row.
+
+    ``S→D c/t · D→S c/t`` — each side colored by `reliability_text`; the
+    whole cell is a dim ``—`` when reliability is unavailable.
+    """
+    if reliability is None:
+        return Text('—', style='dim')
+    cell = Text()
+    cell.append(f'{src.upper()[0]}→{dst.upper()[0]} ', style='dim')
+    cell.append_text(reliability_text(hotkey, src, dst, reliability))
+    cell.append('  ·  ', style='dim')
+    cell.append(f'{dst.upper()[0]}→{src.upper()[0]} ', style='dim')
+    cell.append_text(reliability_text(hotkey, dst, src, reliability))
+    return cell
 
 
 @click.group('view', cls=StyledGroup)
@@ -349,7 +368,11 @@ def view_rates(
       TAO→BTC N  reads:  N TAO → 1 BTC
 
     Capacity (TAO) is the miner's posted collateral — the hard cap on the
-    TAO leg of any single swap.[/dim]
+    TAO leg of any single swap.
+
+    Reliability shows completed/resolved swaps per direction over the last
+    30 days (green ≥90%, yellow ≥50%, red below), from the swap-history
+    API — '—' if that API is unreachable.[/dim]
 
     [dim]Examples:
         $ alw view rates
@@ -385,6 +408,10 @@ def view_rates(
         except ContractError:
             min_swap_rao = 0
             max_swap_rao = 0
+
+        # Per-miner success rate — fetched from the swap-history API and
+        # aggregated. None if the API is unreachable; the table still renders.
+        reliability = fetch_miner_reliability()
 
     if pair:
         parts = pair.lower().split('-')
@@ -450,6 +477,7 @@ def view_rates(
         table.add_column('UID', style='cyan')
         table.add_column(f'{src_up}→{dst_up}', style='green')
         table.add_column(f'{dst_up}→{src_up}', style='green')
+        table.add_column('Reliability', no_wrap=True)
         table.add_column('Capacity (TAO)', style='yellow')
         table.add_column(f'{src_up} Addr', style='dim')
         table.add_column(f'{dst_up} Addr', style='dim')
@@ -478,6 +506,7 @@ def view_rates(
                 str(p.uid),
                 fwd,
                 rev,
+                _reliability_cell(p.hotkey, src, dst, reliability),
                 f'{from_rao(collateral):.4f}',
                 _trunc(p.from_address),
                 _trunc(p.to_address),
@@ -530,6 +559,14 @@ def view_rates(
     shown = len(pairs_with_collateral)
     if shown != total_before_filter:
         console.print(f'[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
+    if reliability is None:
+        console.print('[yellow]Reliability unavailable — swap-history API unreachable.[/yellow]')
+    else:
+        console.print(
+            '[dim]Reliability = completed/resolved swaps per direction; '
+            'green ≥90%, yellow ≥50%, red <50%. A small sample (e.g. 1/1) is '
+            'noisy — prefer miners with a track record.[/dim]'
+        )
     console.print(f'[dim]Sorted by: {sort_by}[/dim]')
     if not full:
         console.print('[dim]Use --full to show untruncated addresses.[/dim]')
