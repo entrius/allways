@@ -163,6 +163,25 @@ def is_local_network(network: str) -> bool:
     return any(host in network for host in ('127.0.0.1', 'localhost', '0.0.0.0'))
 
 
+PROD_DASHBOARD_URL = 'https://all-ways.io'
+TEST_DASHBOARD_URL = 'https://test.all-ways.io'
+
+
+def dashboard_url(network: Optional[str] = None) -> str:
+    """Resolve the dashboard base URL for the active network.
+
+    finney maps to the mainnet dashboard; every other network (test, local,
+    custom endpoints) maps to the testnet dashboard. ALLWAYS_DASHBOARD_URL
+    overrides everything for staging/local use.
+    """
+    override = os.environ.get('ALLWAYS_DASHBOARD_URL')
+    if override:
+        return override.rstrip('/')
+    if network is None:
+        network = get_effective_config().get('network', 'finney')
+    return (PROD_DASHBOARD_URL if network == 'finney' else TEST_DASHBOARD_URL).rstrip('/')
+
+
 def to_rao(amount_tao: float) -> int:
     """Convert TAO to rao."""
     return int(amount_tao * TAO_TO_RAO)

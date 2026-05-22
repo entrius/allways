@@ -31,7 +31,7 @@ def get_ephemeral_wallet() -> bt.Wallet:
     hotkey_file = Path(wallet_path) / EPHEMERAL_WALLET_NAME / 'hotkeys' / EPHEMERAL_HOTKEY_NAME
     if not hotkey_file.exists():
         hotkey_file.parent.mkdir(parents=True, exist_ok=True)
-        wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False)
+        wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False, suppress=True)
         bt.logging.info('Created ephemeral wallet for dendrite-lite')
 
     return wallet

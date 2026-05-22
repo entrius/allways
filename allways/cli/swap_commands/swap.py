@@ -20,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     clear_pending_swap,
     console,
+    dashboard_url,
     find_matching_miners,
     from_rao,
     get_cli_context,
@@ -1072,9 +1073,7 @@ def swap_now_command(
     save_pending_swap(state)
 
     if request_hash:
-        from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL
-
-        dashboard = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+        dashboard = dashboard_url(config.get('network'))
         console.print(f'  [dim]Reservation:[/dim] [cyan]{dashboard}/reservations/{request_hash}[/cyan]')
 
     # Step 9: Send funds (or use pre-provided tx hash)
@@ -1218,7 +1217,7 @@ def swap_now_command(
         return
 
     # Watch swap through lifecycle
-    from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL, watch_swap
+    from allways.cli.swap_commands.view import watch_swap
 
     final_swap = watch_swap(client, swap_id)
 
@@ -1226,5 +1225,4 @@ def swap_now_command(
     if final_swap and final_swap.status == SwapStatus.COMPLETED:
         display_receipt(final_swap)
     elif final_swap and final_swap.status == SwapStatus.TIMED_OUT:
-        dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
-        display_timeout_notice(final_swap, dashboard_url)
+        display_timeout_notice(final_swap, dashboard_url(config.get('network')))
