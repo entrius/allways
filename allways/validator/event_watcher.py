@@ -437,6 +437,17 @@ class ContractEventWatcher:
                 'RPC node retains only recent state'
             )
 
+    @staticmethod
+    def _is_permanently_unavailable_historical_block_error(error: Exception) -> bool:
+        msg = str(error).lower()
+        if ('state' in msg and 'discarded' in msg) or 'pruned' in msg:
+            return True
+
+        has_historical_context = any(token in msg for token in ('historical', 'archive', 'old state'))
+        has_unavailable_marker = any(token in msg for token in ('unavailable', 'not available', 'not found', 'missing'))
+        has_block_or_state_context = any(token in msg for token in ('state', 'block', 'header'))
+        return has_historical_context and has_unavailable_marker and has_block_or_state_context
+
     def process_block(self, block_num: int) -> bool:
         try:
             block_hash = self.substrate.get_block_hash(block_num)
@@ -445,10 +456,9 @@ class ContractEventWatcher:
                 return False
             events = self.substrate.get_events(block_hash=block_hash)
         except Exception as e:
-            msg = str(e).lower()
-            if ('state' in msg and 'discarded' in msg) or 'pruned' in msg:
-                # Permanently pruned: advance past it, else cold start loops
-                # the first pruned block forever and never reaches live state.
+            if self._is_permanently_unavailable_historical_block_error(e):
+                # Permanently unavailable historical block: advance past it,
+                # else cold start loops forever and never reaches live state.
                 self.pruned_block_count += 1
                 if self.pruned_block_first is None:
                     self.pruned_block_first = block_num

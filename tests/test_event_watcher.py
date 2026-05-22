@@ -884,6 +884,37 @@ class TestEventWatcherLogHygiene:
             ew_module.MAX_BLOCKS_PER_SYNC = original_chunk
         w.state_store.close()
 
+    def test_non_archive_historical_error_from_get_block_hash_is_skipped(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.substrate.get_block_hash.side_effect = RuntimeError(
+            'RPC error: block not found in historical state; archive node required'
+        )
+        w.cursor = 0
+
+        w.sync_to(3)
+
+        assert w.pruned_block_count == 3
+        assert w.pruned_block_first == 1
+        assert w.pruned_block_last == 3
+        assert w.cursor == 3
+        assert w.state_store.get_event_cursor() == 3
+        w.state_store.close()
+
+    def test_non_archive_historical_error_from_get_events_is_skipped(self, tmp_path: Path):
+        w = make_watcher(tmp_path)
+        w.substrate.get_block_hash.side_effect = lambda block: f'0x{block:064x}'
+        w.substrate.get_events.side_effect = RuntimeError('state unavailable for historical block; non-archive node')
+        w.cursor = 0
+
+        w.sync_to(3)
+
+        assert w.pruned_block_count == 3
+        assert w.pruned_block_first == 1
+        assert w.pruned_block_last == 3
+        assert w.cursor == 3
+        assert w.state_store.get_event_cursor() == 3
+        w.state_store.close()
+
     def test_unrelated_exception_holds_cursor_for_retry(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.substrate.get_block_hash.side_effect = RuntimeError('connection refused')
