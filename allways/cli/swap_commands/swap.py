@@ -741,33 +741,29 @@ def swap_now_command(
         return
 
     # Show send capability for the source chain (skip in non-interactive mode).
-    # Only asked once we know a miner can actually fill this swap.
-    if not skip_confirm:
-        if from_chain == 'tao':
-            console.print('\n  [green]TAO will be sent automatically from your wallet.[/green]')
-        else:
-            # Prefix-check the value (not just truthy): dotenv can leak an inline comment as the var.
-            wif_raw = (os.environ.get('BTC_PRIVATE_KEY') or '').strip()
-            has_private_key = bool(wif_raw) and wif_raw[0] in '5KLc9'
-            btc_mode = os.environ.get('BTC_MODE', 'lightweight')
-            is_local = is_local_network(config.get('network', 'finney'))
+    # Only asked once we know a miner can actually fill this swap. The TAO
+    # auto-send notice is deferred to the unlock step, nearer the password prompt.
+    if not skip_confirm and from_chain != 'tao':
+        # Prefix-check the value (not just truthy): dotenv can leak an inline comment as the var.
+        wif_raw = (os.environ.get('BTC_PRIVATE_KEY') or '').strip()
+        has_private_key = bool(wif_raw) and wif_raw[0] in '5KLc9'
+        btc_mode = os.environ.get('BTC_MODE', 'lightweight')
+        is_local = is_local_network(config.get('network', 'finney'))
 
-            if has_private_key and not is_local:
-                console.print('\n  [green]BTC_PRIVATE_KEY set — will sign and attempt BTC sends locally.[/green]')
-            else:
-                # External signing path — covers both the lightweight/no-key
-                # case and any other environment without automatic BTC sending.
-                # Taproot caveat only applies to the BYO-sig flow.
-                taproot_note = (
-                    ' Taproot (bc1p…) unsupported.' if btc_mode == 'lightweight' and not has_private_key else ''
-                )
-                console.print(
-                    f'\n  [yellow]BTC signing & sending are external — you will sign at reserve/confirm'
-                    f' and run [cyan]alw swap post-tx <tx_hash>[/cyan] after broadcasting.{taproot_note}[/yellow]'
-                )
-                if not click.confirm('  Continue?', default=True):
-                    console.print('[yellow]Cancelled[/yellow]')
-                    return
+        if has_private_key and not is_local:
+            console.print('\n  [green]BTC_PRIVATE_KEY set — will sign and attempt BTC sends locally.[/green]')
+        else:
+            # External signing path — covers both the lightweight/no-key
+            # case and any other environment without automatic BTC sending.
+            # Taproot caveat only applies to the BYO-sig flow.
+            taproot_note = ' Taproot (bc1p…) unsupported.' if btc_mode == 'lightweight' and not has_private_key else ''
+            console.print(
+                f'\n  [yellow]BTC signing & sending are external — you will sign at reserve/confirm'
+                f' and run [cyan]alw swap post-tx <tx_hash>[/cyan] after broadcasting.{taproot_note}[/yellow]'
+            )
+            if not click.confirm('  Continue?', default=True):
+                console.print('[yellow]Cancelled[/yellow]')
+                return
 
     # Rate is TAO/BTC: highest is best when receiving TAO, lowest when sending TAO.
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
@@ -990,8 +986,13 @@ def swap_now_command(
         console.print('[yellow]Cancelled[/yellow]')
         return
 
-    # Unlock coldkey once (password prompt) — all subsequent signing uses the cached key
+    # Unlock coldkey (password prompt) to sign the reservation proof.
     if from_chain == 'tao':
+        console.print(f"\n  [green]TAO sends automatically from your wallet '[bold]{wallet.name}[/bold]'.[/green]")
+        console.print(
+            '  [dim]Password = your Bittensor coldkey password. This first unlock signs the reservation '
+            'proof (proving you own the source address).[/dim]'
+        )
         from_key = wallet.coldkey
     else:
         from_key = None
@@ -1105,6 +1106,9 @@ def swap_now_command(
 
         from_tx_hash = None
         if from_chain == 'tao':
+            console.print(
+                '  [dim]Enter your coldkey password again — this unlock signs and broadcasts the TAO transfer.[/dim]'
+            )
             for attempt in range(2):
                 send_result = send_tao_transfer(wallet, subtensor, deposit_address, from_amount)
                 if send_result is not None:
