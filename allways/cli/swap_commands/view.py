@@ -1,6 +1,5 @@
 """alw view - View swaps, miners, and rates."""
 
-import os
 import time
 from dataclasses import replace
 
@@ -19,6 +18,7 @@ from allways.cli.swap_commands.helpers import (
     blocks_to_minutes_str,
     clear_pending_swap,
     console,
+    dashboard_url,
     from_rao,
     get_cli_context,
     hydrate_pending_swap,
@@ -36,11 +36,9 @@ from allways.constants import (
 )
 from allways.contract_client import ContractError
 
-DEFAULT_DASHBOARD_URL = 'https://test.all-ways.io'
-
 
 def _dashboard_url() -> str:
-    return os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+    return dashboard_url()
 
 
 @click.group('view', cls=StyledGroup)

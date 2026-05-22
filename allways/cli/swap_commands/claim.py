@@ -1,13 +1,17 @@
 """alw claim - Claim a pending slash payout for a timed-out swap."""
 
-import os
-
 import click
 
 from allways.classes import SwapStatus
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, from_rao, get_cli_context, loading, print_contract_error
-from allways.cli.swap_commands.view import DEFAULT_DASHBOARD_URL
+from allways.cli.swap_commands.helpers import (
+    console,
+    dashboard_url,
+    from_rao,
+    get_cli_context,
+    loading,
+    print_contract_error,
+)
 from allways.contract_client import ContractError
 
 
@@ -24,7 +28,7 @@ def claim_command(swap_id: int, yes: bool):
     [dim]Examples:
         $ alw claim 42[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    config, wallet, _, client = get_cli_context()
 
     console.print(f'\n[bold]Claim Slash — Swap #{swap_id}[/bold]\n')
 
@@ -47,12 +51,12 @@ def claim_command(swap_id: int, yes: bool):
             )
             return
 
-        dashboard_url = os.environ.get('ALLWAYS_DASHBOARD_URL', DEFAULT_DASHBOARD_URL).rstrip('/')
+        dashboard = dashboard_url(config.get('network'))
         console.print(
             f'[yellow]Nothing to claim for swap #{swap_id}.[/yellow]\n'
             '[dim]The slash was either paid directly to the user at timeout, already claimed,\n'
             'or the swap never timed out. Only the original swap user can claim a pending slash.\n'
-            f'Refund history:[/dim] {dashboard_url}/swap/{swap_id}\n'
+            f'Refund history:[/dim] {dashboard}/swap/{swap_id}\n'
         )
         return
 
