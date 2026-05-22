@@ -43,3 +43,11 @@ uv run pre-commit run --all-files --hook-stage pre-push  # pre-push hooks
 2. Make your changes
 3. Ensure tests pass
 4. Submit a pull request
+
+## Automatic Closures
+
+The maintainer bot enforces these rules without manual review. Contributions that violate them are closed automatically.
+
+### Open item limits
+
+Each contributor may have at most **2 open PRs** and **2 open issues** in this repository at any time. Submitting a 3rd of either type while at the cap closes the new one on submission. The limits apply independently — you can have 2 open PRs and 2 open issues at the same time.
