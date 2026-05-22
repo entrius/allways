@@ -117,7 +117,7 @@ def fetch_miner_reliability(window_days: int = RELIABILITY_WINDOW_DAYS, use_cach
         resolved = _parse_iso(s.get('resolvedAt')) or _parse_iso(s.get('updatedAt'))
         if resolved is None or resolved < cutoff:
             continue
-        direction = f"{s.get('sourceChain')}->{s.get('destChain')}"
+        direction = f'{s.get("sourceChain")}->{s.get("destChain")}'
         comp, tot = stats.setdefault(hk, {}).get(direction, (0, 0))
         stats[hk][direction] = (comp + (status == 'COMPLETED'), tot + 1)
 
