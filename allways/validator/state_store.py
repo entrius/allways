@@ -540,6 +540,32 @@ class ValidatorStateStore:
             )
             conn.commit()
 
+    def get_last_scored_block(self) -> int:
+        """Block height the last scoring pass advanced to (0 if never scored).
+
+        Persisted in ``event_watcher_meta`` so the scoring frontier survives a
+        restart — unlike ``self.step``, which is a per-process counter. Drives
+        the block-anchored scoring cadence and tiles consecutive scoring
+        windows: window_start of the next pass is window_end of the last."""
+        with self.lock:
+            conn = self.require_connection()
+            row = conn.execute(
+                'SELECT value FROM event_watcher_meta WHERE key = ?', ('last_scored_block',)
+            ).fetchone()
+        return int(row['value']) if row is not None else 0
+
+    def set_last_scored_block(self, block_num: int) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                INSERT INTO event_watcher_meta (key, value) VALUES ('last_scored_block', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (block_num,),
+            )
+            conn.commit()
+
     def add_bootstrapped_swap(self, swap_id: int) -> None:
         with self.lock:
             conn = self.require_connection()

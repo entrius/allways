@@ -336,6 +336,12 @@ class ContractEventWatcher:
         # Wipe first so a crashed prior cold boot (anchors written, cursor not)
         # or a stale-cursor fallback can't leave duplicate/orphaned rows.
         self.state_store.reset_event_watcher_state()
+        # A cold boot means events before ``current_block - SCORING_WINDOW_BLOCKS``
+        # are gone (long outage / pruned RPC). Any persisted scoring frontier
+        # from before is now unreachable, so clear it: the first post-bootstrap
+        # window falls back to the trailing window instead of trying to score
+        # a span whose events no longer exist (issue #372).
+        self.state_store.set_last_scored_block(0)
         if metagraph_hotkeys and contract_client is not None:
             for hotkey in metagraph_hotkeys:
                 try:
@@ -732,8 +738,16 @@ class ContractEventWatcher:
         active event per hotkey is preserved as a state-reconstruction anchor;
         busy events are kept while the open-swap count is still > 0 so the
         matching -1 isn't orphaned. Mirrors the prune onto the SQL tables so
-        warm restarts see the same anchor invariants."""
-        cutoff = current_block - SCORING_WINDOW_BLOCKS
+        warm restarts see the same anchor invariants.
+
+        The cutoff trails the *unscored* frontier — ``min(current_block,
+        last_scored_block)`` — not ``current_block``. While catching up,
+        ``last_scored_block`` lags the tip; anchoring on it keeps the events
+        of the not-yet-scored window ``(last_scored, current]`` until the next
+        scoring pass consumes them (issue #372)."""
+        last_scored = self.state_store.get_last_scored_block()
+        horizon = min(current_block, last_scored) if last_scored > 0 else current_block
+        cutoff = horizon - SCORING_WINDOW_BLOCKS
         if cutoff <= 0:
             return
         if self.busy_events:

@@ -591,6 +591,20 @@ class TestStateStoreEventTables:
         assert store.get_event_cursor() == 5678
         store.close()
 
+    def test_last_scored_block_default_zero_then_round_trips(self, tmp_path: Path):
+        """The scoring frontier persists across restart (issue #372) — unlike
+        self.step, it's stored in state.db so a fresh process resumes from it."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        assert store.get_last_scored_block() == 0  # never scored
+        store.set_last_scored_block(9_400)
+        assert store.get_last_scored_block() == 9_400
+        store.set_last_scored_block(10_000)
+        assert store.get_last_scored_block() == 10_000
+        # Round-trips independently of the event cursor (shares the meta table).
+        store.set_event_cursor(12_345)
+        assert store.get_last_scored_block() == 10_000
+        store.close()
+
     def test_prune_active_events_preserves_latest_per_hotkey(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         store.insert_active_event(100, 'hk_a', True)
@@ -638,6 +652,49 @@ class TestStateStoreEventTables:
         assert store.get_event_cursor() is None
         assert store.load_bootstrapped_swaps() == set()
         store.close()
+
+
+class TestPruneHorizonTracksScoringFrontier:
+    """Issue #372 — the event prune cutoff trails the *unscored* frontier
+    (min(current_block, last_scored_block)), not the chain tip. A window that
+    hasn't been scored yet must keep its busy/active inputs until scoring
+    consumes them."""
+
+    def test_lagging_frontier_retains_unscored_events(self, tmp_path: Path):
+        from allways.constants import SCORING_WINDOW_BLOCKS as W
+
+        w = make_watcher(tmp_path)
+        # Frontier far behind the tip — simulates catch-up after an outage.
+        w.state_store.set_last_scored_block(1_000)
+        # hk_a's activate→deactivate both sit inside the unscored window
+        # (1_000, tip]; the earlier one is NOT the per-hotkey anchor, so under
+        # the old `tip - W` cutoff it would be pruned before scoring.
+        w.apply_event(1_200, 'MinerActivated', {'miner': 'hk_a', 'active': True})
+        w.apply_event(1_700, 'MinerActivated', {'miner': 'hk_a', 'active': False})
+
+        tip = 1_000 + 2 * W  # old cutoff (tip - W) would drop the 1_200 row
+        w.prune_old_events(tip)
+
+        blocks = sorted(ev.block for ev in w.active_events_by_hotkey['hk_a'])
+        assert blocks == [1_200, 1_700]  # both transitions retained for scoring
+        w.state_store.close()
+
+    def test_caught_up_frontier_prunes_to_window(self, tmp_path: Path):
+        """Once the frontier reaches the tip, pruning trims back to one window
+        behind it — stale anchors aside — same as before the fix."""
+        from allways.constants import SCORING_WINDOW_BLOCKS as W
+
+        w = make_watcher(tmp_path)
+        tip = 10_000
+        w.state_store.set_last_scored_block(tip)  # frontier caught up
+        w.apply_event(100, 'MinerActivated', {'miner': 'hk_a', 'active': True})
+        w.apply_event(tip - W + 100, 'MinerActivated', {'miner': 'hk_a', 'active': False})
+
+        w.prune_old_events(tip)  # cutoff = tip - W
+
+        blocks = [ev.block for ev in w.active_events_by_hotkey['hk_a']]
+        assert blocks == [tip - W + 100]  # ancient row dropped, in-window row kept
+        w.state_store.close()
 
 
 class TestEventWatcherWarmRestart:
@@ -792,6 +849,33 @@ class TestEventWatcherWarmRestart:
         assert {r['hotkey'] for r in loaded} == {'hk_new'}
         assert w.active_miners == {'hk_new'}
         assert w.cursor == current_block - SCORING_WINDOW_BLOCKS
+        w.state_store.close()
+
+    def test_cold_bootstrap_resets_scoring_frontier(self, tmp_path: Path):
+        """Issue #372 — a long-outage cold boot abandons the unreachable
+        pre-bootstrap blocks: the persisted scoring frontier resets to 0 so the
+        first window falls back to the trailing window instead of trying to
+        score a span whose events no longer exist."""
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_last_scored_block(100)  # stale frontier from before the outage
+        store.set_event_cursor(100)  # cursor far behind head → cold path
+        store.close()
+
+        w = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address=TEST_CONTRACT_ADDRESS,
+            metadata_path=METADATA_PATH,
+            state_store=ValidatorStateStore(db_path=tmp_path / 'state.db'),
+        )
+        client = MagicMock()
+        client.get_miner_active_flag.return_value = False
+        client.get_active_swaps.return_value = []
+        current_block = 100 + SCORING_WINDOW_BLOCKS + 50  # gap > window
+        w.initialize(current_block=current_block, metagraph_hotkeys=['hk_a'], contract_client=client)
+
+        assert w.state_store.get_last_scored_block() == 0
         w.state_store.close()
 
     def test_terminal_event_removes_bootstrapped_swap_from_db(self, tmp_path: Path):

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
+from allways.constants import RECYCLE_UID, SCORING_WINDOW_BLOCKS, SUCCESS_EXPONENT
 from allways.validator.event_watcher import ActiveEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
@@ -14,6 +14,8 @@ from allways.validator.scoring import (
     crown_holders_at_instant,
     replay_crown_time_window,
     score_and_reward_miners,
+    scoring_due,
+    scoring_window,
     success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
@@ -87,6 +89,9 @@ def make_validator(
 
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     watcher = make_watcher(store, active=set(hotkeys))
+    # Caught up to the tip — scoring_window clamps window_end to the cursor, so
+    # the replay covers the trailing SCORING_WINDOW_BLOCKS exactly as before.
+    watcher.cursor = block
     collaterals = collaterals or {}
     bounds_cache = MagicMock()
     bounds_cache.max_swap_amount.return_value = max_swap_amount
@@ -504,6 +509,139 @@ class TestCalculateMinerRewards:
 
         assert rewards[0] == 0.0
         assert rewards[RECYCLE_UID] == 1.0
+        v.state_store.close()
+
+
+class TestBlockAnchoredScoringCadence:
+    """Issue #372 — scoring cadence is anchored to block height (the persisted
+    last_scored_block), not the per-process self.step counter. Consecutive
+    windows tile the block axis contiguously so no block's crown-time is ever
+    skipped, and validators stay aligned regardless of step/restart history."""
+
+    def _crown_validator(self, tmp_path: Path, block: int) -> SimpleNamespace:
+        """A single miner holding the tao→btc crown from block 0 onward."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys, block=block)
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
+        )
+        conn.commit()
+        return v
+
+    def test_scoring_due_waits_until_watcher_caught_up(self, tmp_path: Path):
+        """Criterion: never score a window whose events the cursor hasn't loaded."""
+        v = self._crown_validator(tmp_path, block=10_000)
+        v.event_watcher.cursor = 9_000  # watcher lags the tip
+        assert scoring_due(v) is False
+        v.event_watcher.cursor = 10_000  # caught up to the tip
+        assert scoring_due(v) is True
+        v.state_store.close()
+
+    def test_scoring_due_first_pass_then_gates_on_block_delta(self, tmp_path: Path):
+        W = SCORING_WINDOW_BLOCKS
+        v = self._crown_validator(tmp_path, block=10_000)
+        v.event_watcher.cursor = 10_000
+        # last_scored == 0 → first pass fires as soon as the watcher is caught up.
+        assert scoring_due(v) is True
+        v.state_store.set_last_scored_block(10_000)
+        assert scoring_due(v) is False  # nothing new this block
+        # Just shy of a full window: still not due.
+        v.block = v.event_watcher.cursor = 10_000 + W - 1
+        assert scoring_due(v) is False
+        # A full window elapsed: due again.
+        v.block = v.event_watcher.cursor = 10_000 + W
+        assert scoring_due(v) is True
+        v.state_store.close()
+
+    def test_scoring_due_ignores_step_counter(self, tmp_path: Path):
+        """Cadence is block-driven: a self.step value that would have tripped the
+        old `step % SCORING_WINDOW_BLOCKS == 0` gate has no effect now."""
+        v = self._crown_validator(tmp_path, block=10_000)
+        v.event_watcher.cursor = 10_000
+        v.state_store.set_last_scored_block(10_000)
+        v.step = SCORING_WINDOW_BLOCKS  # old gate would have fired
+        assert scoring_due(v) is False  # only block progress matters
+        v.state_store.close()
+
+    def test_window_resumes_from_persisted_frontier(self, tmp_path: Path):
+        """Criterion: after a restart mid-stream the next window resumes from the
+        persisted last_scored_block, dropping no block between it and the tip."""
+        W = SCORING_WINDOW_BLOCKS
+        v = self._crown_validator(tmp_path, block=10_000)
+        v.event_watcher.cursor = 10_000
+        # No frontier yet → fall back to the trailing window.
+        assert scoring_window(v) == (10_000 - W, 10_000)
+        # Frontier persisted (survives restart) → resume from it, no gap.
+        v.state_store.set_last_scored_block(9_500)
+        assert scoring_window(v) == (9_500, 10_000)
+        v.state_store.close()
+
+    def test_window_end_clamped_to_loaded_cursor(self, tmp_path: Path):
+        v = self._crown_validator(tmp_path, block=10_000)
+        v.event_watcher.cursor = 9_800  # tip raced ahead of loaded events
+        _, window_end = scoring_window(v)
+        assert window_end == 9_800  # never score past the loaded frontier
+        v.state_store.close()
+
+    def test_windows_tile_and_credit_full_span(self, tmp_path: Path):
+        """THE issue #372 case. Advance the chain by 3×SCORING_WINDOW_BLOCKS over
+        a handful of forward steps (>1 block/step). Consecutive windows must tile
+        with no gap and no overlap, and a miner holding crown across the whole
+        span must be credited for the whole span — not just the final window."""
+        W = SCORING_WINDOW_BLOCKS
+        start = 5_000
+        v = self._crown_validator(tmp_path, block=start)
+        v.event_watcher.cursor = start
+        v.state_store.set_last_scored_block(start)  # frontier established here
+
+        span = 3 * W
+        blocks_per_step = 137  # >1 block/step, deliberately not a divisor of W
+        windows: list[tuple[int, int]] = []
+        crown_total = 0.0
+
+        def score_one() -> None:
+            ws, we = scoring_window(v)
+            if we <= ws:
+                return
+            crown = replay_crown_time_window(
+                store=v.state_store,
+                event_watcher=v.event_watcher,
+                from_chain='tao',
+                to_chain='btc',
+                window_start=ws,
+                window_end=we,
+                rewardable_hotkeys={'hk_a'},
+            )
+            crown_total_local = crown.get('hk_a', 0.0)
+            nonlocal crown_total
+            crown_total += crown_total_local
+            windows.append((ws, we))
+            v.state_store.set_last_scored_block(we)
+
+        while v.block < start + span:
+            v.block += blocks_per_step
+            v.event_watcher.cursor = v.block  # watcher keeps up each step
+            if scoring_due(v):
+                score_one()
+        # Tail: the next pass (once another full window elapses) would cover
+        # (last_scored, tip]; pull it in so the span runs frontier→tip and the
+        # "no block dropped" assertion holds end-to-end.
+        score_one()
+
+        # Multiple tiles, not one giant window or a single short one.
+        assert len(windows) >= 3
+        # Consecutive windows tile: start of N+1 == end of N (no gap, no overlap).
+        for (_, prev_end), (next_start, _) in zip(windows, windows[1:]):
+            assert next_start == prev_end
+        # Full coverage: frontier → tip, every block in exactly one window.
+        assert windows[0][0] == start
+        assert windows[-1][1] == v.block
+        # The crown holder is credited for the ENTIRE span, not just the last
+        # window — this is the bug. crown_total equals the contiguous coverage.
+        assert crown_total == windows[-1][1] - windows[0][0]
+        assert crown_total >= span  # >= 3×SCORING_WINDOW_BLOCKS, far past one window
         v.state_store.close()
 
 

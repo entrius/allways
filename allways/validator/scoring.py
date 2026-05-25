@@ -41,13 +41,60 @@ class DirectionTrace:
     best_rate: float = 0.0
 
 
+def scoring_due(self: Validator) -> bool:
+    """Block-anchored scoring cadence — replaces the old ``self.step % N`` gate.
+
+    Fires once the event-watcher cursor has caught up to the chain tip *and* a
+    full ``SCORING_WINDOW_BLOCKS`` (or more) has elapsed since the last scored
+    block. The first pass on a fresh validator (``last_scored == 0``) fires as
+    soon as the watcher is caught up.
+
+    Caught-up is required so window_end lands on the chain tip — a globally
+    agreed value — rather than on each validator's local sync frontier, and so
+    a window is never scored ahead of events the watcher has loaded. Decoupled
+    from ``self.step`` entirely: perturbing the step counter cannot change
+    which blocks are scored, and two validators replaying identical chain
+    state from the same ``last_scored_block`` score identical windows."""
+    if self.event_watcher.cursor < self.block:
+        return False
+    last_scored = self.state_store.get_last_scored_block()
+    if last_scored == 0:
+        return True
+    return self.block - last_scored >= SCORING_WINDOW_BLOCKS
+
+
+def scoring_window(self: Validator) -> Tuple[int, int]:
+    """Derive the ``(window_start, window_end]`` block range for this pass.
+
+    ``window_start`` is the previously-scored block, so consecutive windows
+    tile the block axis with no gap and no overlap. ``window_end`` is clamped
+    to the event-watcher cursor so the window never runs ahead of the events
+    that have actually been loaded (the cursor never exceeds ``self.block``).
+    On the first pass (``last_scored == 0``) the window falls back to the
+    trailing ``SCORING_WINDOW_BLOCKS``, anchored by the bootstrap seed."""
+    last_scored = self.state_store.get_last_scored_block()
+    window_end = min(self.block, self.event_watcher.cursor)
+    if last_scored > 0:
+        # min() guards a backwards step (chain reorg / stale RPC tip): an
+        # inverted window would credit nothing, never negative credit.
+        window_start = min(last_scored, window_end)
+    else:
+        window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    return window_start, window_end
+
+
 def score_and_reward_miners(self: Validator) -> None:
     try:
+        _, window_end = scoring_window(self)
         if _contract_is_halted(self):
             rewards, miner_uids = build_halted_rewards(self)
         else:
             rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
+        # Advance the persisted frontier only after scores update, so a crash
+        # mid-pass re-scores this window rather than skipping it. Pruning runs
+        # after this so the prune horizon reflects the just-scored block.
+        self.state_store.set_last_scored_block(window_end)
         prune_rate_events(self)
         prune_swap_outcomes(self)
     except Exception as e:
@@ -77,7 +124,14 @@ def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
 
 def prune_rate_events(self: Validator) -> None:
-    cutoff = self.block - SCORING_WINDOW_BLOCKS
+    """Drop rate events older than one scoring window behind the *unscored*
+    frontier. Anchored on ``min(self.block, last_scored_block)`` rather than
+    ``self.block`` so a window that hasn't been scored yet — last_scored lags
+    self.block while catching up — never loses its inputs before scoring
+    consumes them (issue #372)."""
+    last_scored = self.state_store.get_last_scored_block()
+    horizon = min(self.block, last_scored) if last_scored > 0 else self.block
+    cutoff = horizon - SCORING_WINDOW_BLOCKS
     if cutoff > 0:
         self.state_store.prune_events_older_than(cutoff)
 
@@ -100,8 +154,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
 
-    window_end = self.block
-    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    window_start, window_end = scoring_window(self)
 
     # A miner's *current* active flag is irrelevant to whether they earned
     # crown during the replay window. The only at-scoring-time check is

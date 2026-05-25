@@ -87,10 +87,11 @@ class Validator(BaseValidatorNeuron):
             current_block_fn=lambda: self.block,
         )
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
-        # Forces one scoring pass per fresh process so a mid-window restart
-        # doesn't leave self.scores stale until the next 1200-step boundary
-        # (which would route emissions to RECYCLE via the empty-norm fallback).
-        self.initial_scoring_done = False
+        # Scoring cadence is anchored to block height via the persisted
+        # last_scored_block (see allways.validator.scoring.scoring_due), not a
+        # per-process step counter. A fresh process with a warm state.db
+        # resumes from its persisted frontier; a fresh DB (last_scored == 0)
+        # scores its first window as soon as the event watcher is caught up.
 
         # Optimistic propose/challenge/finalize for reservation + timeout
         # extensions. Stateless decision class — the forward loop drives it
