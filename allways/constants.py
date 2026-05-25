@@ -65,7 +65,7 @@ RECYCLE_UID = 53  # Subnet owner UID
 
 # ─── Reservation ─────────────────────────────────────────
 RESERVE_SLIPPAGE_DEFAULT_BPS = 200  # 2% — applied when the synapse omits slippage
-RESERVE_SLIPPAGE_MAX_BPS = 100_000  # 1000% — clamp ceiling (mostly an integer/typo guard)
+RESERVE_SLIPPAGE_MAX_BPS = 2_500  # 25% — clamp ceiling; ≥10_000 turns the rate gate into a no-op
 RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
 RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
 MAX_RESERVATIONS_PER_ADDRESS = 1
