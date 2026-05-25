@@ -705,9 +705,7 @@ class TestReserveRateRecompute:
         """
         from allways.constants import RESERVE_SLIPPAGE_MAX_BPS
 
-        assert RESERVE_SLIPPAGE_MAX_BPS < 10_000, (
-            'cap ≥10_000 makes quote_within_slippage a no-op — see swap 550'
-        )
+        assert RESERVE_SLIPPAGE_MAX_BPS < 10_000, 'cap ≥10_000 makes quote_within_slippage a no-op — see swap 550'
 
         validator = make_reserve_validator()
         # Rate dropped 90% → recomputed = 10% of 345_000_000 = 34_500_000.
