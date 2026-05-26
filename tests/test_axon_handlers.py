@@ -694,25 +694,31 @@ class TestReserveRateRecompute:
         assert result.accepted is True
 
     def test_slippage_max_bps_clamp_applied(self):
-        """slippage_bps above RESERVE_SLIPPAGE_MAX_BPS is clamped, not errored.
+        """slippage_bps above RESERVE_SLIPPAGE_MAX_BPS is clamped, not errored,
+        and the cap is tight enough to still gate a wildly-off quote.
 
-        With the clamp applied, even a very large drift (rate dropped 90%)
-        passes the slippage gate because MAX_BPS >= 10_000 makes the threshold
-        non-positive.
+        MAX_BPS must stay below 10_000 (100%) — at ≥10_000 the threshold goes
+        non-positive and the gate becomes a no-op, which is what let swap-550's
+        operator-test traffic settle a 71%-off quote without rejection. The
+        clamp should accept the high request value but cap it to a band that
+        still bites real misquotes.
         """
         from allways.constants import RESERVE_SLIPPAGE_MAX_BPS
 
+        assert RESERVE_SLIPPAGE_MAX_BPS < 10_000, 'cap ≥10_000 makes quote_within_slippage a no-op — see swap 550'
+
         validator = make_reserve_validator()
         # Rate dropped 90% → recomputed = 10% of 345_000_000 = 34_500_000.
-        # Default 2% band would reject this, but MAX_BPS uncaps it.
+        # With the cap at 25% (or anything <90%), this gap is still rejected
+        # even after the user-requested slippage gets clamped down.
         moved = make_commitment()
         moved.rate_str = str(345 * 0.10)
         moved.rate = 345 * 0.10
         synapse = make_reserve_synapse()
         synapse.slippage_bps = RESERVE_SLIPPAGE_MAX_BPS + 1_000_000  # absurdly large — clamped
         result = run_reserve_handler(validator, synapse, commitment=moved)
-        # With MAX_BPS applied, gate passes; default 2% would reject
-        assert result.accepted is True
+        assert result.accepted is False
+        assert 'slippage band' in result.rejection_reason
 
     # ------------------------------------------------------------------ #
     # tao_amount internal consistency                                      #

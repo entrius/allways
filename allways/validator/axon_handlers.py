@@ -292,6 +292,7 @@ async def handle_swap_reserve(
     bt.logging.info(
         f'{ctx}: REQUEST received — tao={synapse.tao_amount} '
         f'from_amount={synapse.from_amount} to_amount={synapse.to_amount} '
+        f'slippage_bps={synapse.slippage_bps} '
         f'user_from_address={synapse.from_address} block_anchor={synapse.block_anchor}'
     )
 
