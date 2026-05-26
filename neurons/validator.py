@@ -51,7 +51,7 @@ from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
 
-WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-allways')
+WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-gittensor')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'allways-validators')
 WANDB_VALIDATOR_NAME = os.getenv('WANDB_VALIDATOR_NAME', 'vali')
 
