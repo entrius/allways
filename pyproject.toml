@@ -36,6 +36,7 @@ dependencies = [
     "bech32",
     "pycryptodome",
     "numpy",
+    "psycopg[binary]==3.3.4",
 ]
 
 [project.scripts]

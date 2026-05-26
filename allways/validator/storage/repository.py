@@ -1,0 +1,111 @@
+"""Repository class wrapping the validator's dashboard-write queries.
+
+Mirrors gittensor/gittensor/validator/storage/repository.py — bulk methods
+take `commit=False` so an orchestrator can compose multiple writes inside a
+single transaction.
+"""
+
+import logging
+from contextlib import contextmanager
+from typing import List, Tuple
+
+from .queries import (
+    BULK_UPSERT_CROWN_HOLDERS,
+    BULK_UPSERT_RATE_HISTORY,
+    DELETE_CROWN_IN_RANGE,
+    SET_SYNC_CURSOR,
+)
+
+
+class BaseRepository:
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    @contextmanager
+    def get_cursor(self):
+        cursor = self.db.cursor()
+        try:
+            yield cursor
+        finally:
+            cursor.close()
+
+    def execute_command(self, query: str, params: tuple = (), commit: bool = True) -> bool:
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute(query, params)
+                if commit:
+                    self.db.commit()
+                return True
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error executing command: {e}')
+            return False
+
+
+class Repository(BaseRepository):
+    """Bulk write methods for the validator's dashboard-write path."""
+
+    def store_rate_history_bulk(
+        self,
+        rows: List[Tuple[str, str, str, float, int]],
+        commit: bool = True,
+    ) -> int:
+        """Upsert rate commitments. Rows: (hotkey, from_chain, to_chain, rate, block)."""
+        if not rows:
+            return 0
+        try:
+            with self.get_cursor() as cursor:
+                cursor.executemany(BULK_UPSERT_RATE_HISTORY, rows)
+                if commit:
+                    self.db.commit()
+                return len(rows)
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in bulk rate_history storage: {e}')
+            return 0
+
+    def delete_crown_in_range(
+        self,
+        from_chain: str,
+        to_chain: str,
+        lo_block: int,
+        hi_block: int,
+        commit: bool = True,
+    ) -> bool:
+        """Wipe crown_holders rows in [lo_block, hi_block) for one direction."""
+        if hi_block <= lo_block:
+            return True
+        return self.execute_command(
+            DELETE_CROWN_IN_RANGE,
+            (from_chain, to_chain, lo_block, hi_block),
+            commit=commit,
+        )
+
+    def store_crown_holders_bulk(
+        self,
+        rows: List[Tuple[int, str, str, str, float, float]],
+        commit: bool = True,
+    ) -> int:
+        """Upsert crown winners. Rows: (block, from_chain, to_chain, hotkey, credit, rate)."""
+        if not rows:
+            return 0
+        try:
+            with self.get_cursor() as cursor:
+                cursor.executemany(BULK_UPSERT_CROWN_HOLDERS, rows)
+                if commit:
+                    self.db.commit()
+                return len(rows)
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in bulk crown_holders storage: {e}')
+            return 0
+
+    def set_sync_cursor(self, name: str, value: int, commit: bool = True) -> bool:
+        """Advance a named watermark. Commit in the same transaction as the
+        data the cursor describes so partial writes don't desync the
+        dashboard's freshness signal."""
+        return self.execute_command(SET_SYNC_CURSOR, (name, value), commit=commit)

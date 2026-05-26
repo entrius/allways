@@ -121,6 +121,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
+    # Captured only when dashboard storage is enabled — the tee inside
+    # replay_crown_time_window is a no-op when intervals_out is None, so
+    # disabled validators pay zero cost here.
+    storage_enabled = self.database_storage.is_enabled()
+    intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, List[str], float]]] = {}
     try:
         max_swap_amount = int(self.bounds_cache.max_swap_amount())
     except Exception as e:
@@ -135,6 +140,10 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         trace = DirectionTrace(pool=pool)
         direction_traces[(from_chain, to_chain)] = trace
+        intervals: Optional[List[Tuple[int, int, List[str], float]]] = None
+        if storage_enabled:
+            intervals = []
+            intervals_by_dir[(from_chain, to_chain)] = intervals
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
@@ -144,6 +153,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
+            intervals_out=intervals,
         )
         total_crown_dir = sum(crown_blocks.values())
         volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
@@ -223,6 +233,25 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         recycled=recycled,
         weighting_traces=weighting_traces,
     )
+
+    if storage_enabled:
+        # Expand uniform-state intervals to per-block crown_holders rows.
+        # `flush_scoring_window` deletes [window_start, window_end) per
+        # direction before upserting, so the wipe matches the data exactly.
+        crown_rows_by_dir = {
+            d: expand_intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()
+        }
+        rate_rows: List[Tuple[str, str, str, float, int]] = []
+        for from_chain, to_chain in DIRECTION_POOLS:
+            for e in self.state_store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
+                rate_rows.append((e['hotkey'], from_chain, to_chain, float(e['rate']), e['block']))
+        self.database_storage.flush_scoring_window(
+            rate_rows=rate_rows,
+            crown_rows_by_direction=crown_rows_by_dir,
+            crown_window_bounds_by_direction={d: (window_start, window_end) for d in DIRECTION_POOLS},
+            rate_snapshot_max_block=window_end,
+            crown_holders_max_block=window_end,
+        )
 
     return rewards, set(range(n_uids))
 
@@ -391,6 +420,7 @@ def replay_crown_time_window(
     window_end: int,
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
+    intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
@@ -433,6 +463,8 @@ def replay_crown_time_window(
         winner_rate = rates.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
             trace.best_rate = winner_rate
+        if intervals_out is not None:
+            intervals_out.append((interval_start, interval_end, list(holders), winner_rate))
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
@@ -461,6 +493,27 @@ def replay_crown_time_window(
     if trace is not None:
         trace.crown_blocks = dict(crown_blocks)
     return crown_blocks
+
+
+def expand_intervals_to_crown_rows(
+    intervals: List[Tuple[int, int, List[str], float]],
+    from_chain: str,
+    to_chain: str,
+) -> List[Tuple[int, str, str, str, float, float]]:
+    """Expand uniform-state intervals to per-block crown_holders rows.
+
+    For each (lo, hi, holders, rate) emit (hi - lo) * len(holders) rows,
+    each with credit = 1/len(holders). The per-block per-direction credits
+    therefore sum to 1.0, matching the validator's fair-tie semantics."""
+    rows: List[Tuple[int, str, str, str, float, float]] = []
+    for lo, hi, holders, rate in intervals:
+        if not holders or hi <= lo:
+            continue
+        share = 1.0 / len(holders)
+        for block in range(lo, hi):
+            for hotkey in holders:
+                rows.append((block, from_chain, to_chain, hotkey, share, rate))
+    return rows
 
 
 def crown_holders_at_instant(

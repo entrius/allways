@@ -92,6 +92,8 @@ def make_validator(
     bounds_cache.max_swap_amount.return_value = max_swap_amount
     contract_client = MagicMock()
     contract_client.get_miner_collateral.side_effect = lambda hk: collaterals.get(hk, 0)
+    database_storage = MagicMock()
+    database_storage.is_enabled.return_value = False
     if baseline_credibility:
         for hk_idx, hk in enumerate(hotkeys):
             for i in range(CREDIBILITY_RAMP_OBSERVATIONS):
@@ -108,6 +110,7 @@ def make_validator(
         event_watcher=watcher,
         bounds_cache=bounds_cache,
         contract_client=contract_client,
+        database_storage=database_storage,
     )
 
 
