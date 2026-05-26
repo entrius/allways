@@ -107,6 +107,13 @@ def add_validator_args(cls, parser):
     )
 
     parser.add_argument(
+        '--neuron.wandb_off',
+        action='store_true',
+        help='Disables Weights & Biases logging. wandb captures the validator console output for the run.',
+        default=False,
+    )
+
+    parser.add_argument(
         '--validator.poll_interval',
         type=int,
         help='Polling interval in seconds for checking swaps.',

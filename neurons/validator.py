@@ -8,6 +8,7 @@ Usage:
     python neurons/validator.py --netuid 7 --wallet.name default --wallet.hotkey default
 """
 
+import os
 import sys
 import threading
 import time
@@ -15,8 +16,10 @@ from functools import partial
 from pathlib import Path
 
 import bittensor as bt
+import wandb
 from dotenv import load_dotenv
 
+from allways import __version__
 from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitments
 from allways.constants import (
@@ -47,6 +50,10 @@ from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
+
+WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-allways')
+WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'allways-validators')
+WANDB_VALIDATOR_NAME = os.getenv('WANDB_VALIDATOR_NAME', 'vali')
 
 
 class Validator(BaseValidatorNeuron):
@@ -157,6 +164,20 @@ class Validator(BaseValidatorNeuron):
         self.attach_axon_handlers()
 
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
+
+        # wandb captures the validator's console output for the run; no per-step
+        # log calls needed. Wrapped so a wandb outage never takes down scoring.
+        if not self.config.neuron.wandb_off:
+            try:
+                wandb.init(
+                    entity=WANDB_ENTITY,
+                    project=WANDB_PROJECT,
+                    name=f'{WANDB_VALIDATOR_NAME}-{self.uid}-{__version__}',
+                    config=self.config,
+                    reinit=True,
+                )
+            except Exception as e:
+                bt.logging.error(f'Failed to initialize wandb run: {e}')
 
     def bootstrap_miner_rates(self) -> None:
         """Cold-start anchor for rate events. Without this, a validator with a
