@@ -96,10 +96,9 @@ VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
         )
     ),
 )
-# Vote to extend when this many blocks remain. Sized for one forward step
-# to land the propose tx and the challenge window to elapse — without that
-# runway the propose is orphaned and the reservation expires anyway.
-EXTEND_THRESHOLD_BLOCKS = VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
+# Vote to extend when this many blocks remain: a forward step to land each of
+# the propose and finalize txs, plus the challenge window between them.
+EXTEND_THRESHOLD_BLOCKS = 2 * VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
 
 # Cushion the miner subtracts from each swap's timeout before agreeing to
 # fulfill. Pinned to EXTEND_THRESHOLD_BLOCKS so the miner won't start a
