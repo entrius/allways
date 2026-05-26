@@ -246,6 +246,39 @@ class TestReplayCrownTime:
         assert crown == {'hk_b': 500.0, 'hk_a': 500.0}
         store.close()
 
+    def test_zero_rate_optout_hands_crown_to_still_offering_miner(self, tmp_path: Path):
+        """Regression for #379: a recorded zero-rate opt-out ends crown credit
+        for the leaving miner and hands the rest of the window to the miner who
+        is still offering the direction — instead of the stale positive rate
+        holding the crown for the whole window."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_a', 'btc', 'tao', 200.0, 0),
+            ('hk_b', 'btc', 'tao', 150.0, 0),
+            # hk_a opts out mid-window — the zero terminator scoring now sees.
+            ('hk_a', 'btc', 'tao', 0.0, 600),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # A leads (100, 600] → 500 blocks; after opt-out B holds (600, 1100] → 500.
+        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
+        store.close()
+
     def test_tie_splits_credit_evenly(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})

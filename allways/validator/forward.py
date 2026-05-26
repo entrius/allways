@@ -371,9 +371,20 @@ def refresh_miner_rates(self: Validator) -> None:
             (pair.from_chain, pair.to_chain, pair.rate),
             (pair.to_chain, pair.from_chain, pair.counter_rate),
         ):
-            if r <= 0:
-                continue  # miner opted out of this direction
             key = (pair.hotkey, from_c, to_c)
+            if r <= 0:
+                # Persist a zero terminator only if the direction was previously offered.
+                latest = self.state_store.get_latest_rate_before(pair.hotkey, from_c, to_c, self.block)
+                if latest is not None and latest[0] > 0:
+                    self.state_store.insert_rate_event(
+                        hotkey=pair.hotkey,
+                        from_chain=from_c,
+                        to_chain=to_c,
+                        rate=0.0,
+                        block=self.block,
+                    )
+                    self.last_known_rates[key] = 0.0
+                continue
             if self.last_known_rates.get(key) == r:
                 continue
             self.state_store.insert_rate_event(

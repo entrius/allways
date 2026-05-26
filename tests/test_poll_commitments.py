@@ -125,6 +125,87 @@ class TestPollCommitmentsZeroRate:
         assert ('hk_a', 'btc', 'tao') not in v.last_known_rates
         v.state_store.close()
 
+    def test_zero_after_positive_records_optout(self, tmp_path: Path):
+        """A miner dropping a previously-offered direction to 0 must persist a
+        terminating zero so scoring stops crediting the stale positive rate."""
+        v = make_validator(tmp_path)
+
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_a', rate=0.00015, counter_rate=6500.0)],
+        ):
+            poll_commitments(v)
+
+        v.block += 1
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_a', rate=0.0, counter_rate=6500.0)],
+        ):
+            poll_commitments(v)
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
+        assert v.last_known_rates[('hk_a', 'tao', 'btc')] == 0.0
+        v.state_store.close()
+
+    def test_zero_optout_is_recorded_once_not_every_poll(self, tmp_path: Path):
+        """Once the zero terminator lands, repeated zero polls add nothing."""
+        v = make_validator(tmp_path)
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_a', rate=0.00015, counter_rate=6500.0)],
+        ):
+            poll_commitments(v)
+
+        for _ in range(3):
+            v.block += 1
+            with patch(
+                'allways.validator.forward.read_miner_commitments',
+                return_value=[make_pair('hk_a', rate=0.0, counter_rate=6500.0)],
+            ):
+                poll_commitments(v)
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
+        v.state_store.close()
+
+    def test_reenable_after_optout(self, tmp_path: Path):
+        """positive -> 0 -> positive yields [pos, 0, pos]: the direction
+        re-enables normally after an opt-out."""
+        v = make_validator(tmp_path)
+        sequence = [0.00015, 0.0, 0.00020]
+        for rate in sequence:
+            with patch(
+                'allways.validator.forward.read_miner_commitments',
+                return_value=[make_pair('hk_a', rate=rate, counter_rate=6500.0)],
+            ):
+                poll_commitments(v)
+            v.block += 1
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0, 0.00020]
+        v.state_store.close()
+
+    def test_zero_during_downtime_reconciles_against_persisted_rate(self, tmp_path: Path):
+        """A zero posted while the validator was down (so last_known_rates is
+        empty on restart) still terminates the prior positive on the next poll,
+        because the check reads the persisted latest rate."""
+        v = make_validator(tmp_path)
+        v.state_store.insert_rate_event(
+            hotkey='hk_a', from_chain='tao', to_chain='btc', rate=0.00015, block=v.block - 50
+        )
+
+        assert v.last_known_rates == {}  # simulate fresh process after restart
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_a', rate=0.0, counter_rate=6500.0)],
+        ):
+            poll_commitments(v)
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
+        v.state_store.close()
+
 
 class TestPollCommitmentsDereg:
     def test_dereg_removes_hotkey_from_store_and_cache(self, tmp_path: Path):
