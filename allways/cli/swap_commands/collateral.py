@@ -9,12 +9,18 @@ from allways.cli.swap_commands.helpers import (
     console,
     from_rao,
     get_cli_context,
+    is_valid_ss58,
     loading,
     print_contract_error,
     to_rao,
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, MIN_COLLATERAL_TAO
 from allways.contract_client import ContractError, is_contract_rejection
+
+try:
+    from async_substrate_interface.errors import ExtrinsicNotFound
+except ImportError:  # pragma: no cover - dependency always present in practice
+    ExtrinsicNotFound = ()
 
 
 @click.group('collateral', cls=StyledGroup, show_disclaimer=True)
@@ -187,6 +193,115 @@ def collateral_withdraw(amount: float | None, yes: bool):
         console.print(f'[green]Successfully withdrew {amount} TAO collateral![/green]')
     except ContractError as e:
         print_contract_error('Failed to withdraw collateral', e)
+
+
+@collateral_group.command('recover-from-hotkey', show_disclaimer=True)
+@click.option('--dest', default=None, help='Destination ss58 (default: your coldkey)')
+@click.option('--amount', default=None, type=float, help='Amount in TAO to recover (default: sweep all free balance)')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: bool):
+    """Move a hotkey's free TAO balance back to your coldkey.
+
+    [dim]Collateral is deposited from — and withdrawn back to — the hotkey, so leftover
+    free balance can strand there. `btcli wallet transfer` always signs with the coldkey
+    and cannot move it; this signs with the hotkey, the only key that can spend it.
+
+    This is NOT unstaking. To move STAKED tao use `btcli stake remove`.[/dim]
+
+    [dim]Examples:
+        $ alw collateral recover-from-hotkey                  (sweep all to your coldkey)
+        $ alw collateral recover-from-hotkey --amount 0.5
+        $ alw collateral recover-from-hotkey --dest 5C...[/dim]
+    """
+    _, wallet, subtensor, _ = get_cli_context(need_client=False)
+
+    if dest is None:
+        dest = wallet.coldkeypub.ss58_address
+    elif not is_valid_ss58(dest):
+        console.print(f'[red]Invalid destination ss58 address: {dest}[/red]')
+        return
+
+    keypair = wallet.hotkey
+    src = keypair.ss58_address
+
+    try:
+        account_info = subtensor.substrate.query('System', 'Account', [src])
+        account_data = account_info.value if hasattr(account_info, 'value') else account_info
+        free_rao = int(account_data.get('data', {}).get('free', 0))
+    except Exception as e:
+        console.print(f'[red]Failed to read hotkey balance: {e}[/red]')
+        return
+
+    sweep = amount is None
+    amount_rao = 0
+    if sweep:
+        action = 'Sweep entire free balance (minus tx fee)'
+    else:
+        if amount <= 0:
+            console.print('[red]Amount must be positive[/red]')
+            return
+        amount_rao = to_rao(amount)
+        required = amount_rao + MIN_BALANCE_FOR_TX_RAO
+        if required > free_rao:
+            console.print(
+                f'[red]Insufficient hotkey balance. Free: {from_rao(free_rao):.4f} TAO, '
+                f'need: {from_rao(required):.4f} TAO (amount + {from_rao(MIN_BALANCE_FOR_TX_RAO):.2f} TAO gas buffer). '
+                f'Omit --amount to sweep everything.[/red]'
+            )
+            return
+        action = f'Transfer {amount} TAO'
+
+    console.print('\n[bold]Recovering Hotkey Balance[/bold]\n')
+    console.print(f'  Source hotkey:  {src}')
+    console.print(f'  Free balance:   [green]{from_rao(free_rao):.9f} TAO[/green] ({free_rao} rao)')
+    console.print(f'  Destination:    {dest}')
+    console.print(f'  Action:         {action}\n')
+
+    if free_rao <= 0:
+        console.print('[yellow]Nothing to recover — hotkey free balance is zero.[/yellow]')
+        return
+
+    if not yes and not click.confirm('Confirm recovering hotkey balance?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        substrate = subtensor.substrate
+        if sweep:
+            call = substrate.compose_call(
+                call_module='Balances',
+                call_function='transfer_all',
+                call_params={'dest': dest, 'keep_alive': False},
+            )
+        else:
+            call = substrate.compose_call(
+                call_module='Balances',
+                call_function='transfer_keep_alive',
+                call_params={'dest': dest, 'value': amount_rao},
+            )
+        extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
+        with loading('Submitting transaction...'):
+            receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True)
+    except Exception as e:
+        console.print(f'[red]Failed to submit transfer: {e}[/red]')
+        return
+
+    try:
+        succeeded = receipt.is_success
+    except ExtrinsicNotFound:
+        # Included but the post-inclusion event lookup raced — the transfer
+        # most likely landed. Don't claim failure; point at the balance view.
+        console.print(
+            '[yellow]Submitted, but could not confirm the result from chain events. '
+            'Check the destination balance with `alw collateral view` or a block explorer.[/yellow]'
+        )
+        return
+
+    if succeeded:
+        console.print(f'[green]Recovered hotkey balance to {dest}.[/green]')
+        console.print(f'[dim]Block hash: {receipt.block_hash}[/dim]')
+    else:
+        console.print(f'[red]Transfer failed: {receipt.error_message}[/red]')
 
 
 @collateral_group.command('view')
