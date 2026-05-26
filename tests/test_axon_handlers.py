@@ -847,3 +847,18 @@ class TestReservationPin:
         validator.axon_contract_client.vote_initiate.assert_called_once()
         call = validator.axon_chain_providers['btc'].verify_transaction.call_args
         assert call.kwargs['expected_recipient'] == 'bc1-miner'
+
+    def test_successful_reserve_pins_synchronously(self):
+        """handle_swap_reserve writes the pin inline so a fast SwapConfirm finds it."""
+        validator = make_reserve_validator()
+        validator.axon_contract_client.get_miner_reserved_until.return_value = 1050
+
+        run_reserve_handler(validator, make_reserve_synapse())
+
+        validator.axon_contract_client.vote_reserve.assert_called_once()
+        validator.state_store.upsert_reservation_pin.assert_called_once()
+        pin = validator.state_store.upsert_reservation_pin.call_args[0][0]
+        assert pin.rate_str == '345'
+        assert pin.miner_from_address == 'bc1-miner'
+        assert pin.miner_to_address == '5miner'
+        assert pin.reserved_until == 1050
