@@ -25,7 +25,7 @@ from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
 from allways.utils.rate import calculate_to_amount, derive_tao_leg, quote_within_slippage
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
-from allways.validator.state_store import PendingConfirm
+from allways.validator.state_store import PendingConfirm, ReservationPin
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -454,6 +454,24 @@ async def handle_swap_reserve(
                 f'{ctx}: RESERVED — vote_reserve submitted '
                 f'(tao={synapse.tao_amount}, rate={reserve_rate_str or reserve_rate})'
             )
+
+            # Pin now so a fast SwapConfirm finds it; on failure the watcher backfills, never rejects the reserve.
+            try:
+                validator.state_store.upsert_reservation_pin(
+                    ReservationPin(
+                        miner_hotkey=miner,
+                        reserve_block=cur_block,
+                        from_chain=commitment.from_chain,
+                        to_chain=commitment.to_chain,
+                        rate_str=commitment.rate_str,
+                        counter_rate_str=commitment.counter_rate_str,
+                        miner_from_address=commitment.from_address,
+                        miner_to_address=commitment.to_address,
+                        reserved_until=contract.get_miner_reserved_until(miner),
+                    )
+                )
+            except Exception as e:
+                bt.logging.warning(f'{ctx}: synchronous pin write failed: {e} — watcher will backfill')
 
     except ContractError as e:
         bt.logging.error(f'{ctx} failed: {e}')
