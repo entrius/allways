@@ -21,6 +21,7 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     dashboard_url,
+    fetch_miner_reliability,
     find_matching_miners,
     from_rao,
     get_cli_context,
@@ -29,6 +30,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     mark_pending_swap_tx_sent,
     probe_pending_reservation,
+    reliability_text,
     resolve_source_tx_block,
     save_pending_swap,
     sign_or_prompt_external,
@@ -770,17 +772,35 @@ def swap_now_command(
     canon_is_reverse = from_chain != canon_from
     available_miners.sort(key=lambda x: x[0].rate, reverse=not canon_is_reverse)
 
+    # Per-miner success rate for this direction (None if the API is down).
+    with loading('Checking miner reliability...'):
+        reliability = fetch_miner_reliability()
+
     # Show miners table
     table = Table(title='Available Miners', show_header=True)
     table.add_column('#', style='dim')
     table.add_column('UID', style='cyan')
     table.add_column('Rate (TAO)', style='green')
+    table.add_column('Reliability', no_wrap=True)
     table.add_column('Collateral (TAO)', style='yellow')
 
     for idx, (pair, collateral) in enumerate(available_miners, 1):
-        table.add_row(str(idx), str(pair.uid), f'{pair.rate:g}', f'{from_rao(collateral):.4f}')
+        table.add_row(
+            str(idx),
+            str(pair.uid),
+            f'{pair.rate:g}',
+            reliability_text(pair.hotkey, from_chain, to_chain, reliability),
+            f'{from_rao(collateral):.4f}',
+        )
 
     console.print(table)
+    if reliability is None:
+        console.print('[dim]Reliability unavailable — swap-history API unreachable.[/dim]')
+    else:
+        console.print(
+            f'[dim]Reliability = {from_chain.upper()}→{to_chain.upper()} swaps completed/resolved '
+            'over the last 30 days; green ≥90%, yellow ≥50%, red <50%.[/dim]'
+        )
 
     # Step 3: Select miner (default to best rate)
     best_pair = available_miners[0][0]

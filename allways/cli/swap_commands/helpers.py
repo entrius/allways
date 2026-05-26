@@ -2,13 +2,16 @@ import json
 import os
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
 import click
+import requests
 from rich.console import Console
+from rich.text import Text
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.classes import MinerPair, Swap, SwapStatus
@@ -31,6 +34,92 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 console = Console()
 
 SECONDS_PER_BLOCK = 12
+
+# --- Miner reliability (swap success rate) -------------------------------
+# Per-miner success rate is not on-chain. `view rates` and `swap now` pull a
+# pre-aggregated per-direction completed/total map from the allways API and
+# color-code it. Override the host with ALLWAYS_API_URL for testnet or a
+# self-hosted indexer.
+DEFAULT_API_URL = 'https://api.all-ways.io'
+RELIABILITY_CACHE_TTL = 600  # seconds — stats move slowly; avoid refetching every call
+
+
+def _api_url() -> str:
+    return os.environ.get('ALLWAYS_API_URL', DEFAULT_API_URL).rstrip('/')
+
+
+def fetch_miner_reliability(use_cache: bool = True) -> Optional[dict]:
+    """Per-miner, per-direction swap success counts from the allways API.
+
+    Returns ``{hotkey: {'btc->tao': (completed, total), ...}}`` from
+    ``/miners/reliability`` — resolved swaps only (COMPLETED + TIMED_OUT) over
+    the API's credibility window. Returns ``None`` if the API is unreachable:
+    callers must degrade gracefully, since `view rates` and `swap now` have to
+    work whether or not the indexer is up.
+    """
+    cache_file = ALLWAYS_DIR / 'miner_reliability_cache.json'
+    api_url = _api_url()
+    if use_cache and cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text())
+            fresh = time.time() - cached.get('fetched_at', 0) < RELIABILITY_CACHE_TTL
+            # A cache from a different API host must not be reused.
+            if fresh and cached.get('api_url') == api_url:
+                return {hk: {d: tuple(v) for d, v in dirs.items()} for hk, dirs in cached['stats'].items()}
+        except (json.JSONDecodeError, KeyError, OSError):
+            pass  # stale/corrupt cache — fall through and refetch
+
+    # The API rejects unknown user agents; identify ourselves explicitly.
+    headers = {'User-Agent': f'allways-cli/{__import__("allways").__version__}'}
+    try:
+        resp = requests.get(f'{api_url}/miners/reliability', headers=headers, timeout=10)
+        resp.raise_for_status()
+        rows = resp.json()
+    except (requests.RequestException, ValueError):
+        return None
+    # A JSON error object (dict) instead of a list means no usable data.
+    if not isinstance(rows, list):
+        return {}
+
+    stats: dict = {}
+    for r in rows:
+        hk = r.get('minerHotkey')
+        src = r.get('sourceChain')
+        dst = r.get('destChain')
+        if not hk or not src or not dst:
+            continue
+        stats.setdefault(hk, {})[f'{src}->{dst}'] = (int(r.get('completed') or 0), int(r.get('total') or 0))
+
+    try:
+        ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps(
+                {
+                    'fetched_at': int(time.time()),
+                    'api_url': api_url,
+                    'stats': {hk: {d: list(v) for d, v in dirs.items()} for hk, dirs in stats.items()},
+                }
+            )
+        )
+    except OSError:
+        pass  # cache write is best-effort
+    return stats
+
+
+def reliability_text(hotkey: str, src: str, dst: str, reliability: Optional[dict]) -> Text:
+    """Colored ``completed/total`` for one swap direction.
+
+    Green ≥90%, yellow ≥50%, red below; dim ``—`` when reliability is
+    unavailable or the miner has no resolved swap in that direction.
+    """
+    if reliability is None:
+        return Text('—', style='dim')
+    comp, tot = reliability.get(hotkey, {}).get(f'{src}->{dst}', (0, 0))
+    if tot == 0:
+        return Text('—', style='dim')
+    pct = comp / tot
+    style = 'green' if pct >= 0.9 else 'yellow' if pct >= 0.5 else 'red'
+    return Text(f'{comp}/{tot}', style=style)
 
 
 def blocks_to_minutes_str(blocks: int) -> str:
