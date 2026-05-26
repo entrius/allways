@@ -178,6 +178,13 @@ class OptimisticExtensionWatcher:
                 miner_hotkey=miner_hotkey,
             ),
         )
+        if not success:
+            # Window elapsed, so not a benign challenge-race loss — the reservation
+            # likely expired before finalize landed, stranding the user's source funds.
+            bt.logging.warning(
+                f'OptimisticExt: finalize_extend_reservation for {miner_hotkey[:8]} rejected after '
+                f'challenge window (target {pending.target_block}) — reservation likely expired before finalize landed'
+            )
         return pending.target_block if success else None
 
     # ─── Timeout side ────────────────────────────────────────────────────
