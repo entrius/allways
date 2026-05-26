@@ -206,7 +206,10 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
     free balance can strand there. `btcli wallet transfer` always signs with the coldkey
     and cannot move it; this signs with the hotkey, the only key that can spend it.
 
-    This is NOT unstaking. To move STAKED tao use `btcli stake remove`.[/dim]
+    This is NOT unstaking. To move STAKED tao use `btcli stake remove`.
+
+    Signs with the hotkey from your `alw config` (the configured wallet/hotkey).
+    Target a different one per-call with the global --wallet / --hotkey / --network flags.[/dim]
 
     [dim]Examples:
         $ alw collateral recover-from-hotkey                  (sweep all to your coldkey)
@@ -252,10 +255,12 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
         action = f'Transfer {amount} TAO'
 
     console.print('\n[bold]Recovering Hotkey Balance[/bold]\n')
-    console.print(f'  Source hotkey:  {src}')
+    console.print(f'  Wallet:         {wallet.name}')
+    console.print(f'  Source hotkey:  {wallet.hotkey_str} ([dim]{src}[/dim])')
     console.print(f'  Free balance:   [green]{from_rao(free_rao):.9f} TAO[/green] ({free_rao} rao)')
     console.print(f'  Destination:    {dest}')
-    console.print(f'  Action:         {action}\n')
+    console.print(f'  Action:         {action}')
+    console.print('  [dim]Override which key is used with --wallet / --hotkey.[/dim]\n')
 
     if free_rao <= 0:
         console.print('[yellow]Nothing to recover — hotkey free balance is zero.[/yellow]')
