@@ -406,11 +406,7 @@ def reconstruct_window_start_state(
     active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
-    rates: Dict[str, float] = {
-        hk: rate_block[0]
-        for hk, rate_block in all_latest.items()
-        if hk in rewardable_hotkeys
-    }
+    rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
     return rates, busy_count, active_set
 
