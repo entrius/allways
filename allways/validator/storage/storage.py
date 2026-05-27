@@ -54,8 +54,7 @@ class DatabaseStorage:
             bt.logging.success('Validator DB storage enabled')
         else:
             bt.logging.error(
-                'STORE_DB_RESULTS=1 but Postgres connection failed — '
-                'dashboard writes disabled for this process'
+                'STORE_DB_RESULTS=1 but Postgres connection failed — dashboard writes disabled for this process'
             )
 
     def is_enabled(self) -> bool:
@@ -150,9 +149,7 @@ class DatabaseStorage:
 
             with self.db_connection.pipeline():
                 for from_chain, to_chain in directions:
-                    self.repo.delete_crown_in_range(
-                        from_chain, to_chain, window_start, window_end, commit=False
-                    )
+                    self.repo.delete_crown_in_range(from_chain, to_chain, window_start, window_end, commit=False)
                 self.repo.set_sync_cursor('rate_snapshot_max_block', max_block, commit=False)
                 self.repo.set_sync_cursor('crown_holders_max_block', max_block, commit=False)
 

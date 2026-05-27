@@ -119,9 +119,7 @@ async def forward(self: Validator) -> None:
     if self.database_storage.is_enabled():
         try:
             halted = contract_is_halted(self)
-            self.database_storage.upsert_current_crown_snapshot(
-                snapshot_current_crown_holders(self, halted=halted)
-            )
+            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self, halted=halted))
         except Exception as e:
             bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 
