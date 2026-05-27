@@ -111,6 +111,46 @@ class DatabaseStorage:
 
         return result
 
+    def upsert_current_crown_snapshot(
+        self,
+        rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]],
+    ) -> StorageResult:
+        """Replace current_crown_holders rows for the given directions.
+
+        Called per forward step (~12s) — the dashboard's live "who holds
+        the crown right now" surface. Distinct cadence from
+        ``flush_scoring_window``, which writes the historical per-block
+        ledger at round end (~2h).
+
+        Row format per direction: ``(from_chain, to_chain, hotkey, credit,
+        rate, block)``. Empty list for a direction means "no qualifying
+        holder right now" — that direction's rows are cleared.
+        """
+        if not self.is_enabled():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+            count = self.repo.replace_current_crown(rows_by_direction, commit=False)
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+            result.stored_counts['current_crown_holders'] = count
+        except Exception as ex:
+            if self.db_connection is not None:
+                try:
+                    self.db_connection.rollback()
+                except Exception:
+                    pass
+                self.db_connection.autocommit = True
+            error_msg = f'Failed to upsert current_crown_holders: {ex}'
+            result.success = False
+            result.errors.append(error_msg)
+            self.logger.error(error_msg)
+
+        return result
+
     def close(self):
         if self.db_connection:
             self.db_connection.close()

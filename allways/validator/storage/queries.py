@@ -41,3 +41,23 @@ INSERT INTO sync_cursor (name, value, updated_at)
 VALUES (%s, %s, NOW())
 ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 """
+
+# current_crown_holders: live "who holds the crown right now" per direction,
+# refreshed per forward step (~12s). Distinct from crown_holders, which is
+# the historical per-block ledger flushed at end-of-round (~2h). A direction's
+# rows are deleted before re-insertion so a k-way tied holder set is
+# consistent — readers never see a partial tie.
+DELETE_CURRENT_CROWN_BY_DIRECTION = """
+DELETE FROM current_crown_holders
+WHERE from_chain = %s AND to_chain = %s
+"""
+
+BULK_UPSERT_CURRENT_CROWN_HOLDERS = """
+INSERT INTO current_crown_holders (from_chain, to_chain, hotkey, credit, rate, block, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (from_chain, to_chain, hotkey)
+DO UPDATE SET credit = EXCLUDED.credit,
+              rate   = EXCLUDED.rate,
+              block  = EXCLUDED.block,
+              updated_at = NOW()
+"""

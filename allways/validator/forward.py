@@ -25,7 +25,7 @@ from allways.validator.axon_handlers import (
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.scoring import score_and_reward_miners
+from allways.validator.scoring import score_and_reward_miners, snapshot_current_crown_holders
 from allways.validator.state_store import PendingConfirm
 from allways.validator.swap_tracker import SwapTracker
 
@@ -104,6 +104,19 @@ async def forward(self: Validator) -> None:
         score_and_reward_miners(self)
         self.initial_scoring_done = True
         bt.logging.info('forward: scoring done')
+
+    # Live current-crown snapshot — runs after every other phase so DB
+    # latency here can't push vote_initiate, finalize, or timeout-extension
+    # RPC past their block deadlines. Sub-ms in-memory compute plus a small
+    # bounded write; gated by STORE_DB_RESULTS and wrapped so DB outages
+    # never propagate into the forward loop.
+    if self.database_storage.is_enabled():
+        try:
+            self.database_storage.upsert_current_crown_snapshot(
+                snapshot_current_crown_holders(self)
+            )
+        except Exception as e:
+            bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 
 
 def clear_provider_caches(self: Validator) -> None:

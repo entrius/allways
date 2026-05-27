@@ -495,6 +495,53 @@ def replay_crown_time_window(
     return crown_blocks
 
 
+def snapshot_current_crown_holders(
+    self: Validator,
+) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
+    """Cheap "who holds the crown right now" per direction. Used by the
+    per-forward-step live-crown writer.
+
+    Reconstructs rates/busy/active at the current block and evaluates
+    ``crown_holders_at_instant`` once per direction — no event-stream walk,
+    so cost is O(rewardable_hotkeys) per direction, sub-millisecond in
+    practice. Returns rows in ``DatabaseStorage.upsert_current_crown_snapshot``
+    shape: ``(from_chain, to_chain, hotkey, credit, rate, block)`` keyed
+    by direction. An empty list for a direction means "no qualifying
+    holder right now" — instructs the storage layer to clear that
+    direction's rows."""
+    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    block = self.block
+    rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
+    for from_chain, to_chain in DIRECTION_POOLS:
+        rates, busy_count, active_set = reconstruct_window_start_state(
+            self.state_store,
+            self.event_watcher,
+            from_chain,
+            to_chain,
+            block,
+            rewardable_hotkeys,
+        )
+        canon_from, _ = canonical_pair(from_chain, to_chain)
+        lower_rate_wins = from_chain != canon_from
+        busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        holders = crown_holders_at_instant(
+            rates,
+            rewardable_hotkeys,
+            busy=busy_set,
+            active=active_set,
+            lower_rate_wins=lower_rate_wins,
+        )
+        if holders:
+            share = 1.0 / len(holders)
+            rate = rates.get(holders[0], 0.0)
+            rows_by_direction[(from_chain, to_chain)] = [
+                (from_chain, to_chain, hk, share, rate, block) for hk in holders
+            ]
+        else:
+            rows_by_direction[(from_chain, to_chain)] = []
+    return rows_by_direction
+
+
 def expand_intervals_to_crown_rows(
     intervals: List[Tuple[int, int, List[str], float]],
     from_chain: str,

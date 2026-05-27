@@ -7,12 +7,14 @@ single transaction.
 
 import logging
 from contextlib import contextmanager
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from .queries import (
     BULK_UPSERT_CROWN_HOLDERS,
+    BULK_UPSERT_CURRENT_CROWN_HOLDERS,
     BULK_UPSERT_RATE_HISTORY,
     DELETE_CROWN_IN_RANGE,
+    DELETE_CURRENT_CROWN_BY_DIRECTION,
     SET_SYNC_CURSOR,
 )
 
@@ -109,3 +111,33 @@ class Repository(BaseRepository):
         data the cursor describes so partial writes don't desync the
         dashboard's freshness signal."""
         return self.execute_command(SET_SYNC_CURSOR, (name, value), commit=commit)
+
+    def replace_current_crown(
+        self,
+        rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]],
+        commit: bool = True,
+    ) -> int:
+        """Replace current_crown_holders rows for each given direction.
+
+        Per direction: delete all existing rows, then insert the supplied
+        winners. Wrapped in one transaction so a tied k-way holder set is
+        never partially visible. An empty row list for a direction clears
+        it (no qualified holder at the current instant)."""
+        if not rows_by_direction:
+            return 0
+        total = 0
+        try:
+            with self.get_cursor() as cursor:
+                for (from_chain, to_chain), rows in rows_by_direction.items():
+                    cursor.execute(DELETE_CURRENT_CROWN_BY_DIRECTION, (from_chain, to_chain))
+                    if rows:
+                        cursor.executemany(BULK_UPSERT_CURRENT_CROWN_HOLDERS, rows)
+                        total += len(rows)
+                if commit:
+                    self.db.commit()
+            return total
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in current_crown_holders replace: {e}')
+            return 0
