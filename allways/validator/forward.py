@@ -26,7 +26,6 @@ from allways.validator.axon_handlers import (
 )
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.scoring import (
-    contract_is_halted,
     score_and_reward_miners,
     snapshot_current_crown_holders,
 )
@@ -113,13 +112,16 @@ async def forward(self: Validator) -> None:
     # latency here can't push vote_initiate, finalize, or timeout-extension
     # RPC past their block deadlines. Sub-ms in-memory compute plus a small
     # bounded write; gated by STORE_DB_RESULTS and wrapped so DB outages
-    # never propagate into the forward loop. During a halt the snapshot
-    # writes empty rows for every direction so the live table matches
-    # the recycle semantics.
+    # never propagate into the forward loop. No halt check here — that
+    # RPC is the expensive one; halt-aware clearing happens once per
+    # scoring round inside _flush_halt_window. Worst case the live table
+    # shows the actual best-rate holder during halt for up to one
+    # SCORING_WINDOW_BLOCKS (~2h) until the next round clears it; the
+    # HaltBanner + top-right "paused" indicator (both fed by /halt off
+    # contract_events) signal the recycle state to users in the meantime.
     if self.database_storage.is_enabled():
         try:
-            halted = contract_is_halted(self)
-            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self, halted=halted))
+            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self))
         except Exception as e:
             bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 

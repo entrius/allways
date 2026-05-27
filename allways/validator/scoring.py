@@ -57,21 +57,30 @@ def score_and_reward_miners(self: Validator) -> None:
 
 
 def _flush_halt_window(self: Validator) -> None:
-    """Clear crown_holders rows in the halted window and advance the
-    sync_cursor watermarks. Mirrors the daemon's halt-tick semantics so
-    the dashboard doesn't keep showing pre-halt holders while the
-    validator has recycled the pool."""
+    """Clear crown_holders rows in the halted window, advance the
+    sync_cursor watermarks, and clear the live current_crown_holders
+    table. Mirrors the daemon's halt-tick semantics so the dashboard
+    doesn't keep showing pre-halt holders while the validator has
+    recycled the pool. Live-table clear lives here (not in the
+    per-forward snapshot) so we don't pay an RPC every step just to
+    check halt — halt is rare; one clear per round is enough."""
     if not self.database_storage.is_enabled():
         return
     window_end = self.block
     window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
     if window_end <= 0:
         return
+    directions = list(DIRECTION_POOLS.keys())
     self.database_storage.flush_halt_window(
-        directions=list(DIRECTION_POOLS.keys()),
+        directions=directions,
         window_start=window_start,
         window_end=window_end,
         max_block=window_end - 1,
+    )
+    # Empty rows per direction → upsert_current_crown_snapshot's
+    # delete-then-insert flow clears them.
+    self.database_storage.upsert_current_crown_snapshot(
+        {(f, t): [] for f, t in directions}
     )
 
 
@@ -524,7 +533,6 @@ def replay_crown_time_window(
 
 def snapshot_current_crown_holders(
     self: Validator,
-    halted: bool = False,
 ) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
     """Cheap "who holds the crown right now" per direction. Used by the
     per-forward-step live-crown writer.
@@ -538,12 +546,13 @@ def snapshot_current_crown_holders(
     holder right now" — instructs the storage layer to clear that
     direction's rows.
 
-    When ``halted=True`` no miner can earn crown (full pool recycles),
-    so every direction returns empty — the writer clears the live table
-    so the UI matches the recycle semantics."""
+    Halt is not checked here — that RPC is expensive and halt is rare;
+    instead ``_flush_halt_window`` clears the live table at the next
+    scoring round when a halt is detected. Worst case the live table
+    shows the actual best-rate holder during halt for ~2h, while the
+    HaltBanner + top-right indicator (both fed by /halt off
+    contract_events) signal the recycle state to users."""
     block = self.block
-    if halted:
-        return {(f, t): [] for f, t in DIRECTION_POOLS}
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
