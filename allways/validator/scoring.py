@@ -77,9 +77,13 @@ def _flush_halt_window(self: Validator) -> None:
 
 def contract_is_halted(self: Validator) -> bool:
     """Best-effort halt check. RPC flakiness should not zero every miner's
-    reward, so any exception falls through to normal scoring."""
+    reward, so any exception falls through to normal scoring.
+
+    Delegates to bounds_cache.halted() — short TTL (HALT_TTL_BLOCKS ~ 60s)
+    so the per-forward live-crown writer and the per-round scoring path
+    share one cached value instead of each hitting the contract RPC."""
     try:
-        return bool(self.contract_client.get_halted())
+        return self.bounds_cache.halted()
     except Exception as e:
         bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
         return False
@@ -395,15 +399,18 @@ def reconstruct_window_start_state(
     rewardable_hotkeys: Set[str],
 ) -> Tuple[Dict[str, float], Dict[str, int], Set[str]]:
     """Snapshot rates, busy counts, and the active set as they stood at
-    window_start."""
-    rates: Dict[str, float] = {}
+    window_start. Rate read is one batched query per direction (N
+    rewardable hotkeys would otherwise be N point lookups, runs every
+    forward step from snapshot_current_crown_holders)."""
     busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
     active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
-    for hotkey in rewardable_hotkeys:
-        latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
-        if latest_rate is not None:
-            rates[hotkey] = latest_rate[0]
+    all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
+    rates: Dict[str, float] = {
+        hk: rate_block[0]
+        for hk, rate_block in all_latest.items()
+        if hk in rewardable_hotkeys
+    }
 
     return rates, busy_count, active_set
 
