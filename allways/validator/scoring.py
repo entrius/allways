@@ -238,9 +238,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         # Expand uniform-state intervals to per-block crown_holders rows.
         # `flush_scoring_window` deletes [window_start, window_end) per
         # direction before upserting, so the wipe matches the data exactly.
-        crown_rows_by_dir = {
-            d: expand_intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()
-        }
+        crown_rows_by_dir = {d: expand_intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()}
         rate_rows: List[Tuple[str, str, str, float, int]] = []
         for from_chain, to_chain in DIRECTION_POOLS:
             for e in self.state_store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
