@@ -321,9 +321,7 @@ class ContractEventWatcher:
             out.append({'hotkey': ev.hotkey, 'kind': ev.kind, 'rate': ev.rate, 'block': ev.block_num})
         return out
 
-    def get_reservation_pins_at(
-        self, block: int, from_chain: str, to_chain: str
-    ) -> Dict[str, float]:
+    def get_reservation_pins_at(self, block: int, from_chain: str, to_chain: str) -> Dict[str, float]:
         """Pinned rate per hotkey active at ``block`` for the given direction,
         reconstructed by replaying every pin transition at or before ``block``.
         A hotkey is in the result iff its most recent transition for that
@@ -915,8 +913,7 @@ class ContractEventWatcher:
             self.reservation_pin_events = [
                 ev
                 for ev in self.reservation_pin_events
-                if ev.block_num >= cutoff
-                or latest_per_dir.get((ev.hotkey, ev.from_chain, ev.to_chain)) is ev
+                if ev.block_num >= cutoff or latest_per_dir.get((ev.hotkey, ev.from_chain, ev.to_chain)) is ev
             ]
         self.state_store.prune_active_events(cutoff)
         self.state_store.prune_busy_events(cutoff)

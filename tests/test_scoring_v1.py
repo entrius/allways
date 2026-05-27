@@ -496,11 +496,21 @@ class TestPinnedRateDuringReservation:
         conn.commit()
 
         watcher._record_reservation_pin_event(
-            block_num=300, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0,
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
         )
         # Reservation ends at block 600 — A's live rate of 300 takes over.
         watcher._record_reservation_pin_event(
-            block_num=600, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='end', rate=0.0,
+            block_num=600,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='end',
+            rate=0.0,
         )
 
         crown = replay_crown_time_window(
@@ -539,7 +549,12 @@ class TestPinnedRateDuringReservation:
         # Pin A in the btc→tao direction only — should not affect tao→btc
         # crown ranking.
         watcher._record_reservation_pin_event(
-            block_num=300, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0,
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
         )
 
         crown = replay_crown_time_window(
@@ -579,7 +594,12 @@ class TestPinnedRateDuringReservation:
         # Pin laid down at block 30 (also before window_start) captures
         # the rate as of that block: 200. Pin remains open at window_start.
         watcher._record_reservation_pin_event(
-            block_num=30, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0,
+            block_num=30,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
         )
 
         crown = replay_crown_time_window(
@@ -614,10 +634,20 @@ class TestPinnedRateDuringReservation:
         # Pin should end at SwapInitiated (event_watcher emits the 'end' in
         # production); we simulate that here.
         watcher._record_reservation_pin_event(
-            block_num=300, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0,
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
         )
         watcher._record_reservation_pin_event(
-            block_num=500, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='end', rate=0.0,
+            block_num=500,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='end',
+            rate=0.0,
         )
         watcher.apply_busy_delta(500, 'hk_a', +1)
         watcher.apply_busy_delta(900, 'hk_a', -1)

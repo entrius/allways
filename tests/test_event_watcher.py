@@ -539,8 +539,7 @@ class TestReservationPin:
         w.apply_event(950, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
 
         end_events = [
-            ev for ev in w.reservation_pin_events
-            if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 950
+            ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 950
         ]
         # One 'end' per direction that had been pinned.
         assert {(ev.from_chain, ev.to_chain) for ev in end_events} == {('btc', 'tao'), ('tao', 'btc')}
@@ -591,8 +590,7 @@ class TestReservationPin:
         primary = w.get_reservation_pins_at(1150, 'btc', 'tao')
         assert primary == {'hk_a': 250.0}
         end_events = [
-            ev for ev in w.reservation_pin_events
-            if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 1100
+            ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 1100
         ]
         assert {(ev.from_chain, ev.to_chain) for ev in end_events} == {('btc', 'tao'), ('tao', 'btc')}
         w.state_store.close()
