@@ -79,9 +79,7 @@ def _flush_halt_window(self: Validator) -> None:
     )
     # Empty rows per direction → upsert_current_crown_snapshot's
     # delete-then-insert flow clears them.
-    self.database_storage.upsert_current_crown_snapshot(
-        {(f, t): [] for f, t in directions}
-    )
+    self.database_storage.upsert_current_crown_snapshot({(f, t): [] for f, t in directions})
 
 
 def contract_is_halted(self: Validator) -> bool:
