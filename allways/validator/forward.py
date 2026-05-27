@@ -25,7 +25,11 @@ from allways.validator.axon_handlers import (
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.scoring import score_and_reward_miners, snapshot_current_crown_holders
+from allways.validator.scoring import (
+    contract_is_halted,
+    score_and_reward_miners,
+    snapshot_current_crown_holders,
+)
 from allways.validator.state_store import PendingConfirm
 from allways.validator.swap_tracker import SwapTracker
 
@@ -109,10 +113,15 @@ async def forward(self: Validator) -> None:
     # latency here can't push vote_initiate, finalize, or timeout-extension
     # RPC past their block deadlines. Sub-ms in-memory compute plus a small
     # bounded write; gated by STORE_DB_RESULTS and wrapped so DB outages
-    # never propagate into the forward loop.
+    # never propagate into the forward loop. During a halt the snapshot
+    # writes empty rows for every direction so the live table matches
+    # the recycle semantics.
     if self.database_storage.is_enabled():
         try:
-            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self))
+            halted = contract_is_halted(self)
+            self.database_storage.upsert_current_crown_snapshot(
+                snapshot_current_crown_holders(self, halted=halted)
+            )
         except Exception as e:
             bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 

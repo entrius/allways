@@ -43,8 +43,10 @@ class DirectionTrace:
 
 def score_and_reward_miners(self: Validator) -> None:
     try:
-        if _contract_is_halted(self):
+        halted = contract_is_halted(self)
+        if halted:
             rewards, miner_uids = build_halted_rewards(self)
+            _flush_halt_window(self)
         else:
             rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
@@ -54,7 +56,26 @@ def score_and_reward_miners(self: Validator) -> None:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def _contract_is_halted(self: Validator) -> bool:
+def _flush_halt_window(self: Validator) -> None:
+    """Clear crown_holders rows in the halted window and advance the
+    sync_cursor watermarks. Mirrors the daemon's halt-tick semantics so
+    the dashboard doesn't keep showing pre-halt holders while the
+    validator has recycled the pool."""
+    if not self.database_storage.is_enabled():
+        return
+    window_end = self.block
+    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    if window_end <= 0:
+        return
+    self.database_storage.flush_halt_window(
+        directions=list(DIRECTION_POOLS.keys()),
+        window_start=window_start,
+        window_end=window_end,
+        max_block=window_end - 1,
+    )
+
+
+def contract_is_halted(self: Validator) -> bool:
     """Best-effort halt check. RPC flakiness should not zero every miner's
     reward, so any exception falls through to normal scoring."""
     try:
@@ -243,12 +264,17 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         for from_chain, to_chain in DIRECTION_POOLS:
             for e in self.state_store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
                 rate_rows.append((e['hotkey'], from_chain, to_chain, float(e['rate']), e['block']))
+        # Range delete + insert covers [window_start, window_end) exclusive
+        # of window_end, so the last block actually written is window_end - 1.
+        # Cursor advances to that — claiming through window_end would lie
+        # to readers about what's flushed.
+        cursor_block = max(0, window_end - 1)
         self.database_storage.flush_scoring_window(
             rate_rows=rate_rows,
             crown_rows_by_direction=crown_rows_by_dir,
             crown_window_bounds_by_direction={d: (window_start, window_end) for d in DIRECTION_POOLS},
-            rate_snapshot_max_block=window_end,
-            crown_holders_max_block=window_end,
+            rate_snapshot_max_block=cursor_block,
+            crown_holders_max_block=cursor_block,
         )
 
     return rewards, set(range(n_uids))
@@ -495,6 +521,7 @@ def replay_crown_time_window(
 
 def snapshot_current_crown_holders(
     self: Validator,
+    halted: bool = False,
 ) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
     """Cheap "who holds the crown right now" per direction. Used by the
     per-forward-step live-crown writer.
@@ -506,9 +533,15 @@ def snapshot_current_crown_holders(
     shape: ``(from_chain, to_chain, hotkey, credit, rate, block)`` keyed
     by direction. An empty list for a direction means "no qualifying
     holder right now" — instructs the storage layer to clear that
-    direction's rows."""
-    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    direction's rows.
+
+    When ``halted=True`` no miner can earn crown (full pool recycles),
+    so every direction returns empty — the writer clears the live table
+    so the UI matches the recycle semantics."""
     block = self.block
+    if halted:
+        return {(f, t): [] for f, t in DIRECTION_POOLS}
+    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         rates, busy_count, active_set = reconstruct_window_start_state(

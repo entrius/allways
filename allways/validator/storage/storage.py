@@ -47,8 +47,16 @@ class DatabaseStorage:
             bt.logging.info('STORE_DB_RESULTS not set — validator DB storage disabled')
             return
 
+        bt.logging.info('STORE_DB_RESULTS=1 — connecting to Postgres for dashboard writes')
         self.db_connection = create_database_connection()
-        self.repo = Repository(self.db_connection) if self.db_connection else None
+        if self.db_connection is not None:
+            self.repo = Repository(self.db_connection)
+            bt.logging.success('Validator DB storage enabled')
+        else:
+            bt.logging.error(
+                'STORE_DB_RESULTS=1 but Postgres connection failed — '
+                'dashboard writes disabled for this process'
+            )
 
     def is_enabled(self) -> bool:
         return self.db_connection is not None and self.repo is not None
@@ -105,6 +113,60 @@ class DatabaseStorage:
                 self.db_connection.rollback()
                 self.db_connection.autocommit = True
             error_msg = f'Failed to flush scoring window to DB: {ex}'
+            result.success = False
+            result.errors.append(error_msg)
+            self.logger.error(error_msg)
+
+        return result
+
+    def flush_halt_window(
+        self,
+        directions: List[Tuple[str, str]],
+        window_start: int,
+        window_end: int,
+        max_block: int,
+    ) -> StorageResult:
+        """Halt-aware counterpart to flush_scoring_window.
+
+        During a halt, no miner earns crown and the pool recycles
+        (see ``build_halted_rewards``). Mirror that on the dashboard by
+        deleting any pre-existing crown_holders rows in the halted
+        window and advancing the cursor — leaves no stale "current
+        holder" implication on the historical grid. Rate events that
+        fired during halt are *not* written: the daemon never wrote
+        them either, and rate_history during a recycle has no scoring
+        meaning.
+
+        ``[window_start, window_end)`` is the block range to clear per
+        direction. ``max_block`` advances both sync_cursor watermarks.
+        """
+        if not self.is_enabled():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+
+            with self.db_connection.pipeline():
+                for from_chain, to_chain in directions:
+                    self.repo.delete_crown_in_range(
+                        from_chain, to_chain, window_start, window_end, commit=False
+                    )
+                self.repo.set_sync_cursor('rate_snapshot_max_block', max_block, commit=False)
+                self.repo.set_sync_cursor('crown_holders_max_block', max_block, commit=False)
+
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+
+        except Exception as ex:
+            if self.db_connection is not None:
+                try:
+                    self.db_connection.rollback()
+                except Exception:
+                    pass
+                self.db_connection.autocommit = True
+            error_msg = f'Failed to flush halt window to DB: {ex}'
             result.success = False
             result.errors.append(error_msg)
             self.logger.error(error_msg)
