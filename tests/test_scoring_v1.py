@@ -1023,7 +1023,7 @@ class TestHistoricalActiveState:
         store.close()
 
     def test_only_miner_deactivated_mid_window_pool_partially_recycles(self, tmp_path: Path):
-        """Solo miner deactivates at 600. Earns 500, forfeits 500."""
+        """Solo miner active at window_start, deactivates mid-window."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys, block=1100)
         conn = v.state_store.require_connection()
@@ -1032,12 +1032,14 @@ class TestHistoricalActiveState:
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        v.event_watcher.apply_event(600, 'MinerActivated', {'miner': 'hk_a', 'active': False})
+        # Deactivate inside the [block - SCORING_WINDOW_BLOCKS, block] window so
+        # hk_a holds crown for part of it (sole crowned miner → full pool).
+        v.event_watcher.apply_event(950, 'MinerActivated', {'miner': 'hk_a', 'active': False})
 
         rewards, _ = calculate_miner_rewards(v)
 
-        # hk_a earned (0, 600] = 600 blocks out of 1100 → 600/1100 of tao→btc
-        # pool (success_rate=1.0 default). btc→tao pool gets nothing (no
+        # hk_a is the only miner with a rate, so it takes the entire tao→btc
+        # pool for the blocks it held crown. btc→tao pool gets nothing (no
         # rates posted) and recycles.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         # Everything else recycles: btc→tao pool.
@@ -1709,7 +1711,9 @@ class TestVolumeWeighting:
         miner_hotkey: str,
         tao_amount: int,
         swap_id: int = 1,
-        resolved_block: int = 9_500,
+        # Within the default validator's [block - SCORING_WINDOW_BLOCKS, block]
+        # scoring window so the volume actually counts.
+        resolved_block: int = 9_900,
         completed: bool = True,
         from_chain: str = 'tao',
         to_chain: str = 'btc',
@@ -1811,17 +1815,17 @@ class TestVolumeWeighting:
             ('hk_b', 'btc', 'tao', 150.0, 0),
         )
         conn.commit()
-        # Window is (9400, 10000]. A busy block 9_500..9_620 (120 blocks within
+        # Window is (9700, 10000]. A busy block 9_800..9_860 (60 blocks within
         # the window) so B holds crown 20% of window. We can't use a
         # SwapCompleted event here because the direction lookup needs an
         # active swap entry in the tracker — easier to just record the
         # outcome and the busy delta directly.
-        v.event_watcher.apply_busy_delta(9_500, 'hk_a', +1)
-        v.event_watcher.apply_busy_delta(9_620, 'hk_a', -1)
+        v.event_watcher.apply_busy_delta(9_800, 'hk_a', +1)
+        v.event_watcher.apply_busy_delta(9_860, 'hk_a', -1)
         self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='btc', to_chain='tao')
         self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='btc', to_chain='tao')
         rewards, _ = calculate_miner_rewards(v)
-        # Crown: A=480/600=0.8, B=120/600=0.2. Volume: A=0.2, B=0.8.
+        # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
         # A participation = 0.2/0.8 = 0.25 → factor 0.625.
         # B participation = min(1.0, 0.8/0.2) = 1.0 → factor 1.0.
         np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8 * 0.625, atol=1e-6)
@@ -1928,7 +1932,7 @@ class TestCapacityVolumeInteraction:
             swap_id=1,
             miner_hotkey='hk_b',
             completed=True,
-            resolved_block=9_500,
+            resolved_block=9_900,  # within the default validator's scoring window
             tao_amount=500_000_000,
             from_chain='tao',
             to_chain='btc',
@@ -1959,7 +1963,7 @@ class TestCapacityVolumeInteraction:
             swap_id=1,
             miner_hotkey='hk_b',
             completed=True,
-            resolved_block=9_500,
+            resolved_block=9_900,  # within the default validator's scoring window
             tao_amount=400_000_000,
             from_chain='btc',
             to_chain='tao',

@@ -617,7 +617,7 @@ def snapshot_current_crown_holders(
     Halt is not checked here — that RPC is expensive and halt is rare;
     instead ``_flush_halt_window`` clears the live table at the next
     scoring round when a halt is detected. Worst case the live table
-    shows the actual best-rate holder during halt for ~2h, while the
+    shows the actual best-rate holder during halt for ~1h, while the
     HaltBanner + top-right indicator (both fed by /halt off
     contract_events) signal the recycle state to users."""
     block = self.block

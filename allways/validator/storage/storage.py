@@ -179,7 +179,7 @@ class DatabaseStorage:
         Called per forward step (~12s) — the dashboard's live "who holds
         the crown right now" surface. Distinct cadence from
         ``flush_scoring_window``, which writes the historical per-block
-        ledger at round end (~2h).
+        ledger at round end (~1h).
 
         Row format per direction: ``(from_chain, to_chain, hotkey, credit,
         rate, block)``. Empty list for a direction means "no qualifying

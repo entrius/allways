@@ -117,7 +117,7 @@ async def forward(self: Validator) -> None:
     # RPC is the expensive one; halt-aware clearing happens once per
     # scoring round inside _flush_halt_window. Worst case the live table
     # shows the actual best-rate holder during halt for up to one
-    # SCORING_WINDOW_BLOCKS (~2h) until the next round clears it; the
+    # SCORING_WINDOW_BLOCKS (~1h) until the next round clears it; the
     # HaltBanner + top-right "paused" indicator (both fed by /halt off
     # contract_events) signal the recycle state to users in the meantime.
     if self.database_storage.is_enabled():

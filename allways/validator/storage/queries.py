@@ -44,7 +44,7 @@ ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 
 # current_crown_holders: live "who holds the crown right now" per direction,
 # refreshed per forward step (~12s). Distinct from crown_holders, which is
-# the historical per-block ledger flushed at end-of-round (~2h). A direction's
+# the historical per-block ledger flushed at end-of-round (~1h). A direction's
 # rows are deleted before re-insertion so a k-way tied holder set is
 # consistent — readers never see a partial tie.
 DELETE_CURRENT_CROWN_BY_DIRECTION = """
