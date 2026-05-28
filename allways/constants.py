@@ -47,11 +47,9 @@ BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 600  # ~2 hours at 12s/block — scoring cadence and window width
-# Upper bound on how many blocks a single scoring round will replay. Scoring
-# normally tiles ~SCORING_WINDOW_BLOCKS per round (window_start anchored to the
-# last-scored block), so this is never hit in steady state — it only caps the
-# replay after a validator stall/outage so one catch-up round can't reconstruct
-# an unbounded window. A longer outage than this leaves one bounded coverage gap.
+# Cap on how far back one scoring round replays. Never hit in steady state
+# (rounds tile ~SCORING_WINDOW_BLOCKS); only bounds the catch-up window after a
+# stall, at the cost of one coverage gap if the outage exceeds it.
 MAX_SCORING_BACKFILL_BLOCKS = 5000  # ~16 hours at 12s/block
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days

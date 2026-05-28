@@ -44,21 +44,16 @@ class DirectionTrace:
 
 
 def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
-    """Block-based scoring gate. Fires once on a fresh process
-    (``initial_scoring_done`` False), then every ``SCORING_WINDOW_BLOCKS``
-    *blocks* — not every N forward steps. A forward pass can span several
-    blocks, so a step-count gate would fire far less often than once per
-    window and leave most blocks unscored; anchoring to block delta keeps the
-    cadence at the intended ~2h regardless of how long a forward pass takes."""
+    """Block-based scoring gate: fire once on a fresh process, then every
+    ``SCORING_WINDOW_BLOCKS`` *blocks* — not steps. A forward pass spans several
+    blocks, so a step-count gate fires too rarely and leaves blocks unscored."""
     return not initial_scoring_done or (current_block - last_scored_block) >= SCORING_WINDOW_BLOCKS
 
 
 def scoring_window_bounds(current_block: int, last_scored_block: int) -> Tuple[int, int]:
-    """``(window_start, window_end)`` for a scoring round. Anchors
-    ``window_start`` to the last-scored block so consecutive rounds tile with
-    no per-block gap (round N's ``window_end`` == round N+1's ``window_start``),
-    independent of forward-pass length. ``MAX_SCORING_BACKFILL_BLOCKS`` caps how
-    far back a single catch-up round reaches after a stall."""
+    """``(window_start, window_end)`` for a scoring round. Anchors window_start
+    to the last-scored block so consecutive rounds tile gap-free, capped at
+    ``MAX_SCORING_BACKFILL_BLOCKS`` for the catch-up case after a stall."""
     window_end = current_block
     window_start = max(0, window_end - MAX_SCORING_BACKFILL_BLOCKS, last_scored_block)
     return window_start, window_end
@@ -627,10 +622,9 @@ def snapshot_current_crown_holders(
     contract_events) signal the recycle state to users."""
     block = self.block
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
-    # Same executability filter the scoring path applies, so the live table
-    # never credits an out-of-bounds-rate holder the ledger drops. Bounds come
-    # from the 300-block-TTL bounds_cache (no per-step RPC); both 0 on read
-    # failure is the "unset" sentinel → permissive, matching prior behavior.
+    # Match the scoring path's executability filter so the live table never
+    # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
+    # TTL cache (no per-step RPC); both-0 on failure = permissive, as before.
     try:
         min_swap_amount = int(self.bounds_cache.min_swap_amount())
         max_swap_amount = int(self.bounds_cache.max_swap_amount())

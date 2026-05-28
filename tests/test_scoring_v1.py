@@ -2173,12 +2173,9 @@ class TestEventWatcherPassesTaoAmount:
 
 
 class TestScoringCadenceAndWindow:
-    """Block-based scoring gate + cursor-anchored, gap-free window tiling.
-
-    Guards the fix for the step-vs-block mismatch: a forward pass spans
-    several blocks, so a step-count gate (`step % SCORING_WINDOW_BLOCKS`)
-    fired far less often than once per window and left most blocks unscored.
-    """
+    """Block-based scoring gate + cursor-anchored, gap-free window tiling —
+    guards the step-vs-block fix (a multi-block forward pass made the old
+    step-count gate fire too rarely and leave most blocks unscored)."""
 
     def test_gate_forces_first_pass_on_fresh_process(self):
         # initial_scoring_done False → fire regardless of block delta.

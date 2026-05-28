@@ -105,12 +105,9 @@ class Validator(BaseValidatorNeuron):
         # doesn't leave self.scores stale until the next scoring boundary
         # (which would route emissions to RECYCLE via the empty-norm fallback).
         self.initial_scoring_done = False
-        # Block of the last completed scoring round. Drives the block-based
-        # scoring gate and anchors each round's window_start so consecutive
-        # rounds tile with no per-block gaps, regardless of how many blocks a
-        # forward pass spans. Seeded one window back so a fresh process scores a
-        # single trailing window (matching initial_scoring_done) rather than
-        # replaying from genesis.
+        # Last completed scoring round's block. Drives the block-based gate and
+        # anchors each round's window_start so consecutive rounds tile gap-free.
+        # Seeded one window back so a fresh process scores one trailing window.
         self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
 
         # Optimistic propose/challenge/finalize for reservation + timeout
