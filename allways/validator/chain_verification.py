@@ -28,17 +28,29 @@ class SwapVerifier:
         chain_providers: Dict[str, ChainProvider],
         fee_divisor: int = 100,
         metagraph: Optional[Any] = None,
+        state_store: Optional[Any] = None,
     ):
         self.providers = chain_providers
         self.fee_divisor = fee_divisor
         self.metagraph = metagraph
+        self.state_store = state_store
         self.last_logged_confs: Dict[str, int] = {}  # swap_id:chain -> confs
         self.source_verified_ids: Set[int] = set()  # source tx is final once confirmed
-        self.dest_tip_at_init: Dict[int, int] = {}  # swap_id -> dest tip at first sighting (non-TAO only)
+        # Hydrate from sqlite so a validator restart mid-swap keeps the
+        # original (early) snapshot — a fresh snapshot taken after the honest
+        # dest tx already landed would reject the payout as a replay.
+        if state_store is not None:
+            self.dest_tip_at_init: Dict[int, int] = state_store.load_dest_tip_snapshots()
+        else:
+            self.dest_tip_at_init = {}  # swap_id -> dest tip at first sighting (non-TAO only)
 
-    def observe_initiation(self, swap: Swap) -> None:
+    def observe_initiation(self, swap: Swap, current_block: int = 0) -> None:
         """Snapshot the dest chain's tip on first sighting of a non-TAO swap.
-        Idempotent; fails open with a one-time warning on RPC error."""
+        Idempotent; fails open with a one-time warning on RPC error.
+
+        ``current_block`` is the substrate block at the moment of snapshot;
+        recorded on disk only, for debugging late-snapshot incidents.
+        """
         if swap.to_chain == 'tao' or swap.id in self.dest_tip_at_init:
             return
         provider = self.providers.get(swap.to_chain)
@@ -52,6 +64,20 @@ class SwapVerifier:
             tip = None
         if tip and tip > 0:
             self.dest_tip_at_init[swap.id] = tip
+            if self.state_store is not None:
+                # Same fail-open discipline as the RPC call above: a sqlite
+                # write failure must not break the forward loop. Persistence
+                # is best-effort; the in-memory snapshot remains the source
+                # of truth for this validator run.
+                try:
+                    self.state_store.upsert_dest_tip_snapshot(
+                        swap_id=swap.id,
+                        dest_chain=swap.to_chain,
+                        tip=tip,
+                        recorded_at=current_block,
+                    )
+                except Exception as e:
+                    bt.logging.warning(f'{self._label(swap)}: failed to persist dest-tip snapshot: {e}')
         else:
             log_on_change(
                 f'snapshot_unavailable:{swap.id}',
@@ -63,6 +89,11 @@ class SwapVerifier:
         """Drop per-swap state for swaps no longer being tracked."""
         self.dest_tip_at_init = {sid: v for sid, v in self.dest_tip_at_init.items() if sid in active_ids}
         self.source_verified_ids &= active_ids
+        if self.state_store is not None:
+            try:
+                self.state_store.prune_dest_tip_snapshots(active_ids)
+            except Exception as e:
+                bt.logging.warning(f'failed to prune persisted dest-tip snapshots: {e}')
 
     def _label(self, swap: Swap) -> str:
         return _swap_label(swap, self.metagraph)
@@ -125,9 +156,14 @@ class SwapVerifier:
         if lower is None:
             return True  # fail-open; observe_initiation already logged
         if dest_info.block_number < lower:
+            # TAO lower bound is the swap's initiated_block; non-TAO is the
+            # dest-chain tip snapshot taken at first sighting. The label
+            # matters when debugging late-snapshot incidents — the bound
+            # crossed is not always the initiation block.
+            bound_label = 'initiated_block' if swap.to_chain == 'tao' else 'dest_tip_at_init'
             bt.logging.warning(
-                f'{self._label(swap)}: dest tx at block {dest_info.block_number} < initiated {lower} — '
-                f'rejecting as replay (tx={swap.to_tx_hash[:16]}...)'
+                f'{self._label(swap)}: dest tx at block {dest_info.block_number} < '
+                f'{bound_label} {lower} — rejecting as replay (tx={swap.to_tx_hash[:16]}...)'
             )
             return False
         return True

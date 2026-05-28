@@ -33,7 +33,7 @@ from allways.utils.scale import (
     decode_u128,
     strip_hex_prefix,
 )
-from allways.validator.state_store import ReservationPin, ValidatorStateStore
+from allways.validator.state_store import ReservationPin, ReservationPinEvent, ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
 DATA_DECODERS = {
@@ -241,6 +241,12 @@ class ContractEventWatcher:
         self.busy_events: List[BusyEvent] = []
         self.active_events: List[ActiveEvent] = []
         self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
+        # Direction-keyed reservation pin lifecycle — feeds the scoring
+        # replay's pinned-rate overlay so a miner who pins at a moderate
+        # rate then bumps live to absurd cannot earn crown at the inflated
+        # value. Each entry's ``kind`` is 'start' (with the pinned rate) or
+        # 'end' (rate=0, clears the pin).
+        self.reservation_pin_events: List[ReservationPinEvent] = []
         # Swap IDs whose +1 was seeded directly from the contract's active-swap
         # list during initialize(). Replay must skip their SwapInitiated event
         # to avoid double-counting — the busy tick is already in open_swap_count.
@@ -296,6 +302,40 @@ class ContractEventWatcher:
                 break
             latest[ev.hotkey] = ev.active
         return {hk for hk, is_active in latest.items() if is_active}
+
+    def get_reservation_pin_events_in_range(
+        self, start_block: int, end_block: int, from_chain: str, to_chain: str
+    ) -> List[dict]:
+        """Reservation pin start/end transitions for one direction in
+        ``(start_block, end_block]``, oldest first."""
+        from_chain = (from_chain or '').lower()
+        to_chain = (to_chain or '').lower()
+        out: List[dict] = []
+        for ev in self.reservation_pin_events:
+            if ev.block_num <= start_block:
+                continue
+            if ev.block_num > end_block:
+                break
+            if ev.from_chain != from_chain or ev.to_chain != to_chain:
+                continue
+            out.append({'hotkey': ev.hotkey, 'kind': ev.kind, 'rate': ev.rate, 'block': ev.block_num})
+        return out
+
+    def get_reservation_pins_at(self, block: int, from_chain: str, to_chain: str) -> Dict[str, float]:
+        """Pinned rate per hotkey active at ``block`` for the given direction,
+        reconstructed by replaying every pin transition at or before ``block``.
+        A hotkey is in the result iff its most recent transition for that
+        direction is a 'start'."""
+        from_chain = (from_chain or '').lower()
+        to_chain = (to_chain or '').lower()
+        latest: Dict[str, ReservationPinEvent] = {}
+        for ev in self.reservation_pin_events:
+            if ev.block_num > block:
+                break
+            if ev.from_chain != from_chain or ev.to_chain != to_chain:
+                continue
+            latest[ev.hotkey] = ev
+        return {hk: ev.rate for hk, ev in latest.items() if ev.kind == 'start'}
 
     # ─── Sync loop ──────────────────────────────────────────────────────
 
@@ -405,9 +445,23 @@ class ContractEventWatcher:
             counts[ev.hotkey] = counts.get(ev.hotkey, 0) + ev.delta
         self.open_swap_count = {hk: c for hk, c in counts.items() if c > 0}
 
+        pin_event_rows = self.state_store.load_all_reservation_pin_events()
+        self.reservation_pin_events = [
+            ReservationPinEvent(
+                block_num=r['block_num'],
+                hotkey=r['hotkey'],
+                from_chain=r['from_chain'],
+                to_chain=r['to_chain'],
+                kind=r['kind'],
+                rate=r['rate'],
+            )
+            for r in pin_event_rows
+        ]
+
         bt.logging.info(
             f'EventWatcher hydrated from DB: cursor={self.cursor}, '
-            f'{len(self.active_miners)} active, {sum(self.open_swap_count.values())} open swaps'
+            f'{len(self.active_miners)} active, {sum(self.open_swap_count.values())} open swaps, '
+            f'{len(self.reservation_pin_events)} pin events'
         )
 
     def sync_to(self, current_block: int) -> None:
@@ -533,6 +587,11 @@ class ContractEventWatcher:
                 # snapshot is captured in the on-chain swap struct, so the
                 # local pin is no longer needed.
                 self.state_store.remove_reservation_pin(miner)
+                # Close the scoring-overlay pins too; once busy, the miner
+                # earns no crown anyway, but emitting the 'end' keeps the
+                # in-memory state consistent and avoids stale pins lingering
+                # past a missed terminal event.
+                self._emit_reservation_pin_ends(block_num, miner)
                 # Skip if this swap's +1 was already seeded from the contract's
                 # live active-swap list at bootstrap — otherwise a restart
                 # whose replay window covers the original SwapInitiated would
@@ -557,6 +616,10 @@ class ContractEventWatcher:
                     to_chain=to_chain,
                 )
                 self.apply_busy_delta(block_num, miner, -1, swap_id)
+                # Defensive: if SwapInitiated was missed (out-of-order delivery,
+                # bootstrap), terminal SwapCompleted is the last chance to clear
+                # any lingering scoring pin for this miner.
+                self._emit_reservation_pin_ends(block_num, miner)
                 self.bootstrapped_swap_ids.discard(swap_id)
                 self.state_store.remove_bootstrapped_swap(swap_id)
                 if self.swap_tracker is not None:
@@ -580,6 +643,7 @@ class ContractEventWatcher:
                 # Defensive: a SwapInitiated this validator missed would leave
                 # a stale pin behind — clear it on the terminal event too.
                 self.state_store.remove_reservation_pin(miner)
+                self._emit_reservation_pin_ends(block_num, miner)
                 self.apply_busy_delta(block_num, miner, -1, swap_id)
                 self.bootstrapped_swap_ids.discard(swap_id)
                 self.state_store.remove_bootstrapped_swap(swap_id)
@@ -686,10 +750,99 @@ class ContractEventWatcher:
                 reserved_until=reserved_until,
             )
         )
+        # Emit pin lifecycle events into the scoring overlay. The reservation
+        # locks in BOTH offered directions for this miner (the contract takes
+        # the miner offline for any new swap until this reservation resolves),
+        # so we pin whichever directions the miner is currently quoting a
+        # positive rate for. A new MinerReserved later would emit fresh
+        # 'start' events that supersede these in the replay.
+        try:
+            primary_rate = float(commitment.rate_str) if commitment.rate_str else 0.0
+        except ValueError:
+            primary_rate = 0.0
+        try:
+            counter_rate = float(commitment.counter_rate_str) if commitment.counter_rate_str else 0.0
+        except ValueError:
+            counter_rate = 0.0
+        # Close any pin from a prior reservation that didn't terminate cleanly
+        # before laying down the new pin's 'start' rows.
+        self._emit_reservation_pin_ends(block_num, miner)
+        if primary_rate > 0:
+            self._record_reservation_pin_event(
+                block_num=block_num,
+                hotkey=miner,
+                from_chain=commitment.from_chain,
+                to_chain=commitment.to_chain,
+                kind='start',
+                rate=primary_rate,
+            )
+        if counter_rate > 0:
+            self._record_reservation_pin_event(
+                block_num=block_num,
+                hotkey=miner,
+                from_chain=commitment.to_chain,
+                to_chain=commitment.from_chain,
+                kind='start',
+                rate=counter_rate,
+            )
         bt.logging.info(
             f'EventWatcher: pinned reservation for {miner[:8]} at block {block_num} '
             f'({commitment.from_chain}->{commitment.to_chain})'
         )
+
+    def _record_reservation_pin_event(
+        self,
+        block_num: int,
+        hotkey: str,
+        from_chain: str,
+        to_chain: str,
+        kind: str,
+        rate: float,
+    ) -> None:
+        """Append to the in-memory pin event log and mirror to ``state_store``.
+        Mirrors the dual-write pattern used by ``apply_busy_delta``."""
+        from_chain = (from_chain or '').lower()
+        to_chain = (to_chain or '').lower()
+        ev = ReservationPinEvent(
+            block_num=block_num,
+            hotkey=hotkey,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            kind=kind,
+            rate=float(rate),
+        )
+        self.reservation_pin_events.append(ev)
+        self.reservation_pin_events.sort(key=lambda e: e.block_num)
+        self.state_store.insert_reservation_pin_event(
+            block_num=block_num,
+            hotkey=hotkey,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            kind=kind,
+            rate=rate,
+        )
+
+    def _emit_reservation_pin_ends(self, block_num: int, miner: str) -> None:
+        """Close any open pins for ``miner`` by emitting an 'end' event in each
+        direction whose latest event is a 'start'. Called when a reservation
+        terminates (SwapInitiated/SwapCompleted/SwapTimedOut) — the reservation
+        slot is consumed, so all directions it covered are released. Safe to
+        call when no pins are open."""
+        latest_by_dir: Dict[Tuple[str, str], ReservationPinEvent] = {}
+        for ev in self.reservation_pin_events:
+            if ev.hotkey != miner:
+                continue
+            latest_by_dir[(ev.from_chain, ev.to_chain)] = ev
+        for (from_chain, to_chain), ev in latest_by_dir.items():
+            if ev.kind == 'start':
+                self._record_reservation_pin_event(
+                    block_num=block_num,
+                    hotkey=miner,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
+                    kind='end',
+                    rate=0.0,
+                )
 
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
@@ -753,5 +906,15 @@ class ContractEventWatcher:
                     self.active_events_by_hotkey[hotkey] = pruned
                 else:
                     del self.active_events_by_hotkey[hotkey]
+        if self.reservation_pin_events:
+            latest_per_dir: Dict[Tuple[str, str, str], ReservationPinEvent] = {}
+            for ev in self.reservation_pin_events:
+                latest_per_dir[(ev.hotkey, ev.from_chain, ev.to_chain)] = ev
+            self.reservation_pin_events = [
+                ev
+                for ev in self.reservation_pin_events
+                if ev.block_num >= cutoff or latest_per_dir.get((ev.hotkey, ev.from_chain, ev.to_chain)) is ev
+            ]
         self.state_store.prune_active_events(cutoff)
         self.state_store.prune_busy_events(cutoff)
+        self.state_store.prune_reservation_pin_events(cutoff)
