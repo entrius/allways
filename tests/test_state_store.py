@@ -153,3 +153,63 @@ class TestReservationPinCrossTable:
         row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reservation_pins'").fetchone()
         assert row is not None
         store.close()
+
+
+class TestDestTipSnapshots:
+    def test_upsert_load_round_trip(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=850_000, recorded_at=500)
+        store.upsert_dest_tip_snapshot(swap_id=2, dest_chain='btc', tip=850_010, recorded_at=510)
+
+        assert store.load_dest_tip_snapshots() == {1: 850_000, 2: 850_010}
+        store.close()
+
+    def test_first_write_wins_so_late_re_observation_cannot_overwrite(self, tmp_path: Path):
+        # On restart, a re-observation taken after the honest dest tx already
+        # landed would record a later tip and reject the payout as a replay.
+        # INSERT OR IGNORE means the original (earlier) snapshot is preserved.
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=850_000, recorded_at=500)
+        store.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=850_500, recorded_at=600)
+
+        assert store.load_dest_tip_snapshots() == {1: 850_000}
+        store.close()
+
+    def test_persists_across_store_instances(self, tmp_path: Path):
+        db_path = tmp_path / 'state.db'
+        store1 = ValidatorStateStore(db_path=db_path)
+        store1.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=850_000, recorded_at=500)
+        store1.close()
+
+        store2 = ValidatorStateStore(db_path=db_path)
+        assert store2.load_dest_tip_snapshots() == {1: 850_000}
+        store2.close()
+
+    def test_prune_drops_inactive_swaps(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=100, recorded_at=1)
+        store.upsert_dest_tip_snapshot(swap_id=2, dest_chain='btc', tip=200, recorded_at=2)
+        store.upsert_dest_tip_snapshot(swap_id=3, dest_chain='btc', tip=300, recorded_at=3)
+
+        store.prune_dest_tip_snapshots({2})
+
+        assert store.load_dest_tip_snapshots() == {2: 200}
+        store.close()
+
+    def test_prune_with_empty_active_set_clears_all(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_dest_tip_snapshot(swap_id=1, dest_chain='btc', tip=100, recorded_at=1)
+
+        store.prune_dest_tip_snapshots(set())
+
+        assert store.load_dest_tip_snapshots() == {}
+        store.close()
+
+    def test_fresh_init_db_has_dest_tip_snapshots_table(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        conn = store.require_connection()
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dest_tip_snapshots'"
+        ).fetchone()
+        assert row is not None
+        store.close()

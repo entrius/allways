@@ -89,7 +89,7 @@ async def forward(self: Validator) -> None:
 
     # Snapshot dest-chain tip on first sighting for the dest-tx replay defense.
     for swap in tracker.active.values():
-        verifier.observe_initiation(swap)
+        verifier.observe_initiation(swap, self.block)
     verifier.prune_to_active(set(tracker.active.keys()))
 
     # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
