@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from allways.validator.state_store_queries import BATCH_LATEST_RATES_BEFORE
-
 
 @dataclass
 class PendingConfirm:
@@ -456,7 +454,17 @@ class ValidatorStateStore:
         with self.lock:
             conn = self.require_connection()
             rows = conn.execute(
-                BATCH_LATEST_RATES_BEFORE,
+                """
+                SELECT hotkey, rate, block FROM (
+                    SELECT hotkey, rate, block,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY hotkey
+                               ORDER BY block DESC, id DESC
+                           ) AS rn
+                    FROM rate_events
+                    WHERE from_chain = ? AND to_chain = ? AND block <= ?
+                ) WHERE rn = 1
+                """,
                 (from_chain, to_chain, block),
             ).fetchall()
         return {r['hotkey']: (r['rate'], r['block']) for r in rows}
