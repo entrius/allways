@@ -193,6 +193,24 @@ class TestCrownHoldersHelper:
         # Smallest miner is busy → next-smallest takes the crown.
         assert crown_holders_at_instant(rates, {'a', 'b'}, busy={'a'}, lower_rate_wins=True) == ['b']
 
+    def test_executable_check_drops_sentinel_and_falls_through(self):
+        """Regression for #392: a miner posting 1e10 TAO/BTC wins the rate
+        sort but is not routable, so the executability gate kicks them out
+        and the crown drops to the next-best sane rate."""
+        rates = {'sentinel': 1e10, 'sane': 326.0}
+
+        # Reject the sentinel rate, accept anything ≤ 1e6 (well above sane).
+        def check(r):
+            return r <= 1e6
+
+        assert crown_holders_at_instant(rates, {'sentinel', 'sane'}, executable_rate_check=check) == ['sane']
+
+    def test_executable_check_none_preserves_legacy_behavior(self):
+        """When no check is supplied, the old qualification rules apply —
+        sentinel still wins. Ensures existing callers aren't surprised."""
+        rates = {'sentinel': 1e10, 'sane': 326.0}
+        assert crown_holders_at_instant(rates, {'sentinel', 'sane'}) == ['sentinel']
+
 
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
@@ -247,6 +265,67 @@ class TestReplayCrownTime:
         )
         # B leads blocks (100, 600] → 500 blocks, A leads (600, 1100] → 500 blocks
         assert crown == {'hk_b': 500.0, 'hk_a': 500.0}
+        store.close()
+
+    def test_sentinel_rate_earns_no_crown_when_bounds_set(self, tmp_path: Path):
+        """Regression for #392: a miner posting an unexecutable sentinel
+        rate (1e10 TAO/BTC) wins the rate sort but cannot route any
+        positive integer sat into ``[min_swap, max_swap]`` — they should
+        earn zero crown, and the sane miner takes the entire window."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
+            ('hk_sane', 'btc', 'tao', 326.0, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
+            min_swap_rao=100_000_000,  # 0.1 TAO
+            max_swap_rao=500_000_000,  # 0.5 TAO
+        )
+        assert crown == {'hk_sane': 1000.0}
+        store.close()
+
+    def test_sentinel_rate_still_wins_when_bounds_unset(self, tmp_path: Path):
+        """Without configured bounds the executability filter is permissive
+        — preserves legacy behavior on chains/networks that haven't yet
+        set ``min_swap_amount`` / ``max_swap_amount``."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
+            ('hk_sane', 'btc', 'tao', 326.0, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
+        )
+        assert crown == {'hk_sentinel': 1000.0}
         store.close()
 
     def test_zero_rate_optout_hands_crown_to_still_offering_miner(self, tmp_path: Path):
@@ -424,6 +503,250 @@ class TestReplayCrownTime:
         # From window_start=100 A is already busy (reconstructed from pre-window
         # SwapInitiated). B earns (100,500] = 400; A earns (500,1100] = 600.
         assert crown == {'hk_b': 400.0, 'hk_a': 600.0}
+        store.close()
+
+
+class TestPinnedRateDuringReservation:
+    """Crown calculation must use the pinned rate during the reserved-not-busy
+    window, not the live rate. Closes the bump-after-pin loophole."""
+
+    def test_live_rate_bump_after_pin_does_not_earn_crown(self, tmp_path: Path):
+        """A reserved miner who bumps their live rate to an outlier value
+        earns crown at the pinned rate they had at reservation time, not the
+        post-pin live rate."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        # Pre-window rates: A and B both at 200.
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', 200.0, 0),
+            )
+        conn.commit()
+
+        # A is reserved at block 300 — pin captures the live rate (200).
+        watcher._record_reservation_pin_event(
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
+        )
+        # A bumps live rate to 25004 at block 400 — would normally dominate
+        # the crown ranking. With the pinned-rate overlay, this update is
+        # ignored for crown purposes until the reservation ends.
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 25004.0, 400),
+        )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # Without the fix, A's 25004 live rate would dominate from block 400
+        # and A would earn ~600 blocks of crown. With the fix, A's effective
+        # rate stays pinned at 200, tying with B. Both earn half of the
+        # 1000-block window.
+        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
+        store.close()
+
+    def test_pin_end_lets_live_rate_take_over(self, tmp_path: Path):
+        """Once the reservation ends (RESERVED_END), the live rate updates
+        that happened during the pin take effect for crown ranking."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', 200.0, 0),
+            )
+        # A bumps to 300 at block 400 — buffered behind the pin.
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 300.0, 400),
+        )
+        conn.commit()
+
+        watcher._record_reservation_pin_event(
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
+        )
+        # Reservation ends at block 600 — A's live rate of 300 takes over.
+        watcher._record_reservation_pin_event(
+            block_num=600,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='end',
+            rate=0.0,
+        )
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # (100, 600]: A pinned at 200, B at 200 — tie, each earns 250.
+        # (600, 1100]: A live at 300, B still 200 — A wins 500.
+        assert crown == {'hk_a': 750.0, 'hk_b': 250.0}
+        store.close()
+
+    def test_pin_only_applies_to_pinned_direction(self, tmp_path: Path):
+        """A reservation pin is direction-specific — pinning btc→tao must not
+        affect crown ranking in the tao→btc direction."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        # Pre-window: both miners quote tao→btc at 0.005.
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'tao', 'btc', 0.005, 0),
+            )
+        # Mid-window: A improves their tao→btc rate (lower wins).
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.003, 400),
+        )
+        conn.commit()
+
+        # Pin A in the btc→tao direction only — should not affect tao→btc
+        # crown ranking.
+        watcher._record_reservation_pin_event(
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
+        )
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='tao',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # In tao→btc the pin is invisible. (100, 400]: tied at 0.005 → split.
+        # (400, 1100]: A wins at 0.003 (lower) → 700 to A.
+        assert crown == {'hk_a': 150.0 + 700.0, 'hk_b': 150.0}
+        store.close()
+
+    def test_pin_active_at_window_start_is_reconstructed(self, tmp_path: Path):
+        """A pin laid down before window_start must overlay the live rate from
+        the first interval — same anchor-reconstruction guarantee that
+        rates/busy/active have."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', 200.0, 0),
+            )
+        # A bumps to 25004 BEFORE the window opens (block 50). Without the
+        # pin, A would dominate from window_start.
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 25004.0, 50),
+        )
+        conn.commit()
+
+        # Pin laid down at block 30 (also before window_start) captures
+        # the rate as of that block: 200. Pin remains open at window_start.
+        watcher._record_reservation_pin_event(
+            block_num=30,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
+        )
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # A's effective rate stays pinned at 200 across the entire window;
+        # B is also at 200. They tie, each earns half.
+        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
+        store.close()
+
+    def test_busy_still_excludes_pinned_miner_from_crown(self, tmp_path: Path):
+        """The pinned-rate overlay does not override the busy gate — a pinned
+        miner whose SwapInitiated fires earns no crown while busy. Sanity
+        check that pinning and busy compose correctly."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', 200.0, 0),
+            )
+        conn.commit()
+
+        # A pinned at 200 at block 300. Then SwapInitiated at 500 → busy.
+        # Pin should end at SwapInitiated (event_watcher emits the 'end' in
+        # production); we simulate that here.
+        watcher._record_reservation_pin_event(
+            block_num=300,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='start',
+            rate=200.0,
+        )
+        watcher._record_reservation_pin_event(
+            block_num=500,
+            hotkey='hk_a',
+            from_chain='btc',
+            to_chain='tao',
+            kind='end',
+            rate=0.0,
+        )
+        watcher.apply_busy_delta(500, 'hk_a', +1)
+        watcher.apply_busy_delta(900, 'hk_a', -1)
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # (100, 500]: A pinned, both at 200, tie → 200 each.
+        # (500, 900]: A busy → B alone → 400.
+        # (900, 1100]: A back at live 200, tie → 100 each.
+        assert crown == {'hk_a': 200.0 + 100.0, 'hk_b': 200.0 + 400.0 + 100.0}
         store.close()
 
 

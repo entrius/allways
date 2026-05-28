@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 import numpy as np
@@ -25,6 +25,7 @@ from allways.constants import (
     SUCCESS_EXPONENT,
     VOLUME_WEIGHT_ALPHA,
 )
+from allways.utils.rate import is_executable_rate
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -163,6 +164,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     except Exception as e:
         bt.logging.warning(f'max_swap_amount read failed: {e}')
         max_swap_amount = 0
+    try:
+        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'min_swap_amount read failed: {e}')
+        min_swap_amount = 0
     collaterals: Dict[str, int] = {}
     miner_volume_total: Dict[str, int] = {}
     miner_crown_total: Dict[str, float] = {}
@@ -186,6 +192,8 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
             intervals_out=intervals,
+            min_swap_rao=min_swap_amount,
+            max_swap_rao=max_swap_amount,
         )
         total_crown_dir = sum(crown_blocks.values())
         volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
@@ -369,16 +377,21 @@ class EventKind(IntEnum):
     """Ordering of coincident-block transitions in the crown-time replay.
 
     ACTIVE applies first because the on-chain active flag is the per-miner
-    tell-all. Then BUSY (reservation ends crown for that miner), then
-    RATE. So if a user reserves a miner in the same block that miner's
-    best rate was posted, the reservation ends crown credit *before* the
-    rate attribution — matching the intent that a busy miner doesn't earn
-    a new interval.
+    tell-all. Then BUSY (busy ends crown for that miner). RESERVED_END is
+    next — once a reservation terminates, the pin overlay drops so the
+    miner's live rate takes effect again. RATE comes after that so a
+    same-block rate update lands cleanly on the now-unpinned series.
+    RESERVED_START is last so the pin captures whatever value RATE just
+    wrote: a miner who posts a rate change in the same block they get
+    reserved has the post-update value pinned, matching the contract's
+    block-end commitment read.
     """
 
     ACTIVE = 0
     BUSY = 1
-    RATE = 2
+    RESERVED_END = 2
+    RATE = 3
+    RESERVED_START = 4
 
 
 @dataclass
@@ -404,18 +417,24 @@ def reconstruct_window_start_state(
     to_chain: str,
     window_start: int,
     rewardable_hotkeys: Set[str],
-) -> Tuple[Dict[str, float], Dict[str, int], Set[str]]:
-    """Snapshot rates, busy counts, and the active set as they stood at
-    window_start. Rate read is one batched query per direction (N
-    rewardable hotkeys would otherwise be N point lookups, runs every
-    forward step from snapshot_current_crown_holders)."""
+) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, float]]:
+    """Snapshot rates, busy counts, active set, and reservation-pin overlay
+    as they stood at window_start. Rate read is one batched query per
+    direction (N rewardable hotkeys would otherwise be N point lookups,
+    runs every forward step from snapshot_current_crown_holders)."""
     busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
     active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
     rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
-    return rates, busy_count, active_set
+    pinned_rates: Dict[str, float] = {
+        hk: rate
+        for hk, rate in event_watcher.get_reservation_pins_at(window_start, from_chain, to_chain).items()
+        if hk in rewardable_hotkeys and rate > 0
+    }
+
+    return rates, busy_count, active_set, pinned_rates
 
 
 def merge_replay_events(
@@ -426,8 +445,8 @@ def merge_replay_events(
     window_start: int,
     window_end: int,
 ) -> List[ReplayEvent]:
-    """Merge in-window active, busy, and rate transitions into one
-    chronologically-sorted stream."""
+    """Merge in-window active, busy, rate, and reservation-pin transitions
+    into one chronologically-sorted stream."""
     events: List[ReplayEvent] = []
 
     for e in event_watcher.get_active_events_in_range(window_start, window_end):
@@ -440,6 +459,10 @@ def merge_replay_events(
 
     for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.RATE, value=float(e['rate'])))
+
+    for e in event_watcher.get_reservation_pin_events_in_range(window_start, window_end, from_chain, to_chain):
+        kind = EventKind.RESERVED_START if e['kind'] == 'start' else EventKind.RESERVED_END
+        events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=kind, value=float(e['rate'])))
 
     events.sort(key=lambda ev: ev.sort_key)
     return events
@@ -455,16 +478,22 @@ def replay_crown_time_window(
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
     intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
+    min_swap_rao: int = 0,
+    max_swap_rao: int = 0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
-    that instant, not busy, and had a positive rate posted. Active/rate/busy
+    that instant, not busy, had a positive rate posted, and their rate is
+    executable under the current contract swap bounds. Active/rate/busy
     are evaluated per-block via the replay — a miner's status at scoring
     time is irrelevant other than metagraph membership (used to credit the
     UID). Collateral-floor invariants are trusted to the contract's active
-    flag; halt state is handled at ``score_and_reward_miners`` entry."""
-    rates, busy_count, active_set = reconstruct_window_start_state(
+    flag; halt state is handled at ``score_and_reward_miners`` entry.
+
+    Bounds at 0 disable the executability filter (matches the contract's
+    "unset" sentinel); the rate-positive floor still applies."""
+    rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
     )
     replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
@@ -475,26 +504,42 @@ def replay_crown_time_window(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
+    def executable_check(rate: float) -> bool:
+        return is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
+
+    def effective_rates() -> Dict[str, float]:
+        """Live rates with pinned-during-reservation values overlaid. A miner
+        in ``pinned_rates`` earns crown at the value captured when they were
+        reserved, ignoring any subsequent live-rate updates until the
+        reservation terminates. Closes the bump-after-pin loophole."""
+        if not pinned_rates:
+            return rates
+        merged = dict(rates)
+        merged.update(pinned_rates)
+        return merged
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
         if duration <= 0:
             return
         busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        rates_for_instant = effective_rates()
         holders = crown_holders_at_instant(
-            rates,
+            rates_for_instant,
             rewardable_hotkeys,
             busy=busy_set,
             active=active_set,
             lower_rate_wins=lower_rate_wins,
+            executable_rate_check=executable_check,
         )
         if not holders:
             if trace is not None:
                 trace.unfilled_blocks += duration
             return
-        winner_rate = rates.get(holders[0], 0.0)
+        winner_rate = rates_for_instant.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
             trace.best_rate = winner_rate
         if intervals_out is not None:
@@ -512,6 +557,11 @@ def replay_crown_time_window(
                 busy_count[event.hotkey] = new_count
             else:
                 busy_count.pop(event.hotkey, None)
+        elif event.kind is EventKind.RESERVED_START:
+            if event.value > 0:
+                pinned_rates[event.hotkey] = event.value
+        elif event.kind is EventKind.RESERVED_END:
+            pinned_rates.pop(event.hotkey, None)
         else:  # ACTIVE
             if event.value > 0:
                 active_set.add(event.hotkey)
@@ -554,7 +604,7 @@ def snapshot_current_crown_holders(
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
-        rates, busy_count, active_set = reconstruct_window_start_state(
+        rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
             self.state_store,
             self.event_watcher,
             from_chain,
@@ -565,6 +615,11 @@ def snapshot_current_crown_holders(
         canon_from, _ = canonical_pair(from_chain, to_chain)
         lower_rate_wins = from_chain != canon_from
         busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        # Overlay reservation-pinned rates so the live table credits the same
+        # holder the scoring path does during a pin window (bump-after-pin
+        # loophole closure) — otherwise the live view contradicts the ledger.
+        if pinned_rates:
+            rates = {**rates, **pinned_rates}
         holders = crown_holders_at_instant(
             rates,
             rewardable_hotkeys,
@@ -610,16 +665,25 @@ def crown_holders_at_instant(
     busy: Optional[Set[str]] = None,
     active: Optional[Set[str]] = None,
     lower_rate_wins: bool = False,
+    executable_rate_check: Optional[Callable[[float], bool]] = None,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
-    other condition (rewardable, active, not busy, rate > 0). If the best
-    rate has no qualified miner, fall through to the next-best rate.
+    other condition (rewardable, active, not busy, rate > 0, executable).
+    If the best rate has no qualified miner, fall through to the next-best
+    rate.
 
     ``lower_rate_wins`` flips the sort: rates are stored as canonical_dest
     per canonical_source (TAO per BTC), so higher-is-better only holds in
     the canonical direction (btc→tao). In the reverse direction (tao→btc)
     a smaller TAO/BTC quote means the miner is asking less TAO for 1 BTC —
     a better deal for the swapper, which earns them the crown.
+
+    ``executable_rate_check`` (optional) rejects rates that no user can
+    route under the current contract swap bounds. Sentinels like 1e10
+    TAO/BTC win the rate sort but map every positive integer satoshi to a
+    TAO leg outside ``[min_swap, max_swap]``, so they should not earn
+    crown. When None (tests that don't care about bounds; pre-bounds-aware
+    callers), no executability filter is applied.
 
     Collateral-floor gating is trusted to the contract's active flag —
     miners who drop below the floor get auto-deactivated on-chain (fee /
@@ -634,7 +698,12 @@ def crown_holders_at_instant(
     def qualifies(hotkey: str) -> bool:
         if active is not None and hotkey not in active:
             return False
-        return hotkey in rewardable and hotkey not in busy and rates.get(hotkey, 0) > 0
+        rate = rates.get(hotkey, 0)
+        if rate <= 0:
+            return False
+        if executable_rate_check is not None and not executable_rate_check(rate):
+            return False
+        return hotkey in rewardable and hotkey not in busy
 
     by_rate: Dict[float, List[str]] = {}
     for hotkey, rate in rates.items():
