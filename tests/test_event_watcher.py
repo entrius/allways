@@ -504,6 +504,97 @@ class TestReservationPin:
         assert pin.reserved_until == 1400
         w.state_store.close()
 
+    def test_miner_reserved_emits_scoring_pin_events_for_both_directions(self, tmp_path: Path):
+        """The scoring overlay needs to see a 'start' event in each direction
+        the miner offers a positive rate for. ``MinerReserved`` reads the
+        commitment's primary + counter rate and emits one event per direction
+        with a positive quote."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        # commitment has rate_str=345 (btc→tao) and counter_rate_str=0.0029 (tao→btc).
+        starts = [ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'start']
+        assert len(starts) == 2
+        primary = next(ev for ev in starts if ev.from_chain == 'btc' and ev.to_chain == 'tao')
+        counter = next(ev for ev in starts if ev.from_chain == 'tao' and ev.to_chain == 'btc')
+        assert primary.rate == 345.0
+        assert counter.rate == 0.0029
+        assert primary.block_num == 900 and counter.block_num == 900
+        w.state_store.close()
+
+    def test_swap_initiated_emits_pin_end_events(self, tmp_path: Path):
+        """Open pins in any direction must close on SwapInitiated so the
+        scoring overlay drops to live rates once the swap consumes the
+        reservation slot."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+        w.apply_event(950, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+
+        end_events = [
+            ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 950
+        ]
+        # One 'end' per direction that had been pinned.
+        assert {(ev.from_chain, ev.to_chain) for ev in end_events} == {('btc', 'tao'), ('tao', 'btc')}
+        # After end, get_reservation_pins_at returns empty for both directions.
+        assert w.get_reservation_pins_at(950, 'btc', 'tao') == {}
+        assert w.get_reservation_pins_at(950, 'tao', 'btc') == {}
+        w.state_store.close()
+
+    def test_get_reservation_pins_at_filters_by_direction(self, tmp_path: Path):
+        """get_reservation_pins_at returns only pins active for the requested
+        direction. A miner pinned in both legs is visible in both calls."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        primary = w.get_reservation_pins_at(950, 'btc', 'tao')
+        counter = w.get_reservation_pins_at(950, 'tao', 'btc')
+        assert primary == {'hk_a': 345.0}
+        assert counter == {'hk_a': 0.0029}
+        # A direction the miner doesn't quote returns nothing.
+        assert w.get_reservation_pins_at(950, 'btc', 'eth') == {}
+        w.state_store.close()
+
+    def test_consecutive_miner_reserved_supersedes_prior_pin(self, tmp_path: Path):
+        """If a fresh MinerReserved arrives while a pin from a prior reservation
+        is still open (e.g. terminal event missed), the helper emits an end
+        for the stale pin before laying down the new 'start'."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        first = make_pinned_commitment(rate_str='200', counter_rate_str='0.005')
+        second = make_pinned_commitment(rate_str='250', counter_rate_str='0.004')
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=first,
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=second,
+        ):
+            w.apply_event(1100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1200})
+
+        # At block 1100 the active pin should be the second one's rate, not
+        # the first's. The first pin must have been closed by an 'end' before
+        # the second 'start'.
+        primary = w.get_reservation_pins_at(1150, 'btc', 'tao')
+        assert primary == {'hk_a': 250.0}
+        end_events = [
+            ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end' and ev.block_num == 1100
+        ]
+        assert {(ev.from_chain, ev.to_chain) for ev in end_events} == {('btc', 'tao'), ('tao', 'btc')}
+        w.state_store.close()
+
 
 class TestBootstrap:
     """initialize() snapshotting behavior — the M1 fix."""

@@ -67,6 +67,29 @@ class ReservationPin:
     created_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class ReservationPinEvent:
+    """One transition in the per-direction reservation-pin lifecycle, used by
+    the crown-time replay to freeze a miner's crown rate at the value pinned
+    when the reservation was created.
+
+    ``kind = 'start'`` carries the pinned rate (``rate`` field, canonical
+    units: TAO per BTC in the reservation's stated direction). ``kind = 'end'``
+    carries ``rate = 0`` and clears any active pin for that hotkey + direction.
+    The pin's lifetime spans (start block, end block]; the credit_interval
+    walker uses these events to overlay the pinned rate during the reserved-
+    not-busy window. Stored separately from ``rate_events`` so the live rate
+    series is unchanged by reservation lifecycle.
+    """
+
+    block_num: int
+    hotkey: str
+    from_chain: str
+    to_chain: str
+    kind: str  # 'start' or 'end'
+    rate: float
+
+
 class ValidatorStateStore:
     def __init__(
         self,
@@ -303,6 +326,112 @@ class ValidatorStateStore:
             reserved_until=row['reserved_until'],
             created_at=row['created_at'],
         )
+
+    # ─── reservation_pin_events ─────────────────────────────────────────
+    #
+    # Direction-keyed history of reservation pin start/end transitions.
+    # Used by ``replay_crown_time_window`` to overlay the pinned rate
+    # during the reserved-not-busy window, closing the bump-after-pin
+    # loophole where a miner pinned at a moderate rate could bump live
+    # rate to absurd and earn crown at the inflated value.
+
+    def insert_reservation_pin_event(
+        self,
+        block_num: int,
+        hotkey: str,
+        from_chain: str,
+        to_chain: str,
+        kind: str,
+        rate: float,
+    ) -> None:
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                INSERT INTO reservation_pin_events
+                    (block_num, hotkey, from_chain, to_chain, kind, rate)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (block_num, hotkey, (from_chain or '').lower(), (to_chain or '').lower(), kind, float(rate)),
+            )
+            conn.commit()
+
+    def load_all_reservation_pin_events(self) -> List[dict]:
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT block_num, hotkey, from_chain, to_chain, kind, rate
+                FROM reservation_pin_events
+                ORDER BY block_num ASC, id ASC
+                """
+            ).fetchall()
+        return [
+            {
+                'block_num': r['block_num'],
+                'hotkey': r['hotkey'],
+                'from_chain': r['from_chain'],
+                'to_chain': r['to_chain'],
+                'kind': r['kind'],
+                'rate': r['rate'],
+            }
+            for r in rows
+        ]
+
+    def get_reservation_pin_events_in_range(
+        self,
+        from_chain: str,
+        to_chain: str,
+        start_block: int,
+        end_block: int,
+    ) -> List[dict]:
+        """Pin lifecycle events in ``(start_block, end_block]`` for a direction,
+        oldest first."""
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT id, block_num, hotkey, kind, rate
+                FROM reservation_pin_events
+                WHERE from_chain = ? AND to_chain = ?
+                  AND block_num > ? AND block_num <= ?
+                ORDER BY block_num ASC, id ASC
+                """,
+                ((from_chain or '').lower(), (to_chain or '').lower(), start_block, end_block),
+            ).fetchall()
+        return [
+            {
+                'id': r['id'],
+                'block': r['block_num'],
+                'hotkey': r['hotkey'],
+                'kind': r['kind'],
+                'rate': r['rate'],
+            }
+            for r in rows
+        ]
+
+    def prune_reservation_pin_events(self, cutoff_block: int) -> None:
+        """Drop pin events older than ``cutoff_block``, preserving each
+        (hotkey, from_chain, to_chain) tuple's most recent event so a still-
+        open pin retains its 'start' anchor for state reconstruction. Mirrors
+        the anchor-preservation rule used by ``prune_active_events``.
+        """
+        if cutoff_block <= 0:
+            return
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                DELETE FROM reservation_pin_events
+                WHERE block_num < ?
+                  AND id NOT IN (
+                    SELECT MAX(id) FROM reservation_pin_events
+                    GROUP BY hotkey, from_chain, to_chain
+                  )
+                """,
+                (cutoff_block,),
+            )
+            conn.commit()
 
     # ─── rate_events ────────────────────────────────────────────────────
 
@@ -602,6 +731,7 @@ class ValidatorStateStore:
             conn = self.require_connection()
             conn.execute('DELETE FROM active_events')
             conn.execute('DELETE FROM busy_events')
+            conn.execute('DELETE FROM reservation_pin_events')
             conn.execute("DELETE FROM event_watcher_meta WHERE key = 'cursor'")
             conn.execute('DELETE FROM bootstrapped_swaps')
             conn.commit()
@@ -614,6 +744,7 @@ class ValidatorStateStore:
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (hotkey,))
+            conn.execute('DELETE FROM reservation_pin_events WHERE hotkey = ?', (hotkey,))
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
@@ -735,6 +866,22 @@ class ValidatorStateStore:
                     ON busy_events(block_num);
                 CREATE INDEX IF NOT EXISTS idx_busy_events_hotkey
                     ON busy_events(hotkey);
+
+                CREATE TABLE IF NOT EXISTS reservation_pin_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_num   INTEGER NOT NULL,
+                    hotkey      TEXT NOT NULL,
+                    from_chain  TEXT NOT NULL,
+                    to_chain    TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    rate        REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_reservation_pin_events_block
+                    ON reservation_pin_events(block_num);
+                CREATE INDEX IF NOT EXISTS idx_reservation_pin_events_hotkey
+                    ON reservation_pin_events(hotkey);
+                CREATE INDEX IF NOT EXISTS idx_reservation_pin_events_dir_block
+                    ON reservation_pin_events(from_chain, to_chain, block_num);
 
                 CREATE TABLE IF NOT EXISTS event_watcher_meta (
                     key     TEXT PRIMARY KEY,
