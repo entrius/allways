@@ -620,7 +620,9 @@ class TestBootstrap:
         client.get_miner_active_flag.side_effect = RuntimeError('rpc down')
 
         # Pre-window start (current_block < SCORING_WINDOW_BLOCKS) — cursor clamps at 0.
-        w.initialize(current_block=500, metagraph_hotkeys=['hk_a'], contract_client=client)
+        from allways.constants import SCORING_WINDOW_BLOCKS
+
+        w.initialize(current_block=SCORING_WINDOW_BLOCKS // 2, metagraph_hotkeys=['hk_a'], contract_client=client)
 
         # Everything defaults to empty/starting state, no exception propagated
         assert w.active_miners == set()

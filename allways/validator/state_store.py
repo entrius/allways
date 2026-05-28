@@ -436,6 +436,39 @@ class ValidatorStateStore:
         )
         return (row['rate'], row['block']) if row is not None else None
 
+    def get_latest_rates_before(
+        self,
+        from_chain: str,
+        to_chain: str,
+        block: int,
+    ) -> Dict[str, Tuple[float, int]]:
+        """Batched form of get_latest_rate_before — one query per direction
+        instead of one per (hotkey, direction). Returns {hotkey: (rate, block)}
+        for every hotkey that has at least one rate event in that direction
+        at-or-before ``block``. Caller filters by membership in the
+        rewardable set after.
+
+        Ordering matches the single-row form: ``block DESC, id DESC`` so a
+        same-block re-emit (id is monotonic) picks the latest write.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute(
+                """
+                SELECT hotkey, rate, block FROM (
+                    SELECT hotkey, rate, block,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY hotkey
+                               ORDER BY block DESC, id DESC
+                           ) AS rn
+                    FROM rate_events
+                    WHERE from_chain = ? AND to_chain = ? AND block <= ?
+                ) WHERE rn = 1
+                """,
+                (from_chain, to_chain, block),
+            ).fetchall()
+        return {r['hotkey']: (r['rate'], r['block']) for r in rows}
+
     def get_rate_events_in_range(
         self,
         from_chain: str,

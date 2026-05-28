@@ -46,6 +46,7 @@ from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
 from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
 from allways.validator.state_store import ValidatorStateStore
+from allways.validator.storage import DatabaseStorage
 from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
 
@@ -93,11 +94,21 @@ class Validator(BaseValidatorNeuron):
             db_path=state_db_path,
             current_block_fn=lambda: self.block,
         )
+        # Mirrors crown_holders / rate_history into Postgres for the miner
+        # dashboard. Disabled by default; opt in per host with
+        # STORE_DB_RESULTS=true and DB_* env vars. When disabled the scoring
+        # path's storage tee is a no-op — zero overhead for validators that
+        # don't write to the dashboard DB.
+        self.database_storage = DatabaseStorage()
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
         # Forces one scoring pass per fresh process so a mid-window restart
-        # doesn't leave self.scores stale until the next 1200-step boundary
+        # doesn't leave self.scores stale until the next scoring boundary
         # (which would route emissions to RECYCLE via the empty-norm fallback).
         self.initial_scoring_done = False
+        # Last completed scoring round's block. Drives the block-based gate and
+        # anchors each round's window_start so consecutive rounds tile gap-free.
+        # Seeded one window back so a fresh process scores one trailing window.
+        self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
 
         # Optimistic propose/challenge/finalize for reservation + timeout
         # extensions. Stateless decision class — the forward loop drives it
@@ -265,6 +276,7 @@ class Validator(BaseValidatorNeuron):
             super().__exit__(exc_type, exc_value, traceback)
         finally:
             self.state_store.close()
+            self.database_storage.close()
 
 
 # Main entry point

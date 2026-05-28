@@ -13,7 +13,6 @@ from allways.commitments import read_miner_commitments
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
-    SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
@@ -26,7 +25,11 @@ from allways.validator.axon_handlers import (
     scale_encode_initiate_hash_input,
 )
 from allways.validator.chain_verification import SwapVerifier
-from allways.validator.scoring import score_and_reward_miners
+from allways.validator.scoring import (
+    due_for_scoring,
+    score_and_reward_miners,
+    snapshot_current_crown_holders,
+)
 from allways.validator.state_store import PendingConfirm
 from allways.validator.swap_tracker import SwapTracker
 
@@ -101,10 +104,27 @@ async def forward(self: Validator) -> None:
     extend_fulfilled_near_timeout(self)
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
-    if not self.initial_scoring_done or self.step % SCORING_WINDOW_BLOCKS == 0:
+    if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
         score_and_reward_miners(self)
         self.initial_scoring_done = True
         bt.logging.info('forward: scoring done')
+
+    # Live current-crown snapshot — runs after every other phase so DB
+    # latency here can't push vote_initiate, finalize, or timeout-extension
+    # RPC past their block deadlines. Sub-ms in-memory compute plus a small
+    # bounded write; gated by STORE_DB_RESULTS and wrapped so DB outages
+    # never propagate into the forward loop. No halt check here — that
+    # RPC is the expensive one; halt-aware clearing happens once per
+    # scoring round inside _flush_halt_window. Worst case the live table
+    # shows the actual best-rate holder during halt for up to one
+    # SCORING_WINDOW_BLOCKS (~1h) until the next round clears it; the
+    # HaltBanner + top-right "paused" indicator (both fed by /halt off
+    # contract_events) signal the recycle state to users in the meantime.
+    if self.database_storage.is_enabled():
+        try:
+            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self))
+        except Exception as e:
+            bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 
 
 def clear_provider_caches(self: Validator) -> None:

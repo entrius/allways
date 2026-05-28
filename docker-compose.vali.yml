@@ -12,6 +12,10 @@ services:
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
       - ./data/allways:/root/.allways
+    # optional: uncomment to write dashboard rows from the validator
+    # (requires STORE_DB_RESULTS=true and DB_* vars in .env)
+    # networks:
+    #   - allways_network
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
@@ -43,3 +47,9 @@ services:
       WATCHTOWER_POLL_INTERVAL: 200
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
+
+# optional: uncomment alongside the validator's `networks:` block to write
+# dashboard rows into an externally-managed allways DB.
+# networks:
+#   allways_network:
+#     external: true
