@@ -51,6 +51,20 @@ alw --help
 - **Validators**: Monitor swaps, verify on-chain transactions, vote on outcomes
 - **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
 - **CLI**: User interface for posting pairs, managing collateral, and executing swaps
+- **swap-api**: Stateless HTTP wrapper around the CLI swap flow, for browser users
+
+## Running swap-api locally
+
+`allways.swap_api` is a thin FastAPI service that wraps the same Python modules the CLI uses (`contract_client`, `commitments`, `dendrite_lite`) and exposes them over HTTP for browser orchestration. It holds no keys, no funds, and no state — see [docs/swap-api/browser-swap-spec.md](../docs/swap-api/browser-swap-spec.md) for the contract.
+
+```bash
+WS_ENDPOINT=ws://127.0.0.1:9944 \
+NETUID=2 \
+CONTRACT_ADDRESS=5DjJmTpcHZvF3aZZEafKBdo3ksmdUSZ8bBBUSFhW3Ce3xf1J \
+python -m allways.swap_api
+# defaults: SWAP_API_HOST=0.0.0.0 SWAP_API_PORT=8000
+curl http://localhost:8000/healthz | jq
+```
 
 ## Validator Storage Layout
 
