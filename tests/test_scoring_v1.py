@@ -195,8 +195,11 @@ class TestCrownHoldersHelper:
         sort but is not routable, so the executability gate kicks them out
         and the crown drops to the next-best sane rate."""
         rates = {'sentinel': 1e10, 'sane': 326.0}
+
         # Reject the sentinel rate, accept anything ≤ 1e6 (well above sane).
-        check = lambda r: r <= 1e6
+        def check(r):
+            return r <= 1e6
+
         assert crown_holders_at_instant(rates, {'sentinel', 'sane'}, executable_rate_check=check) == ['sane']
 
     def test_executable_check_none_preserves_legacy_behavior(self):
