@@ -643,17 +643,14 @@ class ValidatorStateStore:
         defense lower bound, so a re-observation must not overwrite the
         original (earlier) snapshot.
         """
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO dest_tip_snapshots (
-                    swap_id, dest_chain, tip, recorded_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (swap_id, dest_chain, tip, recorded_at),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT OR IGNORE INTO dest_tip_snapshots (
+                swap_id, dest_chain, tip, recorded_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (swap_id, dest_chain, tip, recorded_at),
+        )
 
     def load_dest_tip_snapshots(self) -> Dict[int, int]:
         """Repopulate the in-memory snapshot map at SwapVerifier init.
@@ -661,25 +658,20 @@ class ValidatorStateStore:
         Returned as ``{swap_id: tip}`` — the in-memory check only needs the
         tip; ``dest_chain``/``recorded_at`` are kept on disk for debugging.
         """
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute('SELECT swap_id, tip FROM dest_tip_snapshots').fetchall()
+        rows = self._fetchall('SELECT swap_id, tip FROM dest_tip_snapshots')
         return {int(r['swap_id']): int(r['tip']) for r in rows}
 
     def prune_dest_tip_snapshots(self, active_ids: Set[int]) -> None:
         """Mirror the in-memory prune: drop snapshots for swaps no longer
         tracked so the table doesn't accumulate forever."""
-        with self.lock:
-            conn = self.require_connection()
-            if not active_ids:
-                conn.execute('DELETE FROM dest_tip_snapshots')
-            else:
-                placeholders = ','.join('?' * len(active_ids))
-                conn.execute(
-                    f'DELETE FROM dest_tip_snapshots WHERE swap_id NOT IN ({placeholders})',
-                    tuple(int(sid) for sid in active_ids),
-                )
-            conn.commit()
+        if not active_ids:
+            self._execute('DELETE FROM dest_tip_snapshots')
+            return
+        placeholders = ','.join('?' * len(active_ids))
+        self._execute(
+            f'DELETE FROM dest_tip_snapshots WHERE swap_id NOT IN ({placeholders})',
+            tuple(int(sid) for sid in active_ids),
+        )
 
     def reset_event_watcher_state(self) -> None:
         """Wipe all event-watcher persistence. Used when the cursor is more than
@@ -733,14 +725,8 @@ class ValidatorStateStore:
         return self.conn
 
     # ─── crud helpers ───────────────────────────────────────────────────
-    #
-    # Wrap the lock/connection/commit dance shared by every table's
-    # methods. Use these for any single-statement operation. Methods that
-    # need to hold the lock across multiple statements (e.g.
-    # ``insert_rate_event``'s read-then-conditional-write,
-    # ``delete_hotkey``'s multi-table sweep) keep the explicit ``with
-    # self.lock`` block — splitting their lock acquisition would break
-    # atomicity.
+    # Single-statement boilerplate. Methods that hold the lock across
+    # multiple statements (insert_rate_event, delete_hotkey) bypass these.
 
     def _execute(self, sql: str, params: Tuple = ()) -> None:
         """Single-statement write under lock with commit."""
