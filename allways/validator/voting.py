@@ -38,3 +38,19 @@ def timeout_swap(
     except Exception as e:
         bt.logging.error(f'{tag}: timeout_swap vote failed: {e}')
         return False
+
+
+def vote_deactivate(
+    client: AllwaysContractClient,
+    wallet: bt.Wallet,
+    miner_hotkey: str,
+    label: Optional[str] = None,
+) -> bool:
+    """Vote to deactivate an active miner. Caller logs the outcome."""
+    tag = label or f'Miner {miner_hotkey[:8]}'
+    try:
+        client.vote_deactivate(wallet=wallet, miner_hotkey=miner_hotkey)
+        return True
+    except Exception as e:
+        bt.logging.error(f'{tag}: vote_deactivate failed: {e}')
+        return False

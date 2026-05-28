@@ -82,6 +82,8 @@ async def forward(self: Validator) -> None:
 
     poll_commitments(self)
 
+    enforce_under_min_collateral_deactivation(self)
+
     # Pull newly-initiated and resolved swaps off the contract.
     await tracker.poll()
     bt.logging.info('forward: tracker polled')
@@ -395,6 +397,50 @@ def refresh_miner_rates(self: Validator) -> None:
                 block=self.block,
             )
             self.last_known_rates[key] = r
+
+
+def enforce_under_min_collateral_deactivation(self: Validator) -> None:
+    """Vote to deactivate active miners below the current min_collateral floor.
+
+    Admin ``set_min_collateral`` raises do not retroactively clear ``active``
+    on-chain — only slash/fee paths auto-deactivate. Validators remediate via
+    ``vote_deactivate`` quorum (see contract docs and scoring.py comments).
+    """
+    try:
+        min_collateral = self.bounds_cache.min_collateral()
+    except Exception as e:
+        bt.logging.warning(f'forward: min_collateral read failed, skipping deactivation pass: {e}')
+        return
+
+    if min_collateral <= 0:
+        return
+
+    active = self.event_watcher.active_miners
+    if not active:
+        return
+
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(self.metagraph.hotkeys)}
+
+    for hotkey in active:
+        try:
+            if not self.contract_client.get_miner_active_flag(hotkey):
+                continue
+            collateral = int(self.contract_client.get_miner_collateral(hotkey))
+        except Exception as e:
+            bt.logging.warning(f'forward: under-min check failed for {hotkey[:8]}: {e}')
+            continue
+
+        if collateral >= min_collateral:
+            continue
+
+        uid = hotkey_to_uid.get(hotkey, '?')
+        label = f'UID {uid} ({hotkey[:8]})'
+        bt.logging.info(
+            f'{label}: collateral {collateral} < min_collateral {min_collateral} '
+            f'while active → voting deactivate'
+        )
+        if voting.vote_deactivate(self.contract_client, self.wallet, hotkey, label=label):
+            bt.logging.success(f'{label}: vote_deactivate submitted')
 
 
 def purge_deregistered_hotkeys(self: Validator) -> None:
