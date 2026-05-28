@@ -18,6 +18,7 @@ from allways.constants import (
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
 from allways.utils.logging import swap_label as _swap_label
+from allways.utils.rate import expected_swap_amounts
 from allways.utils.scale import strip_hex_prefix
 from allways.validator import voting
 from allways.validator.axon_handlers import (
@@ -481,19 +482,33 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         if not provider or not swap.to_tx_hash:
             continue
 
+        # Mirror final-confirm evidence: extension verification must use the
+        # canonical payout derived from swap.rate, not the miner-controlled
+        # swap.to_amount. Otherwise a dust mark_fulfilled buys timeout
+        # protection that final-confirm itself would reject.
+        if not swap.rate or not swap.miner_to_address:
+            bt.logging.warning(f'{ctx}: missing rate or miner_to_address on Fulfilled swap')
+            continue
+
+        _, expected_user_receives = expected_swap_amounts(swap, self.swap_verifier.fee_divisor)
+        if expected_user_receives == 0:
+            bt.logging.warning(f'{ctx}: rate produces 0 to_amount after fees; skipping extension')
+            continue
+
         try:
             tx_info = provider.verify_transaction(
                 tx_hash=swap.to_tx_hash,
                 expected_recipient=swap.user_to_address,
-                expected_amount=swap.to_amount,
+                expected_amount=expected_user_receives,
                 block_hint=swap.to_tx_block,
+                expected_sender=swap.miner_to_address,
             )
         except Exception as e:
             bt.logging.debug(f'{ctx}: extend check verify_transaction error: {e}')
             continue
 
         if tx_info is None:
-            continue  # dest tx invisible — neither tier qualifies
+            continue  # dest tx invisible or below canonical payout — neither tier qualifies
 
         # A finalize this step may have just pushed the deadline out. Mirror
         # the reservation-side gate in try_extend_reservation: once the swap
