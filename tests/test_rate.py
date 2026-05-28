@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount, normalize_rate
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, is_executable_rate, normalize_rate
 
 # Chain decimals
 TAO_DEC = 9
@@ -271,3 +271,68 @@ class TestNormalizeRate:
         """Pre-existing :g behavior — sub-1e-4 values switch to scientific.
         Documented so a future change to fixed-point doesn't silently break."""
         assert normalize_rate(1e-6) == '1e-06'
+
+
+class TestIsExecutableRate:
+    """Crown-eligibility gate against sentinel quotes that no user can route.
+
+    Bounds chosen to match live SN7 contract: ``min_swap=0.1 TAO``,
+    ``max_swap=0.5 TAO`` (in rao).
+    """
+
+    MIN = 100_000_000  # 0.1 TAO
+    MAX = 500_000_000  # 0.5 TAO
+
+    def test_sane_btc_to_tao_rate_executable(self):
+        assert is_executable_rate(326.0, 'btc', 'tao', self.MIN, self.MAX) is True
+
+    def test_sane_tao_to_btc_rate_executable(self):
+        assert is_executable_rate(326.0, 'tao', 'btc', self.MIN, self.MAX) is True
+
+    def test_huge_btc_to_tao_rate_rejected(self):
+        """1e10 TAO/BTC: 1 sat → 1e11 rao = 100 TAO, far above 0.5 TAO max.
+        No positive integer sat lands in [0.1, 0.5] TAO."""
+        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_float_max_btc_to_tao_rate_rejected(self):
+        """The other sentinel miners post: float-max wins the rate sort but
+        overflows the conversion math entirely."""
+        assert is_executable_rate(1.797e308, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_zero_rate_rejected(self):
+        assert is_executable_rate(0.0, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_negative_rate_rejected(self):
+        assert is_executable_rate(-1.0, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_non_finite_rate_rejected(self):
+        assert is_executable_rate(float('inf'), 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(float('nan'), 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_bounds_unset_is_permissive(self):
+        """Both bounds at 0 → no on-chain limit configured → don't filter.
+        Matches the contract's unset-bounds sentinel."""
+        assert is_executable_rate(1e10, 'btc', 'tao', 0, 0) is True
+        assert is_executable_rate(1e-10, 'tao', 'btc', 0, 0) is True
+
+    def test_max_unset_only_lower_bound_enforced(self):
+        """If only min_swap is set, every rate above the floor is executable."""
+        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, 0) is True
+
+    def test_tao_to_btc_lowball_rate_passes_predicate(self):
+        """tao→btc with rate=1e-8: the TAO leg IS the source amount, which
+        is in bounds for any rao in [min, max]. The bug here is economic
+        (uncollateralized BTC payout) rather than granularity, and lives
+        outside this predicate — documented so reviewers know the gap."""
+        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is True
+
+    def test_boundary_rate_executable_at_one_sat(self):
+        """At max_swap/10 = 50_000_000 rao per sat, the smallest integer sat
+        produces exactly max_swap — should be executable."""
+        rate = self.MAX / 10  # TAO leg at 1 sat == max_swap
+        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is True
+
+    def test_just_past_boundary_rate_rejected(self):
+        """A rate that maps 1 sat just above max_swap → no executable sat."""
+        rate = (self.MAX / 10) * 1.0001
+        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False

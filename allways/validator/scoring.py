@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 import numpy as np
@@ -25,6 +25,7 @@ from allways.constants import (
     SUCCESS_EXPONENT,
     VOLUME_WEIGHT_ALPHA,
 )
+from allways.utils.rate import is_executable_rate
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -126,6 +127,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     except Exception as e:
         bt.logging.warning(f'max_swap_amount read failed: {e}')
         max_swap_amount = 0
+    try:
+        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'min_swap_amount read failed: {e}')
+        min_swap_amount = 0
     collaterals: Dict[str, int] = {}
     miner_volume_total: Dict[str, int] = {}
     miner_crown_total: Dict[str, float] = {}
@@ -144,6 +150,8 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
+            min_swap_rao=min_swap_amount,
+            max_swap_rao=max_swap_amount,
         )
         total_crown_dir = sum(crown_blocks.values())
         volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
@@ -406,15 +414,21 @@ def replay_crown_time_window(
     window_end: int,
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
+    min_swap_rao: int = 0,
+    max_swap_rao: int = 0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
-    that instant, not busy, and had a positive rate posted. Active/rate/busy
+    that instant, not busy, had a positive rate posted, and their rate is
+    executable under the current contract swap bounds. Active/rate/busy
     are evaluated per-block via the replay — a miner's status at scoring
     time is irrelevant other than metagraph membership (used to credit the
     UID). Collateral-floor invariants are trusted to the contract's active
-    flag; halt state is handled at ``score_and_reward_miners`` entry."""
+    flag; halt state is handled at ``score_and_reward_miners`` entry.
+
+    Bounds at 0 disable the executability filter (matches the contract's
+    "unset" sentinel); the rate-positive floor still applies."""
     rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
     )
@@ -425,6 +439,9 @@ def replay_crown_time_window(
     # direction (tao→btc) lower = better.
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
+
+    def executable_check(rate: float) -> bool:
+        return is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
 
     crown_blocks: Dict[str, float] = {}
     prev_block = window_start
@@ -452,6 +469,7 @@ def replay_crown_time_window(
             busy=busy_set,
             active=active_set,
             lower_rate_wins=lower_rate_wins,
+            executable_rate_check=executable_check,
         )
         if not holders:
             if trace is not None:
@@ -501,16 +519,25 @@ def crown_holders_at_instant(
     busy: Optional[Set[str]] = None,
     active: Optional[Set[str]] = None,
     lower_rate_wins: bool = False,
+    executable_rate_check: Optional[Callable[[float], bool]] = None,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
-    other condition (rewardable, active, not busy, rate > 0). If the best
-    rate has no qualified miner, fall through to the next-best rate.
+    other condition (rewardable, active, not busy, rate > 0, executable).
+    If the best rate has no qualified miner, fall through to the next-best
+    rate.
 
     ``lower_rate_wins`` flips the sort: rates are stored as canonical_dest
     per canonical_source (TAO per BTC), so higher-is-better only holds in
     the canonical direction (btc→tao). In the reverse direction (tao→btc)
     a smaller TAO/BTC quote means the miner is asking less TAO for 1 BTC —
     a better deal for the swapper, which earns them the crown.
+
+    ``executable_rate_check`` (optional) rejects rates that no user can
+    route under the current contract swap bounds. Sentinels like 1e10
+    TAO/BTC win the rate sort but map every positive integer satoshi to a
+    TAO leg outside ``[min_swap, max_swap]``, so they should not earn
+    crown. When None (tests that don't care about bounds; pre-bounds-aware
+    callers), no executability filter is applied.
 
     Collateral-floor gating is trusted to the contract's active flag —
     miners who drop below the floor get auto-deactivated on-chain (fee /
@@ -525,7 +552,12 @@ def crown_holders_at_instant(
     def qualifies(hotkey: str) -> bool:
         if active is not None and hotkey not in active:
             return False
-        return hotkey in rewardable and hotkey not in busy and rates.get(hotkey, 0) > 0
+        rate = rates.get(hotkey, 0)
+        if rate <= 0:
+            return False
+        if executable_rate_check is not None and not executable_rate_check(rate):
+            return False
+        return hotkey in rewardable and hotkey not in busy
 
     by_rate: Dict[float, List[str]] = {}
     for hotkey, rate in rates.items():
