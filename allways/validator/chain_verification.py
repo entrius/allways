@@ -180,6 +180,7 @@ class SwapVerifier:
                 swap.miner_from_address,
                 swap.from_amount,
                 swap.from_tx_block,
+                swap.user_from_address,
             )
             source_ok = source_info is not None
             if source_ok:

@@ -6,6 +6,7 @@ initiated. Closes the gap left by the contract enforcing ``used_from_tx``
 only on the source side.
 """
 
+import asyncio
 from unittest.mock import MagicMock
 
 from allways.chain_providers.base import TransactionInfo
@@ -140,3 +141,107 @@ class TestPruneToActive:
 
         assert v.dest_tip_at_init == {2: 200}
         assert v.source_verified_ids == {2}
+
+
+class TestVerifyMinerFulfillmentSourceSender:
+    def _make_fulfilled_swap(self) -> Swap:
+        return Swap(
+            id=42,
+            user_hotkey='user',
+            miner_hotkey='miner',
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=1_000_000,
+            to_amount=345_000_000,
+            tao_amount=345_000_000,
+            user_from_address='bc1q-user',
+            user_to_address='5user',
+            miner_from_address='bc1q-miner',
+            miner_to_address='5miner',
+            rate='345',
+            from_tx_hash='src-hash',
+            from_tx_block=50,
+            to_tx_hash='dest-hash',
+            to_tx_block=101,
+            status=SwapStatus.FULFILLED,
+            initiated_block=100,
+        )
+
+    def _run_fulfillment(self, v: SwapVerifier, swap: Swap) -> bool:
+        return asyncio.run(v.verify_miner_fulfillment(swap))
+
+    def test_source_verify_passes_user_from_as_expected_sender(self):
+        swap = self._make_fulfilled_swap()
+        source = MagicMock()
+        source.verify_transaction.return_value = TransactionInfo(
+            tx_hash='src-hash',
+            confirmed=True,
+            sender='bc1q-user',
+            recipient='bc1q-miner',
+            amount=1_000_000,
+            block_number=50,
+            confirmations=10,
+        )
+        dest = MagicMock()
+        dest.verify_transaction.return_value = TransactionInfo(
+            tx_hash='dest-hash',
+            confirmed=True,
+            sender='5miner',
+            recipient='5user',
+            amount=3_415_500_000,
+            block_number=101,
+            confirmations=10,
+        )
+        v = SwapVerifier(chain_providers={'btc': source, 'tao': dest})
+
+        assert self._run_fulfillment(v, swap) is True
+        source.verify_transaction.assert_called_once_with(
+            tx_hash='src-hash',
+            expected_recipient='bc1q-miner',
+            expected_amount=1_000_000,
+            block_hint=50,
+            expected_sender='bc1q-user',
+        )
+
+    def test_rejects_source_tx_with_wrong_sender_when_user_bound(self):
+        """Provider returns confirmed tx with empty sender — must fail when
+        expected_sender is bound, matching axon/miner/forward paths."""
+        swap = self._make_fulfilled_swap()
+
+        def verify_source(**kwargs):
+            assert kwargs.get('expected_sender') == 'bc1q-user'
+            info = TransactionInfo(
+                tx_hash='src-hash',
+                confirmed=True,
+                sender='',
+                recipient='bc1q-miner',
+                amount=1_000_000,
+                block_number=50,
+                confirmations=10,
+            )
+            if kwargs.get('expected_sender') and info.sender != kwargs['expected_sender']:
+                return None
+            return info
+
+        source = MagicMock()
+        source.verify_transaction.side_effect = verify_source
+        dest = MagicMock()
+        dest.verify_transaction.return_value = TransactionInfo(
+            tx_hash='dest-hash',
+            confirmed=True,
+            sender='5miner',
+            recipient='5user',
+            amount=3_415_500_000,
+            block_number=101,
+            confirmations=10,
+        )
+        v = SwapVerifier(chain_providers={'btc': source, 'tao': dest})
+
+        assert self._run_fulfillment(v, swap) is False
+        source.verify_transaction.assert_called_once_with(
+            tx_hash='src-hash',
+            expected_recipient='bc1q-miner',
+            expected_amount=1_000_000,
+            block_hint=50,
+            expected_sender='bc1q-user',
+        )
