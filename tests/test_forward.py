@@ -62,9 +62,7 @@ def make_validator(swap: Swap, block: int, finalized_target, tx_info=_UNSET):
     ext.maybe_propose_timeout.return_value = False
 
     provider = MagicMock()
-    provider.verify_transaction.return_value = (
-        SimpleNamespace(confirmations=1) if tx_info is _UNSET else tx_info
-    )
+    provider.verify_transaction.return_value = SimpleNamespace(confirmations=1) if tx_info is _UNSET else tx_info
     provider.get_chain.return_value = SimpleNamespace(min_confirmations=3)
 
     contract_client = MagicMock()
