@@ -5,8 +5,8 @@ alw-utils/sync-validator-state writes today — but from inside the validator
 during the scoring run, so there is no Python re-implementation of the
 scoring walker to drift from the validator's truth.
 
-Self-contained: nothing here is imported by scoring or forward yet. The
-call site is wired up in a follow-up.
+Called from the validator's scoring run (`calculate_miner_rewards`) and the
+per-forward live-crown snapshot; gated by `STORE_DB_RESULTS`.
 """
 
 from .database import create_database_connection

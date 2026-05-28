@@ -3,9 +3,6 @@
 Gated by the STORE_DB_RESULTS env var. When disabled (default), the
 validator runs unchanged; the storage methods short-circuit to a
 disabled-state result.
-
-This module is not yet called from the scoring/forward path — that wiring
-is the next step.
 """
 
 import os
