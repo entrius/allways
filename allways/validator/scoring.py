@@ -602,6 +602,16 @@ def snapshot_current_crown_holders(
     contract_events) signal the recycle state to users."""
     block = self.block
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    # Same executability filter the scoring path applies, so the live table
+    # never credits an out-of-bounds-rate holder the ledger drops. Bounds come
+    # from the 300-block-TTL bounds_cache (no per-step RPC); both 0 on read
+    # failure is the "unset" sentinel → permissive, matching prior behavior.
+    try:
+        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
+        min_swap_amount = max_swap_amount = 0
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
@@ -620,12 +630,17 @@ def snapshot_current_crown_holders(
         # loophole closure) — otherwise the live view contradicts the ledger.
         if pinned_rates:
             rates = {**rates, **pinned_rates}
+
+        def executable_check(rate: float, from_chain=from_chain, to_chain=to_chain) -> bool:
+            return is_executable_rate(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
+
         holders = crown_holders_at_instant(
             rates,
             rewardable_hotkeys,
             busy=busy_set,
             active=active_set,
             lower_rate_wins=lower_rate_wins,
+            executable_rate_check=executable_check,
         )
         if holders:
             share = 1.0 / len(holders)
