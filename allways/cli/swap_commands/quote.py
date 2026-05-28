@@ -16,7 +16,13 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.contract_client import ContractError
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
+from allways.utils.rate import (
+    apply_fee_deduction,
+    calculate_to_amount,
+    check_swap_viability,
+    derive_tao_leg,
+    is_executable_rate,
+)
 
 
 @click.command('quote')
@@ -104,8 +110,6 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         console.print('[yellow]No active miners with collateral for this pair[/yellow]\n')
         return
 
-    available.sort(key=lambda x: x[0].rate, reverse=True)
-
     # Calculate amounts per miner
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
@@ -113,41 +117,18 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     canon_from_decimals = get_chain(canon_from).decimals
     dst_chain_def = get_chain(to_chain)
 
-    # Contract-side bounds are global — check before per-miner viability so
-    # a user who requested an out-of-bounds amount gets one clear reason
-    # instead of N rows each blaming collateral. Bounds are enforced against
-    # the TAO leg (see vote_reserve in lib.rs).
+    # Rate is canonical_dest per canonical_source (e.g. TAO/BTC). For BTC→TAO
+    # higher is better for the user; for TAO→BTC lower is better. Match the
+    # direction-aware sort already used by `swap now` (swap.py) and validator
+    # crown (scoring.py) so the top row is the best available rate.
+    available.sort(key=lambda x: x[0].rate, reverse=not is_reverse)
+
     try:
         min_swap_rao = client.get_min_swap_amount()
         max_swap_rao = client.get_max_swap_amount()
     except ContractError:
         min_swap_rao = 0
         max_swap_rao = 0
-
-    # Global bounds (min/max swap) are the same for every miner — check once
-    # up front so a bounds-violating amount gets one clear reason instead of
-    # N rows each blaming collateral. Use any row's rate to derive the TAO
-    # leg; only the direction matters, not the miner.
-    sample_pair = available[0][0]
-    sample_to_amount = calculate_to_amount(
-        from_amount, sample_pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals
-    )
-    request_tao_rao = derive_tao_leg(from_chain, from_amount, to_chain, sample_to_amount)
-
-    if min_swap_rao > 0 and request_tao_rao < min_swap_rao:
-        console.print(
-            f'\n[red]Amount below contract minimum: {from_rao(request_tao_rao):.4f} TAO equivalent '
-            f'< {from_rao(min_swap_rao):.4f} TAO min.[/red]\n'
-            f'[dim]No miner can accept this — increase --amount.[/dim]\n'
-        )
-        return
-    if max_swap_rao > 0 and request_tao_rao > max_swap_rao:
-        console.print(
-            f'\n[red]Amount above contract maximum: {from_rao(request_tao_rao):.4f} TAO equivalent '
-            f'> {from_rao(max_swap_rao):.4f} TAO max.[/red]\n'
-            f'[dim]No miner can accept this — decrease --amount.[/dim]\n'
-        )
-        return
 
     src_up = from_chain.upper()
     dst_up = to_chain.upper()
@@ -166,6 +147,12 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
 
     viable_count = 0
     busy_but_fits_count = 0
+    # Track bounds reasons so we can give a single actionable hint when every
+    # miner failed for the same reason (the previous up-front bounds check did
+    # this, but using available[0]'s rate to derive the TAO leg — wrong for
+    # BTC→TAO, where the TAO leg depends on the miner's rate).
+    above_max_count = 0
+    below_min_count = 0
     for idx, (pair, collateral, has_swap) in enumerate(available, 1):
         to_amount = calculate_to_amount(from_amount, pair.rate_str, is_reverse, canon_to_decimals, canon_from_decimals)
         user_receives = apply_fee_deduction(to_amount, fee_divisor)
@@ -173,18 +160,29 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
 
         tao_amount_rao = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
         viable, reason = check_swap_viability(tao_amount_rao, collateral, min_swap_rao, max_swap_rao)
+        # Sentinel rates (e.g. 1.797e+308 TAO/BTC) win the rate sort but no
+        # positive integer source amount maps to an in-bounds TAO leg, so the
+        # miner can't actually accept any user-routable swap. Match the crown
+        # eligibility gate so they don't get labeled "available" here either.
+        routable = is_executable_rate(pair.rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
         # "in swap" takes precedence over amount-viability: even if the amount
         # fits, the miner can't accept a new reservation until the current one
         # resolves. Shown yellow rather than red to signal "temporary".
         if has_swap:
             status = '[yellow]in swap[/yellow]'
-            if viable:
+            if viable and routable:
                 busy_but_fits_count += 1
+        elif not routable:
+            status = '[red]unexecutable rate[/red]'
         elif viable:
             status = '[green]available[/green]'
             viable_count += 1
         else:
             status = f'[red]{reason}[/red]'
+            if 'above max' in reason:
+                above_max_count += 1
+            elif 'below min' in reason:
+                below_min_count += 1
 
         table.add_row(
             str(idx),
@@ -201,10 +199,14 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
     # Show the implied max-send amount at the best available rate so a user
     # who hit "insufficient collateral" knows the ceiling to retry under.
     # Prefer a miner that's not in-swap so the hint is actionable now; fall
-    # back to the top-rate row so the user still sees a ceiling figure.
-    reservable = [row for row in available if not row[2]]
-    if (reservable or available) and max_swap_rao > 0:
-        best_pair, best_collateral, best_has_swap = reservable[0] if reservable else available[0]
+    # back to the top-rate row so the user still sees a ceiling figure. Skip
+    # rows with unexecutable rates — citing a sentinel as "best" would mislead.
+    routable_rows = [
+        row for row in available if is_executable_rate(row[0].rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    ]
+    reservable = [row for row in routable_rows if not row[2]]
+    if (reservable or routable_rows) and max_swap_rao > 0:
+        best_pair, best_collateral, best_has_swap = reservable[0] if reservable else routable_rows[0]
         # The TAO leg is capped by min(collateral, max_swap_rao).
         effective_tao_cap_rao = min(best_collateral, max_swap_rao)
         if from_chain == 'tao':
@@ -225,6 +227,16 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         if busy_but_fits_count > 0:
             console.print(
                 '  [yellow]All miners that can fulfill this amount are currently in a swap — retry shortly.[/yellow]\n'
+            )
+        elif above_max_count > 0 and below_min_count == 0 and max_swap_rao > 0:
+            console.print(
+                f'  [yellow]No miner can accept this — every routable miner exceeds the contract max '
+                f'({from_rao(max_swap_rao):.4f} TAO equivalent). Decrease --amount.[/yellow]\n'
+            )
+        elif below_min_count > 0 and above_max_count == 0 and min_swap_rao > 0:
+            console.print(
+                f'  [yellow]No miner can accept this — every routable miner is below the contract min '
+                f'({from_rao(min_swap_rao):.4f} TAO equivalent). Increase --amount.[/yellow]\n'
             )
         else:
             console.print(

@@ -319,12 +319,12 @@ class TestIsExecutableRate:
         """If only min_swap is set, every rate above the floor is executable."""
         assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, 0) is True
 
-    def test_tao_to_btc_lowball_rate_passes_predicate(self):
-        """tao→btc with rate=1e-8: the TAO leg IS the source amount, which
-        is in bounds for any rao in [min, max]. The bug here is economic
-        (uncollateralized BTC payout) rather than granularity, and lives
-        outside this predicate — documented so reviewers know the gap."""
-        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is True
+    def test_tao_to_btc_lowball_rate_rejected(self):
+        """tao→btc with rate=1e-8 implies 0.1 TAO buys 1e7 BTC — destination
+        absurdity, not a granularity miss. Caught by the symmetric check:
+        treating 1/r = 1e8 as a btc→tao rate, 1 sat already overshoots
+        max_swap on the TAO leg, so the original rate is sentinel-low."""
+        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is False
 
     def test_boundary_rate_executable_at_one_sat(self):
         """At max_swap/10 = 50_000_000 rao per sat, the smallest integer sat
@@ -336,3 +336,26 @@ class TestIsExecutableRate:
         """A rate that maps 1 sat just above max_swap → no executable sat."""
         rate = (self.MAX / 10) * 1.0001
         assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_tao_to_btc_boundary_rate_executable_at_one_sat(self):
+        """Symmetric boundary: at inverse=max_swap/10 (i.e. r = 10/max_swap),
+        treating 1/r as btc→tao maps 1 sat to exactly max_swap on the TAO leg.
+        Just executable."""
+        rate = 10 / self.MAX  # 1/r * 10 == max_swap; 1 sat at inverse hits max
+        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is True
+
+    def test_tao_to_btc_just_past_boundary_rate_rejected(self):
+        """One ULP below the boundary: the inverse rate's 1 sat overshoots
+        max_swap, so no integer source routes by symmetry."""
+        rate = (10 / self.MAX) * 0.9999
+        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is False
+
+    def test_tao_to_btc_sentinel_unset_bounds_still_permissive(self):
+        """Unset bounds disable the gate in both directions — keeps the
+        legacy "no on-chain bounds yet" path permissive."""
+        assert is_executable_rate(1e-8, 'tao', 'btc', 0, 0) is True
+
+    def test_tao_to_btc_zero_max_only_min_set_is_permissive(self):
+        """If only min_swap is set (max_swap=0), any rate above the floor
+        symmetry still passes. Mirrors test_max_unset_only_lower_bound_enforced."""
+        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, 0) is True

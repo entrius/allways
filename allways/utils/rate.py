@@ -127,12 +127,19 @@ def is_executable_rate(
     min_swap_rao: int,
     max_swap_rao: int,
 ) -> bool:
-    """True iff some positive integer source amount yields a TAO leg within
-    ``[min_swap_rao, max_swap_rao]`` at the given rate and direction.
+    """True iff the rate is integer-routable in its declared direction.
 
-    Crown-eligibility gate: sentinel rates like ``1e10`` TAO/BTC win the
-    rate sort but no positive integer satoshi maps to an in-bounds TAO
-    leg, so they're not routable by any user — they should not earn crown.
+    Crown-eligibility gate against sentinel rates that no user can route:
+
+    * BTC→TAO: high-side sentinels (``1e10``, ``1.797e308`` TAO/BTC) — the
+      smallest positive sat already maps above ``max_swap_rao``, so no
+      positive integer source produces an in-bounds TAO leg.
+    * TAO→BTC: low-side sentinels (``1e-8`` TAO/BTC) — the TAO leg IS the
+      source amount, so it trivially fits any bounds, but the destination
+      payout implied by the rate is absurd. Catch this by the symmetric
+      check on the inverse rate: if treating ``1/rate`` as a BTC→TAO rate
+      has no integer-routable source either, the original rate is at an
+      extreme of the executable spectrum and a sentinel by symmetry.
 
     A bound at ``0`` is the contract's "unset" sentinel and disables that
     side; both at 0 → permissive (no on-chain bounds yet).
@@ -142,11 +149,12 @@ def is_executable_rate(
     if min_swap_rao <= 0 and max_swap_rao <= 0:
         return True
 
-    if to_chain == 'tao':
-        # Forward into TAO: dest_rao = source_units × rate × 10**(tao_dec - src_dec).
-        src_decimals = get_chain(from_chain).decimals
+    def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
+        # For a "src → tao" direction at ``forward_rate`` (tao per src), is
+        # there a positive integer src amount whose TAO leg lands in bounds?
+        src_decimals = get_chain(src_chain).decimals
         decimal_factor = 10 ** (get_chain('tao').decimals - src_decimals)
-        denom = rate * decimal_factor
+        denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             # rate × decimal_factor overflowed (e.g. 1.797e308 × 10) → smallest
             # positive integer source already maps above any finite max bound.
@@ -157,17 +165,25 @@ def is_executable_rate(
         max_source = math.floor(max_swap_rao / denom)
         return min_source <= max_source
 
-    if from_chain == 'tao':
-        # Reverse out of TAO: TAO leg = source_rao itself. Any positive
-        # integer rao in [min, max] qualifies — rate doesn't gate the TAO
-        # side here. (The asymmetric griefing case — extremely low rate
-        # producing an unfulfillable BTC payout — is an economic-backing
-        # concern, not a granularity one, and is out of scope for this
-        # predicate.)
-        lo = max(1, min_swap_rao)
-        if max_swap_rao <= 0:
-            return True
-        return lo <= max_swap_rao
+    if to_chain == 'tao':
+        # Forward into TAO: dest_rao = source_units × rate × 10**(tao_dec - src_dec).
+        return _has_integer_routable_source(rate, from_chain)
+
+    if from_chain == 'tao' and to_chain != 'tao':
+        # Reverse out of TAO: the TAO leg is the source itself, so any positive
+        # rao in [min, max] is trivially in bounds — but absurd-low rates
+        # (e.g. 1e-8 TAO/BTC) imply destinations so large no rational user
+        # would route, and the miner can post them just to win the
+        # lowest-rate-wins crown. Treat ``1/rate`` as a ``to_chain → tao`` rate
+        # and apply the same integer-routability check by symmetry: if the
+        # inverse direction has no routable source either, the original rate
+        # is at an extreme of the executable spectrum.
+        if rate <= 0:
+            return False
+        inverse = 1.0 / rate
+        if not math.isfinite(inverse) or inverse <= 0:
+            return False
+        return _has_integer_routable_source(inverse, to_chain)
 
     # Non-TAO pairs have no TAO-leg bound to enforce.
     return True
@@ -183,8 +199,11 @@ def check_swap_viability(
 
     Mirrors the guards in lib.rs::vote_reserve (bounds) and vote_initiate
     (collateral). Returns (viable, reason) — reason is empty on success.
-    Bounds are global and should be checked against any single rate before
-    the per-miner loop; collateral is per-miner.
+
+    The bounds are global, but the TAO leg they apply to is *not* — when the
+    source chain isn't TAO, the TAO leg = to_amount, which depends on the
+    miner's rate. Callers must derive ``tao_amount_rao`` per miner; sampling
+    one rate up front is only safe when ``from_chain == 'tao'``.
     """
     if min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
         return False, f'below min swap ({min_swap_rao / 1_000_000_000:.4f} TAO)'
