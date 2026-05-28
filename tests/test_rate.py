@@ -14,6 +14,16 @@ ETH_DEC = 18
 class TestBtcToTao:
     """BTC → TAO: forward direction, multiply by rate."""
 
+    def test_rate_string_whitespace_stripped(self):
+        source = int(Decimal('0.01') * BTC_TO_SAT)
+        padded = calculate_to_amount(
+            source, ' 345 ', is_reverse=False, to_decimals=TAO_DEC, from_decimals=BTC_DEC
+        )
+        plain = calculate_to_amount(
+            source, '345', is_reverse=False, to_decimals=TAO_DEC, from_decimals=BTC_DEC
+        )
+        assert padded == plain
+
     def test_standard_rate(self):
         # 0.01 BTC @ rate 345 (1 BTC = 345 TAO) → 3.45 TAO
         source = int(Decimal('0.01') * BTC_TO_SAT)  # 1_000_000 sat

@@ -37,6 +37,7 @@ def calculate_to_amount(
         to_decimals: Decimal places for canonical dest chain (e.g. 9 for TAO)
         from_decimals: Decimal places for canonical source chain (e.g. 8 for BTC)
     """
+    rate = rate.strip()
     rate_fixed = int(Decimal(rate) * RATE_PRECISION)
     if rate_fixed == 0:
         return 0
