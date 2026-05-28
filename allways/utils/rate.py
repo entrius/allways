@@ -105,6 +105,35 @@ def derive_tao_leg(from_chain: str, from_amount: int, to_chain: str, to_amount: 
     return 0
 
 
+def is_reverse_payout_direction(from_chain: str, to_chain: str) -> bool:
+    """True when the miner delivers native dest (not TAO) — reverse of canonical order."""
+    canon_from, _ = canonical_pair(from_chain, to_chain)
+    return from_chain != canon_from
+
+
+def max_dest_from_collateral(
+    collateral_rao: int,
+    rate: str,
+    from_chain: str,
+    to_chain: str,
+) -> int:
+    """Max dest-chain payout collateral can back at ``rate`` for reverse swaps.
+
+    For TAO→BTC the miner must deliver BTC; collateral is TAO. Returns the same
+    value as ``calculate_to_amount(collateral, rate, is_reverse=True, ...)``.
+    """
+    if not is_reverse_payout_direction(from_chain, to_chain):
+        return 0
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    return calculate_to_amount(
+        collateral_rao,
+        rate,
+        True,
+        get_chain(canon_to).decimals,
+        get_chain(canon_from).decimals,
+    )
+
+
 def quote_within_slippage(quoted: int, recomputed: int, slippage_bps: int) -> bool:
     """True if `recomputed` is no more than `slippage_bps` below `quoted`.
 
@@ -124,6 +153,11 @@ def check_swap_viability(
     miner_collateral_rao: int,
     min_swap_rao: int,
     max_swap_rao: int,
+    *,
+    from_chain: str = '',
+    to_chain: str = '',
+    to_amount: int = 0,
+    rate: str = '',
 ) -> tuple[bool, str]:
     """Check whether a swap can pass vote_initiate for a given miner.
 
@@ -131,11 +165,26 @@ def check_swap_viability(
     (collateral). Returns (viable, reason) — reason is empty on success.
     Bounds are global and should be checked against any single rate before
     the per-miner loop; collateral is per-miner.
+
+    For reverse swaps (e.g. TAO→BTC) the miner delivers native dest; bound
+    ``to_amount`` to what collateral can back at the committed rate. For forward
+    swaps (BTC→TAO) the TAO leg must fit within collateral.
     """
     if min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
         return False, f'below min swap ({min_swap_rao / 1_000_000_000:.4f} TAO)'
     if max_swap_rao > 0 and tao_amount_rao > max_swap_rao:
         return False, f'above max swap ({max_swap_rao / 1_000_000_000:.4f} TAO)'
+
+    if from_chain and to_chain and rate and is_reverse_payout_direction(from_chain, to_chain):
+        max_dest = max_dest_from_collateral(miner_collateral_rao, rate, from_chain, to_chain)
+        if max_dest <= 0:
+            return False, 'rate produces no collateral-backed dest payout'
+        if to_amount > max_dest:
+            return False, 'dest payout exceeds collateral-backed limit'
+        if tao_amount_rao > miner_collateral_rao:
+            return False, f'insufficient collateral ({tao_amount_rao / 1_000_000_000:.4f} TAO needed)'
+        return True, ''
+
     if tao_amount_rao > miner_collateral_rao:
         return False, f'insufficient collateral ({tao_amount_rao / 1_000_000_000:.4f} TAO needed)'
     return True, ''

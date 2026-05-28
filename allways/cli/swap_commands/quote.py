@@ -172,7 +172,16 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         human_receives = user_receives / (10**dst_chain_def.decimals)
 
         tao_amount_rao = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
-        viable, reason = check_swap_viability(tao_amount_rao, collateral, min_swap_rao, max_swap_rao)
+        viable, reason = check_swap_viability(
+            tao_amount_rao,
+            collateral,
+            min_swap_rao,
+            max_swap_rao,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            to_amount=to_amount,
+            rate=pair.rate_str,
+        )
         # "in swap" takes precedence over amount-viability: even if the amount
         # fits, the miner can't accept a new reservation until the current one
         # resolves. Shown yellow rather than red to signal "temporary".

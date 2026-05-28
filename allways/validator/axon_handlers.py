@@ -23,7 +23,13 @@ from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
-from allways.utils.rate import calculate_to_amount, derive_tao_leg, quote_within_slippage
+from allways.utils.rate import (
+    calculate_to_amount,
+    derive_tao_leg,
+    is_reverse_payout_direction,
+    max_dest_from_collateral,
+    quote_within_slippage,
+)
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm, ReservationPin
 
@@ -407,6 +413,18 @@ async def handle_swap_reserve(
             if synapse.tao_amount > collateral:
                 reject_synapse(synapse, 'Insufficient miner collateral', ctx)
                 return synapse
+
+            if is_reverse_payout_direction(synapse.from_chain, synapse.to_chain):
+                rate_str = reserve_rate_str or str(reserve_rate)
+                max_dest = max_dest_from_collateral(
+                    collateral,
+                    rate_str,
+                    synapse.from_chain,
+                    synapse.to_chain,
+                )
+                if max_dest <= 0 or synapse.to_amount > max_dest:
+                    reject_synapse(synapse, 'Dest payout exceeds collateral-backed limit', ctx)
+                    return synapse
 
             min_collateral = validator.bounds_cache.min_collateral()
             if min_collateral > 0 and collateral < min_collateral:

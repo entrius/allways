@@ -156,6 +156,8 @@ mod allways_swap_manager {
     // Callers on both the miner and validator side hardcode the same value so
     // no one needs to poll the contract to compute fee_amount.
     const FEE_DIVISOR: u128 = 100;
+    // Fixed-point rate denominator — must match allways.constants.RATE_PRECISION.
+    const RATE_PRECISION: u128 = 1_000_000_000_000_000_000;
 
     // Optimistic extension parameters. Window kept comfortably below the
     // client-side EXTEND_THRESHOLD_BLOCKS (=20) so finalization always lands
@@ -217,6 +219,109 @@ mod allways_swap_manager {
             let mut output = <ink::env::hash::Keccak256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Keccak256, _>(value, &mut output);
             Hash::from(output)
+        }
+
+        fn chain_decimals(chain: &str) -> u32 {
+            if chain == "tao" {
+                9
+            } else {
+                8
+            }
+        }
+
+        fn canonical_pair<'a>(chain_a: &'a str, chain_b: &'a str) -> (&'a str, &'a str) {
+            if chain_b == "tao" {
+                (chain_a, chain_b)
+            } else if chain_a == "tao" {
+                (chain_b, chain_a)
+            } else if chain_a < chain_b {
+                (chain_a, chain_b)
+            } else {
+                (chain_b, chain_a)
+            }
+        }
+
+        fn is_reverse_payout(from_chain: &str, to_chain: &str) -> bool {
+            let (canon_from, _) = Self::canonical_pair(from_chain, to_chain);
+            from_chain != canon_from
+        }
+
+        fn parse_rate_fixed(rate: &str) -> Result<u128, Error> {
+            if rate.is_empty() || rate.starts_with('-') {
+                return Err(Error::InvalidAmount);
+            }
+            let (int_part, frac_part) = match rate.split_once('.') {
+                Some((a, b)) => (a, b),
+                None => (rate, ""),
+            };
+            let int_val: u128 = int_part.parse().map_err(|_| Error::InvalidAmount)?;
+            let mut frac_val: u128 = 0;
+            let mut frac_digits: u32 = 0;
+            for ch in frac_part.chars() {
+                if !ch.is_ascii_digit() {
+                    return Err(Error::InvalidAmount);
+                }
+                if frac_digits >= 18 {
+                    break;
+                }
+                frac_val = frac_val
+                    .saturating_mul(10)
+                    .saturating_add(u128::from(ch as u8 - b'0'));
+                frac_digits += 1;
+            }
+            if frac_digits < 18 {
+                frac_val = frac_val.saturating_mul(10u128.pow(18 - frac_digits));
+            }
+            Ok(int_val
+                .saturating_mul(RATE_PRECISION)
+                .saturating_add(frac_val))
+        }
+
+        /// Reverse-direction to_amount — mirrors ``calculate_to_amount`` in Python.
+        fn calculate_to_amount_reverse(
+            from_amount: Balance,
+            rate: &str,
+            to_decimals: u32,
+            from_decimals: u32,
+        ) -> Result<Balance, Error> {
+            let rate_fixed = Self::parse_rate_fixed(rate)?;
+            if rate_fixed == 0 {
+                return Ok(0);
+            }
+            let from = u128::from(from_amount);
+            let decimal_diff = i64::from(to_decimals) - i64::from(from_decimals);
+            let result = if decimal_diff >= 0 {
+                let divisor = rate_fixed.saturating_mul(10u128.pow(decimal_diff as u32));
+                if divisor == 0 {
+                    0
+                } else {
+                    from.saturating_mul(RATE_PRECISION) / divisor
+                }
+            } else {
+                let multiplier = 10u128.pow((-decimal_diff) as u32);
+                from.saturating_mul(RATE_PRECISION)
+                    .saturating_mul(multiplier)
+                    / rate_fixed
+            };
+            Ok(Balance::try_from(result).unwrap_or(Balance::MAX))
+        }
+
+        fn max_dest_from_collateral(
+            collateral: Balance,
+            rate: &str,
+            from_chain: &str,
+            to_chain: &str,
+        ) -> Result<Balance, Error> {
+            if !Self::is_reverse_payout(from_chain, to_chain) {
+                return Ok(0);
+            }
+            let (canon_from, canon_to) = Self::canonical_pair(from_chain, to_chain);
+            Self::calculate_to_amount_reverse(
+                collateral,
+                rate,
+                Self::chain_decimals(canon_to),
+                Self::chain_decimals(canon_from),
+            )
         }
 
         fn clear_confirmed_reservation(&mut self, miner: AccountId) {
@@ -868,7 +973,17 @@ mod allways_swap_manager {
 
             self.consensus_vote(miner, REQ_INITIATE, request_hash, move |this| {
                 let miner_collateral = this.collateral.get(miner).unwrap_or(0);
-                if tao_amount > miner_collateral {
+                if Self::is_reverse_payout(&from_chain, &to_chain) {
+                    let max_to = Self::max_dest_from_collateral(
+                        miner_collateral,
+                        &rate,
+                        &from_chain,
+                        &to_chain,
+                    )?;
+                    if to_amount > max_to {
+                        return Err(Error::InsufficientCollateral);
+                    }
+                } else if tao_amount > miner_collateral {
                     return Err(Error::InsufficientCollateral);
                 }
 

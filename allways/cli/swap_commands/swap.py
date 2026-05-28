@@ -884,7 +884,16 @@ def swap_now_command(
         console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
         min_swap, max_swap = 0, 0
 
-    viable, reason = check_swap_viability(tao_amount, selected_collateral, min_swap, max_swap)
+    viable, reason = check_swap_viability(
+        tao_amount,
+        selected_collateral,
+        min_swap,
+        max_swap,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        to_amount=to_amount,
+        rate=selected_pair.rate_str,
+    )
     if not viable:
         console.print(
             f'[red]Swap cannot be initiated at this amount: {reason} '
