@@ -112,57 +112,47 @@ class ValidatorStateStore:
     # ─── pending_confirms ───────────────────────────────────────────────
 
     def enqueue(self, item: PendingConfirm) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO pending_confirms (
-                    miner_hotkey, from_tx_hash, from_chain, to_chain,
-                    from_address, to_address, tao_amount, from_amount,
-                    to_amount, miner_from_address, miner_to_address,
-                    rate_str, reserved_until, from_tx_block, queued_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    item.miner_hotkey,
-                    item.from_tx_hash,
-                    item.from_chain,
-                    item.to_chain,
-                    item.from_address,
-                    item.to_address,
-                    item.tao_amount,
-                    item.from_amount,
-                    item.to_amount,
-                    item.miner_from_address,
-                    item.miner_to_address,
-                    item.rate_str,
-                    item.reserved_until,
-                    item.from_tx_block,
-                    item.queued_at,
-                ),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT OR REPLACE INTO pending_confirms (
+                miner_hotkey, from_tx_hash, from_chain, to_chain,
+                from_address, to_address, tao_amount, from_amount,
+                to_amount, miner_from_address, miner_to_address,
+                rate_str, reserved_until, from_tx_block, queued_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.miner_hotkey,
+                item.from_tx_hash,
+                item.from_chain,
+                item.to_chain,
+                item.from_address,
+                item.to_address,
+                item.tao_amount,
+                item.from_amount,
+                item.to_amount,
+                item.miner_from_address,
+                item.miner_to_address,
+                item.rate_str,
+                item.reserved_until,
+                item.from_tx_block,
+                item.queued_at,
+            ),
+        )
 
     def get_all(self) -> List[PendingConfirm]:
         """Snapshot of pending items, oldest first. Does not purge expired
         entries — call ``purge_expired_pending_confirms`` explicitly."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute('SELECT * FROM pending_confirms ORDER BY queued_at').fetchall()
+        rows = self._fetchall('SELECT * FROM pending_confirms ORDER BY queued_at')
         return [self.row_to_pending(row) for row in rows]
 
     def remove(self, miner_hotkey: str) -> Optional[PendingConfirm]:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute(
-                'SELECT * FROM pending_confirms WHERE miner_hotkey = ?',
-                (miner_hotkey,),
-            ).fetchone()
-            if row is None:
-                return None
-            conn.execute('DELETE FROM pending_confirms WHERE miner_hotkey = ?', (miner_hotkey,))
-            conn.commit()
-        return self.row_to_pending(row)
+        row = self._fetch_and_delete(
+            'SELECT * FROM pending_confirms WHERE miner_hotkey = ?',
+            'DELETE FROM pending_confirms WHERE miner_hotkey = ?',
+            (miner_hotkey,),
+        )
+        return self.row_to_pending(row) if row is not None else None
 
     def update_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
         """Refresh the cached reserved_until on an existing pending_confirms row.
@@ -171,39 +161,30 @@ class ValidatorStateStore:
         this, the row's stale value causes ``purge_expired_pending_confirms`` to
         delete a still-live entry the moment the original TTL elapses.
         """
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
-                (reserved_until, miner_hotkey),
-            )
-            conn.commit()
+        self._execute(
+            'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
+            (reserved_until, miner_hotkey),
+        )
 
     def has(self, miner_hotkey: str) -> bool:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute(
-                'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
-                (miner_hotkey,),
-            ).fetchone()
+        row = self._fetchone(
+            'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
+            (miner_hotkey,),
+        )
         return row is not None
 
     def pending_size(self) -> int:
-        with self.lock:
-            conn = self.require_connection()
-            count = conn.execute('SELECT COUNT(*) FROM pending_confirms').fetchone()[0]
-            return int(count)
+        row = self._fetchone('SELECT COUNT(*) FROM pending_confirms')
+        return int(row[0])
 
     def purge_expired_pending_confirms(self) -> int:
         """Drop pending confirms whose reservation has already expired."""
         if self.current_block_fn is None:
             return 0
-        current_block = self.current_block_fn()
-        with self.lock:
-            conn = self.require_connection()
-            cursor = conn.execute('DELETE FROM pending_confirms WHERE reserved_until < ?', (current_block,))
-            conn.commit()
-            return cursor.rowcount
+        return self._execute_returning_rowcount(
+            'DELETE FROM pending_confirms WHERE reserved_until < ?',
+            (self.current_block_fn(),),
+        )
 
     @staticmethod
     def row_to_pending(row: sqlite3.Row) -> PendingConfirm:
@@ -237,54 +218,42 @@ class ValidatorStateStore:
         """Persist (or overwrite) the commitment snapshot for a miner's
         reservation. Keyed on ``miner_hotkey`` — a miner has at most one live
         reservation, so a fresh ``MinerReserved`` replaces any stale pin."""
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO reservation_pins (
-                    miner_hotkey, reserve_block, from_chain, to_chain,
-                    rate_str, counter_rate_str, miner_from_address,
-                    miner_to_address, reserved_until, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    pin.miner_hotkey,
-                    pin.reserve_block,
-                    pin.from_chain,
-                    pin.to_chain,
-                    pin.rate_str,
-                    pin.counter_rate_str,
-                    pin.miner_from_address,
-                    pin.miner_to_address,
-                    pin.reserved_until,
-                    pin.created_at,
-                ),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT OR REPLACE INTO reservation_pins (
+                miner_hotkey, reserve_block, from_chain, to_chain,
+                rate_str, counter_rate_str, miner_from_address,
+                miner_to_address, reserved_until, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pin.miner_hotkey,
+                pin.reserve_block,
+                pin.from_chain,
+                pin.to_chain,
+                pin.rate_str,
+                pin.counter_rate_str,
+                pin.miner_from_address,
+                pin.miner_to_address,
+                pin.reserved_until,
+                pin.created_at,
+            ),
+        )
 
     def get_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute(
-                'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
-                (miner_hotkey,),
-            ).fetchone()
-        if row is None:
-            return None
-        return self.row_to_reservation_pin(row)
+        row = self._fetchone(
+            'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
+            (miner_hotkey,),
+        )
+        return self.row_to_reservation_pin(row) if row is not None else None
 
     def remove_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute(
-                'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
-                (miner_hotkey,),
-            ).fetchone()
-            if row is None:
-                return None
-            conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (miner_hotkey,))
-            conn.commit()
-        return self.row_to_reservation_pin(row)
+        row = self._fetch_and_delete(
+            'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
+            'DELETE FROM reservation_pins WHERE miner_hotkey = ?',
+            (miner_hotkey,),
+        )
+        return self.row_to_reservation_pin(row) if row is not None else None
 
     def update_reservation_pin_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
         """Refresh the cached reserved_until on an existing pin row.
@@ -293,24 +262,19 @@ class ValidatorStateStore:
         the reservation, so ``purge_expired_reservation_pins`` doesn't drop a
         still-live pin at its stale TTL.
         """
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                'UPDATE reservation_pins SET reserved_until = ? WHERE miner_hotkey = ?',
-                (reserved_until, miner_hotkey),
-            )
-            conn.commit()
+        self._execute(
+            'UPDATE reservation_pins SET reserved_until = ? WHERE miner_hotkey = ?',
+            (reserved_until, miner_hotkey),
+        )
 
     def purge_expired_reservation_pins(self) -> int:
         """Drop pins whose reservation has already expired."""
         if self.current_block_fn is None:
             return 0
-        current_block = self.current_block_fn()
-        with self.lock:
-            conn = self.require_connection()
-            cursor = conn.execute('DELETE FROM reservation_pins WHERE reserved_until < ?', (current_block,))
-            conn.commit()
-            return cursor.rowcount
+        return self._execute_returning_rowcount(
+            'DELETE FROM reservation_pins WHERE reserved_until < ?',
+            (self.current_block_fn(),),
+        )
 
     @staticmethod
     def row_to_reservation_pin(row: sqlite3.Row) -> ReservationPin:
@@ -344,28 +308,23 @@ class ValidatorStateStore:
         kind: str,
         rate: float,
     ) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT INTO reservation_pin_events
-                    (block_num, hotkey, from_chain, to_chain, kind, rate)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (block_num, hotkey, (from_chain or '').lower(), (to_chain or '').lower(), kind, float(rate)),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT INTO reservation_pin_events
+                (block_num, hotkey, from_chain, to_chain, kind, rate)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (block_num, hotkey, (from_chain or '').lower(), (to_chain or '').lower(), kind, float(rate)),
+        )
 
     def load_all_reservation_pin_events(self) -> List[dict]:
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT block_num, hotkey, from_chain, to_chain, kind, rate
-                FROM reservation_pin_events
-                ORDER BY block_num ASC, id ASC
-                """
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT block_num, hotkey, from_chain, to_chain, kind, rate
+            FROM reservation_pin_events
+            ORDER BY block_num ASC, id ASC
+            """
+        )
         return [
             {
                 'block_num': r['block_num'],
@@ -387,18 +346,16 @@ class ValidatorStateStore:
     ) -> List[dict]:
         """Pin lifecycle events in ``(start_block, end_block]`` for a direction,
         oldest first."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT id, block_num, hotkey, kind, rate
-                FROM reservation_pin_events
-                WHERE from_chain = ? AND to_chain = ?
-                  AND block_num > ? AND block_num <= ?
-                ORDER BY block_num ASC, id ASC
-                """,
-                ((from_chain or '').lower(), (to_chain or '').lower(), start_block, end_block),
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT id, block_num, hotkey, kind, rate
+            FROM reservation_pin_events
+            WHERE from_chain = ? AND to_chain = ?
+              AND block_num > ? AND block_num <= ?
+            ORDER BY block_num ASC, id ASC
+            """,
+            ((from_chain or '').lower(), (to_chain or '').lower(), start_block, end_block),
+        )
         return [
             {
                 'id': r['id'],
@@ -418,20 +375,17 @@ class ValidatorStateStore:
         """
         if cutoff_block <= 0:
             return
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                DELETE FROM reservation_pin_events
-                WHERE block_num < ?
-                  AND id NOT IN (
-                    SELECT MAX(id) FROM reservation_pin_events
-                    GROUP BY hotkey, from_chain, to_chain
-                  )
-                """,
-                (cutoff_block,),
-            )
-            conn.commit()
+        self._execute(
+            """
+            DELETE FROM reservation_pin_events
+            WHERE block_num < ?
+              AND id NOT IN (
+                SELECT MAX(id) FROM reservation_pin_events
+                GROUP BY hotkey, from_chain, to_chain
+              )
+            """,
+            (cutoff_block,),
+        )
 
     # ─── rate_events ────────────────────────────────────────────────────
 
@@ -471,20 +425,16 @@ class ValidatorStateStore:
         to_chain: str,
         block: int,
     ) -> Optional[Tuple[float, int]]:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute(
-                """
-                SELECT rate, block FROM rate_events
-                WHERE hotkey = ? AND from_chain = ? AND to_chain = ? AND block <= ?
-                ORDER BY block DESC, id DESC
-                LIMIT 1
-                """,
-                (hotkey, from_chain, to_chain, block),
-            ).fetchone()
-        if row is None:
-            return None
-        return row['rate'], row['block']
+        row = self._fetchone(
+            """
+            SELECT rate, block FROM rate_events
+            WHERE hotkey = ? AND from_chain = ? AND to_chain = ? AND block <= ?
+            ORDER BY block DESC, id DESC
+            LIMIT 1
+            """,
+            (hotkey, from_chain, to_chain, block),
+        )
+        return (row['rate'], row['block']) if row is not None else None
 
     def get_rate_events_in_range(
         self,
@@ -494,16 +444,14 @@ class ValidatorStateStore:
         end_block: int,
     ) -> List[dict]:
         """Rate events in ``(start_block, end_block]`` for a direction, oldest first."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT id, hotkey, rate, block FROM rate_events
-                WHERE from_chain = ? AND to_chain = ? AND block > ? AND block <= ?
-                ORDER BY block ASC, id ASC
-                """,
-                (from_chain, to_chain, start_block, end_block),
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT id, hotkey, rate, block FROM rate_events
+            WHERE from_chain = ? AND to_chain = ? AND block > ? AND block <= ?
+            ORDER BY block ASC, id ASC
+            """,
+            (from_chain, to_chain, start_block, end_block),
+        )
         return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
 
     # ─── swap_outcomes ──────────────────────────────────────────────────
@@ -522,42 +470,37 @@ class ValidatorStateStore:
         # volume query is robust to upstream case drift. SQLite text
         # comparisons are case-sensitive and DIRECTION_POOLS keys are
         # lowercase.
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO swap_outcomes
-                    (swap_id, miner_hotkey, completed, resolved_block, tao_amount, from_chain, to_chain)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    swap_id,
-                    miner_hotkey,
-                    1 if completed else 0,
-                    resolved_block,
-                    int(tao_amount or 0),
-                    (from_chain or '').lower(),
-                    (to_chain or '').lower(),
-                ),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT OR REPLACE INTO swap_outcomes
+                (swap_id, miner_hotkey, completed, resolved_block, tao_amount, from_chain, to_chain)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                swap_id,
+                miner_hotkey,
+                1 if completed else 0,
+                resolved_block,
+                int(tao_amount or 0),
+                (from_chain or '').lower(),
+                (to_chain or '').lower(),
+            ),
+        )
 
     def get_success_rates_since(self, since_block: int) -> Dict[str, Tuple[int, int]]:
         """Return ``{hotkey: (completed_count, timed_out_count)}`` for outcomes
         resolved at or after ``since_block``."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT miner_hotkey,
-                       SUM(completed) AS completed,
-                       SUM(1 - completed) AS timed_out
-                FROM swap_outcomes
-                WHERE resolved_block >= ?
-                GROUP BY miner_hotkey
-                """,
-                (since_block,),
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT miner_hotkey,
+                   SUM(completed) AS completed,
+                   SUM(1 - completed) AS timed_out
+            FROM swap_outcomes
+            WHERE resolved_block >= ?
+            GROUP BY miner_hotkey
+            """,
+            (since_block,),
+        )
         return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
 
     def get_volume_since(self, since_block: int) -> Dict[str, int]:
@@ -568,17 +511,15 @@ class ValidatorStateStore:
         direction breakdown. Volume-weighted scoring uses
         ``get_volume_by_direction_since`` so a miner serving one direction
         isn't diluted by network volume on the other direction."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT miner_hotkey, SUM(tao_amount) AS total
-                FROM swap_outcomes
-                WHERE resolved_block >= ? AND completed = 1
-                GROUP BY miner_hotkey
-                """,
-                (since_block,),
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT miner_hotkey, SUM(tao_amount) AS total
+            FROM swap_outcomes
+            WHERE resolved_block >= ? AND completed = 1
+            GROUP BY miner_hotkey
+            """,
+            (since_block,),
+        )
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 
     def get_volume_by_direction_since(self, since_block: int, from_chain: str, to_chain: str) -> Dict[str, int]:
@@ -588,103 +529,75 @@ class ValidatorStateStore:
 
         Lookup is lowercased to match the normalization applied in
         ``insert_swap_outcome``."""
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT miner_hotkey, SUM(tao_amount) AS total
-                FROM swap_outcomes
-                WHERE resolved_block >= ?
-                  AND completed = 1
-                  AND from_chain = ?
-                  AND to_chain = ?
-                GROUP BY miner_hotkey
-                """,
-                (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
-            ).fetchall()
+        rows = self._fetchall(
+            """
+            SELECT miner_hotkey, SUM(tao_amount) AS total
+            FROM swap_outcomes
+            WHERE resolved_block >= ?
+              AND completed = 1
+              AND from_chain = ?
+              AND to_chain = ?
+            GROUP BY miner_hotkey
+            """,
+            (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
+        )
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
 
     def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
         if cutoff_block <= 0:
             return
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
-            conn.commit()
+        self._execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
 
     # ─── event_watcher state ────────────────────────────────────────────
 
     def insert_active_event(self, block_num: int, hotkey: str, active: bool) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                'INSERT INTO active_events (block_num, hotkey, active) VALUES (?, ?, ?)',
-                (block_num, hotkey, 1 if active else 0),
-            )
-            conn.commit()
+        self._execute(
+            'INSERT INTO active_events (block_num, hotkey, active) VALUES (?, ?, ?)',
+            (block_num, hotkey, 1 if active else 0),
+        )
 
     def insert_busy_event(self, block_num: int, hotkey: str, delta: int, swap_id: Optional[int] = None) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                'INSERT INTO busy_events (block_num, hotkey, delta, swap_id) VALUES (?, ?, ?, ?)',
-                (block_num, hotkey, delta, swap_id),
-            )
-            conn.commit()
+        self._execute(
+            'INSERT INTO busy_events (block_num, hotkey, delta, swap_id) VALUES (?, ?, ?, ?)',
+            (block_num, hotkey, delta, swap_id),
+        )
 
     def load_all_active_events(self) -> List[dict]:
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                'SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC'
-            ).fetchall()
+        rows = self._fetchall(
+            'SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC'
+        )
         return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'active': bool(r['active'])} for r in rows]
 
     def load_all_busy_events(self) -> List[dict]:
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute(
-                'SELECT block_num, hotkey, delta, swap_id FROM busy_events ORDER BY block_num ASC, id ASC'
-            ).fetchall()
+        rows = self._fetchall(
+            'SELECT block_num, hotkey, delta, swap_id FROM busy_events ORDER BY block_num ASC, id ASC'
+        )
         return [
             {'block_num': r['block_num'], 'hotkey': r['hotkey'], 'delta': r['delta'], 'swap_id': r['swap_id']}
             for r in rows
         ]
 
     def get_event_cursor(self) -> Optional[int]:
-        with self.lock:
-            conn = self.require_connection()
-            row = conn.execute('SELECT value FROM event_watcher_meta WHERE key = ?', ('cursor',)).fetchone()
+        row = self._fetchone('SELECT value FROM event_watcher_meta WHERE key = ?', ('cursor',))
         return int(row['value']) if row is not None else None
 
     def set_event_cursor(self, block_num: int) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                INSERT INTO event_watcher_meta (key, value) VALUES ('cursor', ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (block_num,),
-            )
-            conn.commit()
+        self._execute(
+            """
+            INSERT INTO event_watcher_meta (key, value) VALUES ('cursor', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (block_num,),
+        )
 
     def add_bootstrapped_swap(self, swap_id: int) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute('INSERT OR IGNORE INTO bootstrapped_swaps (swap_id) VALUES (?)', (swap_id,))
-            conn.commit()
+        self._execute('INSERT OR IGNORE INTO bootstrapped_swaps (swap_id) VALUES (?)', (swap_id,))
 
     def remove_bootstrapped_swap(self, swap_id: int) -> None:
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute('DELETE FROM bootstrapped_swaps WHERE swap_id = ?', (swap_id,))
-            conn.commit()
+        self._execute('DELETE FROM bootstrapped_swaps WHERE swap_id = ?', (swap_id,))
 
     def load_bootstrapped_swaps(self) -> Set[int]:
-        with self.lock:
-            conn = self.require_connection()
-            rows = conn.execute('SELECT swap_id FROM bootstrapped_swaps').fetchall()
+        rows = self._fetchall('SELECT swap_id FROM bootstrapped_swaps')
         return {int(r['swap_id']) for r in rows}
 
     def prune_active_events(self, cutoff_block: int) -> None:
@@ -693,17 +606,14 @@ class ValidatorStateStore:
         prune's anchor-preservation rule)."""
         if cutoff_block <= 0:
             return
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                DELETE FROM active_events
-                WHERE block_num < ?
-                  AND id NOT IN (SELECT MAX(id) FROM active_events GROUP BY hotkey)
-                """,
-                (cutoff_block,),
-            )
-            conn.commit()
+        self._execute(
+            """
+            DELETE FROM active_events
+            WHERE block_num < ?
+              AND id NOT IN (SELECT MAX(id) FROM active_events GROUP BY hotkey)
+            """,
+            (cutoff_block,),
+        )
 
     def prune_busy_events(self, cutoff_block: int) -> None:
         """Drop busy events older than ``cutoff_block`` except for hotkeys whose
@@ -711,17 +621,14 @@ class ValidatorStateStore:
         +1/-1 history so a future SwapCompleted's -1 isn't orphaned."""
         if cutoff_block <= 0:
             return
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                DELETE FROM busy_events
-                WHERE block_num < ?
-                  AND hotkey NOT IN (SELECT hotkey FROM busy_events GROUP BY hotkey HAVING SUM(delta) > 0)
-                """,
-                (cutoff_block,),
-            )
-            conn.commit()
+        self._execute(
+            """
+            DELETE FROM busy_events
+            WHERE block_num < ?
+              AND hotkey NOT IN (SELECT hotkey FROM busy_events GROUP BY hotkey HAVING SUM(delta) > 0)
+            """,
+            (cutoff_block,),
+        )
 
     def reset_event_watcher_state(self) -> None:
         """Wipe all event-watcher persistence. Used when the cursor is more than
@@ -751,20 +658,17 @@ class ValidatorStateStore:
         """Delete rate events older than ``cutoff_block``, preserving the
         latest row per ``(hotkey, from_chain, to_chain)`` as a state-
         reconstruction anchor for ``get_latest_rate_before(window_start)``."""
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                """
-                DELETE FROM rate_events
-                WHERE block < ?
-                  AND id NOT IN (
-                      SELECT MAX(id) FROM rate_events
-                      GROUP BY hotkey, from_chain, to_chain
-                  )
-                """,
-                (cutoff_block,),
-            )
-            conn.commit()
+        self._execute(
+            """
+            DELETE FROM rate_events
+            WHERE block < ?
+              AND id NOT IN (
+                  SELECT MAX(id) FROM rate_events
+                  GROUP BY hotkey, from_chain, to_chain
+              )
+            """,
+            (cutoff_block,),
+        )
 
     def close(self) -> None:
         with self.lock:
@@ -776,6 +680,58 @@ class ValidatorStateStore:
         if self.conn is None:
             raise RuntimeError('ValidatorStateStore is closed')
         return self.conn
+
+    # ─── crud helpers ───────────────────────────────────────────────────
+    #
+    # Wrap the lock/connection/commit dance shared by every table's
+    # methods. Use these for any single-statement operation. Methods that
+    # need to hold the lock across multiple statements (e.g.
+    # ``insert_rate_event``'s read-then-conditional-write,
+    # ``delete_hotkey``'s multi-table sweep) keep the explicit ``with
+    # self.lock`` block — splitting their lock acquisition would break
+    # atomicity.
+
+    def _execute(self, sql: str, params: Tuple = ()) -> None:
+        """Single-statement write under lock with commit."""
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(sql, params)
+            conn.commit()
+
+    def _execute_returning_rowcount(self, sql: str, params: Tuple = ()) -> int:
+        """Single-statement write under lock; returns affected row count."""
+        with self.lock:
+            conn = self.require_connection()
+            cursor = conn.execute(sql, params)
+            conn.commit()
+            return cursor.rowcount
+
+    def _fetchone(self, sql: str, params: Tuple = ()) -> Optional[sqlite3.Row]:
+        """Read a single row under lock. Caller is responsible for mapping
+        the row to a domain type (often via a ``row_to_X`` helper)."""
+        with self.lock:
+            conn = self.require_connection()
+            return conn.execute(sql, params).fetchone()
+
+    def _fetchall(self, sql: str, params: Tuple = ()) -> List[sqlite3.Row]:
+        """Read all matching rows under lock. Caller maps."""
+        with self.lock:
+            conn = self.require_connection()
+            return conn.execute(sql, params).fetchall()
+
+    def _fetch_and_delete(
+        self, select_sql: str, delete_sql: str, params: Tuple
+    ) -> Optional[sqlite3.Row]:
+        """Atomic snapshot-then-delete under a single lock acquisition.
+        Returns the pre-delete row, or None if no row matched."""
+        with self.lock:
+            conn = self.require_connection()
+            row = conn.execute(select_sql, params).fetchone()
+            if row is None:
+                return None
+            conn.execute(delete_sql, params)
+            conn.commit()
+            return row
 
     def init_db(self) -> None:
         with self.lock:
