@@ -2249,15 +2249,9 @@ class TestHistoricalCollateralReplay:
         the latest event at or before the queried block wins."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active=set())
-        watcher.apply_event(
-            100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 100_000_000}
-        )
-        watcher.apply_event(
-            500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 250_000_000}
-        )
-        watcher.apply_event(
-            800, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 50, 'remaining': 50_000_000}
-        )
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 100_000_000})
+        watcher.apply_event(500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 250_000_000})
+        watcher.apply_event(800, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 50, 'remaining': 50_000_000})
         assert watcher.get_miner_collaterals_at(50) == {}
         assert watcher.get_miner_collaterals_at(100) == {'hk_a': 100_000_000}
         assert watcher.get_miner_collaterals_at(499) == {'hk_a': 100_000_000}
@@ -2273,9 +2267,7 @@ class TestHistoricalCollateralReplay:
         to keep the replayed series in step with on-chain collateral."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a'})
-        watcher.apply_event(
-            100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000}
-        )
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
         watcher.apply_event(200, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
         watcher.apply_event(
             300,
@@ -2291,9 +2283,7 @@ class TestHistoricalCollateralReplay:
         capacity, not the pre-slash value."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a'})
-        watcher.apply_event(
-            100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000}
-        )
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
         watcher.apply_event(200, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
         watcher.apply_event(
             300,
@@ -2310,18 +2300,10 @@ class TestHistoricalCollateralReplay:
         correct value."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active=set())
-        watcher.apply_event(
-            100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000}
-        )
-        watcher.apply_event(
-            200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000}
-        )
-        watcher.apply_event(
-            5_000, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000}
-        )
-        watcher.apply_event(
-            50, 'CollateralPosted', {'miner': 'hk_b', 'amount': 0, 'total': 300_000_000}
-        )
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000})
+        watcher.apply_event(200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000})
+        watcher.apply_event(5_000, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
+        watcher.apply_event(50, 'CollateralPosted', {'miner': 'hk_b', 'amount': 0, 'total': 300_000_000})
         # current_block=10_000, SCORING_WINDOW_BLOCKS=1200 → cutoff=8_800.
         watcher.prune_old_events(10_000)
         blocks_a = [ev.block for ev in watcher.collateral_events_by_hotkey['hk_a']]
@@ -2337,12 +2319,8 @@ class TestHistoricalCollateralReplay:
         ``by_hotkey`` index match what was on disk."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a'})
-        watcher.apply_event(
-            100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000}
-        )
-        watcher.apply_event(
-            500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000}
-        )
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000})
+        watcher.apply_event(500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000})
         # Build a second watcher pointed at the same DB and hydrate.
         store.set_event_cursor(600)
         watcher2 = ContractEventWatcher(

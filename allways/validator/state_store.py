@@ -583,8 +583,7 @@ class ValidatorStateStore:
 
     def load_all_collateral_events(self) -> List[dict]:
         rows = self._fetchall(
-            'SELECT block_num, hotkey, collateral_rao FROM collateral_events '
-            'ORDER BY block_num ASC, id ASC'
+            'SELECT block_num, hotkey, collateral_rao FROM collateral_events ORDER BY block_num ASC, id ASC'
         )
         return [
             {'block_num': r['block_num'], 'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao'])}

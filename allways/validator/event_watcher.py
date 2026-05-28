@@ -520,9 +520,7 @@ class ContractEventWatcher:
 
         collateral_rows = self.state_store.load_all_collateral_events()
         self.collateral_events = [
-            CollateralEvent(
-                hotkey=r['hotkey'], collateral_rao=int(r['collateral_rao']), block=r['block_num']
-            )
+            CollateralEvent(hotkey=r['hotkey'], collateral_rao=int(r['collateral_rao']), block=r['block_num'])
             for r in collateral_rows
         ]
         self.collateral_events_by_hotkey = {}

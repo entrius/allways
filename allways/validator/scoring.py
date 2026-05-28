@@ -411,7 +411,9 @@ def merge_replay_events(
 
     for e in event_watcher.get_collateral_events_in_range(window_start, window_end):
         events.append(
-            ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao']))
+            ReplayEvent(
+                block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
+            )
         )
 
     events.sort(key=lambda ev: ev.sort_key)
