@@ -190,6 +190,23 @@ class TestCrownHoldersHelper:
         # Smallest miner is busy → next-smallest takes the crown.
         assert crown_holders_at_instant(rates, {'a', 'b'}, busy={'a'}, lower_rate_wins=True) == ['b']
 
+    def test_executable_check_drops_sentinel_and_falls_through(self):
+        """Regression for #392: a miner posting 1e10 TAO/BTC wins the rate
+        sort but is not routable, so the executability gate kicks them out
+        and the crown drops to the next-best sane rate."""
+        rates = {'sentinel': 1e10, 'sane': 326.0}
+        # Reject the sentinel rate, accept anything ≤ 1e6 (well above sane).
+        check = lambda r: r <= 1e6
+        assert crown_holders_at_instant(
+            rates, {'sentinel', 'sane'}, executable_rate_check=check
+        ) == ['sane']
+
+    def test_executable_check_none_preserves_legacy_behavior(self):
+        """When no check is supplied, the old qualification rules apply —
+        sentinel still wins. Ensures existing callers aren't surprised."""
+        rates = {'sentinel': 1e10, 'sane': 326.0}
+        assert crown_holders_at_instant(rates, {'sentinel', 'sane'}) == ['sentinel']
+
 
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
@@ -244,6 +261,67 @@ class TestReplayCrownTime:
         )
         # B leads blocks (100, 600] → 500 blocks, A leads (600, 1100] → 500 blocks
         assert crown == {'hk_b': 500.0, 'hk_a': 500.0}
+        store.close()
+
+    def test_sentinel_rate_earns_no_crown_when_bounds_set(self, tmp_path: Path):
+        """Regression for #392: a miner posting an unexecutable sentinel
+        rate (1e10 TAO/BTC) wins the rate sort but cannot route any
+        positive integer sat into ``[min_swap, max_swap]`` — they should
+        earn zero crown, and the sane miner takes the entire window."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
+            ('hk_sane', 'btc', 'tao', 326.0, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
+            min_swap_rao=100_000_000,  # 0.1 TAO
+            max_swap_rao=500_000_000,  # 0.5 TAO
+        )
+        assert crown == {'hk_sane': 1000.0}
+        store.close()
+
+    def test_sentinel_rate_still_wins_when_bounds_unset(self, tmp_path: Path):
+        """Without configured bounds the executability filter is permissive
+        — preserves legacy behavior on chains/networks that haven't yet
+        set ``min_swap_amount`` / ``max_swap_amount``."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        conn = store.require_connection()
+        for row in (
+            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
+            ('hk_sane', 'btc', 'tao', 326.0, 0),
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
+        )
+        assert crown == {'hk_sentinel': 1000.0}
         store.close()
 
     def test_zero_rate_optout_hands_crown_to_still_offering_miner(self, tmp_path: Path):

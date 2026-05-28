@@ -1,5 +1,6 @@
 """Shared rate calculation — single source of truth for to_amount math."""
 
+import math
 from decimal import Decimal
 from typing import Tuple
 
@@ -117,6 +118,59 @@ def quote_within_slippage(quoted: int, recomputed: int, slippage_bps: int) -> bo
     if recomputed >= quoted:
         return True
     return recomputed * 10_000 >= quoted * (10_000 - slippage_bps)
+
+
+def is_executable_rate(
+    rate: float,
+    from_chain: str,
+    to_chain: str,
+    min_swap_rao: int,
+    max_swap_rao: int,
+) -> bool:
+    """True iff some positive integer source amount yields a TAO leg within
+    ``[min_swap_rao, max_swap_rao]`` at the given rate and direction.
+
+    Crown-eligibility gate: sentinel rates like ``1e10`` TAO/BTC win the
+    rate sort but no positive integer satoshi maps to an in-bounds TAO
+    leg, so they're not routable by any user — they should not earn crown.
+
+    A bound at ``0`` is the contract's "unset" sentinel and disables that
+    side; both at 0 → permissive (no on-chain bounds yet).
+    """
+    if not math.isfinite(rate) or rate <= 0:
+        return False
+    if min_swap_rao <= 0 and max_swap_rao <= 0:
+        return True
+
+    if to_chain == 'tao':
+        # Forward into TAO: dest_rao = source_units × rate × 10**(tao_dec - src_dec).
+        src_decimals = get_chain(from_chain).decimals
+        decimal_factor = 10 ** (get_chain('tao').decimals - src_decimals)
+        denom = rate * decimal_factor
+        if not math.isfinite(denom) or denom <= 0:
+            # rate × decimal_factor overflowed (e.g. 1.797e308 × 10) → smallest
+            # positive integer source already maps above any finite max bound.
+            return False
+        min_source = max(1, math.ceil(max(1, min_swap_rao) / denom))
+        if max_swap_rao <= 0:
+            return True
+        max_source = math.floor(max_swap_rao / denom)
+        return min_source <= max_source
+
+    if from_chain == 'tao':
+        # Reverse out of TAO: TAO leg = source_rao itself. Any positive
+        # integer rao in [min, max] qualifies — rate doesn't gate the TAO
+        # side here. (The asymmetric griefing case — extremely low rate
+        # producing an unfulfillable BTC payout — is an economic-backing
+        # concern, not a granularity one, and is out of scope for this
+        # predicate.)
+        lo = max(1, min_swap_rao)
+        if max_swap_rao <= 0:
+            return True
+        return lo <= max_swap_rao
+
+    # Non-TAO pairs have no TAO-leg bound to enforce.
+    return True
 
 
 def check_swap_viability(
