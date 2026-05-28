@@ -11,7 +11,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.forward import extend_fulfilled_near_timeout
+from allways.validator.forward import (
+    extend_fulfilled_near_timeout,
+    initialize_pending_user_reservations,
+    purge_deregistered_hotkeys,
+)
+from allways.validator.state_store import PendingConfirm, ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
 # Real swap 206 numbers: extension 2 was proposed at this block, and a BTC
@@ -136,3 +141,59 @@ class TestExtendFulfilledNearTimeout:
 
         v.optimistic_extensions.maybe_propose_timeout.assert_not_called()
         v.optimistic_extensions.maybe_challenge_timeout.assert_not_called()
+
+
+PENDING_CONFIRM_SAMPLE = PendingConfirm(
+    miner_hotkey='miner-gone',
+    from_tx_hash='tx-1',
+    from_chain='btc',
+    to_chain='tao',
+    from_address='bc1-user',
+    to_address='5user',
+    tao_amount=123,
+    from_amount=456,
+    to_amount=789,
+    miner_from_address='bc1-miner',
+    miner_to_address='5miner',
+    rate_str='350',
+    reserved_until=1000,
+)
+
+
+class TestPurgeDeregisteredHotkeys:
+    def test_clears_pending_confirms_for_stale_hotkeys(self, tmp_path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.enqueue(PENDING_CONFIRM_SAMPLE)
+        assert store.has('miner-gone')
+
+        v = SimpleNamespace(
+            metagraph=SimpleNamespace(hotkeys=['miner-live']),
+            last_known_rates={('miner-gone', 'btc', 'tao'): '350'},
+            state_store=store,
+        )
+        purge_deregistered_hotkeys(v)
+
+        assert not store.has('miner-gone')
+        assert v.last_known_rates == {}
+        store.close()
+
+
+class TestInitializePendingSkipsDeregistered:
+    def test_drops_pending_for_hotkey_not_in_metagraph(self, tmp_path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.enqueue(PENDING_CONFIRM_SAMPLE)
+        provider = MagicMock()
+
+        v = SimpleNamespace(
+            metagraph=SimpleNamespace(hotkeys=['miner-live']),
+            state_store=store,
+            block=100,
+            chain_providers={'btc': provider},
+            event_watcher=SimpleNamespace(open_swap_count={'miner-gone': 0}),
+            contract_client=MagicMock(),
+        )
+        initialize_pending_user_reservations(v)
+
+        assert not store.has('miner-gone')
+        provider.verify_transaction.assert_not_called()
+        store.close()

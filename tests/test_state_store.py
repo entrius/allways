@@ -10,7 +10,7 @@ fresh ``init_db()`` creating the table.
 from dataclasses import replace
 from pathlib import Path
 
-from allways.validator.state_store import ReservationPin, ValidatorStateStore
+from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
 
 PIN_SAMPLE1 = ReservationPin(
     miner_hotkey='miner-1',
@@ -145,6 +145,32 @@ class TestReservationPinCrossTable:
 
         store.delete_hotkey('miner-1')
         assert store.get_reservation_pin('miner-1') is None
+        store.close()
+
+    def test_delete_hotkey_clears_pending_confirm(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.enqueue(
+            PendingConfirm(
+                miner_hotkey='miner-1',
+                from_tx_hash='tx-1',
+                from_chain='btc',
+                to_chain='tao',
+                from_address='bc1-user',
+                to_address='5user',
+                tao_amount=123,
+                from_amount=456,
+                to_amount=789,
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                rate_str='350',
+                reserved_until=1000,
+            )
+        )
+        assert store.has('miner-1')
+
+        store.delete_hotkey('miner-1')
+
+        assert not store.has('miner-1')
         store.close()
 
     def test_fresh_init_db_has_reservation_pins_table(self, tmp_path: Path):

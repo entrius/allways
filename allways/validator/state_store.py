@@ -695,6 +695,7 @@ class ValidatorStateStore:
             conn.execute('DELETE FROM swap_outcomes WHERE miner_hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (hotkey,))
             conn.execute('DELETE FROM reservation_pin_events WHERE hotkey = ?', (hotkey,))
+            conn.execute('DELETE FROM pending_confirms WHERE miner_hotkey = ?', (hotkey,))
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator.state_store import PendingConfirm, ValidatorStateStore
 
 
 def make_store(tmp_path: Path) -> ValidatorStateStore:
@@ -186,6 +186,32 @@ class TestDeleteHotkey:
         # hk2 untouched
         assert store.get_latest_rate_before('hk2', 'tao', 'btc', block=200) is not None
         assert 'hk2' in store.get_success_rates_since(0)
+        store.close()
+
+    def test_removes_pending_confirms(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        store.enqueue(
+            PendingConfirm(
+                miner_hotkey='hk1',
+                from_tx_hash='tx-1',
+                from_chain='btc',
+                to_chain='tao',
+                from_address='bc1-user',
+                to_address='5user',
+                tao_amount=123,
+                from_amount=456,
+                to_amount=789,
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                rate_str='350',
+                reserved_until=1000,
+            )
+        )
+        assert store.has('hk1')
+
+        store.delete_hotkey('hk1')
+
+        assert not store.has('hk1')
         store.close()
 
 

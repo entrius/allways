@@ -128,6 +128,12 @@ def initialize_pending_user_reservations(self: Validator) -> None:
 
     for item in items:
         swap_label = f'{item.from_chain.upper()}->{item.to_chain.upper()}'
+        if item.miner_hotkey not in hotkey_to_uid:
+            self.state_store.remove(item.miner_hotkey)
+            bt.logging.info(
+                f'PendingConfirm [{swap_label} ({item.miner_hotkey[:8]})]: miner deregistered, dropping'
+            )
+            continue
         uid = hotkey_to_uid.get(item.miner_hotkey, '?')
         miner_short = f'UID {uid} ({item.miner_hotkey[:8]})'
         provider = self.chain_providers.get(item.from_chain)
@@ -403,10 +409,17 @@ def purge_deregistered_hotkeys(self: Validator) -> None:
     stale = {hk for (hk, _, _) in self.last_known_rates.keys()} - current_hotkeys
     if not stale:
         return
+    pending_dropped = 0
     for hk in stale:
+        if self.state_store.has(hk):
+            pending_dropped += 1
         self.state_store.delete_hotkey(hk)
     self.last_known_rates = {k: v for k, v in self.last_known_rates.items() if k[0] not in stale}
     bt.logging.info(f'forward: dropped state for {len(stale)} deregistered miner(s)')
+    if pending_dropped:
+        bt.logging.info(
+            f'forward: removed {pending_dropped} pending confirm(s) for deregistered miner(s)'
+        )
 
 
 async def confirm_miner_fulfillments(
