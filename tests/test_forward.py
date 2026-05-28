@@ -20,7 +20,7 @@ PROPOSE_BLOCK = 8_207_273
 EXT_TARGET = PROPOSE_BLOCK + 240
 
 
-def make_fulfilled_swap(swap_id: int = 206) -> Swap:
+def make_fulfilled_swap(swap_id: int = 206, to_amount: int = 37_189) -> Swap:
     """A FULFILLED TAO->BTC swap with a visible dest tx, one block from timeout."""
     return Swap(
         id=swap_id,
@@ -29,21 +29,29 @@ def make_fulfilled_swap(swap_id: int = 206) -> Swap:
         from_chain='tao',
         to_chain='btc',
         from_amount=100_000_000,
-        to_amount=37_189,
+        to_amount=to_amount,
         tao_amount=100_000_000,
         user_from_address='5user',
         user_to_address='bc1q-user',
+        miner_to_address='bc1q-miner',
+        rate='268',
         to_tx_hash='dest-tx-hash',
         status=SwapStatus.FULFILLED,
         timeout_block=PROPOSE_BLOCK + 1,
     )
 
 
-def make_validator(swap: Swap, block: int, finalized_target):
+_UNSET = object()
+
+
+def make_validator(swap: Swap, block: int, finalized_target, tx_info=_UNSET):
     """Stand-in Validator for ``extend_fulfilled_near_timeout``.
 
     ``finalized_target``: what ``maybe_finalize_timeout`` returns — an int for
     a finalize that lands this step, or ``None`` for no finalize.
+    ``tx_info``: what the provider's ``verify_transaction`` returns. Default
+    is a success namespace; pass ``None`` to simulate the provider rejecting
+    the dest tx (e.g. amount below canonical payout or sender mismatch).
     """
     tracker = SwapTracker(client=MagicMock())
     tracker.active[swap.id] = swap
@@ -54,7 +62,8 @@ def make_validator(swap: Swap, block: int, finalized_target):
     ext.maybe_propose_timeout.return_value = False
 
     provider = MagicMock()
-    provider.verify_transaction.return_value = SimpleNamespace(confirmations=1)
+    provider.verify_transaction.return_value = SimpleNamespace(confirmations=1) if tx_info is _UNSET else tx_info
+    provider.get_chain.return_value = SimpleNamespace(min_confirmations=3)
 
     contract_client = MagicMock()
     contract_client.get_swap_extension_count.return_value = 1
@@ -65,6 +74,7 @@ def make_validator(swap: Swap, block: int, finalized_target):
         optimistic_extensions=ext,
         chain_providers={'btc': provider},
         contract_client=contract_client,
+        swap_verifier=SimpleNamespace(fee_divisor=100),
     )
 
 
@@ -95,3 +105,34 @@ class TestExtendFulfilledNearTimeout:
         extend_fulfilled_near_timeout(v)
 
         v.optimistic_extensions.maybe_propose_timeout.assert_called_once()
+
+    def test_verifies_canonical_payout_and_miner_sender(self):
+        # Extension evidence must mirror final-confirm: expected_amount is the
+        # canonical payout from swap.rate (not the miner-controlled
+        # swap.to_amount), and expected_sender is pinned to miner_to_address.
+        # Without this, a dust mark_fulfilled buys timeout protection that
+        # final-confirm itself would reject.
+        swap = make_fulfilled_swap(to_amount=1)  # miner posted dust
+        v = make_validator(swap, block=PROPOSE_BLOCK, finalized_target=None)
+
+        extend_fulfilled_near_timeout(v)
+
+        provider = v.chain_providers['btc']
+        call = provider.verify_transaction.call_args
+        assert call.kwargs['expected_sender'] == 'bc1q-miner'
+        # Canonical payout derived from rate, not the dust to_amount the miner posted.
+        assert call.kwargs['expected_amount'] != 1
+        assert call.kwargs['expected_amount'] > 0
+
+    def test_skips_extension_when_dest_tx_fails_canonical_check(self):
+        # Provider returns None when the dest tx doesn't match the canonical
+        # amount or expected sender. The extension path must then skip propose
+        # so the swap proceeds to timeout naturally instead of being protected
+        # by a fraudulent mark_fulfilled.
+        swap = make_fulfilled_swap(to_amount=1)
+        v = make_validator(swap, block=PROPOSE_BLOCK, finalized_target=None, tx_info=None)
+
+        extend_fulfilled_near_timeout(v)
+
+        v.optimistic_extensions.maybe_propose_timeout.assert_not_called()
+        v.optimistic_extensions.maybe_challenge_timeout.assert_not_called()

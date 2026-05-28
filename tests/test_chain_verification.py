@@ -6,11 +6,13 @@ initiated. Closes the gap left by the contract enforcing ``used_from_tx``
 only on the source side.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from allways.chain_providers.base import TransactionInfo
 from allways.classes import Swap, SwapStatus
 from allways.validator.chain_verification import SwapVerifier
+from allways.validator.state_store import ValidatorStateStore
 
 
 def make_swap(swap_id: int = 1, to_chain: str = 'btc', initiated_block: int = 100) -> Swap:
@@ -140,3 +142,81 @@ class TestPruneToActive:
 
         assert v.dest_tip_at_init == {2: 200}
         assert v.source_verified_ids == {2}
+
+
+class TestSnapshotPersistence:
+    """A validator restart mid-swap must keep the original (early) snapshot;
+    re-snapshotting on warm start would capture a tip past the honest payout
+    block and reject the miner's tx as a replay."""
+
+    def test_restart_hydrates_snapshot_from_state_store(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        btc = MagicMock()
+        btc.get_current_block_height.return_value = 850_000
+
+        # First validator run observes the swap and persists the tip.
+        v1 = SwapVerifier(chain_providers={'btc': btc}, state_store=store)
+        v1.observe_initiation(make_swap(swap_id=1, to_chain='btc'), current_block=500)
+        assert v1.dest_tip_at_init[1] == 850_000
+
+        # Simulate restart: a fresh verifier sharing the same state_store.
+        # The dest-chain tip is now well past the honest payout block (e.g.
+        # honest payout at 850_100, current tip 850_500). If the new verifier
+        # re-snapshotted, the tip-at-init would be 850_500 and a valid payout
+        # at block 850_100 would be rejected as a replay.
+        btc.get_current_block_height.return_value = 850_500
+        v2 = SwapVerifier(chain_providers={'btc': btc}, state_store=store)
+
+        assert v2.dest_tip_at_init == {1: 850_000}
+
+        # Subsequent observe_initiation for the same swap is a no-op because
+        # the hydrated entry already exists — the late tip is never recorded.
+        v2.observe_initiation(make_swap(swap_id=1, to_chain='btc'), current_block=600)
+        assert v2.dest_tip_at_init[1] == 850_000
+
+        # Honest dest tx at block 850_100 (after init, before restart tip)
+        # still passes the freshness check.
+        swap = make_swap(swap_id=1, to_chain='btc')
+        assert v2.is_dest_tx_fresh(swap, tx_at(850_100)) is True
+        store.close()
+
+    def test_observe_initiation_persists_first_snapshot(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        btc = MagicMock()
+        btc.get_current_block_height.return_value = 850_000
+
+        v = SwapVerifier(chain_providers={'btc': btc}, state_store=store)
+        v.observe_initiation(make_swap(swap_id=1, to_chain='btc'), current_block=500)
+
+        assert store.load_dest_tip_snapshots() == {1: 850_000}
+        store.close()
+
+    def test_prune_to_active_removes_persisted_snapshot(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        btc = MagicMock()
+        btc.get_current_block_height.return_value = 850_000
+
+        v = SwapVerifier(chain_providers={'btc': btc}, state_store=store)
+        v.observe_initiation(make_swap(swap_id=1, to_chain='btc'), current_block=500)
+        v.observe_initiation(make_swap(swap_id=2, to_chain='btc'), current_block=501)
+
+        v.prune_to_active({2})
+
+        assert store.load_dest_tip_snapshots() == {2: 850_000}
+        store.close()
+
+    def test_persistence_failure_does_not_break_in_memory_snapshot(self):
+        # Forward-loop discipline: a sqlite write failure must not interrupt
+        # the snapshot path. The in-memory entry must still be present so the
+        # current run keeps a working replay defense.
+        failing_store = MagicMock()
+        failing_store.load_dest_tip_snapshots.return_value = {}
+        failing_store.upsert_dest_tip_snapshot.side_effect = RuntimeError('disk full')
+
+        btc = MagicMock()
+        btc.get_current_block_height.return_value = 850_000
+        v = SwapVerifier(chain_providers={'btc': btc}, state_store=failing_store)
+
+        v.observe_initiation(make_swap(swap_id=1, to_chain='btc'), current_block=500)
+
+        assert v.dest_tip_at_init == {1: 850_000}

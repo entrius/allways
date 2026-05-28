@@ -139,6 +139,7 @@ class Validator(BaseValidatorNeuron):
             chain_providers=self.chain_providers,
             fee_divisor=self.fee_divisor,
             metagraph=self.metagraph,
+            state_store=self.state_store,
         )
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).

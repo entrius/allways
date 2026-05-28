@@ -723,6 +723,59 @@ class ValidatorStateStore:
             )
             conn.commit()
 
+    # ─── dest_tip_snapshots ─────────────────────────────────────────────
+
+    def upsert_dest_tip_snapshot(
+        self,
+        swap_id: int,
+        dest_chain: str,
+        tip: int,
+        recorded_at: int,
+    ) -> None:
+        """Persist the dest-chain tip captured at first sighting of a swap.
+
+        INSERT OR IGNORE: only the first sighting matters for the replay-
+        defense lower bound, so a re-observation must not overwrite the
+        original (earlier) snapshot.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO dest_tip_snapshots (
+                    swap_id, dest_chain, tip, recorded_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (swap_id, dest_chain, tip, recorded_at),
+            )
+            conn.commit()
+
+    def load_dest_tip_snapshots(self) -> Dict[int, int]:
+        """Repopulate the in-memory snapshot map at SwapVerifier init.
+
+        Returned as ``{swap_id: tip}`` — the in-memory check only needs the
+        tip; ``dest_chain``/``recorded_at`` are kept on disk for debugging.
+        """
+        with self.lock:
+            conn = self.require_connection()
+            rows = conn.execute('SELECT swap_id, tip FROM dest_tip_snapshots').fetchall()
+        return {int(r['swap_id']): int(r['tip']) for r in rows}
+
+    def prune_dest_tip_snapshots(self, active_ids: Set[int]) -> None:
+        """Mirror the in-memory prune: drop snapshots for swaps no longer
+        tracked so the table doesn't accumulate forever."""
+        with self.lock:
+            conn = self.require_connection()
+            if not active_ids:
+                conn.execute('DELETE FROM dest_tip_snapshots')
+            else:
+                placeholders = ','.join('?' * len(active_ids))
+                conn.execute(
+                    f'DELETE FROM dest_tip_snapshots WHERE swap_id NOT IN ({placeholders})',
+                    tuple(int(sid) for sid in active_ids),
+                )
+            conn.commit()
+
     def reset_event_watcher_state(self) -> None:
         """Wipe all event-watcher persistence. Used when the cursor is more than
         a scoring window behind current — the chain has moved past replayable
@@ -890,6 +943,13 @@ class ValidatorStateStore:
 
                 CREATE TABLE IF NOT EXISTS bootstrapped_swaps (
                     swap_id INTEGER PRIMARY KEY
+                );
+
+                CREATE TABLE IF NOT EXISTS dest_tip_snapshots (
+                    swap_id     INTEGER PRIMARY KEY,
+                    dest_chain  TEXT NOT NULL,
+                    tip         INTEGER NOT NULL,
+                    recorded_at INTEGER NOT NULL
                 );
                 """
             )
