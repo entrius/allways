@@ -563,9 +563,7 @@ class ValidatorStateStore:
         )
 
     def load_all_active_events(self) -> List[dict]:
-        rows = self._fetchall(
-            'SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC'
-        )
+        rows = self._fetchall('SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC')
         return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'active': bool(r['active'])} for r in rows]
 
     def load_all_busy_events(self) -> List[dict]:
@@ -719,9 +717,7 @@ class ValidatorStateStore:
             conn = self.require_connection()
             return conn.execute(sql, params).fetchall()
 
-    def _fetch_and_delete(
-        self, select_sql: str, delete_sql: str, params: Tuple
-    ) -> Optional[sqlite3.Row]:
+    def _fetch_and_delete(self, select_sql: str, delete_sql: str, params: Tuple) -> Optional[sqlite3.Row]:
         """Atomic snapshot-then-delete under a single lock acquisition.
         Returns the pre-delete row, or None if no row matched."""
         with self.lock:
