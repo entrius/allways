@@ -20,6 +20,7 @@ from allways.constants import (
     CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
+    MAX_SCORING_BACKFILL_BLOCKS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
@@ -42,6 +43,27 @@ class DirectionTrace:
     best_rate: float = 0.0
 
 
+def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
+    """Block-based scoring gate. Fires once on a fresh process
+    (``initial_scoring_done`` False), then every ``SCORING_WINDOW_BLOCKS``
+    *blocks* — not every N forward steps. A forward pass can span several
+    blocks, so a step-count gate would fire far less often than once per
+    window and leave most blocks unscored; anchoring to block delta keeps the
+    cadence at the intended ~2h regardless of how long a forward pass takes."""
+    return not initial_scoring_done or (current_block - last_scored_block) >= SCORING_WINDOW_BLOCKS
+
+
+def scoring_window_bounds(current_block: int, last_scored_block: int) -> Tuple[int, int]:
+    """``(window_start, window_end)`` for a scoring round. Anchors
+    ``window_start`` to the last-scored block so consecutive rounds tile with
+    no per-block gap (round N's ``window_end`` == round N+1's ``window_start``),
+    independent of forward-pass length. ``MAX_SCORING_BACKFILL_BLOCKS`` caps how
+    far back a single catch-up round reaches after a stall."""
+    window_end = current_block
+    window_start = max(0, window_end - MAX_SCORING_BACKFILL_BLOCKS, last_scored_block)
+    return window_start, window_end
+
+
 def score_and_reward_miners(self: Validator) -> None:
     try:
         halted = contract_is_halted(self)
@@ -53,6 +75,10 @@ def score_and_reward_miners(self: Validator) -> None:
         self.update_scores(rewards, miner_uids)
         prune_rate_events(self)
         prune_swap_outcomes(self)
+        # Advance the cursor only after a round completes, so a mid-round
+        # failure retries the same window next forward instead of skipping it.
+        # self.block is TTL-cached, so it equals the window_end the round used.
+        self.last_scored_block = self.block
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
@@ -133,8 +159,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
 
-    window_end = self.block
-    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    window_start, window_end = scoring_window_bounds(self.block, self.last_scored_block)
 
     # A miner's *current* active flag is irrelevant to whether they earned
     # crown during the replay window. The only at-scoring-time check is

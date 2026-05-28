@@ -6,14 +6,21 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
+from allways.constants import (
+    MAX_SCORING_BACKFILL_BLOCKS,
+    RECYCLE_UID,
+    SCORING_WINDOW_BLOCKS,
+    SUCCESS_EXPONENT,
+)
 from allways.validator.event_watcher import ActiveEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
     credibility_ramp,
     crown_holders_at_instant,
+    due_for_scoring,
     replay_crown_time_window,
     score_and_reward_miners,
+    scoring_window_bounds,
     success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
@@ -105,6 +112,9 @@ def make_validator(
                 )
     return SimpleNamespace(
         block=block,
+        # Seed one window back so scoring_window_bounds yields the same
+        # [block - SCORING_WINDOW_BLOCKS, block] window these tests assume.
+        last_scored_block=max(0, block - SCORING_WINDOW_BLOCKS),
         metagraph=make_metagraph(hotkeys),
         state_store=store,
         event_watcher=watcher,
@@ -2160,3 +2170,57 @@ class TestEventWatcherPassesTaoAmount:
         )
         assert row['tao_amount'] == 0
         store.close()
+
+
+class TestScoringCadenceAndWindow:
+    """Block-based scoring gate + cursor-anchored, gap-free window tiling.
+
+    Guards the fix for the step-vs-block mismatch: a forward pass spans
+    several blocks, so a step-count gate (`step % SCORING_WINDOW_BLOCKS`)
+    fired far less often than once per window and left most blocks unscored.
+    """
+
+    def test_gate_forces_first_pass_on_fresh_process(self):
+        # initial_scoring_done False → fire regardless of block delta.
+        assert due_for_scoring(current_block=5, last_scored_block=4, initial_scoring_done=False)
+
+    def test_gate_fires_on_block_delta_not_step_count(self):
+        # Exactly one window elapsed → due; one block short → not yet.
+        assert due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS, True)
+        assert not due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS + 1, True)
+
+    def test_gate_overshoot_fires(self):
+        # A multi-block forward pass can overshoot the boundary — still fires.
+        assert due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS - 5, True)
+
+    def test_consecutive_windows_tile_with_no_gap(self):
+        # Round N's window_end must equal round N+1's window_start so every
+        # block is covered exactly once.
+        start1, end1 = scoring_window_bounds(current_block=1000, last_scored_block=400)
+        assert (start1, end1) == (400, 1000)
+        # Cursor advances to end1; next round fires a window later.
+        start2, end2 = scoring_window_bounds(current_block=1600, last_scored_block=end1)
+        assert start2 == end1  # tiles — no gap
+        assert (start2, end2) == (1000, 1600)
+
+    def test_overshoot_does_not_open_a_gap(self):
+        # Forward straddled the boundary: fires at last+window+5. window_start
+        # stays anchored to last_scored, so the 5 extra blocks are still scored.
+        last = 1000
+        start, end = scoring_window_bounds(current_block=last + SCORING_WINDOW_BLOCKS + 5, last_scored_block=last)
+        assert start == last  # no gap despite the overshoot
+
+    def test_backfill_is_capped_after_a_stall(self):
+        # last_scored far behind (long outage) → window_start clamps to the
+        # cap, not the stale cursor, so one round can't replay an unbounded span.
+        start, end = scoring_window_bounds(current_block=100_000, last_scored_block=0)
+        assert start == 100_000 - MAX_SCORING_BACKFILL_BLOCKS
+        assert end == 100_000
+
+    def test_fresh_seed_scores_one_trailing_window(self):
+        # Seed = block - SCORING_WINDOW_BLOCKS (validator __init__) → first
+        # round covers exactly one trailing window, like the old behavior.
+        block = 50_000
+        seed = max(0, block - SCORING_WINDOW_BLOCKS)
+        start, end = scoring_window_bounds(current_block=block, last_scored_block=seed)
+        assert (start, end) == (block - SCORING_WINDOW_BLOCKS, block)

@@ -13,7 +13,6 @@ from allways.commitments import read_miner_commitments
 from allways.constants import (
     CHALLENGE_WINDOW_BLOCKS,
     EXTEND_THRESHOLD_BLOCKS,
-    SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
@@ -27,6 +26,7 @@ from allways.validator.axon_handlers import (
 )
 from allways.validator.chain_verification import SwapVerifier
 from allways.validator.scoring import (
+    due_for_scoring,
     score_and_reward_miners,
     snapshot_current_crown_holders,
 )
@@ -104,7 +104,7 @@ async def forward(self: Validator) -> None:
     extend_fulfilled_near_timeout(self)
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
-    if not self.initial_scoring_done or self.step % SCORING_WINDOW_BLOCKS == 0:
+    if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
         score_and_reward_miners(self)
         self.initial_scoring_done = True
         bt.logging.info('forward: scoring done')
