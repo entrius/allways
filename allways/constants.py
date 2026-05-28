@@ -47,10 +47,10 @@ BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 600  # ~2 hours at 12s/block — scoring cadence and window width
-# Cap on how far back one scoring round replays. Never hit in steady state
-# (rounds tile ~SCORING_WINDOW_BLOCKS); only bounds the catch-up window after a
-# stall, at the cost of one coverage gap if the outage exceeds it.
-MAX_SCORING_BACKFILL_BLOCKS = 5000  # ~16 hours at 12s/block
+# Cap on how far back one scoring round replays after a stall: just resume a
+# couple hours back, don't try to recover a long outage (the event-watcher only
+# reconstructs ~one window back anyway). >1 window so overshoot can't re-gap.
+MAX_SCORING_BACKFILL_BLOCKS = 2 * SCORING_WINDOW_BLOCKS  # ~4 hours at 12s/block
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
