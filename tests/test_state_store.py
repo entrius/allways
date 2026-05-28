@@ -208,8 +208,6 @@ class TestDestTipSnapshots:
     def test_fresh_init_db_has_dest_tip_snapshots_table(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         conn = store.require_connection()
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='dest_tip_snapshots'"
-        ).fetchone()
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='dest_tip_snapshots'").fetchone()
         assert row is not None
         store.close()

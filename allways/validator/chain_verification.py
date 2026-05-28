@@ -77,9 +77,7 @@ class SwapVerifier:
                         recorded_at=current_block,
                     )
                 except Exception as e:
-                    bt.logging.warning(
-                        f'{self._label(swap)}: failed to persist dest-tip snapshot: {e}'
-                    )
+                    bt.logging.warning(f'{self._label(swap)}: failed to persist dest-tip snapshot: {e}')
         else:
             log_on_change(
                 f'snapshot_unavailable:{swap.id}',
