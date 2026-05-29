@@ -92,6 +92,19 @@ class TestObserveInitiation:
 
         assert v.dest_tip_at_init[7] == 850_500
 
+    def test_late_snapshot_capped_when_payout_already_on_chain(self):
+        btc = MagicMock()
+        btc.get_current_block_height.side_effect = [None, 850_500]
+        v = SwapVerifier(chain_providers={'btc': btc})
+        swap = make_swap(swap_id=7, to_chain='btc')
+        swap.to_tx_block = 850_100
+
+        v.observe_initiation(swap)
+        v.observe_initiation(swap)
+
+        assert v.dest_tip_at_init[7] == 850_100
+        assert v.is_dest_tx_fresh(swap, tx_at(850_100)) is True
+
     def test_rpc_raises_treated_as_failure(self):
         btc = MagicMock()
         btc.get_current_block_height.side_effect = RuntimeError('boom')

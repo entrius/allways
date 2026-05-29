@@ -63,6 +63,10 @@ class SwapVerifier:
         except Exception:
             tip = None
         if tip and tip > 0:
+            # If fulfillment landed before a late snapshot (RPC retry), cap the
+            # lower bound so an honest payout is not rejected as a replay.
+            if swap.to_tx_block and swap.to_tx_block > 0:
+                tip = min(tip, swap.to_tx_block)
             self.dest_tip_at_init[swap.id] = tip
             if self.state_store is not None:
                 # Same fail-open discipline as the RPC call above: a sqlite
