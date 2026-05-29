@@ -15,7 +15,7 @@ from allways.constants import (
     EXTEND_THRESHOLD_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
-from allways.utils.logging import log_on_change
+from allways.utils.logging import log_crown_winners, log_on_change
 from allways.utils.logging import swap_label as _swap_label
 from allways.utils.rate import expected_swap_amounts
 from allways.utils.scale import strip_hex_prefix
@@ -123,7 +123,7 @@ async def forward(self: Validator) -> None:
     # HaltBanner + top-right "paused" indicator (both fed by /halt off
     # contract_events) signal the recycle state to users in the meantime.
     crown_snapshot = snapshot_current_crown_holders(self)
-    log_crown_winners(self, crown_snapshot)
+    log_crown_winners(self.metagraph, self.block, crown_snapshot)
     if self.database_storage.is_enabled():
         try:
             self.database_storage.upsert_current_crown_snapshot(crown_snapshot)
@@ -135,31 +135,6 @@ def clear_provider_caches(self: Validator) -> None:
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
-
-
-def log_crown_winners(
-    self: Validator,
-    snapshot: dict[tuple[str, str], list[tuple[str, str, str, float, float, int]]],
-) -> None:
-    """One greppable line per forward step naming the current crown holder UID
-    and rate per direction. Format:
-
-        forward: crown holders @ block=N | btc->tao uid=42 rate=326.42 | tao->btc uid=17 rate=339.62
-
-    Ties render as ``uid=42,55``. Directions with no qualifying holder render
-    as ``btc->tao none``. ASCII arrows so ``grep 'crown holders'`` and
-    ``grep 'btc->tao'`` both work without copy-pasting unicode."""
-    hotkey_to_uid = {hk: uid for uid, hk in enumerate(self.metagraph.hotkeys)}
-    parts = [f'forward: crown holders @ block={self.block}']
-    for (from_chain, to_chain), rows in snapshot.items():
-        direction = f'{from_chain}->{to_chain}'
-        if not rows:
-            parts.append(f'{direction} none')
-            continue
-        uids = ','.join(str(hotkey_to_uid.get(row[2], '?')) for row in rows)
-        rate = rows[0][4]
-        parts.append(f'{direction} uid={uids} rate={rate:g}')
-    bt.logging.info(' | '.join(parts))
 
 
 def initialize_pending_user_reservations(self: Validator) -> None:

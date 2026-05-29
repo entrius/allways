@@ -69,3 +69,29 @@ def swap_label(swap: Any, metagraph: Optional[Any] = None) -> str:
     direction = f'{(swap.from_chain or "?").upper()}->{(swap.to_chain or "?").upper()}'
     miner = miner_label(metagraph, getattr(swap, 'miner_hotkey', ''))
     return f'Swap #{swap.id} [{direction} {miner}]'
+
+
+def log_crown_winners(
+    metagraph: Any,
+    block: int,
+    snapshot: dict[tuple[str, str], list[tuple[str, str, str, float, float, int]]],
+) -> None:
+    """One greppable info line per forward pass naming the current crown holder
+    UID and rate per direction:
+
+        forward: crown holders @ block=N | btc->tao uid=42 rate=326.42 | tao->btc uid=17 rate=339.62
+
+    Ties render as ``uid=42,55``. Empty directions render as ``btc->tao none``.
+    ASCII arrows so ``grep 'crown holders'`` and ``grep 'btc->tao'`` work
+    without copy-pasting unicode."""
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(metagraph.hotkeys)}
+    parts = [f'forward: crown holders @ block={block}']
+    for (from_chain, to_chain), rows in snapshot.items():
+        direction = f'{from_chain}->{to_chain}'
+        if not rows:
+            parts.append(f'{direction} none')
+            continue
+        uids = ','.join(str(hotkey_to_uid.get(row[2], '?')) for row in rows)
+        rate = rows[0][4]
+        parts.append(f'{direction} uid={uids} rate={rate:g}')
+    bt.logging.info(' | '.join(parts))
