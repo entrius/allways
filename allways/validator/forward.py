@@ -530,6 +530,10 @@ def extend_fulfilled_near_timeout(self: Validator) -> None:
         if tx_info is None:
             continue  # dest tx invisible or below canonical payout — neither tier qualifies
 
+        if not self.swap_verifier.is_dest_tx_fresh(swap, tx_info):
+            bt.logging.debug(f'{ctx}: dest tx failed replay check for extension')
+            continue
+
         # A finalize this step may have just pushed the deadline out. Mirror
         # the reservation-side gate in try_extend_reservation: once the swap
         # is no longer near timeout, skip challenge/propose so the next

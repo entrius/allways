@@ -74,7 +74,10 @@ def make_validator(swap: Swap, block: int, finalized_target, tx_info=_UNSET):
         optimistic_extensions=ext,
         chain_providers={'btc': provider},
         contract_client=contract_client,
-        swap_verifier=SimpleNamespace(fee_divisor=100),
+        swap_verifier=SimpleNamespace(
+            fee_divisor=100,
+            is_dest_tx_fresh=lambda _swap, _tx: True,
+        ),
     )
 
 
@@ -123,6 +126,16 @@ class TestExtendFulfilledNearTimeout:
         # Canonical payout derived from rate, not the dust to_amount the miner posted.
         assert call.kwargs['expected_amount'] != 1
         assert call.kwargs['expected_amount'] > 0
+
+    def test_skips_extension_when_dest_tx_fails_replay_check(self):
+        swap = make_fulfilled_swap()
+        v = make_validator(swap, block=PROPOSE_BLOCK, finalized_target=None)
+        v.swap_verifier.is_dest_tx_fresh = MagicMock(return_value=False)
+
+        extend_fulfilled_near_timeout(v)
+
+        v.optimistic_extensions.maybe_propose_timeout.assert_not_called()
+        v.optimistic_extensions.maybe_challenge_timeout.assert_not_called()
 
     def test_skips_extension_when_dest_tx_fails_canonical_check(self):
         # Provider returns None when the dest tx doesn't match the canonical
