@@ -127,19 +127,20 @@ def is_executable_rate(
     min_swap_rao: int,
     max_swap_rao: int,
 ) -> bool:
-    """True iff the rate is integer-routable in its declared direction.
+    """True iff the rate is fundably routable in its declared direction.
 
-    Crown-eligibility gate against sentinel rates that no user can route:
+    Crown-eligibility gate against rates that no user can route. Routable means
+    a source >= the source chain's ``min_onchain_amount`` (dust / existential
+    deposit) maps a TAO leg into ``[min_swap_rao, max_swap_rao]`` — a rate whose
+    only in-bounds source is sub-dust (e.g. 1 sat -> 0.5 TAO at 5e7 TAO/BTC) is
+    unfundable, so unexecutable.
 
-    * BTC→TAO: high-side sentinels (``1e10``, ``1.797e308`` TAO/BTC) — the
-      smallest positive sat already maps above ``max_swap_rao``, so no
-      positive integer source produces an in-bounds TAO leg.
-    * TAO→BTC: low-side sentinels (``1e-8`` TAO/BTC) — the TAO leg IS the
-      source amount, so it trivially fits any bounds, but the destination
-      payout implied by the rate is absurd. Catch this by the symmetric
-      check on the inverse rate: if treating ``1/rate`` as a BTC→TAO rate
-      has no integer-routable source either, the original rate is at an
-      extreme of the executable spectrum and a sentinel by symmetry.
+    * BTC→TAO: high-side rates — even the smallest fundable sat maps above
+      ``max_swap_rao``, so no fundable source produces an in-bounds TAO leg.
+    * TAO→BTC: low-side rates — the TAO leg IS the source, so it trivially fits
+      any bounds, but the destination payout is absurd. Caught by the symmetric
+      check on ``1/rate``: if the inverse direction has no fundable source, the
+      original rate is at an extreme of the executable spectrum.
 
     A bound at ``0`` is the contract's "unset" sentinel and disables that
     side; both at 0 → permissive (no on-chain bounds yet).
@@ -151,15 +152,18 @@ def is_executable_rate(
 
     def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
         # For a "src → tao" direction at ``forward_rate`` (tao per src), is
-        # there a positive integer src amount whose TAO leg lands in bounds?
-        src_decimals = get_chain(src_chain).decimals
-        decimal_factor = 10 ** (get_chain('tao').decimals - src_decimals)
+        # there an src amount that is fundable on-chain (>= the chain's
+        # min_onchain_amount) whose TAO leg lands in bounds?
+        src = get_chain(src_chain)
+        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
         denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             # rate × decimal_factor overflowed (e.g. 1.797e308 × 10) → smallest
             # positive integer source already maps above any finite max bound.
             return False
-        min_source = max(1, math.ceil(max(1, min_swap_rao) / denom))
+        # Floor at the source chain's dust/existential minimum: a rate whose only
+        # in-bounds source is below it (e.g. 1 sat) is unfundable, so unexecutable.
+        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_rao) / denom))
         if max_swap_rao <= 0:
             return True
         max_source = math.floor(max_swap_rao / denom)

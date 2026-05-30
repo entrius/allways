@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from allways.chains import get_chain
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, is_executable_rate, normalize_rate
 
@@ -326,29 +327,37 @@ class TestIsExecutableRate:
         max_swap on the TAO leg, so the original rate is sentinel-low."""
         assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is False
 
-    def test_boundary_rate_executable_at_one_sat(self):
-        """At max_swap/10 = 50_000_000 rao per sat, the smallest integer sat
-        produces exactly max_swap — should be executable."""
-        rate = self.MAX / 10  # TAO leg at 1 sat == max_swap
-        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is True
+    DUST = get_chain('btc').min_onchain_amount  # smallest fundable BTC source
 
-    def test_just_past_boundary_rate_rejected(self):
-        """A rate that maps 1 sat just above max_swap → no executable sat."""
-        rate = (self.MAX / 10) * 1.0001
+    def test_sub_dust_boundary_rate_rejected(self):
+        """At max_swap/10, the only in-bounds source is 1 sat — below the BTC
+        dust floor, so unfundable. Rejected (the crown-squat rate)."""
+        rate = self.MAX / 10  # TAO leg at 1 sat == max_swap; 1 sat < dust
         assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False
 
-    def test_tao_to_btc_boundary_rate_executable_at_one_sat(self):
-        """Symmetric boundary: at inverse=max_swap/10 (i.e. r = 10/max_swap),
-        treating 1/r as btc→tao maps 1 sat to exactly max_swap on the TAO leg.
-        Just executable."""
-        rate = 10 / self.MAX  # 1/r * 10 == max_swap; 1 sat at inverse hits max
-        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is True
+    def test_dust_floor_boundary_rate_executable(self):
+        """At the rate where the dust floor maps exactly to max_swap, the
+        smallest fundable source is in-bounds — just executable."""
+        rate = self.MAX / (10 * self.DUST)  # DUST sat → max_swap on the TAO leg
+        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is True
 
-    def test_tao_to_btc_just_past_boundary_rate_rejected(self):
-        """One ULP below the boundary: the inverse rate's 1 sat overshoots
-        max_swap, so no integer source routes by symmetry."""
-        rate = (10 / self.MAX) * 0.9999
+    def test_just_past_dust_floor_boundary_rejected(self):
+        """Just above the boundary, even the dust floor overshoots max_swap →
+        no fundable source routes."""
+        rate = (self.MAX / (10 * self.DUST)) * 1.0001
+        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False
+
+    def test_tao_to_btc_sub_dust_boundary_rate_rejected(self):
+        """Symmetric: r = 10/max_swap maps 1 sat (sub-dust) to max_swap on the
+        inverse leg — rejected (the swap-1670 tao→btc crown-squat rate)."""
+        rate = 10 / self.MAX
         assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is False
+
+    def test_tao_to_btc_dust_floor_boundary_executable(self):
+        """Symmetric boundary at the dust floor: the dust-clearing inverse
+        source maps in-bounds — just executable."""
+        rate = (10 * self.DUST) / self.MAX
+        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is True
 
     def test_tao_to_btc_sentinel_unset_bounds_still_permissive(self):
         """Unset bounds disable the gate in both directions — keeps the
