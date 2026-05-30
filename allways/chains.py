@@ -21,6 +21,9 @@ class ChainDefinition:
     env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_RPC_URL)
     seconds_per_block: int = 12  # Average block time on this chain
     min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
+    # Smallest amount that can actually exist/move on-chain, in native units
+    # (BTC dust floor, TAO existential deposit). 1 = no floor.
+    min_onchain_amount: int = 1
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -32,6 +35,8 @@ CHAIN_BTC = ChainDefinition(
     env_prefix='BTC',
     seconds_per_block=600,
     min_confirmations=2,
+    # 1000 sat, not the bare 546 P2PKH dust line: margin vs higher dustrelayfee / wallet quirks, and a tighter executable-rate ceiling.
+    min_onchain_amount=1000,
 )
 CHAIN_TAO = ChainDefinition(
     id='tao',
@@ -41,6 +46,8 @@ CHAIN_TAO = ChainDefinition(
     env_prefix='TAO',
     seconds_per_block=12,
     min_confirmations=6,
+    # Existential deposit: accounts below this are reaped.
+    min_onchain_amount=500,
 )
 
 SUPPORTED_CHAINS = {
