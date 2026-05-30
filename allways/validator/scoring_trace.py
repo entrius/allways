@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
-from allways.constants import CREDIBILITY_RAMP_OBSERVATIONS, RECYCLE_UID, TAO_TO_RAO
+from allways.constants import (
+    CREDIBILITY_MAX_TIMEOUTS,
+    CREDIBILITY_RAMP_OBSERVATIONS,
+    RECYCLE_UID,
+    TAO_TO_RAO,
+)
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace
@@ -45,9 +50,12 @@ class WeightingTrace:
         self.participation = min(1.0, self.volume_share / crown_share) if crown_share > 0 else 1.0
         self.volume_factor = factor
 
-    def record_credibility(self, closed_swaps: int, ramp_target: int) -> None:
+    def record_credibility(self, closed_swaps: int, ramp_target: int, timed_out: int = 0) -> None:
         self.closed_swaps = closed_swaps
-        self.credibility_ramp = min(1.0, closed_swaps / ramp_target) if ramp_target > 0 else 1.0
+        if timed_out > CREDIBILITY_MAX_TIMEOUTS:
+            self.credibility_ramp = 0.0
+        else:
+            self.credibility_ramp = min(1.0, closed_swaps / ramp_target) if ramp_target > 0 else 1.0
 
 
 def log_scoring_trace(

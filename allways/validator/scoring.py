@@ -17,6 +17,7 @@ import numpy as np
 
 from allways.chains import canonical_pair
 from allways.constants import (
+    CREDIBILITY_MAX_TIMEOUTS,
     CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
@@ -249,6 +250,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             wt.record_credibility(
                 closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
                 ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
+                timed_out=success_stats.get(hotkey, (0, 0))[1],
             )
             crown_share_dir = blocks / total_crown_dir
             vol_dir = volumes_dir.get(hotkey, 0)
@@ -384,8 +386,13 @@ def success_rate(stats: Optional[Tuple[int, int]]) -> float:
 
 def credibility_ramp(stats: Optional[Tuple[int, int]]) -> float:
     """Linear ramp to full credibility at CREDIBILITY_RAMP_OBSERVATIONS closed
-    swaps. Applied linearly to the reward, not cubed. Zero observations → 0."""
+    swaps. Applied linearly to the reward, not cubed. Zero observations → 0.
+    More than CREDIBILITY_MAX_TIMEOUTS timed-out swaps in the window hard-zeros
+    credibility — a rolling penalty that recovers as old timeouts age out."""
     if not stats or stats == (0, 0):
+        return 0.0
+    _completed, timed_out = stats
+    if timed_out > CREDIBILITY_MAX_TIMEOUTS:
         return 0.0
     return min(1.0, sum(stats) / CREDIBILITY_RAMP_OBSERVATIONS)
 

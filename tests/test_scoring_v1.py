@@ -158,14 +158,20 @@ class TestCredibilityRampHelper:
         assert credibility_ramp((0, 0)) == 0.0
 
     def test_scales_linearly_below_threshold(self):
-        """1 closed swap → ramp 0.1; 5 closed → 0.5. Counts timeouts too."""
+        """1 closed swap → ramp 0.1; 5 closed → 0.5. Counts tolerated timeouts too."""
         assert credibility_ramp((1, 0)) == 0.1
         assert credibility_ramp((5, 0)) == 0.5
-        assert credibility_ramp((2, 3)) == 0.5
+        assert credibility_ramp((2, 3)) == 0.5  # 3 timeouts tolerated
 
     def test_caps_at_full_ramp(self):
         assert credibility_ramp((10, 0)) == 1.0
-        assert credibility_ramp((90, 10)) == 1.0
+
+    def test_excess_timeouts_hard_zero(self):
+        """More than CREDIBILITY_MAX_TIMEOUTS (3) timeouts → 0, regardless of volume."""
+        assert credibility_ramp((8, 3)) == 1.0  # 3 tolerated, fully ramped
+        assert credibility_ramp((8, 4)) == 0.0  # 4th timeout zeros it
+        assert credibility_ramp((90, 10)) == 0.0  # high volume can't rescue it
+        assert credibility_ramp((0, 4)) == 0.0
 
 
 class TestCrownHoldersHelper:
@@ -1693,6 +1699,15 @@ class TestWeightingTraceRecorders:
         wt.record_credibility(closed_swaps=5, ramp_target=0)
         assert wt.credibility_ramp == 1.0
 
+    def test_record_credibility_excess_timeouts_zero(self):
+        """Trace mirrors the reward rule: >3 timeouts → ramp shown as 0."""
+        from allways.validator.scoring_trace import WeightingTrace
+
+        wt = WeightingTrace()
+        wt.record_credibility(closed_swaps=100, ramp_target=10, timed_out=4)
+        assert wt.closed_swaps == 100
+        assert wt.credibility_ramp == 0.0
+
 
 class TestVolumeWeighting:
     """End-to-end volume weighting via calculate_miner_rewards."""
@@ -2036,8 +2051,27 @@ class TestCredibilityRamp:
         np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         v.state_store.close()
 
-    def test_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
-        """5 completed + 5 timed_out → ramp = 1.0, raw = 0.5 → 0.5³ × 1.0 = 0.125."""
+    def test_tolerated_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
+        """7 completed + 3 timed_out (within the 3-timeout tolerance) → ramp = 1.0,
+        raw = 0.7 → 0.7³ × 1.0."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
+        self.seed_btc_tao_crown(v, 'hk_a')
+        for i in range(7):
+            v.state_store.insert_swap_outcome(
+                swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
+            )
+        for i in range(3):
+            v.state_store.insert_swap_outcome(
+                swap_id=100 + i, miner_hotkey='hk_a', completed=False, resolved_block=200 + i
+            )
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.7**3, atol=1e-6)
+        v.state_store.close()
+
+    def test_excess_timeouts_zero_reward(self, tmp_path: Path):
+        """5 completed + 5 timed_out → 5 timeouts > 3 → credibility hard-zeroed →
+        reward 0 despite a high raw fulfillment count."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
@@ -2050,7 +2084,7 @@ class TestCredibilityRamp:
                 swap_id=100 + i, miner_hotkey='hk_a', completed=False, resolved_block=200 + i
             )
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.5**3, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_unearned_ramp_portion_recycles(self, tmp_path: Path):
