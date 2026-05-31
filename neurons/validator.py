@@ -155,22 +155,23 @@ class Validator(BaseValidatorNeuron):
         )
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
-        # axon_lock serialises substrate websocket calls across handler threads
-        # to prevent "cannot call recv while another coroutine is already running recv" errors.
-        self.axon_lock = threading.Lock()
+        # axon_lock serialises every call on axon_subtensor's websocket so two
+        # threads can't both land in recv. Reentrant: handlers hold it, then
+        # nest a bounds_cache read (which re-acquires it via axon_contract_client).
+        self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
         self.axon_contract_client = AllwaysContractClient(
             subtensor=self.axon_subtensor,
             reconnect_subtensor=self.reconnect_axon_subtensor,
+            substrate_lock=self.axon_lock,
         )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
-        # Must read the current block via axon_subtensor — the block getter on
-        # self (self.block) goes through self.subtensor, which the forward loop
-        # is already using; concurrent axon + forward reads collide on the same
-        # websocket and raise ConcurrencyError.
+        # Read block/bounds via axon_subtensor; the forward loop calls this too,
+        # so it shares axon_lock rather than colliding with handler threads.
         self.bounds_cache = BoundsCache(
             self.axon_contract_client,
             self.axon_subtensor.get_current_block,
+            lock=self.axon_lock,
         )
 
         # Attach synapse handlers to axon
