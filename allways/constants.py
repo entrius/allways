@@ -65,8 +65,8 @@ VOLUME_WEIGHT_ALPHA: float = 0.5
 CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 # More than this many timed-out swaps within CREDIBILITY_WINDOW_BLOCKS hard-zeros
 # a miner's credibility (and thus their whole reward) until the old timeouts age
-# out of the rolling window. 0-3 tolerated; the 4th timeout zeros credibility.
-CREDIBILITY_MAX_TIMEOUTS: int = 3
+# out of the rolling window. 0-2 tolerated; the 3rd timeout zeros credibility.
+CREDIBILITY_MAX_TIMEOUTS: int = 2
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID

@@ -161,17 +161,17 @@ class TestCredibilityRampHelper:
         """1 closed swap → ramp 0.1; 5 closed → 0.5. Counts tolerated timeouts too."""
         assert credibility_ramp((1, 0)) == 0.1
         assert credibility_ramp((5, 0)) == 0.5
-        assert credibility_ramp((2, 3)) == 0.5  # 3 timeouts tolerated
+        assert credibility_ramp((3, 2)) == 0.5  # 2 timeouts tolerated
 
     def test_caps_at_full_ramp(self):
         assert credibility_ramp((10, 0)) == 1.0
 
     def test_excess_timeouts_hard_zero(self):
-        """More than CREDIBILITY_MAX_TIMEOUTS (3) timeouts → 0, regardless of volume."""
-        assert credibility_ramp((8, 3)) == 1.0  # 3 tolerated, fully ramped
-        assert credibility_ramp((8, 4)) == 0.0  # 4th timeout zeros it
+        """More than CREDIBILITY_MAX_TIMEOUTS (2) timeouts → 0, regardless of volume."""
+        assert credibility_ramp((8, 2)) == 1.0  # 2 tolerated, fully ramped
+        assert credibility_ramp((8, 3)) == 0.0  # 3rd timeout zeros it
         assert credibility_ramp((90, 10)) == 0.0  # high volume can't rescue it
-        assert credibility_ramp((0, 4)) == 0.0
+        assert credibility_ramp((0, 3)) == 0.0
 
 
 class TestCrownHoldersHelper:
@@ -2052,21 +2052,21 @@ class TestCredibilityRamp:
         v.state_store.close()
 
     def test_tolerated_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
-        """7 completed + 3 timed_out (within the 3-timeout tolerance) → ramp = 1.0,
-        raw = 0.7 → 0.7³ × 1.0."""
+        """8 completed + 2 timed_out (within the 2-timeout tolerance) → ramp = 1.0,
+        raw = 0.8 → 0.8³ × 1.0."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
-        for i in range(7):
+        for i in range(8):
             v.state_store.insert_swap_outcome(
                 swap_id=i + 1, miner_hotkey='hk_a', completed=True, resolved_block=100 + i
             )
-        for i in range(3):
+        for i in range(2):
             v.state_store.insert_swap_outcome(
                 swap_id=100 + i, miner_hotkey='hk_a', completed=False, resolved_block=200 + i
             )
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.7**3, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8**3, atol=1e-6)
         v.state_store.close()
 
     def test_excess_timeouts_zero_reward(self, tmp_path: Path):
