@@ -15,7 +15,7 @@ from allways.constants import (
     EXTEND_THRESHOLD_BLOCKS,
 )
 from allways.contract_client import ContractError, is_contract_rejection
-from allways.utils.logging import log_on_change
+from allways.utils.logging import log_crown_winners, log_on_change
 from allways.utils.logging import swap_label as _swap_label
 from allways.utils.rate import expected_swap_amounts
 from allways.utils.scale import strip_hex_prefix
@@ -112,17 +112,21 @@ async def forward(self: Validator) -> None:
     # Live current-crown snapshot — runs after every other phase so DB
     # latency here can't push vote_initiate, finalize, or timeout-extension
     # RPC past their block deadlines. Sub-ms in-memory compute plus a small
-    # bounded write; gated by STORE_DB_RESULTS and wrapped so DB outages
-    # never propagate into the forward loop. No halt check here — that
-    # RPC is the expensive one; halt-aware clearing happens once per
+    # bounded write; the write is gated by STORE_DB_RESULTS and wrapped so
+    # DB outages never propagate into the forward loop. The compute runs
+    # unconditionally so the per-step crown log line below works for
+    # validators that haven't opted into DB writes. No halt check here —
+    # that RPC is the expensive one; halt-aware clearing happens once per
     # scoring round inside _flush_halt_window. Worst case the live table
     # shows the actual best-rate holder during halt for up to one
     # SCORING_WINDOW_BLOCKS (~1h) until the next round clears it; the
     # HaltBanner + top-right "paused" indicator (both fed by /halt off
     # contract_events) signal the recycle state to users in the meantime.
+    crown_snapshot = snapshot_current_crown_holders(self)
+    log_crown_winners(self.metagraph, self.block, crown_snapshot)
     if self.database_storage.is_enabled():
         try:
-            self.database_storage.upsert_current_crown_snapshot(snapshot_current_crown_holders(self))
+            self.database_storage.upsert_current_crown_snapshot(crown_snapshot)
         except Exception as e:
             bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
 
