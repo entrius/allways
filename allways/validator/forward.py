@@ -378,12 +378,29 @@ def poll_commitments(self: Validator) -> None:
 
 def refresh_miner_rates(self: Validator) -> None:
     try:
-        pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'max_swap_amount read failed: {e}')
+        max_swap_amount = 0
+    try:
+        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'min_swap_amount read failed: {e}')
+        min_swap_amount = 0
+
+    try:
+        pairs = read_miner_commitments(
+            self.subtensor,
+            self.config.netuid,
+            min_swap_rao=min_swap_amount,
+            max_swap_rao=max_swap_amount,
+        )
     except Exception as e:
         bt.logging.warning(f'Commitment poll failed: {e}')
         return
 
     current_hotkeys = set(self.metagraph.hotkeys)
+    admitted_keys: set[tuple[str, str, str]] = set()
 
     for pair in pairs:
         if pair.hotkey not in current_hotkeys:
@@ -406,6 +423,7 @@ def refresh_miner_rates(self: Validator) -> None:
                     )
                     self.last_known_rates[key] = 0.0
                 continue
+            admitted_keys.add(key)
             if self.last_known_rates.get(key) == r:
                 continue
             self.state_store.insert_rate_event(
@@ -416,6 +434,38 @@ def refresh_miner_rates(self: Validator) -> None:
                 block=self.block,
             )
             self.last_known_rates[key] = r
+
+    # SECOND SWEEP: terminate previously-positive directions that vanished from
+    # this poll. Covers parser-poison (commitment overwritten with garbage) and
+    # bounds-tighten exits (rate dropped below executability). Without this a
+    # miner's stale positive rate keeps earning crown until deregistration.
+    #
+    # Guard: read_miner_commitments swallows transient RPC errors and returns
+    # an empty list. If pairs is empty, we can't distinguish "RPC dead" from
+    # "nobody posting" — either way, terminating every miner is wrong. Skip
+    # the sweep; the next successful poll catches whatever genuinely vanished.
+    if not pairs:
+        return
+    for key, rate in list(self.last_known_rates.items()):
+        if rate <= 0:
+            continue
+        hk, from_c, to_c = key
+        if hk not in current_hotkeys:
+            continue  # purge_deregistered_hotkeys handles dereg
+        if key in admitted_keys:
+            continue
+        latest = self.state_store.get_latest_rate_before(hk, from_c, to_c, self.block)
+        if latest is None or latest[0] <= 0:
+            continue
+        self.state_store.insert_rate_event(
+            hotkey=hk,
+            from_chain=from_c,
+            to_chain=to_c,
+            rate=0.0,
+            block=self.block,
+        )
+        self.last_known_rates[key] = 0.0
+        bt.logging.info(f'forward: terminating rate for {hk[:8]} {from_c}->{to_c} — commitment dropped')
 
 
 def purge_deregistered_hotkeys(self: Validator) -> None:

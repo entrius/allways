@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from allways.commitments import parse_commitment_data, read_miner_commitments
+from allways.commitments import (
+    parse_commitment_data,
+    read_miner_commitments,
+    read_unexecutable_commitments,
+)
 
 
 class TestParseCommitmentData:
@@ -288,3 +292,111 @@ class TestReadMinerCommitmentsQueryMap:
         with patch('allways.commitments.bt.logging.warning'):
             pairs = read_miner_commitments(subtensor, netuid=7)
         assert pairs == []
+
+
+# Sentinel rates chosen so is_executable_rate returns False under any normal
+# (min, max) BTC/TAO bounds: 1e9 TAO/BTC is so high even 1 sat maps above max,
+# and 1e-9 TAO/BTC inverted is the symmetric low-side rejection.
+BOUNDS_REASONABLE = {'min_swap_rao': 500_000_000, 'max_swap_rao': 5_000_000_000}  # 0.5–5 TAO
+
+
+class TestParseCommitmentDataExecutability:
+    def test_drops_pair_with_sentinel_forward_rate_when_bounds_set(self):
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:1e9:350'
+        assert parse_commitment_data(raw, **BOUNDS_REASONABLE) is None
+
+    def test_drops_pair_with_sentinel_counter_rate_when_bounds_set(self):
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:1e-9'
+        assert parse_commitment_data(raw, **BOUNDS_REASONABLE) is None
+
+    def test_admits_pair_with_one_sentinel_one_zero(self):
+        """Zero stays opt-out semantics — a pair with one direction at 0 and
+        the other direction executable must not be dropped just because 0
+        looks sentinel-shaped."""
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:0'
+        pair = parse_commitment_data(raw, **BOUNDS_REASONABLE)
+        assert pair is not None
+        assert pair.rate == 340.0
+        assert pair.counter_rate == 0.0
+
+    def test_permissive_when_bounds_zero(self):
+        """Default-permissive: with bounds at 0/0, even absurd rates parse."""
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:1e9:1e-9'
+        pair = parse_commitment_data(raw)
+        assert pair is not None
+
+    def test_bounds_at_max_zero_uses_min_only(self):
+        """max_swap_rao=0 is the contract's 'unset' sentinel; min-only bounds
+        still admit a normal rate (no upper cap to enforce)."""
+        raw = 'v1:btc:bc1qaddr:tao:5Caddr:340:350'
+        pair = parse_commitment_data(raw, min_swap_rao=500_000_000, max_swap_rao=0)
+        assert pair is not None
+
+
+class TestReadMinerCommitmentsExecutability:
+    def make_subtensor(self, hotkeys, rows):
+        subtensor = MagicMock()
+        metagraph = SimpleNamespace(
+            hotkeys=list(hotkeys),
+            n=SimpleNamespace(item=lambda: len(hotkeys)),
+        )
+        subtensor.metagraph.return_value = metagraph
+
+        def fake_query_map(module, storage_function, params):
+            for hotkey, raw in rows:
+                key = SimpleNamespace(value=hotkey)
+                metadata = SimpleNamespace(value={'info': {'fields': [{'Raw0': '0x' + raw.encode().hex()}]}})
+                yield key, metadata
+
+        subtensor.substrate.query_map.side_effect = fake_query_map
+        return subtensor
+
+    def test_drops_sentinel_pair_when_bounds_supplied(self):
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_a', 'hk_b'],
+            rows=[
+                ('hk_a', 'v1:btc:a:tao:a:340:350'),
+                ('hk_b', 'v1:btc:b:tao:b:1e9:350'),
+            ],
+        )
+        pairs = read_miner_commitments(subtensor, netuid=7, **BOUNDS_REASONABLE)
+        assert [p.hotkey for p in pairs] == ['hk_a']
+
+    def test_permissive_when_no_bounds_admits_sentinel(self):
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_a'],
+            rows=[('hk_a', 'v1:btc:a:tao:a:1e9:350')],
+        )
+        pairs = read_miner_commitments(subtensor, netuid=7)
+        assert [p.hotkey for p in pairs] == ['hk_a']
+
+
+class TestReadUnexecutableCommitments:
+    def make_subtensor(self, hotkeys, rows):
+        subtensor = MagicMock()
+        metagraph = SimpleNamespace(
+            hotkeys=list(hotkeys),
+            n=SimpleNamespace(item=lambda: len(hotkeys)),
+        )
+        subtensor.metagraph.return_value = metagraph
+
+        def fake_query_map(module, storage_function, params):
+            for hotkey, raw in rows:
+                key = SimpleNamespace(value=hotkey)
+                metadata = SimpleNamespace(value={'info': {'fields': [{'Raw0': '0x' + raw.encode().hex()}]}})
+                yield key, metadata
+
+        subtensor.substrate.query_map.side_effect = fake_query_map
+        return subtensor
+
+    def test_returns_only_bounded_drops_not_malformed(self):
+        subtensor = self.make_subtensor(
+            hotkeys=['hk_good', 'hk_sentinel', 'hk_garbage'],
+            rows=[
+                ('hk_good', 'v1:btc:a:tao:a:340:350'),
+                ('hk_sentinel', 'v1:btc:b:tao:b:1e9:350'),
+                ('hk_garbage', 'x'),
+            ],
+        )
+        out = read_unexecutable_commitments(subtensor, netuid=7, **BOUNDS_REASONABLE)
+        assert out == {'hk_sentinel'}

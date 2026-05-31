@@ -24,6 +24,7 @@ from allways.chain_providers import create_chain_providers
 from allways.commitments import read_miner_commitments
 from allways.constants import (
     DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    DIRECTION_POOLS,
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
     SCORING_WINDOW_BLOCKS,
@@ -200,13 +201,43 @@ class Validator(BaseValidatorNeuron):
         seed one anchor event per (hotkey, direction) at cursor — mirrors the
         active-flag anchor that event_watcher.initialize already does."""
         try:
-            pairs = read_miner_commitments(self.subtensor, self.config.netuid)
+            max_swap_amount = int(self.bounds_cache.max_swap_amount())
+        except Exception as e:
+            bt.logging.warning(f'max_swap_amount read failed: {e}')
+            max_swap_amount = 0
+        try:
+            min_swap_amount = int(self.bounds_cache.min_swap_amount())
+        except Exception as e:
+            bt.logging.warning(f'min_swap_amount read failed: {e}')
+            min_swap_amount = 0
+
+        try:
+            pairs = read_miner_commitments(
+                self.subtensor,
+                self.config.netuid,
+                min_swap_rao=min_swap_amount,
+                max_swap_rao=max_swap_amount,
+            )
         except Exception as e:
             bt.logging.warning(f'Rate bootstrap: commitment read failed: {e}')
             return
 
         anchor_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
         current_hotkeys = set(self.metagraph.hotkeys)
+
+        # Hydrate last_known_rates from persisted state BEFORE seeding the
+        # admitted-pairs cache. Without this, a validator restart on or after
+        # a miner's parser-poison (or sentinel) flip would never see the prior
+        # positive in cache, so refresh_miner_rates' second sweep couldn't
+        # emit a terminator and the stale rate would keep earning crown until
+        # the next genuine on-chain event resets it.
+        for from_chain, to_chain in DIRECTION_POOLS:
+            for hk, (rate, _block) in self.state_store.get_latest_rates_before(
+                from_chain, to_chain, anchor_block
+            ).items():
+                if hk in current_hotkeys and rate > 0:
+                    self.last_known_rates[(hk, from_chain, to_chain)] = rate
+
         seeded = 0
         for pair in pairs:
             if pair.hotkey not in current_hotkeys:

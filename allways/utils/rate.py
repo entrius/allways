@@ -193,6 +193,33 @@ def is_executable_rate(
     return True
 
 
+def min_executable_tao_leg(
+    rate: float,
+    from_chain: str,
+    to_chain: str,
+    min_swap_rao: int,
+    max_swap_rao: int,
+) -> int:
+    """Smallest TAO leg (rao) the rate produces among in-band fundable swaps.
+
+    Shares band math with is_executable_rate. Returns 0 when no in-band
+    fundable swap exists (rate unexecutable) — caller treats as "no constraint".
+    """
+    if not is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao):
+        return 0
+    if from_chain == 'tao':
+        return max(get_chain('tao').min_onchain_amount, max(0, min_swap_rao))
+    if to_chain == 'tao':
+        src = get_chain(from_chain)
+        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
+        denom = rate * decimal_factor
+        if not math.isfinite(denom) or denom <= 0:
+            return 0
+        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_rao) / denom))
+        return int(min_source * denom)
+    return 0
+
+
 def check_swap_viability(
     tao_amount_rao: int,
     miner_collateral_rao: int,
