@@ -6,14 +6,21 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from allways.constants import RECYCLE_UID, SUCCESS_EXPONENT
+from allways.constants import (
+    MAX_SCORING_BACKFILL_BLOCKS,
+    RECYCLE_UID,
+    SCORING_WINDOW_BLOCKS,
+    SUCCESS_EXPONENT,
+)
 from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
     credibility_ramp,
     crown_holders_at_instant,
+    due_for_scoring,
     replay_crown_time_window,
     score_and_reward_miners,
+    scoring_window_bounds,
     success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
@@ -110,6 +117,8 @@ def make_validator(
     bounds_cache.max_swap_amount.return_value = max_swap_amount
     contract_client = MagicMock()
     contract_client.get_miner_collateral.side_effect = lambda hk: collaterals.get(hk, 0)
+    database_storage = MagicMock()
+    database_storage.is_enabled.return_value = False
     if baseline_credibility:
         for hk_idx, hk in enumerate(hotkeys):
             for i in range(CREDIBILITY_RAMP_OBSERVATIONS):
@@ -121,11 +130,15 @@ def make_validator(
                 )
     return SimpleNamespace(
         block=block,
+        # Seed one window back so scoring_window_bounds yields the same
+        # [block - SCORING_WINDOW_BLOCKS, block] window these tests assume.
+        last_scored_block=max(0, block - SCORING_WINDOW_BLOCKS),
         metagraph=make_metagraph(hotkeys),
         state_store=store,
         event_watcher=watcher,
         bounds_cache=bounds_cache,
         contract_client=contract_client,
+        database_storage=database_storage,
     )
 
 
@@ -1028,7 +1041,7 @@ class TestHistoricalActiveState:
         store.close()
 
     def test_only_miner_deactivated_mid_window_pool_partially_recycles(self, tmp_path: Path):
-        """Solo miner deactivates at 600. Earns 500, forfeits 500."""
+        """Solo miner active at window_start, deactivates mid-window."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys, block=1100)
         conn = v.state_store.require_connection()
@@ -1037,12 +1050,14 @@ class TestHistoricalActiveState:
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        v.event_watcher.apply_event(600, 'MinerActivated', {'miner': 'hk_a', 'active': False})
+        # Deactivate inside the [block - SCORING_WINDOW_BLOCKS, block] window so
+        # hk_a holds crown for part of it (sole crowned miner → full pool).
+        v.event_watcher.apply_event(950, 'MinerActivated', {'miner': 'hk_a', 'active': False})
 
         rewards, _ = calculate_miner_rewards(v)
 
-        # hk_a earned (0, 600] = 600 blocks out of 1100 → 600/1100 of tao→btc
-        # pool (success_rate=1.0 default). btc→tao pool gets nothing (no
+        # hk_a is the only miner with a rate, so it takes the entire tao→btc
+        # pool for the blocks it held crown. btc→tao pool gets nothing (no
         # rates posted) and recycles.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         # Everything else recycles: btc→tao pool.
@@ -1716,7 +1731,9 @@ class TestVolumeWeighting:
         miner_hotkey: str,
         tao_amount: int,
         swap_id: int = 1,
-        resolved_block: int = 9_500,
+        # Within the default validator's [block - SCORING_WINDOW_BLOCKS, block]
+        # scoring window so the volume actually counts.
+        resolved_block: int = 9_900,
         completed: bool = True,
         from_chain: str = 'tao',
         to_chain: str = 'btc',
@@ -1818,17 +1835,17 @@ class TestVolumeWeighting:
             ('hk_b', 'btc', 'tao', 150.0, 0),
         )
         conn.commit()
-        # Window is (9400, 10000]. A busy block 9_500..9_620 (120 blocks within
+        # Window is (9700, 10000]. A busy block 9_800..9_860 (60 blocks within
         # the window) so B holds crown 20% of window. We can't use a
         # SwapCompleted event here because the direction lookup needs an
         # active swap entry in the tracker — easier to just record the
         # outcome and the busy delta directly.
-        v.event_watcher.apply_busy_delta(9_500, 'hk_a', +1)
-        v.event_watcher.apply_busy_delta(9_620, 'hk_a', -1)
+        v.event_watcher.apply_busy_delta(9_800, 'hk_a', +1)
+        v.event_watcher.apply_busy_delta(9_860, 'hk_a', -1)
         self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='btc', to_chain='tao')
         self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='btc', to_chain='tao')
         rewards, _ = calculate_miner_rewards(v)
-        # Crown: A=480/600=0.8, B=120/600=0.2. Volume: A=0.2, B=0.8.
+        # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
         # A participation = 0.2/0.8 = 0.25 → factor 0.625.
         # B participation = min(1.0, 0.8/0.2) = 1.0 → factor 1.0.
         np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8 * 0.625, atol=1e-6)
@@ -1935,7 +1952,7 @@ class TestCapacityVolumeInteraction:
             swap_id=1,
             miner_hotkey='hk_b',
             completed=True,
-            resolved_block=9_500,
+            resolved_block=9_900,  # within the default validator's scoring window
             tao_amount=500_000_000,
             from_chain='tao',
             to_chain='btc',
@@ -1966,7 +1983,7 @@ class TestCapacityVolumeInteraction:
             swap_id=1,
             miner_hotkey='hk_b',
             completed=True,
-            resolved_block=9_500,
+            resolved_block=9_900,  # within the default validator's scoring window
             tao_amount=400_000_000,
             from_chain='btc',
             to_chain='tao',
@@ -2207,7 +2224,7 @@ class TestHistoricalCollateralReplay:
             collaterals={'hk_a': 100_000_000},  # held throughout the window
         )
         self.seed_tao_btc_crown(v, 'hk_a')
-        # Top-up fires *after* window_end (= 10_000). Window is (8_800, 10_000].
+        # Top-up fires *after* window_end (= 10_000). Window is (9_700, 10_000].
         v.event_watcher.apply_event(
             10_500,
             'CollateralPosted',
@@ -2232,15 +2249,15 @@ class TestHistoricalCollateralReplay:
             collaterals={'hk_a': 125_000_000},  # window-start anchor
         )
         self.seed_tao_btc_crown(v, 'hk_a')
-        # SCORING_WINDOW_BLOCKS = 600 → window is (9_400, 10_000]. Midpoint
-        # 9_700 splits credit 300/300 between low and full capacity.
+        # SCORING_WINDOW_BLOCKS = 300 → window is (9_700, 10_000]. Midpoint
+        # 9_850 splits credit 150/150 between low and full capacity.
         v.event_watcher.apply_event(
-            9_700,
+            9_850,
             'CollateralPosted',
             {'miner': 'hk_a', 'amount': 375_000_000, 'total': 500_000_000},
         )
         rewards, _ = calculate_miner_rewards(v)
-        # First 300 blocks at cap 0.25, next 300 at cap 1.0 → mean cap 0.625.
+        # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.625, atol=1e-6)
         v.state_store.close()
 
@@ -2304,7 +2321,7 @@ class TestHistoricalCollateralReplay:
         watcher.apply_event(200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000})
         watcher.apply_event(5_000, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
         watcher.apply_event(50, 'CollateralPosted', {'miner': 'hk_b', 'amount': 0, 'total': 300_000_000})
-        # current_block=10_000, SCORING_WINDOW_BLOCKS=1200 → cutoff=8_800.
+        # current_block=10_000, SCORING_WINDOW_BLOCKS=300 → cutoff=9_700.
         watcher.prune_old_events(10_000)
         blocks_a = [ev.block for ev in watcher.collateral_events_by_hotkey['hk_a']]
         assert blocks_a == [5_000]
@@ -2336,3 +2353,54 @@ class TestHistoricalCollateralReplay:
         ]
         assert watcher2.get_miner_collaterals_at(1_000) == {'hk_a': 200_000_000}
         store.close()
+
+
+class TestScoringCadenceAndWindow:
+    """Block-based scoring gate + cursor-anchored, gap-free window tiling —
+    guards the step-vs-block fix (a multi-block forward pass made the old
+    step-count gate fire too rarely and leave most blocks unscored)."""
+
+    def test_gate_forces_first_pass_on_fresh_process(self):
+        # initial_scoring_done False → fire regardless of block delta.
+        assert due_for_scoring(current_block=5, last_scored_block=4, initial_scoring_done=False)
+
+    def test_gate_fires_on_block_delta_not_step_count(self):
+        # Exactly one window elapsed → due; one block short → not yet.
+        assert due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS, True)
+        assert not due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS + 1, True)
+
+    def test_gate_overshoot_fires(self):
+        # A multi-block forward pass can overshoot the boundary — still fires.
+        assert due_for_scoring(1000, 1000 - SCORING_WINDOW_BLOCKS - 5, True)
+
+    def test_consecutive_windows_tile_with_no_gap(self):
+        # Round N's window_end must equal round N+1's window_start so every
+        # block is covered exactly once.
+        start1, end1 = scoring_window_bounds(current_block=1000, last_scored_block=400)
+        assert (start1, end1) == (400, 1000)
+        # Cursor advances to end1; next round fires a window later.
+        start2, end2 = scoring_window_bounds(current_block=1600, last_scored_block=end1)
+        assert start2 == end1  # tiles — no gap
+        assert (start2, end2) == (1000, 1600)
+
+    def test_overshoot_does_not_open_a_gap(self):
+        # Forward straddled the boundary: fires at last+window+5. window_start
+        # stays anchored to last_scored, so the 5 extra blocks are still scored.
+        last = 1000
+        start, end = scoring_window_bounds(current_block=last + SCORING_WINDOW_BLOCKS + 5, last_scored_block=last)
+        assert start == last  # no gap despite the overshoot
+
+    def test_backfill_is_capped_after_a_stall(self):
+        # last_scored far behind (long outage) → window_start clamps to the
+        # cap, not the stale cursor, so one round can't replay an unbounded span.
+        start, end = scoring_window_bounds(current_block=100_000, last_scored_block=0)
+        assert start == 100_000 - MAX_SCORING_BACKFILL_BLOCKS
+        assert end == 100_000
+
+    def test_fresh_seed_scores_one_trailing_window(self):
+        # Seed = block - SCORING_WINDOW_BLOCKS (validator __init__) → first
+        # round covers exactly one trailing window, like the old behavior.
+        block = 50_000
+        seed = max(0, block - SCORING_WINDOW_BLOCKS)
+        start, end = scoring_window_bounds(current_block=block, last_scored_block=seed)
+        assert (start, end) == (block - SCORING_WINDOW_BLOCKS, block)

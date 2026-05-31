@@ -20,6 +20,7 @@ from allways.constants import (
     CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
+    MAX_SCORING_BACKFILL_BLOCKS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
@@ -43,24 +44,76 @@ class DirectionTrace:
     best_rate: float = 0.0
 
 
+def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
+    """Block-based scoring gate: fire once on a fresh process, then every
+    ``SCORING_WINDOW_BLOCKS`` *blocks* — not steps. A forward pass spans several
+    blocks, so a step-count gate fires too rarely and leaves blocks unscored."""
+    return not initial_scoring_done or (current_block - last_scored_block) >= SCORING_WINDOW_BLOCKS
+
+
+def scoring_window_bounds(current_block: int, last_scored_block: int) -> Tuple[int, int]:
+    """``(window_start, window_end)`` for a scoring round. Anchors window_start
+    to the last-scored block so consecutive rounds tile gap-free, capped at
+    ``MAX_SCORING_BACKFILL_BLOCKS`` for the catch-up case after a stall."""
+    window_end = current_block
+    window_start = max(0, window_end - MAX_SCORING_BACKFILL_BLOCKS, last_scored_block)
+    return window_start, window_end
+
+
 def score_and_reward_miners(self: Validator) -> None:
     try:
-        if _contract_is_halted(self):
+        halted = contract_is_halted(self)
+        if halted:
             rewards, miner_uids = build_halted_rewards(self)
+            _flush_halt_window(self)
         else:
             rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
         prune_rate_events(self)
         prune_swap_outcomes(self)
+        # Advance the cursor only after a round completes, so a mid-round
+        # failure retries the same window next forward instead of skipping it.
+        # self.block is TTL-cached, so it equals the window_end the round used.
+        self.last_scored_block = self.block
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def _contract_is_halted(self: Validator) -> bool:
+def _flush_halt_window(self: Validator) -> None:
+    """Clear crown_holders rows in the halted window, advance the
+    sync_cursor watermarks, and clear the live current_crown_holders
+    table. Mirrors the daemon's halt-tick semantics so the dashboard
+    doesn't keep showing pre-halt holders while the validator has
+    recycled the pool. Live-table clear lives here (not in the
+    per-forward snapshot) so we don't pay an RPC every step just to
+    check halt — halt is rare; one clear per round is enough."""
+    if not self.database_storage.is_enabled():
+        return
+    window_end = self.block
+    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    if window_end <= 0:
+        return
+    directions = list(DIRECTION_POOLS.keys())
+    self.database_storage.flush_halt_window(
+        directions=directions,
+        window_start=window_start,
+        window_end=window_end,
+        max_block=window_end - 1,
+    )
+    # Empty rows per direction → upsert_current_crown_snapshot's
+    # delete-then-insert flow clears them.
+    self.database_storage.upsert_current_crown_snapshot({(f, t): [] for f, t in directions})
+
+
+def contract_is_halted(self: Validator) -> bool:
     """Best-effort halt check. RPC flakiness should not zero every miner's
-    reward, so any exception falls through to normal scoring."""
+    reward, so any exception falls through to normal scoring.
+
+    Delegates to bounds_cache.halted() — short TTL (HALT_TTL_BLOCKS ~ 60s)
+    so the per-forward live-crown writer and the per-round scoring path
+    share one cached value instead of each hitting the contract RPC."""
     try:
-        return bool(self.contract_client.get_halted())
+        return self.bounds_cache.halted()
     except Exception as e:
         bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
         return False
@@ -102,8 +155,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
 
-    window_end = self.block
-    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    window_start, window_end = scoring_window_bounds(self.block, self.last_scored_block)
 
     # A miner's *current* active flag is irrelevant to whether they earned
     # crown during the replay window. The only at-scoring-time check is
@@ -123,6 +175,11 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
+    # Captured only when dashboard storage is enabled — the tee inside
+    # replay_crown_time_window is a no-op when intervals_out is None, so
+    # disabled validators pay zero cost here.
+    storage_enabled = self.database_storage.is_enabled()
+    intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, List[str], float]]] = {}
     try:
         max_swap_amount = int(self.bounds_cache.max_swap_amount())
     except Exception as e:
@@ -141,6 +198,10 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
         trace = DirectionTrace(pool=pool)
         direction_traces[(from_chain, to_chain)] = trace
+        intervals: Optional[List[Tuple[int, int, List[str], float]]] = None
+        if storage_enabled:
+            intervals = []
+            intervals_by_dir[(from_chain, to_chain)] = intervals
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
@@ -150,6 +211,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
+            intervals_out=intervals,
             min_swap_rao=min_swap_amount,
             max_swap_rao=max_swap_amount,
         )
@@ -231,6 +293,28 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         recycled=recycled,
         weighting_traces=weighting_traces,
     )
+
+    if storage_enabled:
+        # Expand uniform-state intervals to per-block crown_holders rows.
+        # `flush_scoring_window` deletes [window_start, window_end) per
+        # direction before upserting, so the wipe matches the data exactly.
+        crown_rows_by_dir = {d: expand_intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()}
+        rate_rows: List[Tuple[str, str, str, float, int]] = []
+        for from_chain, to_chain in DIRECTION_POOLS:
+            for e in self.state_store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
+                rate_rows.append((e['hotkey'], from_chain, to_chain, float(e['rate']), e['block']))
+        # Range delete + insert covers [window_start, window_end) exclusive
+        # of window_end, so the last block actually written is window_end - 1.
+        # Cursor advances to that — claiming through window_end would lie
+        # to readers about what's flushed.
+        cursor_block = max(0, window_end - 1)
+        self.database_storage.flush_scoring_window(
+            rate_rows=rate_rows,
+            crown_rows_by_direction=crown_rows_by_dir,
+            crown_window_bounds_by_direction={d: (window_start, window_end) for d in DIRECTION_POOLS},
+            rate_snapshot_max_block=cursor_block,
+            crown_holders_max_block=cursor_block,
+        )
 
     return rewards, set(range(n_uids))
 
@@ -361,15 +445,14 @@ def reconstruct_window_start_state(
     rewardable_hotkeys: Set[str],
 ) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, float], Dict[str, int]]:
     """Snapshot rates, busy counts, active set, reservation-pin overlay, and
-    posted collateral as they stood at window_start."""
-    rates: Dict[str, float] = {}
+    posted collateral as they stood at window_start. Rate read is one batched
+    query per direction (N rewardable hotkeys would otherwise be N point
+    lookups, runs every forward step from snapshot_current_crown_holders)."""
     busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
     active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
-    for hotkey in rewardable_hotkeys:
-        latest_rate = store.get_latest_rate_before(hotkey, from_chain, to_chain, window_start)
-        if latest_rate is not None:
-            rates[hotkey] = latest_rate[0]
+    all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
+    rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
     pinned_rates: Dict[str, float] = {
         hk: rate
@@ -429,6 +512,7 @@ def replay_crown_time_window(
     window_end: int,
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
+    intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
     min_swap_rao: int = 0,
     max_swap_rao: int = 0,
 ) -> Dict[str, float]:
@@ -501,6 +585,8 @@ def replay_crown_time_window(
         winner_rate = rates_for_instant.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
             trace.best_rate = winner_rate
+        if intervals_out is not None:
+            intervals_out.append((interval_start, interval_end, list(holders), winner_rate))
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
@@ -539,6 +625,100 @@ def replay_crown_time_window(
         trace.crown_blocks = dict(crown_blocks)
         trace.cap_weighted_blocks = dict(cap_weighted_blocks)
     return crown_blocks
+
+
+def snapshot_current_crown_holders(
+    self: Validator,
+) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
+    """Cheap "who holds the crown right now" per direction. Used by the
+    per-forward-step live-crown writer.
+
+    Reconstructs rates/busy/active at the current block and evaluates
+    ``crown_holders_at_instant`` once per direction — no event-stream walk,
+    so cost is O(rewardable_hotkeys) per direction, sub-millisecond in
+    practice. Returns rows in ``DatabaseStorage.upsert_current_crown_snapshot``
+    shape: ``(from_chain, to_chain, hotkey, credit, rate, block)`` keyed
+    by direction. An empty list for a direction means "no qualifying
+    holder right now" — instructs the storage layer to clear that
+    direction's rows.
+
+    Halt is not checked here — that RPC is expensive and halt is rare;
+    instead ``_flush_halt_window`` clears the live table at the next
+    scoring round when a halt is detected. Worst case the live table
+    shows the actual best-rate holder during halt for ~1h, while the
+    HaltBanner + top-right indicator (both fed by /halt off
+    contract_events) signal the recycle state to users."""
+    block = self.block
+    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    # Match the scoring path's executability filter so the live table never
+    # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
+    # TTL cache (no per-step RPC); both-0 on failure = permissive, as before.
+    try:
+        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+    except Exception as e:
+        bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
+        min_swap_amount = max_swap_amount = 0
+    rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
+    for from_chain, to_chain in DIRECTION_POOLS:
+        rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
+            self.state_store,
+            self.event_watcher,
+            from_chain,
+            to_chain,
+            block,
+            rewardable_hotkeys,
+        )
+        canon_from, _ = canonical_pair(from_chain, to_chain)
+        lower_rate_wins = from_chain != canon_from
+        busy_set = {hk for hk, c in busy_count.items() if c > 0}
+        # Overlay reservation-pinned rates so the live table credits the same
+        # holder the scoring path does during a pin window (bump-after-pin
+        # loophole closure) — otherwise the live view contradicts the ledger.
+        if pinned_rates:
+            rates = {**rates, **pinned_rates}
+
+        def executable_check(rate: float, from_chain=from_chain, to_chain=to_chain) -> bool:
+            return is_executable_rate(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
+
+        holders = crown_holders_at_instant(
+            rates,
+            rewardable_hotkeys,
+            busy=busy_set,
+            active=active_set,
+            lower_rate_wins=lower_rate_wins,
+            executable_rate_check=executable_check,
+        )
+        if holders:
+            share = 1.0 / len(holders)
+            rate = rates.get(holders[0], 0.0)
+            rows_by_direction[(from_chain, to_chain)] = [
+                (from_chain, to_chain, hk, share, rate, block) for hk in holders
+            ]
+        else:
+            rows_by_direction[(from_chain, to_chain)] = []
+    return rows_by_direction
+
+
+def expand_intervals_to_crown_rows(
+    intervals: List[Tuple[int, int, List[str], float]],
+    from_chain: str,
+    to_chain: str,
+) -> List[Tuple[int, str, str, str, float, float]]:
+    """Expand uniform-state intervals to per-block crown_holders rows.
+
+    For each (lo, hi, holders, rate) emit (hi - lo) * len(holders) rows,
+    each with credit = 1/len(holders). The per-block per-direction credits
+    therefore sum to 1.0, matching the validator's fair-tie semantics."""
+    rows: List[Tuple[int, str, str, str, float, float]] = []
+    for lo, hi, holders, rate in intervals:
+        if not holders or hi <= lo:
+            continue
+        share = 1.0 / len(holders)
+        for block in range(lo, hi):
+            for hotkey in holders:
+                rows.append((block, from_chain, to_chain, hotkey, share, rate))
+    return rows
 
 
 def crown_holders_at_instant(
