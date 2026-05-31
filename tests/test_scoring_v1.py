@@ -333,6 +333,72 @@ class TestReplayCrownTime:
         assert crown == {'hk_sane': 1000.0}
         store.close()
 
+    def test_bounds_transition_does_not_retroactively_zero_pre_bounds_credit(self, tmp_path: Path):
+        """Bounds-tightening between scoring rounds must not zero out a miner's
+        credit from the previous round.
+
+        Production scoring runs per ~hour window; each round reads bounds fresh
+        and applies them to its window only. If bounds tighten between round N
+        (permissive) and round N+1 (strict), round N's credit stays as it was —
+        scoring is per-window, never re-evaluated.
+
+        Verified by replaying the same rate-event store twice for adjacent
+        windows: the permissive window credits the miner, the strict window
+        does not, and the permissive replay's result is unchanged.
+        """
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        # A rate that lands in [min, max] = [0, very-large] but is unexecutable
+        # once max is tightened to a small value: 1e10 TAO/BTC has no fundable
+        # source in [0.1, 0.5] TAO (every sat maps above max).
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 1e10, 0),
+        )
+        conn.commit()
+
+        # Round N — permissive bounds, full window credited.
+        permissive = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        assert permissive == {'hk_a': 1000.0}
+
+        # Round N+1 — bounds tightened mid-day. The next window's replay zeros
+        # the miner, but the prior result must still be exactly what it was.
+        strict = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=1100,
+            window_end=2100,
+            rewardable_hotkeys={'hk_a'},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert strict == {}
+
+        # Re-run round N — same inputs, same result. Confirms the strict round
+        # did not mutate state in a way that retroactively wipes earlier credit.
+        permissive_replay = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+        assert permissive_replay == permissive
+        store.close()
+
     def test_sentinel_rate_still_wins_when_bounds_unset(self, tmp_path: Path):
         """Without configured bounds the executability filter is permissive
         — preserves legacy behavior on chains/networks that haven't yet
