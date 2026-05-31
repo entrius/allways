@@ -86,6 +86,7 @@ def make_validator(
     block: int = 10_000,
     *,
     max_swap_amount: int = 0,
+    min_swap_amount: int = 0,
     collaterals: dict[str, int] | None = None,
     baseline_credibility: bool = True,
 ) -> SimpleNamespace:
@@ -115,6 +116,7 @@ def make_validator(
             seed_collateral(watcher, hotkey, amount, block=0)
     bounds_cache = MagicMock()
     bounds_cache.max_swap_amount.return_value = max_swap_amount
+    bounds_cache.min_swap_amount.return_value = min_swap_amount
     contract_client = MagicMock()
     contract_client.get_miner_collateral.side_effect = lambda hk: collaterals.get(hk, 0)
     database_storage = MagicMock()
@@ -308,6 +310,9 @@ class TestReplayCrownTime:
         earn zero crown, and the sane miner takes the entire window."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        # Seed enough collateral so hk_sane clears the per-block boundary-squat
+        # gate — this test isn't exercising that gate.
+        seed_collateral(watcher, 'hk_sane', 500_000_000, block=0)
         conn = store.require_connection()
         for row in (
             ('hk_sentinel', 'btc', 'tao', 1e10, 0),
@@ -331,6 +336,124 @@ class TestReplayCrownTime:
             max_swap_rao=500_000_000,  # 0.5 TAO
         )
         assert crown == {'hk_sane': 1000.0}
+        store.close()
+
+    def test_boundary_squat_dropped_per_block(self, tmp_path: Path):
+        """Squatter posts a live, executable rate (50000 TAO/BTC) whose smallest
+        in-band leg (0.5 TAO at 1000 sats) exceeds their 0.15 TAO collateral.
+        Survives is_executable_rate but the per-block gate drops them — entire
+        window unfilled (no other holders)."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_squat'})
+        seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+        )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_squat'},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert crown == {}
+        store.close()
+
+    def test_boundary_squat_loses_to_funded_runner_up(self, tmp_path: Path):
+        """Squatter has the best rate but their per-block gate drops every
+        block to the funded runner-up — same shape as the busy-runner-up case."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_squat', 'hk_funded'})
+        seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
+        seed_collateral(watcher, 'hk_funded', 500_000_000, block=0)
+        conn = store.require_connection()
+        for row in (
+            ('hk_squat', 'btc', 'tao', 50000.0, 0),  # best rate, can't fund
+            ('hk_funded', 'btc', 'tao', 326.0, 0),  # runner-up, can fund
+        ):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                row,
+            )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_squat', 'hk_funded'},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert crown == {'hk_funded': 1000.0}
+        store.close()
+
+    def test_squat_gate_skipped_when_bounds_unset(self, tmp_path: Path):
+        """Cold-start fail-safe: bounds at 0 → gate skipped (matches
+        is_executable_rate's permissive branch)."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_squat'})
+        seed_collateral(watcher, 'hk_squat', 1, block=0)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+        )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_squat'},
+        )
+        assert crown == {'hk_squat': 1000.0}
+        store.close()
+
+    def test_squat_gate_uses_per_block_collateral(self, tmp_path: Path):
+        """A miner who tops up collateral mid-window earns crown only for
+        blocks after the top-up — proves the gate uses per-block state, not
+        a window-end snapshot."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_squat'})
+        seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
+        # Top-up mid-window — collateral becomes enough to fund the 0.5 TAO leg.
+        watcher.apply_event(600, 'CollateralPosted', {'miner': 'hk_squat', 'amount': 350_000_000, 'total': 500_000_000})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+        )
+        conn.commit()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_squat'},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        # Blocks (100, 600] dropped (collateral 0.15 < 0.5 TAO leg).
+        # Blocks (600, 1100] credited (collateral 0.5 TAO).
+        assert crown == {'hk_squat': 500.0}
         store.close()
 
     def test_bounds_transition_does_not_retroactively_zero_pre_bounds_credit(self, tmp_path: Path):

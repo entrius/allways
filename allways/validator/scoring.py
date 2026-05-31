@@ -27,7 +27,7 @@ from allways.constants import (
     SUCCESS_EXPONENT,
     VOLUME_WEIGHT_ALPHA,
 )
-from allways.utils.rate import is_executable_rate
+from allways.utils.rate import is_executable_rate, min_executable_tao_leg
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -571,6 +571,15 @@ def replay_crown_time_window(
         merged.update(pinned_rates)
         return merged
 
+    bounds_set = min_swap_rao > 0 or max_swap_rao > 0
+
+    def can_fund(hotkey: str, rate: float) -> bool:
+        # Boundary-squat per-block gate: a miner whose own rate forces a TAO
+        # leg larger than their collateral_at_block earns no crown for that
+        # block. Cascades to the next-best rate via crown_holders_at_instant.
+        min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+        return min_leg == 0 or collaterals.get(hotkey, 0) >= min_leg
+
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
         if duration <= 0:
@@ -584,6 +593,7 @@ def replay_crown_time_window(
             active=active_set,
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
+            can_fund_at_rate=can_fund if bounds_set else None,
         )
         if not holders:
             if trace is not None:
@@ -735,6 +745,7 @@ def crown_holders_at_instant(
     active: Optional[Set[str]] = None,
     lower_rate_wins: bool = False,
     executable_rate_check: Optional[Callable[[float], bool]] = None,
+    can_fund_at_rate: Optional[Callable[[str, float], bool]] = None,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
     other condition (rewardable, active, not busy, rate > 0, executable).
@@ -771,6 +782,8 @@ def crown_holders_at_instant(
         if rate <= 0:
             return False
         if executable_rate_check is not None and not executable_rate_check(rate):
+            return False
+        if can_fund_at_rate is not None and not can_fund_at_rate(hotkey, rate):
             return False
         return hotkey in rewardable and hotkey not in busy
 
