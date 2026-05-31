@@ -197,6 +197,19 @@ class ActiveEvent:
     block: int
 
 
+@dataclass
+class CollateralEvent:
+    """Transition of a miner's posted collateral. ``collateral_rao`` is the
+    post-event total (not a delta), matching the on-chain ``total`` field of
+    ``CollateralPosted`` / ``CollateralWithdrawn``. Replayed per-block so the
+    capacity multiplier in scoring reflects collateral as-of each crown
+    block, not as-of the scoring moment."""
+
+    hotkey: str
+    collateral_rao: int
+    block: int
+
+
 MAX_BLOCKS_PER_SYNC = 50
 EVENT_PRUNE_INTERVAL_BLOCKS = 100  # O(events) sweep; window much wider than per-step delta.
 
@@ -241,6 +254,13 @@ class ContractEventWatcher:
         self.busy_events: List[BusyEvent] = []
         self.active_events: List[ActiveEvent] = []
         self.active_events_by_hotkey: Dict[str, List[ActiveEvent]] = {}
+        # Per-block collateral series — feeds the scoring replay's capacity
+        # multiplier so a miner cannot top up collateral after the fact and
+        # retroactively boost the capacity weight on already-earned crown.
+        # Bootstrapped from a single anchor read at cursor; subsequent
+        # CollateralPosted/CollateralWithdrawn events build the series.
+        self.collateral_events: List[CollateralEvent] = []
+        self.collateral_events_by_hotkey: Dict[str, List[CollateralEvent]] = {}
         # Direction-keyed reservation pin lifecycle — feeds the scoring
         # replay's pinned-rate overlay so a miner who pins at a moderate
         # rate then bumps live to absurd cannot earn crown at the inflated
@@ -302,6 +322,32 @@ class ContractEventWatcher:
                 break
             latest[ev.hotkey] = ev.active
         return {hk for hk, is_active in latest.items() if is_active}
+
+    def get_collateral_events_in_range(self, start_block: int, end_block: int) -> List[dict]:
+        """Collateral transitions in ``(start_block, end_block]``, oldest first.
+        ``collateral_rao`` is the post-event total."""
+        out: List[dict] = []
+        for ev in self.collateral_events:
+            if ev.block <= start_block:
+                continue
+            if ev.block > end_block:
+                break
+            out.append({'hotkey': ev.hotkey, 'collateral_rao': ev.collateral_rao, 'block': ev.block})
+        return out
+
+    def get_miner_collaterals_at(self, block: int) -> Dict[str, int]:
+        """Per-hotkey posted collateral at ``block``, reconstructed by taking
+        the most recent transition at or before ``block`` for each hotkey.
+        Hotkeys with no recorded event default to absent (caller treats as 0).
+        Cold bootstrap seeds an anchor event at ``cursor`` for every active
+        hotkey, so any rewardable miner with a meaningful collateral position
+        appears in the result for ``block >= cursor``."""
+        latest: Dict[str, int] = {}
+        for ev in self.collateral_events:
+            if ev.block > block:
+                break
+            latest[ev.hotkey] = ev.collateral_rao
+        return latest
 
     def get_reservation_pin_events_in_range(
         self, start_block: int, end_block: int, from_chain: str, to_chain: str
@@ -418,6 +464,20 @@ class ContractEventWatcher:
             self.active_events.append(event)
             self.active_events_by_hotkey.setdefault(hotkey, []).append(event)
             self.state_store.insert_active_event(self.cursor, hotkey, True)
+        # Same anchor logic for collateral: a fresh boot can only read current
+        # collateral, so we record it at ``cursor`` and treat the window as if
+        # the miner held that collateral the whole time. CollateralPosted /
+        # CollateralWithdrawn events replayed during sync_to refine the series.
+        if metagraph_hotkeys and contract_client is not None:
+            for hotkey in metagraph_hotkeys:
+                try:
+                    collateral = int(contract_client.get_miner_collateral(hotkey))
+                except Exception as e:
+                    bt.logging.debug(f'EventWatcher bootstrap: collateral read failed for {hotkey[:8]}: {e}')
+                    continue
+                if collateral <= 0:
+                    continue
+                self._record_collateral_event(self.cursor, hotkey, collateral)
         self.state_store.set_event_cursor(self.cursor)
 
     def hydrate_from_db(self) -> None:
@@ -458,10 +518,20 @@ class ContractEventWatcher:
             for r in pin_event_rows
         ]
 
+        collateral_rows = self.state_store.load_all_collateral_events()
+        self.collateral_events = [
+            CollateralEvent(hotkey=r['hotkey'], collateral_rao=int(r['collateral_rao']), block=r['block_num'])
+            for r in collateral_rows
+        ]
+        self.collateral_events_by_hotkey = {}
+        for ev in self.collateral_events:
+            self.collateral_events_by_hotkey.setdefault(ev.hotkey, []).append(ev)
+
         bt.logging.info(
             f'EventWatcher hydrated from DB: cursor={self.cursor}, '
             f'{len(self.active_miners)} active, {sum(self.open_swap_count.values())} open swaps, '
-            f'{len(self.reservation_pin_events)} pin events'
+            f'{len(self.reservation_pin_events)} pin events, '
+            f'{len(self.collateral_events)} collateral events'
         )
 
     def sync_to(self, current_block: int) -> None:
@@ -605,6 +675,7 @@ class ContractEventWatcher:
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
                 tao = int(values.get('tao_amount') or 0)
+                fee = int(values.get('fee_amount') or 0)
                 from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
@@ -615,6 +686,11 @@ class ContractEventWatcher:
                     from_chain=from_chain,
                     to_chain=to_chain,
                 )
+                # The contract's apply_collateral_penalty deducts ``fee_amount``
+                # from collateral without emitting a CollateralWithdrawn event,
+                # so we mirror it here to keep the replayed series in step.
+                if fee > 0:
+                    self._apply_collateral_delta(block_num, miner, -fee)
                 self.apply_busy_delta(block_num, miner, -1, swap_id)
                 # Defensive: if SwapInitiated was missed (out-of-order delivery,
                 # bootstrap), terminal SwapCompleted is the last chance to clear
@@ -631,6 +707,7 @@ class ContractEventWatcher:
             swap_id = values.get('swap_id')
             miner = values.get('miner', '')
             if isinstance(swap_id, int) and miner:
+                slash = int(values.get('slash_amount') or 0)
                 from_chain, to_chain = self._lookup_swap_direction(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
@@ -640,6 +717,13 @@ class ContractEventWatcher:
                     from_chain=from_chain,
                     to_chain=to_chain,
                 )
+                # The slash side mirrors the fee side: apply_collateral_penalty
+                # silently reduces collateral. CollateralSlashed *does* fire
+                # right before SwapTimedOut, but we deliberately don't double-
+                # count by handling both — we drive the series off the terminal
+                # event whose direction-aware busy-delta we already process.
+                if slash > 0:
+                    self._apply_collateral_delta(block_num, miner, -slash)
                 # Defensive: a SwapInitiated this validator missed would leave
                 # a stale pin behind — clear it on the terminal event too.
                 self.state_store.remove_reservation_pin(miner)
@@ -652,6 +736,16 @@ class ContractEventWatcher:
                 bt.logging.warning(
                     f'EventWatcher: {self._label(miner)} SwapTimedOut swap=#{swap_id} @ block {block_num} (slash)'
                 )
+        elif name == 'CollateralPosted':
+            miner = values.get('miner', '')
+            total = values.get('total')
+            if miner and isinstance(total, int):
+                self._record_collateral_event(block_num, miner, int(total))
+        elif name == 'CollateralWithdrawn':
+            miner = values.get('miner', '')
+            remaining = values.get('remaining')
+            if miner and isinstance(remaining, int):
+                self._record_collateral_event(block_num, miner, int(remaining))
         elif name == 'ReservationExtensionFinalized':
             # Event-driven cache update for the local pending_confirms row —
             # replaces the polling refresh that the legacy vote-extend flow
@@ -880,6 +974,35 @@ class ContractEventWatcher:
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
         self.state_store.insert_busy_event(block_num, hotkey, delta, swap_id)
 
+    def _latest_collateral(self, hotkey: str) -> int:
+        """Last known collateral for ``hotkey`` (0 if no event has fired)."""
+        history = self.collateral_events_by_hotkey.get(hotkey)
+        if not history:
+            return 0
+        return history[-1].collateral_rao
+
+    def _record_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int) -> None:
+        """Append a collateral transition and persist it. ``collateral_rao`` is
+        the post-event total (matches the on-chain event field). Duplicate
+        same-value events are still recorded so the latest block_num always
+        reflects when the position was last touched, but caller can suppress
+        no-op writes if they want a tighter series."""
+        if not hotkey:
+            return
+        clipped = max(0, int(collateral_rao))
+        event = CollateralEvent(hotkey=hotkey, collateral_rao=clipped, block=block_num)
+        self.collateral_events.append(event)
+        self.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
+        self.state_store.insert_collateral_event(block_num, hotkey, clipped)
+
+    def _apply_collateral_delta(self, block_num: int, hotkey: str, delta_rao: int) -> None:
+        """Apply a signed delta against the last-known collateral. Used for
+        fee (``confirm_swap``) and slash (``timeout_swap``) deductions that
+        ``apply_collateral_penalty`` silently makes without emitting a
+        ``CollateralWithdrawn``. Clipped at zero."""
+        prior = self._latest_collateral(hotkey)
+        self._record_collateral_event(block_num, hotkey, prior + delta_rao)
+
     def prune_old_events(self, current_block: int) -> None:
         """Drop busy and active events older than one scoring window. Latest
         active event per hotkey is preserved as a state-reconstruction anchor;
@@ -915,6 +1038,21 @@ class ContractEventWatcher:
                 for ev in self.reservation_pin_events
                 if ev.block_num >= cutoff or latest_per_dir.get((ev.hotkey, ev.from_chain, ev.to_chain)) is ev
             ]
+        if self.collateral_events:
+            latest_collateral: Dict[str, CollateralEvent] = {}
+            for ev in self.collateral_events:
+                latest_collateral[ev.hotkey] = ev
+            self.collateral_events = [
+                ev for ev in self.collateral_events if ev.block >= cutoff or latest_collateral.get(ev.hotkey) is ev
+            ]
+            for hotkey, events in list(self.collateral_events_by_hotkey.items()):
+                latest = events[-1] if events else None
+                pruned = [ev for ev in events if ev.block >= cutoff or ev is latest]
+                if pruned:
+                    self.collateral_events_by_hotkey[hotkey] = pruned
+                else:
+                    del self.collateral_events_by_hotkey[hotkey]
         self.state_store.prune_active_events(cutoff)
         self.state_store.prune_busy_events(cutoff)
+        self.state_store.prune_collateral_events(cutoff)
         self.state_store.prune_reservation_pin_events(cutoff)

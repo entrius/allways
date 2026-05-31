@@ -12,7 +12,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
 )
-from allways.validator.event_watcher import ActiveEvent, ContractEventWatcher
+from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
     credibility_ramp,
@@ -69,6 +69,17 @@ def seed_active(watcher: ContractEventWatcher, hotkey: str, active: bool, block:
         watcher.active_miners.discard(hotkey)
 
 
+def seed_collateral(watcher: ContractEventWatcher, hotkey: str, collateral_rao: int, block: int) -> None:
+    """Insert a collateral event directly into the watcher's in-memory state.
+    Mirrors the cold-bootstrap anchor that ``ContractEventWatcher`` writes
+    when it first sees a miner with a positive contract collateral position."""
+    event = CollateralEvent(hotkey=hotkey, collateral_rao=int(collateral_rao), block=block)
+    watcher.collateral_events.append(event)
+    watcher.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
+    watcher.collateral_events.sort(key=lambda ev: ev.block)
+    watcher.collateral_events_by_hotkey[hotkey].sort(key=lambda ev: ev.block)
+
+
 def make_validator(
     tmp_path: Path,
     hotkeys: list[str],
@@ -95,6 +106,13 @@ def make_validator(
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     watcher = make_watcher(store, active=set(hotkeys))
     collaterals = collaterals or {}
+    # Mirror the cold-bootstrap collateral anchor: scoring now reads collateral
+    # from the event watcher's per-block series, not from a live contract call.
+    # Seeding at block 0 puts the value before any test's window_start, so the
+    # reconstruction at window_start returns it as the anchor value.
+    for hotkey, amount in collaterals.items():
+        if amount > 0:
+            seed_collateral(watcher, hotkey, amount, block=0)
     bounds_cache = MagicMock()
     bounds_cache.max_swap_amount.return_value = max_swap_amount
     contract_client = MagicMock()
@@ -1586,20 +1604,24 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
-    def test_collateral_rpc_failure_is_logged_not_fatal(self, tmp_path: Path):
-        """A failing get_miner_collateral logs and treats as 0 → factor 0 →
-        miner's reward zeroes but the scoring pass completes."""
+    def test_no_collateral_anchor_zeros_reward(self, tmp_path: Path):
+        """A miner with no collateral event in the watcher's series (e.g. cold-
+        bootstrap saw zero on-chain collateral, or the read failed) is treated
+        as zero collateral throughout the window → factor 0 → zero reward.
+        Scoring no longer reads collateral via RPC, so the failure mode is now
+        a missing series rather than a failing call."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)
-        v.contract_client.get_miner_collateral.side_effect = RuntimeError('rpc down')
+        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)  # no collaterals dict
         self.seed_tao_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v)
         assert rewards[0] == 0.0
         v.state_store.close()
 
-    def test_collateral_read_cached_within_pass(self, tmp_path: Path):
-        """A miner holding crown in both directions has collateral fetched once,
-        not per-direction. Keeps the RPC budget bounded."""
+    def test_scoring_does_not_call_contract_for_collateral(self, tmp_path: Path):
+        """Scoring must derive capacity from the replayed event series, not a
+        live contract read. Closes #409: any path that reads current collateral
+        at scoring time would let a miner top up after the window and
+        retroactively boost capacity on already-earned crown."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
@@ -1615,8 +1637,7 @@ class TestCapacityWeighting:
             )
         conn.commit()
         calculate_miner_rewards(v)
-        # hk_a held crown in both directions → exactly one RPC for collateral.
-        assert v.contract_client.get_miner_collateral.call_count == 1
+        assert v.contract_client.get_miner_collateral.call_count == 0
         v.state_store.close()
 
     def test_max_swap_amount_rpc_failure_falls_back_to_unity(self, tmp_path: Path):
@@ -1637,12 +1658,11 @@ class TestWeightingTraceRecorders:
     direct unit coverage so changes there don't have to be inferred from
     integration tests."""
 
-    def test_record_capacity_sets_both_fields(self):
+    def test_record_capacity_sets_factor(self):
         from allways.validator.scoring_trace import WeightingTrace
 
         wt = WeightingTrace()
-        wt.record_capacity(collateral=250_000_000, factor=0.5)
-        assert wt.collateral == 250_000_000
+        wt.record_capacity(factor=0.5)
         assert wt.capacity_factor == 0.5
 
     def test_record_volume_computes_share_and_participation(self):
@@ -2207,6 +2227,165 @@ class TestEventWatcherPassesTaoAmount:
             .fetchone()
         )
         assert row['tao_amount'] == 0
+        store.close()
+
+
+class TestHistoricalCollateralReplay:
+    """Capacity weighting is now derived from a per-block collateral series
+    replayed alongside active/busy/rate, not a contract read at scoring time.
+    Closes #409 — a miner who tops up collateral after the window cannot
+    retroactively boost the capacity multiplier on crown they've already
+    earned."""
+
+    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, 'tao', 'btc', rate, 0),
+        )
+        conn.commit()
+
+    def test_409_retroactive_topup_does_not_boost_window(self, tmp_path: Path):
+        """Reproduces the #409 proof. Window holds collateral at 0.1 TAO the
+        entire time; a post-window CollateralPosted to 0.5 TAO must not
+        change the reward."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            block=10_000,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 100_000_000},  # held throughout the window
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        # Top-up fires *after* window_end (= 10_000). Window is (9_700, 10_000].
+        v.event_watcher.apply_event(
+            10_500,
+            'CollateralPosted',
+            {'miner': 'hk_a', 'amount': 400_000_000, 'total': 500_000_000},
+        )
+        rewards, _ = calculate_miner_rewards(v)
+        # capacity_factor = 100M / 500M = 0.2; pool 0.5 → reward 0.1.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.2, atol=1e-6)
+        v.state_store.close()
+
+    def test_mid_window_topup_blends_capacity(self, tmp_path: Path):
+        """A miner posts more collateral midway through the window. Capacity
+        is integrated per-block: half the window at 1/4 cap, half at full cap
+        → time-weighted average 0.625. Validates that the multiplier reflects
+        collateral *during* the interval, not at the end of it."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            block=10_000,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 125_000_000},  # window-start anchor
+        )
+        self.seed_tao_btc_crown(v, 'hk_a')
+        # SCORING_WINDOW_BLOCKS = 300 → window is (9_700, 10_000]. Midpoint
+        # 9_850 splits credit 150/150 between low and full capacity.
+        v.event_watcher.apply_event(
+            9_850,
+            'CollateralPosted',
+            {'miner': 'hk_a', 'amount': 375_000_000, 'total': 500_000_000},
+        )
+        rewards, _ = calculate_miner_rewards(v)
+        # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.625, atol=1e-6)
+        v.state_store.close()
+
+    def test_get_miner_collaterals_at_returns_latest(self, tmp_path: Path):
+        """Unit test the event watcher's per-block collateral reconstruction:
+        the latest event at or before the queried block wins."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 100_000_000})
+        watcher.apply_event(500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 50, 'total': 250_000_000})
+        watcher.apply_event(800, 'CollateralWithdrawn', {'miner': 'hk_a', 'amount': 50, 'remaining': 50_000_000})
+        assert watcher.get_miner_collaterals_at(50) == {}
+        assert watcher.get_miner_collaterals_at(100) == {'hk_a': 100_000_000}
+        assert watcher.get_miner_collaterals_at(499) == {'hk_a': 100_000_000}
+        assert watcher.get_miner_collaterals_at(500) == {'hk_a': 250_000_000}
+        assert watcher.get_miner_collaterals_at(799) == {'hk_a': 250_000_000}
+        assert watcher.get_miner_collaterals_at(800) == {'hk_a': 50_000_000}
+        store.close()
+
+    def test_swap_completed_deducts_fee_from_collateral_series(self, tmp_path: Path):
+        """``apply_collateral_penalty`` silently deducts the fee inside
+        ``confirm_swap`` — the contract emits no CollateralWithdrawn for it,
+        so the watcher mirrors the deduction from ``SwapCompleted.fee_amount``
+        to keep the replayed series in step with on-chain collateral."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
+        watcher.apply_event(200, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(
+            300,
+            'SwapCompleted',
+            {'swap_id': 1, 'miner': 'hk_a', 'tao_amount': 0, 'fee_amount': 50_000_000},
+        )
+        assert watcher.get_miner_collaterals_at(300) == {'hk_a': 450_000_000}
+        store.close()
+
+    def test_swap_timed_out_deducts_slash_from_collateral_series(self, tmp_path: Path):
+        """Same mirror for slashes — ``SwapTimedOut.slash_amount`` reduces the
+        replayed series so a post-slash crown interval gets the lower
+        capacity, not the pre-slash value."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
+        watcher.apply_event(200, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(
+            300,
+            'SwapTimedOut',
+            {'swap_id': 1, 'miner': 'hk_a', 'slash_amount': 200_000_000},
+        )
+        assert watcher.get_miner_collaterals_at(300) == {'hk_a': 300_000_000}
+        store.close()
+
+    def test_prune_keeps_latest_collateral_event_per_hotkey(self, tmp_path: Path):
+        """Mirrors the active-prune anchor rule: collateral events older than
+        the cutoff drop, but the most recent per-hotkey row is kept so
+        post-prune reconstruction at any block ≥ cutoff still returns the
+        correct value."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active=set())
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000})
+        watcher.apply_event(200, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000})
+        watcher.apply_event(5_000, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 500_000_000})
+        watcher.apply_event(50, 'CollateralPosted', {'miner': 'hk_b', 'amount': 0, 'total': 300_000_000})
+        # current_block=10_000, SCORING_WINDOW_BLOCKS=300 → cutoff=9_700.
+        watcher.prune_old_events(10_000)
+        blocks_a = [ev.block for ev in watcher.collateral_events_by_hotkey['hk_a']]
+        assert blocks_a == [5_000]
+        blocks_b = [ev.block for ev in watcher.collateral_events_by_hotkey['hk_b']]
+        assert blocks_b == [50]
+        assert watcher.get_miner_collaterals_at(20_000) == {'hk_a': 500_000_000, 'hk_b': 300_000_000}
+        store.close()
+
+    def test_collateral_events_persist_across_hydrate(self, tmp_path: Path):
+        """Warm-restart hydration: collateral events written to state.db
+        round-trip through hydrate_from_db so the in-memory series and the
+        ``by_hotkey`` index match what was on disk."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        watcher.apply_event(100, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 100_000_000})
+        watcher.apply_event(500, 'CollateralPosted', {'miner': 'hk_a', 'amount': 0, 'total': 200_000_000})
+        # Build a second watcher pointed at the same DB and hydrate.
+        store.set_event_cursor(600)
+        watcher2 = ContractEventWatcher(
+            substrate=MagicMock(),
+            contract_address='5contract',
+            metadata_path=METADATA_PATH,
+            state_store=store,
+        )
+        watcher2.hydrate_from_db()
+        assert [(ev.block, ev.collateral_rao) for ev in watcher2.collateral_events] == [
+            (100, 100_000_000),
+            (500, 200_000_000),
+        ]
+        assert watcher2.get_miner_collaterals_at(1_000) == {'hk_a': 200_000_000}
         store.close()
 
 

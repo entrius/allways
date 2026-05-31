@@ -27,9 +27,13 @@ NON_EARNER_LINE_CAP = 30
 
 @dataclass
 class WeightingTrace:
-    """Per-hotkey capacity + volume + credibility factors for the scoring log."""
+    """Per-hotkey capacity + volume + credibility factors for the scoring log.
 
-    collateral: int = 0
+    ``capacity_factor`` is the time-weighted average of
+    ``min(1, collateral / max_swap)`` over the miner's crown intervals — the
+    per-block series lives in the event watcher, so a post-window collateral
+    top-up cannot retroactively scale it (#409)."""
+
     capacity_factor: float = 1.0
     volume_rao: int = 0
     crown_share: float = 0.0
@@ -39,8 +43,7 @@ class WeightingTrace:
     closed_swaps: int = 0
     credibility_ramp: float = 0.0
 
-    def record_capacity(self, collateral: int, factor: float) -> None:
-        self.collateral = collateral
+    def record_capacity(self, factor: float) -> None:
         self.capacity_factor = factor
 
     def record_volume(self, vol_rao: int, total_volume_rao: int, crown_share: float, factor: float) -> None:
@@ -101,7 +104,7 @@ def log_scoring_trace(
         if wt is not None:
             extras = (
                 f' ({wt.closed_swaps}/{CREDIBILITY_RAMP_OBSERVATIONS} closed, ramp={wt.credibility_ramp:.2f})'
-                f' cap={wt.capacity_factor:.2f} (col={wt.collateral / TAO_TO_RAO:g}t)'
+                f' cap={wt.capacity_factor:.2f}'
                 f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
                 f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
             )

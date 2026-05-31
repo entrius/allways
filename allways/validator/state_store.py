@@ -2,13 +2,13 @@
 
 Tables: ``pending_confirms`` (axon→forward queue), ``rate_events`` (crown-time
 input), ``swap_outcomes`` (credibility ledger), ``active_events`` +
-``busy_events`` + ``event_watcher_meta`` + ``bootstrapped_swaps`` (event
-watcher persistence — warm restarts hydrate from these instead of replaying
-contract history). Single connection guarded by one lock; opened with
-``check_same_thread=False``. ``busy_timeout`` is set before
-``journal_mode=WAL`` because the WAL flip takes a brief exclusive lock that
-concurrent openers would otherwise hit as "database is locked" — the local
-dev env runs two validators against the same file.
+``busy_events`` + ``collateral_events`` + ``event_watcher_meta`` +
+``bootstrapped_swaps`` (event watcher persistence — warm restarts hydrate
+from these instead of replaying contract history). Single connection guarded
+by one lock; opened with ``check_same_thread=False``. ``busy_timeout`` is
+set before ``journal_mode=WAL`` because the WAL flip takes a brief exclusive
+lock that concurrent openers would otherwise hit as "database is locked" —
+the local dev env runs two validators against the same file.
 """
 
 import sqlite3
@@ -608,6 +608,21 @@ class ValidatorStateStore:
             for r in rows
         ]
 
+    def insert_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int) -> None:
+        self._execute(
+            'INSERT INTO collateral_events (block_num, hotkey, collateral_rao) VALUES (?, ?, ?)',
+            (block_num, hotkey, int(collateral_rao)),
+        )
+
+    def load_all_collateral_events(self) -> List[dict]:
+        rows = self._fetchall(
+            'SELECT block_num, hotkey, collateral_rao FROM collateral_events ORDER BY block_num ASC, id ASC'
+        )
+        return [
+            {'block_num': r['block_num'], 'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao'])}
+            for r in rows
+        ]
+
     def get_event_cursor(self) -> Optional[int]:
         row = self._fetchone('SELECT value FROM event_watcher_meta WHERE key = ?', ('cursor',))
         return int(row['value']) if row is not None else None
@@ -657,6 +672,21 @@ class ValidatorStateStore:
             DELETE FROM busy_events
             WHERE block_num < ?
               AND hotkey NOT IN (SELECT hotkey FROM busy_events GROUP BY hotkey HAVING SUM(delta) > 0)
+            """,
+            (cutoff_block,),
+        )
+
+    def prune_collateral_events(self, cutoff_block: int) -> None:
+        """Drop collateral events older than ``cutoff_block``, preserving the
+        latest row per hotkey as a reconstruction anchor (mirrors
+        ``prune_active_events``)."""
+        if cutoff_block <= 0:
+            return
+        self._execute(
+            """
+            DELETE FROM collateral_events
+            WHERE block_num < ?
+              AND id NOT IN (SELECT MAX(id) FROM collateral_events GROUP BY hotkey)
             """,
             (cutoff_block,),
         )
@@ -714,6 +744,7 @@ class ValidatorStateStore:
             conn = self.require_connection()
             conn.execute('DELETE FROM active_events')
             conn.execute('DELETE FROM busy_events')
+            conn.execute('DELETE FROM collateral_events')
             conn.execute('DELETE FROM reservation_pin_events')
             conn.execute("DELETE FROM event_watcher_meta WHERE key = 'cursor'")
             conn.execute('DELETE FROM bootstrapped_swaps')
@@ -890,6 +921,17 @@ class ValidatorStateStore:
                     ON busy_events(block_num);
                 CREATE INDEX IF NOT EXISTS idx_busy_events_hotkey
                     ON busy_events(hotkey);
+
+                CREATE TABLE IF NOT EXISTS collateral_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_num       INTEGER NOT NULL,
+                    hotkey          TEXT NOT NULL,
+                    collateral_rao  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_collateral_events_block
+                    ON collateral_events(block_num);
+                CREATE INDEX IF NOT EXISTS idx_collateral_events_hotkey
+                    ON collateral_events(hotkey);
 
                 CREATE TABLE IF NOT EXISTS reservation_pin_events (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 class DirectionTrace:
     pool: float = 0.0
     crown_blocks: Dict[str, float] = field(default_factory=dict)
+    cap_weighted_blocks: Dict[str, float] = field(default_factory=dict)
     unfilled_blocks: int = 0
     best_rate: float = 0.0
 
@@ -190,7 +191,6 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     except Exception as e:
         bt.logging.warning(f'min_swap_amount read failed: {e}')
         min_swap_amount = 0
-    collaterals: Dict[str, int] = {}
     miner_volume_total: Dict[str, int] = {}
     miner_crown_total: Dict[str, float] = {}
     network_volume_total: int = 0
@@ -238,15 +238,15 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             uid = hotkey_to_uid.get(hotkey)
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
-            if hotkey not in collaterals:
-                try:
-                    collaterals[hotkey] = int(self.contract_client.get_miner_collateral(hotkey))
-                except Exception as e:
-                    bt.logging.warning(f'collateral read failed for {hotkey[:8]}: {e}')
-                    collaterals[hotkey] = 0
-            cap = capacity_factor(collaterals[hotkey], max_swap_amount)
+            # Capacity is integrated per-block during the replay, so the
+            # effective multiplier is the time-weighted average over the
+            # miner's crown intervals. Reading current collateral here
+            # would let a post-window top-up retroactively boost credit
+            # already earned (#409).
+            cap_blocks = trace.cap_weighted_blocks.get(hotkey, 0.0)
+            cap = (cap_blocks / blocks) if blocks > 0 else 0.0
             wt = weighting_traces.setdefault(hotkey, WeightingTrace())
-            wt.record_capacity(collateral=collaterals[hotkey], factor=cap)
+            wt.record_capacity(factor=cap)
             wt.record_credibility(
                 closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
                 ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
@@ -412,13 +412,19 @@ class EventKind(IntEnum):
     wrote: a miner who posts a rate change in the same block they get
     reserved has the post-update value pinned, matching the contract's
     block-end commitment read.
+
+    COLLATERAL is independent of qualification — it only scales the credit
+    of an interval. Ordered between RATE and RESERVED_START so that a same-
+    block post lands before any reservation pin captures, matching the
+    intuition that capacity is observable as soon as it's posted.
     """
 
     ACTIVE = 0
     BUSY = 1
     RESERVED_END = 2
     RATE = 3
-    RESERVED_START = 4
+    COLLATERAL = 4
+    RESERVED_START = 5
 
 
 @dataclass
@@ -444,11 +450,11 @@ def reconstruct_window_start_state(
     to_chain: str,
     window_start: int,
     rewardable_hotkeys: Set[str],
-) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, float]]:
-    """Snapshot rates, busy counts, active set, and reservation-pin overlay
-    as they stood at window_start. Rate read is one batched query per
-    direction (N rewardable hotkeys would otherwise be N point lookups,
-    runs every forward step from snapshot_current_crown_holders)."""
+) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, float], Dict[str, int]]:
+    """Snapshot rates, busy counts, active set, reservation-pin overlay, and
+    posted collateral as they stood at window_start. Rate read is one batched
+    query per direction (N rewardable hotkeys would otherwise be N point
+    lookups, runs every forward step from snapshot_current_crown_holders)."""
     busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
     active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
 
@@ -461,7 +467,9 @@ def reconstruct_window_start_state(
         if hk in rewardable_hotkeys and rate > 0
     }
 
-    return rates, busy_count, active_set, pinned_rates
+    collaterals: Dict[str, int] = dict(event_watcher.get_miner_collaterals_at(window_start))
+
+    return rates, busy_count, active_set, pinned_rates, collaterals
 
 
 def merge_replay_events(
@@ -491,6 +499,13 @@ def merge_replay_events(
         kind = EventKind.RESERVED_START if e['kind'] == 'start' else EventKind.RESERVED_END
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=kind, value=float(e['rate'])))
 
+    for e in event_watcher.get_collateral_events_in_range(window_start, window_end):
+        events.append(
+            ReplayEvent(
+                block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
+            )
+        )
+
     events.sort(key=lambda ev: ev.sort_key)
     return events
 
@@ -512,15 +527,22 @@ def replay_crown_time_window(
     Ties at the same rate split credit evenly. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
     that instant, not busy, had a positive rate posted, and their rate is
-    executable under the current contract swap bounds. Active/rate/busy
-    are evaluated per-block via the replay — a miner's status at scoring
-    time is irrelevant other than metagraph membership (used to credit the
-    UID). Collateral-floor invariants are trusted to the contract's active
-    flag; halt state is handled at ``score_and_reward_miners`` entry.
+    executable under the current contract swap bounds. Active/rate/busy/
+    collateral are evaluated per-block via the replay — a miner's status at
+    scoring time is irrelevant other than metagraph membership (used to
+    credit the UID). The collateral-floor activation gate is still trusted
+    to the contract's active flag; halt state is handled at
+    ``score_and_reward_miners`` entry.
 
     Bounds at 0 disable the executability filter (matches the contract's
-    "unset" sentinel); the rate-positive floor still applies."""
-    rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
+    "unset" sentinel); the rate-positive floor still applies.
+
+    When ``trace`` is supplied, ``trace.cap_weighted_blocks`` is populated
+    alongside ``trace.crown_blocks``. The weighted series multiplies each
+    interval's split by ``capacity_factor(collateral_at_block, max_swap_rao)``
+    so a post-window collateral boost cannot retroactively scale credit
+    already earned (closes #409)."""
+    rates, busy_count, active_set, pinned_rates, collaterals = reconstruct_window_start_state(
         store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
     )
     replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
@@ -535,6 +557,7 @@ def replay_crown_time_window(
         return is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
 
     crown_blocks: Dict[str, float] = {}
+    cap_weighted_blocks: Dict[str, float] = {}
     prev_block = window_start
 
     def effective_rates() -> Dict[str, float]:
@@ -574,6 +597,8 @@ def replay_crown_time_window(
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
+            cap = capacity_factor(collaterals.get(hk, 0), max_swap_rao)
+            cap_weighted_blocks[hk] = cap_weighted_blocks.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:
         if event.kind is EventKind.RATE:
@@ -589,6 +614,8 @@ def replay_crown_time_window(
                 pinned_rates[event.hotkey] = event.value
         elif event.kind is EventKind.RESERVED_END:
             pinned_rates.pop(event.hotkey, None)
+        elif event.kind is EventKind.COLLATERAL:
+            collaterals[event.hotkey] = max(0, int(event.value))
         else:  # ACTIVE
             if event.value > 0:
                 active_set.add(event.hotkey)
@@ -603,6 +630,7 @@ def replay_crown_time_window(
     credit_interval(prev_block, window_end)
     if trace is not None:
         trace.crown_blocks = dict(crown_blocks)
+        trace.cap_weighted_blocks = dict(cap_weighted_blocks)
     return crown_blocks
 
 
