@@ -351,6 +351,7 @@ class AllwaysContractClient:
         contract_address: Optional[str] = None,
         subtensor: Optional[bt.Subtensor] = None,
         reconnect_subtensor: Optional[Callable[[], None]] = None,
+        substrate_lock: Optional[Any] = None,
     ):
         self.contract_address = contract_address or get_contract_address() or ''
         self.subtensor = subtensor
@@ -362,8 +363,9 @@ class AllwaysContractClient:
         self.readonly_keypair = Keypair.create_from_uri('//Alice')
         self.initialized = False
         # substrate-interface's WebSocketProvider isn't thread-safe; serialize
-        # access so concurrent threads can't both land in recv at the same time.
-        self._substrate_lock = threading.Lock()
+        # access so concurrent threads can't both land in recv. Callers sharing
+        # this subtensor elsewhere pass that path's lock to serialize as one.
+        self._substrate_lock = substrate_lock or threading.Lock()
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')

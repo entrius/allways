@@ -6,7 +6,8 @@ may not have (testnet caps at 45/min). Halt is in the same shape (admin
 toggle), just shorter TTL because the dashboard wants quick freshness.
 """
 
-from typing import Any, Callable
+import threading
+from typing import Any, Callable, Optional
 
 import bittensor as bt
 
@@ -21,19 +22,28 @@ class BoundsCache:
     # unhalt. 5 blocks (~60s) keeps the worst-case lag tolerable.
     HALT_TTL_BLOCKS = 5
 
-    def __init__(self, contract: AllwaysContractClient, get_block: Callable[[], int]):
+    def __init__(
+        self,
+        contract: AllwaysContractClient,
+        get_block: Callable[[], int],
+        lock: Optional[Any] = None,
+    ):
         self._contract = contract
         self._get_block = get_block
         self._cache: dict[str, tuple[int, Any]] = {}
+        # get_block and the reads share the caller's subtensor websocket; hold
+        # the connection's lock so a shared thread can't race us into recv.
+        self._lock = lock or threading.Lock()
 
     def _cached(self, key: str, read: Callable[[], int]) -> int:
-        now = self._get_block()
-        entry = self._cache.get(key)
-        if entry is not None and now - entry[0] < self.TTL_BLOCKS:
-            return entry[1]
-        value = read()
-        self._cache[key] = (now, value)
-        return value
+        with self._lock:
+            now = self._get_block()
+            entry = self._cache.get(key)
+            if entry is not None and now - entry[0] < self.TTL_BLOCKS:
+                return entry[1]
+            value = read()
+            self._cache[key] = (now, value)
+            return value
 
     def min_collateral(self) -> int:
         return self._cached('min_collateral', self._contract.get_min_collateral)
@@ -51,14 +61,15 @@ class BoundsCache:
         flakes don't churn the writer) or False (no prior cache → assume
         not halted, matching scoring.contract_is_halted's fail-open
         behavior so a flaky RPC can't zero every miner's reward)."""
-        now = self._get_block()
-        entry = self._cache.get('halted')
-        if entry is not None and now - entry[0] < self.HALT_TTL_BLOCKS:
-            return bool(entry[1])
-        try:
-            value = bool(self._contract.get_halted())
-            self._cache['halted'] = (now, value)
-            return value
-        except Exception as e:
-            bt.logging.warning(f'halt RPC check failed: {e}')
-            return bool(entry[1]) if entry is not None else False
+        with self._lock:
+            now = self._get_block()
+            entry = self._cache.get('halted')
+            if entry is not None and now - entry[0] < self.HALT_TTL_BLOCKS:
+                return bool(entry[1])
+            try:
+                value = bool(self._contract.get_halted())
+                self._cache['halted'] = (now, value)
+                return value
+            except Exception as e:
+                bt.logging.warning(f'halt RPC check failed: {e}')
+                return bool(entry[1]) if entry is not None else False
