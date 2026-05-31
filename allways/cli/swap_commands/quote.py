@@ -238,6 +238,12 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
                 f'  [yellow]No miner can accept this — every routable miner is below the contract min '
                 f'({from_rao(min_swap_rao):.4f} TAO equivalent). Increase --amount.[/yellow]\n'
             )
+        elif len(available) > 0 and all(
+            not is_executable_rate(p.rate, from_chain, to_chain, min_swap_rao, max_swap_rao) for (p, _, _) in available
+        ):
+            console.print(
+                '  [yellow]Every miner is posting an unexecutable rate (sentinel). Try again later.[/yellow]\n'
+            )
         else:
             console.print(
                 '  [yellow]No miner can fulfill this swap at the requested amount — try a smaller amount '
