@@ -24,4 +24,4 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: entrius/allways:latest
+          tags: entrius/allways:latest,entrius/allways:${{ github.sha }}
