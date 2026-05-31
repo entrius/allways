@@ -41,13 +41,7 @@ from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_DEFAU
 from allways.contract_client import ContractError
 from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
-from allways.utils.rate import (
-    apply_fee_deduction,
-    calculate_to_amount,
-    check_swap_viability,
-    derive_tao_leg,
-    is_executable_rate,
-)
+from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
 
 
 def to_smallest_unit(amount: float, chain_id: str) -> int:
@@ -773,28 +767,6 @@ def swap_now_command(
                 console.print('[yellow]Cancelled[/yellow]')
                 return
 
-    # Read swap bounds early so we can filter out sentinel-rate posters before
-    # they pollute the ranked miner table.
-    try:
-        with loading('Reading protocol swap bounds...'):
-            min_swap = client.get_min_swap_amount()
-            max_swap = client.get_max_swap_amount()
-    except ContractError:
-        console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
-        min_swap, max_swap = 0, 0
-
-    if min_swap > 0 or max_swap > 0:
-        available_miners = [
-            (p, c)
-            for (p, c) in available_miners
-            if is_executable_rate(p.rate, from_chain, to_chain, min_swap, max_swap)
-        ]
-        if not available_miners:
-            console.print(
-                f'[yellow]Every miner posts an unexecutable rate for {from_chain.upper()}/{to_chain.upper()}.[/yellow]'
-            )
-            return
-
     # Rate is TAO/BTC: highest is best when receiving TAO, lowest when sending TAO.
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     canon_is_reverse = from_chain != canon_from
@@ -904,6 +876,14 @@ def swap_now_command(
     # collateral. Mirrors vote_reserve (bounds) and vote_initiate
     # (collateral) so we fail loudly here instead of after the user has
     # reserved and sent funds.
+    try:
+        with loading('Reading protocol swap bounds...'):
+            min_swap = client.get_min_swap_amount()
+            max_swap = client.get_max_swap_amount()
+    except ContractError:
+        console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
+        min_swap, max_swap = 0, 0
+
     viable, reason = check_swap_viability(tao_amount, selected_collateral, min_swap, max_swap)
     if not viable:
         console.print(
