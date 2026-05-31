@@ -21,6 +21,7 @@ from allways.validator.scoring import (
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
+    snapshot_current_crown_holders,
     success_rate,
 )
 from allways.validator.state_store import ValidatorStateStore
@@ -727,6 +728,59 @@ class TestReplayCrownTime:
         # SwapInitiated). B earns (100,500] = 400; A earns (500,1100] = 600.
         assert crown == {'hk_b': 400.0, 'hk_a': 600.0}
         store.close()
+
+
+class TestSnapshotCurrentCrownHolders:
+    """The per-forward-step live-crown snapshot must stay consistent with the
+    scoring ledger: it reconstructs the same 5-tuple window state and applies
+    the same boundary-squat gate."""
+
+    def _seed_rate(self, store: ValidatorStateStore, hotkey: str, rate: float) -> None:
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, 'btc', 'tao', rate, 0),
+        )
+        conn.commit()
+
+    def test_runs_and_credits_funded_holder(self, tmp_path: Path):
+        """Regression for the 5-vs-4 unpack crash: reconstruct_window_start_state
+        returns 5 values and this caller must unpack all of them. A funded miner
+        with an executable rate shows up as the live crown holder."""
+        v = make_validator(
+            tmp_path,
+            ['hk_funded'],
+            min_swap_amount=100_000_000,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_funded': 500_000_000},
+        )
+        self._seed_rate(v.state_store, 'hk_funded', 326.0)
+
+        rows = snapshot_current_crown_holders(v)
+
+        holders = [row[2] for row in rows[('btc', 'tao')]]
+        assert holders == ['hk_funded']
+        v.state_store.close()
+
+    def test_boundary_squat_excluded_from_live_table(self, tmp_path: Path):
+        """The squatter posts the best, executable rate but their 0.15 TAO
+        collateral can't fund the 0.5 TAO leg it forces. The live table must
+        drop them to the funded runner-up, matching the ledger."""
+        v = make_validator(
+            tmp_path,
+            ['hk_squat', 'hk_funded'],
+            min_swap_amount=100_000_000,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_squat': 150_000_000, 'hk_funded': 500_000_000},
+        )
+        self._seed_rate(v.state_store, 'hk_squat', 50000.0)  # best rate, can't fund
+        self._seed_rate(v.state_store, 'hk_funded', 326.0)  # runner-up, can fund
+
+        rows = snapshot_current_crown_holders(v)
+
+        holders = [row[2] for row in rows[('btc', 'tao')]]
+        assert holders == ['hk_funded']
+        v.state_store.close()
 
 
 class TestPinnedRateDuringReservation:

@@ -677,8 +677,9 @@ def snapshot_current_crown_holders(
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         min_swap_amount = max_swap_amount = 0
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
+    bounds_set = min_swap_amount > 0 or max_swap_amount > 0
     for from_chain, to_chain in DIRECTION_POOLS:
-        rates, busy_count, active_set, pinned_rates = reconstruct_window_start_state(
+        rates, busy_count, active_set, pinned_rates, collaterals = reconstruct_window_start_state(
             self.state_store,
             self.event_watcher,
             from_chain,
@@ -698,6 +699,13 @@ def snapshot_current_crown_holders(
         def executable_check(rate: float, from_chain=from_chain, to_chain=to_chain) -> bool:
             return is_executable_rate(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
 
+        def can_fund(hotkey: str, rate: float, from_chain=from_chain, to_chain=to_chain, collaterals=collaterals) -> bool:
+            # Mirror the scoring path's boundary-squat gate so the live table
+            # never credits a holder whose collateral can't fund their own
+            # smallest legal leg, which the ledger drops.
+            min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
+            return min_leg == 0 or collaterals.get(hotkey, 0) >= min_leg
+
         holders = crown_holders_at_instant(
             rates,
             rewardable_hotkeys,
@@ -705,6 +713,7 @@ def snapshot_current_crown_holders(
             active=active_set,
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
+            can_fund_at_rate=can_fund if bounds_set else None,
         )
         if holders:
             share = 1.0 / len(holders)
