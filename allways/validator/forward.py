@@ -439,6 +439,13 @@ def refresh_miner_rates(self: Validator) -> None:
     # this poll. Covers parser-poison (commitment overwritten with garbage) and
     # bounds-tighten exits (rate dropped below executability). Without this a
     # miner's stale positive rate keeps earning crown until deregistration.
+    #
+    # Guard: read_miner_commitments swallows transient RPC errors and returns
+    # an empty list. If pairs is empty, we can't distinguish "RPC dead" from
+    # "nobody posting" — either way, terminating every miner is wrong. Skip
+    # the sweep; the next successful poll catches whatever genuinely vanished.
+    if not pairs:
+        return
     for key, rate in list(self.last_known_rates.items()):
         if rate <= 0:
             continue

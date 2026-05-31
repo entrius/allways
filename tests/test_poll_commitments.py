@@ -254,10 +254,48 @@ class TestPollCommitmentsSentinel:
         """Regression guard for the parser-poison free-rider hole.
 
         Miner posts a sane rate, then overwrites their commitment with garbage
-        (or rate goes unexecutable). Pair vanishes from the poll, but the
-        prior positive rate is still in state_store. The second sweep must
+        (or rate goes unexecutable). hk_a's pair vanishes from the poll, but
+        the prior positive rate is still in state_store. The second sweep must
         emit a 0-terminator so scoring stops crediting the stale rate.
+
+        hk_b stays in the poll throughout — so pairs is non-empty (proving
+        this isn't the RPC-failure case where the sweep is skipped).
         """
+        v = make_validator(tmp_path, hotkeys=['hk_a', 'hk_b'])
+
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[
+                make_pair('hk_a', rate=0.00015, counter_rate=6500.0),
+                make_pair('hk_b', rate=0.00016, counter_rate=6400.0),
+            ],
+        ):
+            poll_commitments(v)
+
+        v.block += 1
+        # hk_a's commitment is parser-poisoned (vanishes); hk_b is still posting.
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_b', rate=0.00016, counter_rate=6400.0)],
+        ):
+            poll_commitments(v)
+
+        a_tao_btc = [
+            e for e in v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) if e['hotkey'] == 'hk_a'
+        ]
+        a_btc_tao = [
+            e for e in v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000) if e['hotkey'] == 'hk_a'
+        ]
+        assert [e['rate'] for e in a_tao_btc] == [0.00015, 0.0]
+        assert [e['rate'] for e in a_btc_tao] == [6500.0, 0.0]
+        assert v.last_known_rates[('hk_a', 'tao', 'btc')] == 0.0
+        assert v.last_known_rates[('hk_a', 'btc', 'tao')] == 0.0
+        v.state_store.close()
+
+    def test_empty_pairs_does_not_terminate_known_positives(self, tmp_path: Path):
+        """read_miner_commitments swallows transient RPC errors and returns [].
+        If we treated [] as 'every miner vanished', a single websocket flake
+        would zero every previously-positive miner. Skip the sweep instead."""
         v = make_validator(tmp_path)
 
         with patch(
@@ -267,16 +305,15 @@ class TestPollCommitmentsSentinel:
             poll_commitments(v)
 
         v.block += 1
-        # Pair vanishes entirely on the next poll (parser-poisoned commitment).
+        # Simulate RPC failure: empty pairs (could be RPC dead OR genuine).
         with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
             poll_commitments(v)
 
         tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
         btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
-        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
-        assert [e['rate'] for e in btc_tao] == [6500.0, 0.0]
-        assert v.last_known_rates[('hk_a', 'tao', 'btc')] == 0.0
-        assert v.last_known_rates[('hk_a', 'btc', 'tao')] == 0.0
+        assert [e['rate'] for e in tao_btc] == [0.00015]
+        assert [e['rate'] for e in btc_tao] == [6500.0]
+        assert v.last_known_rates[('hk_a', 'tao', 'btc')] == 0.00015
         v.state_store.close()
 
     def test_no_terminator_when_never_offered(self, tmp_path: Path):
@@ -336,10 +373,13 @@ class TestBootstrapHydratesLastKnownRates:
 
     def test_post_bootstrap_first_poll_terminates_parser_poisoned_miner(self, tmp_path: Path):
         """End-to-end: persisted positive → bootstrap hydrates → next poll sees
-        no commitment → 0-terminator emitted."""
+        no commitment for the poisoned miner → 0-terminator emitted.
+
+        hk_b posts throughout so pairs is non-empty (the empty-pairs sweep
+        guard would otherwise skip termination)."""
         from neurons.validator import Validator
 
-        v = self._make_validator_with_bootstrap(tmp_path, hotkeys=['hk_a'])
+        v = self._make_validator_with_bootstrap(tmp_path, hotkeys=['hk_a', 'hk_b'])
         anchor_block = max(0, v.block - SCORING_WINDOW_BLOCKS)
         v.state_store.insert_rate_event(
             hotkey='hk_a', from_chain='tao', to_chain='btc', rate=0.00015, block=anchor_block - 10
@@ -348,11 +388,16 @@ class TestBootstrapHydratesLastKnownRates:
         with patch('neurons.validator.read_miner_commitments', return_value=[]):
             Validator.bootstrap_miner_rates(v)
 
-        with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_b', rate=0.00020, counter_rate=6400.0)],
+        ):
             poll_commitments(v)
 
-        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
-        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
+        a_tao_btc = [
+            e for e in v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) if e['hotkey'] == 'hk_a'
+        ]
+        assert [e['rate'] for e in a_tao_btc] == [0.00015, 0.0]
         v.state_store.close()
 
 
