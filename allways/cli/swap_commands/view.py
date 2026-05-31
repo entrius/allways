@@ -37,7 +37,6 @@ from allways.constants import (
     MAX_EXTENSIONS_PER_SWAP,
 )
 from allways.contract_client import ContractError
-from allways.utils.rate import is_executable_rate
 
 
 def _dashboard_url() -> str:
@@ -152,13 +151,6 @@ def view_miners(
         fulfillment_timeout = 0
         current_block = 0
 
-    try:
-        min_swap_rao = client.get_min_swap_amount()
-        max_swap_rao = client.get_max_swap_amount()
-    except ContractError:
-        min_swap_rao = 0
-        max_swap_rao = 0
-
     def _trunc(s: str) -> str:
         if full or not s:
             return s
@@ -240,22 +232,13 @@ def view_miners(
             status_str = '[dim]offline[/dim]'
             status_sort_token = 'offline'
 
-        def _rate_cell(rate: float, from_c: str, to_c: str) -> str:
-            if rate <= 0:
-                return '[dim]—[/dim]'
-            if (min_swap_rao > 0 or max_swap_rao > 0) and not is_executable_rate(
-                rate, from_c, to_c, min_swap_rao, max_swap_rao
-            ):
-                return f'[red]{rate:g} ✗[/red]'
-            return f'{rate:g}'
-
-        fwd_display = _rate_cell(pair.rate, pair.from_chain, pair.to_chain)
+        fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
         if pair.counter_rate > 0:
-            ctr_display = _rate_cell(pair.counter_rate, pair.to_chain, pair.from_chain)
+            ctr_display = f'{pair.counter_rate:g}'
         elif pair.counter_rate_str:
             ctr_display = '[dim]—[/dim]'
         else:
-            ctr_display = _rate_cell(pair.rate, pair.from_chain, pair.to_chain)
+            ctr_display = f'{pair.rate:g}'
 
         rows.append(
             {
@@ -430,20 +413,6 @@ def view_rates(
         # aggregated. None if the API is unreachable; the table still renders.
         reliability = fetch_miner_reliability()
 
-    unexecutable_hidden = 0
-    if min_swap_rao > 0 or max_swap_rao > 0:
-        kept: list[tuple] = []
-        for p, c in pairs_with_collateral:
-            fwd_ok = p.rate > 0 and is_executable_rate(p.rate, p.from_chain, p.to_chain, min_swap_rao, max_swap_rao)
-            rev_ok = p.counter_rate > 0 and is_executable_rate(
-                p.counter_rate, p.to_chain, p.from_chain, min_swap_rao, max_swap_rao
-            )
-            if fwd_ok or rev_ok:
-                kept.append((p, c))
-            else:
-                unexecutable_hidden += 1
-        pairs_with_collateral = kept
-
     if pair:
         parts = pair.lower().split('-')
         if len(parts) != 2:
@@ -590,10 +559,6 @@ def view_rates(
     shown = len(pairs_with_collateral)
     if shown != total_before_filter:
         console.print(f'[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
-    if unexecutable_hidden:
-        console.print(
-            f'[dim]Hid {unexecutable_hidden} miner(s) with unexecutable rates under current swap bounds.[/dim]'
-        )
     if reliability is None:
         console.print('[yellow]Reliability unavailable — swap-history API unreachable.[/yellow]')
     else:
