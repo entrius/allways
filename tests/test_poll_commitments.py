@@ -33,6 +33,9 @@ def make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     metagraph = SimpleNamespace(hotkeys=list(hotkeys or ['hk_a', 'hk_b']))
     config = SimpleNamespace(netuid=2)
+    bounds_cache = MagicMock()
+    bounds_cache.min_swap_amount.return_value = 0
+    bounds_cache.max_swap_amount.return_value = 0
     return SimpleNamespace(
         block=1000,
         subtensor=MagicMock(),
@@ -41,6 +44,7 @@ def make_validator(tmp_path: Path, hotkeys=None) -> SimpleNamespace:
         state_store=store,
         contract_client=MagicMock(),
         event_watcher=MagicMock(),
+        bounds_cache=bounds_cache,
         last_known_rates={},
     )
 
@@ -242,6 +246,113 @@ class TestPollCommitmentsErrors:
 
         # No events persisted on a failed read.
         assert v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) == []
+        v.state_store.close()
+
+
+class TestPollCommitmentsSentinel:
+    def test_previously_positive_direction_terminated_when_pair_drops(self, tmp_path: Path):
+        """Regression guard for the parser-poison free-rider hole.
+
+        Miner posts a sane rate, then overwrites their commitment with garbage
+        (or rate goes unexecutable). Pair vanishes from the poll, but the
+        prior positive rate is still in state_store. The second sweep must
+        emit a 0-terminator so scoring stops crediting the stale rate.
+        """
+        v = make_validator(tmp_path)
+
+        with patch(
+            'allways.validator.forward.read_miner_commitments',
+            return_value=[make_pair('hk_a', rate=0.00015, counter_rate=6500.0)],
+        ):
+            poll_commitments(v)
+
+        v.block += 1
+        # Pair vanishes entirely on the next poll (parser-poisoned commitment).
+        with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
+            poll_commitments(v)
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        btc_tao = v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
+        assert [e['rate'] for e in btc_tao] == [6500.0, 0.0]
+        assert v.last_known_rates[('hk_a', 'tao', 'btc')] == 0.0
+        assert v.last_known_rates[('hk_a', 'btc', 'tao')] == 0.0
+        v.state_store.close()
+
+    def test_no_terminator_when_never_offered(self, tmp_path: Path):
+        """Direction that was never positive must not get a spurious 0 event."""
+        v = make_validator(tmp_path)
+
+        with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
+            poll_commitments(v)
+
+        assert v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000) == []
+        assert v.state_store.get_rate_events_in_range('btc', 'tao', 0, 10_000) == []
+        v.state_store.close()
+
+    def test_bounds_threaded_into_read(self, tmp_path: Path):
+        """Validator bounds_cache values must flow into read_miner_commitments
+        so the parser drops unexecutable pairs before they ever reach the loop.
+        """
+        v = make_validator(tmp_path)
+        v.bounds_cache.min_swap_amount.return_value = 500_000_000
+        v.bounds_cache.max_swap_amount.return_value = 5_000_000_000
+
+        with patch('allways.validator.forward.read_miner_commitments', return_value=[]) as mock_read:
+            poll_commitments(v)
+
+        assert mock_read.call_args.kwargs['min_swap_rao'] == 500_000_000
+        assert mock_read.call_args.kwargs['max_swap_rao'] == 5_000_000_000
+        v.state_store.close()
+
+
+class TestBootstrapHydratesLastKnownRates:
+    """bootstrap_miner_rates must seed last_known_rates from persisted state so
+    the runtime second sweep catches stale positives from miners
+    parser-poisoned before this restart."""
+
+    def _make_validator_with_bootstrap(self, tmp_path: Path, hotkeys=None) -> SimpleNamespace:
+        v = make_validator(tmp_path, hotkeys=hotkeys)
+        # bootstrap_miner_rates reads self.block and SCORING_WINDOW_BLOCKS to
+        # pick an anchor; default v.block=1000 is fine.
+        return v
+
+    def test_bootstrap_seeds_from_state_store_for_stale_positives(self, tmp_path: Path):
+        """A positive rate persisted before restart but absent from this poll
+        must still be in last_known_rates after bootstrap."""
+        from neurons.validator import Validator
+
+        v = self._make_validator_with_bootstrap(tmp_path, hotkeys=['hk_a'])
+        anchor_block = max(0, v.block - SCORING_WINDOW_BLOCKS)
+        v.state_store.insert_rate_event(
+            hotkey='hk_a', from_chain='tao', to_chain='btc', rate=0.00015, block=anchor_block - 10
+        )
+
+        with patch('neurons.validator.read_miner_commitments', return_value=[]):
+            Validator.bootstrap_miner_rates(v)
+
+        assert v.last_known_rates.get(('hk_a', 'tao', 'btc')) == 0.00015
+        v.state_store.close()
+
+    def test_post_bootstrap_first_poll_terminates_parser_poisoned_miner(self, tmp_path: Path):
+        """End-to-end: persisted positive → bootstrap hydrates → next poll sees
+        no commitment → 0-terminator emitted."""
+        from neurons.validator import Validator
+
+        v = self._make_validator_with_bootstrap(tmp_path, hotkeys=['hk_a'])
+        anchor_block = max(0, v.block - SCORING_WINDOW_BLOCKS)
+        v.state_store.insert_rate_event(
+            hotkey='hk_a', from_chain='tao', to_chain='btc', rate=0.00015, block=anchor_block - 10
+        )
+
+        with patch('neurons.validator.read_miner_commitments', return_value=[]):
+            Validator.bootstrap_miner_rates(v)
+
+        with patch('allways.validator.forward.read_miner_commitments', return_value=[]):
+            poll_commitments(v)
+
+        tao_btc = v.state_store.get_rate_events_in_range('tao', 'btc', 0, 10_000)
+        assert [e['rate'] for e in tao_btc] == [0.00015, 0.0]
         v.state_store.close()
 
 
