@@ -699,7 +699,9 @@ def snapshot_current_crown_holders(
         def executable_check(rate: float, from_chain=from_chain, to_chain=to_chain) -> bool:
             return is_executable_rate(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
 
-        def can_fund(hotkey: str, rate: float, from_chain=from_chain, to_chain=to_chain, collaterals=collaterals) -> bool:
+        def can_fund(
+            hotkey: str, rate: float, from_chain=from_chain, to_chain=to_chain, collaterals=collaterals
+        ) -> bool:
             # Mirror the scoring path's boundary-squat gate so the live table
             # never credits a holder whose collateral can't fund their own
             # smallest legal leg, which the ledger drops.
