@@ -138,21 +138,6 @@ class Validator(BaseValidatorNeuron):
             metagraph_hotkeys=list(self.metagraph.hotkeys),
             contract_client=self.contract_client,
         )
-        self.bootstrap_miner_rates()
-
-        self.swap_tracker = SwapTracker(client=self.contract_client, metagraph=self.metagraph)
-        self.swap_tracker.initialize()
-        # Late-bind the tracker so TimeoutExtensionFinalized events can write
-        # the new timeout_block straight into the in-memory active swap.
-        self.event_watcher.swap_tracker = self.swap_tracker
-        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
-
-        self.swap_verifier = SwapVerifier(
-            chain_providers=self.chain_providers,
-            fee_divisor=self.fee_divisor,
-            metagraph=self.metagraph,
-            state_store=self.state_store,
-        )
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two
@@ -172,6 +157,24 @@ class Validator(BaseValidatorNeuron):
             self.axon_contract_client,
             self.axon_subtensor.get_current_block,
             lock=self.axon_lock,
+        )
+
+        # bootstrap_miner_rates reads bounds_cache, so the block above must
+        # run first.
+        self.bootstrap_miner_rates()
+
+        self.swap_tracker = SwapTracker(client=self.contract_client, metagraph=self.metagraph)
+        self.swap_tracker.initialize()
+        # Late-bind the tracker so TimeoutExtensionFinalized events can write
+        # the new timeout_block straight into the in-memory active swap.
+        self.event_watcher.swap_tracker = self.swap_tracker
+        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
+
+        self.swap_verifier = SwapVerifier(
+            chain_providers=self.chain_providers,
+            fee_divisor=self.fee_divisor,
+            metagraph=self.metagraph,
+            state_store=self.state_store,
         )
 
         # Attach synapse handlers to axon
