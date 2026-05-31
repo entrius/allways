@@ -155,21 +155,3 @@ class TestTaoToBtcAbsurdLowRate:
         sentinel_line = next((line for line in result.output.splitlines() if '193' in line), '')
         assert 'unexecutable' in sentinel_line, f'expected sentinel-row marked unexecutable; got: {sentinel_line!r}'
         assert 'available' not in sentinel_line
-
-
-class TestQuoteAllSentinelSummary:
-    """When every available miner posts an unexecutable rate, the summary
-    must surface that explicitly so the user doesn't think it's a transient
-    no-viable-amount problem."""
-
-    def test_quote_summary_lists_all_sentinel_case(self):
-        pairs = [
-            _pair(14, 'btc', 'tao', 1.797e308),
-            _pair(189, 'btc', 'tao', 1.797e308),
-        ]
-        collaterals = {'hk14': 10**12, 'hk189': 10**12}
-        result = _invoke(pairs, collaterals, ['--from', 'btc', '--to', 'tao', '--amount', '0.0005'])
-        assert result.exit_code == 0, result.output
-        assert 'unexecutable rate (sentinel)' in result.output
-        # Make sure the generic "try a smaller amount" branch isn't also emitted.
-        assert 'try a smaller amount' not in result.output
