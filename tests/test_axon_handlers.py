@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 from allways.chain_providers.base import TransactionInfo
 from allways.classes import MinerPair, Reservation
 from allways.contract_client import ContractError
-from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
-from allways.validator.axon_handlers import handle_swap_confirm, handle_swap_reserve
+from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.validator.axon_handlers import handle_miner_activate, handle_swap_confirm, handle_swap_reserve
 from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
 
 
@@ -868,3 +868,64 @@ class TestReservationPin:
         assert pin.miner_from_address == 'bc1-miner'
         assert pin.miner_to_address == '5miner'
         assert pin.reserved_until == 1050
+
+
+class TestReserveExecutabilityGate:
+    def test_handle_swap_reserve_rejects_sentinel_rate(self):
+        """An executable-bounded rate that is unexecutable under cached bounds
+        must be rejected at reserve time so no reservation is voted on."""
+        validator = make_reserve_validator()
+        # Bounds that make BTC/TAO rate 1e9 unexecutable on the BTC→TAO leg.
+        validator.bounds_cache.min_swap_amount.return_value = 500_000_000
+        validator.bounds_cache.max_swap_amount.return_value = 5_000_000_000
+        unexecutable = make_commitment()
+        unexecutable.rate = 1e9
+        unexecutable.rate_str = '1e9'
+
+        result = run_reserve_handler(validator, make_reserve_synapse(), commitment=unexecutable)
+
+        assert result.accepted is False
+        assert 'not executable' in result.rejection_reason
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+
+class TestMinerActivateExecutability:
+    def _activate_synapse(
+        self, hotkey: str = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+    ) -> MinerActivateSynapse:
+        from bittensor.core.synapse import TerminalInfo
+
+        synapse = MinerActivateSynapse(hotkey=hotkey, signature='sig', message='msg')
+        synapse.dendrite = TerminalInfo(hotkey=hotkey)
+        return synapse
+
+    def _activate_validator(self) -> MagicMock:
+        validator = MagicMock()
+        validator.config.netuid = 2
+        validator.axon_lock = threading.Lock()
+        validator.axon_subtensor.is_hotkey_registered.return_value = True
+        validator.bounds_cache = MagicMock()
+        validator.bounds_cache.min_collateral.return_value = 0
+        validator.bounds_cache.min_swap_amount.return_value = 0
+        validator.bounds_cache.max_swap_amount.return_value = 0
+        validator.axon_contract_client.get_miner_snapshot.return_value = (10_000_000_000, False, False, 0, 0)
+        validator.wallet = MagicMock()
+        return validator
+
+    def test_handle_miner_activate_rejects_sentinel_commitment(self):
+        """When the bounded commitment read returns None (sentinel/unexecutable),
+        activate must surface the no-valid-commitment rejection rather than
+        voting the miner active."""
+        validator = self._activate_validator()
+        validator.bounds_cache.min_swap_amount.return_value = 500_000_000
+        validator.bounds_cache.max_swap_amount.return_value = 5_000_000_000
+
+        with patch('allways.validator.axon_handlers.read_miner_commitment', return_value=None) as mock_read:
+            result = asyncio.run(handle_miner_activate(validator, self._activate_synapse()))
+
+        assert result.accepted is False
+        assert 'No valid commitment' in result.rejection_reason
+        # Bounds must flow through so the parser drops sentinels before activate sees them.
+        assert mock_read.call_args.kwargs['min_swap_rao'] == 500_000_000
+        assert mock_read.call_args.kwargs['max_swap_rao'] == 5_000_000_000
+        validator.axon_contract_client.vote_activate.assert_not_called()

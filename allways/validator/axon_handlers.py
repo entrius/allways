@@ -23,7 +23,12 @@ from allways.contract_client import AllwaysContractClient, ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
-from allways.utils.rate import calculate_to_amount, derive_tao_leg, quote_within_slippage
+from allways.utils.rate import (
+    calculate_to_amount,
+    derive_tao_leg,
+    is_executable_rate,
+    quote_within_slippage,
+)
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.state_store import PendingConfirm, ReservationPin
 
@@ -227,9 +232,11 @@ async def handle_miner_activate(
                 netuid=validator.config.netuid,
                 hotkey=miner_hotkey,
                 metagraph=validator.metagraph,
+                min_swap_rao=validator.bounds_cache.min_swap_amount(),
+                max_swap_rao=validator.bounds_cache.max_swap_amount(),
             )
             if commitment is None:
-                reject_synapse(synapse, 'No commitment found', ctx)
+                reject_synapse(synapse, 'No valid commitment (missing, malformed, or rate not executable)', ctx)
                 return synapse
 
             collateral, active, _, _, _ = contract.get_miner_snapshot(miner_hotkey)
@@ -358,6 +365,11 @@ async def handle_swap_reserve(
             if reserve_rate <= 0:
                 reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
                 return synapse
+            min_swap = validator.bounds_cache.min_swap_amount()
+            max_swap = validator.bounds_cache.max_swap_amount()
+            if not is_executable_rate(reserve_rate, synapse.from_chain, synapse.to_chain, min_swap, max_swap):
+                reject_synapse(synapse, 'Miner rate is not executable under current swap bounds', ctx)
+                return synapse
             bt.logging.info(
                 f'{ctx}: commitment ok — miner_rate={reserve_rate_str or reserve_rate} '
                 f'miner_from={commitment.from_address} miner_to={commitment.to_address}'
@@ -413,8 +425,6 @@ async def handle_swap_reserve(
                 reject_synapse(synapse, 'Miner collateral below minimum', ctx)
                 return synapse
 
-            min_swap = validator.bounds_cache.min_swap_amount()
-            max_swap = validator.bounds_cache.max_swap_amount()
             if min_swap > 0 and synapse.tao_amount < min_swap:
                 reject_synapse(synapse, f'Swap amount below minimum ({synapse.tao_amount} < {min_swap} rao)', ctx)
                 return synapse
