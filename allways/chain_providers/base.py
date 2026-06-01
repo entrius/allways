@@ -123,6 +123,16 @@ class ChainProvider(ABC):
             )
             return None
 
+        # A self-transfer (sender == recipient) is never a real swap leg: the
+        # paying and receiving parties are always distinct. Rejecting it blocks
+        # same-wallet A->A volume fakes; A->B self-flow is bounded economically.
+        if tx_info.sender and tx_info.sender == expected_recipient:
+            bt.logging.warning(
+                f'verify_transaction: self-transfer on tx {tx_hash[:16]}... '
+                f'(sender == recipient {expected_recipient}) — rejecting'
+            )
+            return None
+
         return tx_info
 
     @abstractmethod
