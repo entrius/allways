@@ -138,6 +138,16 @@ class Validator(BaseValidatorNeuron):
             metagraph_hotkeys=list(self.metagraph.hotkeys),
             contract_client=self.contract_client,
         )
+        # Heal collateral on startup: a warm restart hydrates from state.db and
+        # does no contract reads, so any baseline that drifted/zeroed (e.g. a
+        # fee/slash delta applied without a baseline) would persist and keep the
+        # miner out of crown. Reconcile active miners against the contract now.
+        try:
+            self.event_watcher.reconcile_collateral_from_contract(
+                self.block, list(self.metagraph.hotkeys), self.contract_client
+            )
+        except Exception as e:
+            bt.logging.warning(f'startup collateral reconcile failed: {e}')
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two

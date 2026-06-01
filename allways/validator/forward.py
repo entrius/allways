@@ -105,6 +105,16 @@ async def forward(self: Validator) -> None:
     enforce_swap_timeouts(self, tracker, uncertain_swaps)
 
     if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
+        # Resync active miners' collateral to on-chain truth before scoring so
+        # a drifted/absent baseline can't drop an active miner from crown via
+        # the capacity / can_fund gate. Writes at the current block only, so it
+        # never retroactively rescales capacity already earned in this window.
+        try:
+            self.event_watcher.reconcile_collateral_from_contract(
+                self.block, list(self.metagraph.hotkeys), self.contract_client
+            )
+        except Exception as e:
+            bt.logging.warning(f'forward: collateral reconcile failed: {e}')
         score_and_reward_miners(self)
         self.initial_scoring_done = True
         bt.logging.info('forward: scoring done')
