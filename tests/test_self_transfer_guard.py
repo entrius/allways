@@ -10,8 +10,8 @@ reward-side limits, so it still passes here.
 
 from typing import Optional
 
-from allways.chains import CHAIN_TAO, ChainDefinition
 from allways.chain_providers.base import ChainProvider, TransactionInfo
+from allways.chains import CHAIN_TAO, ChainDefinition
 
 
 class FakeProvider(ChainProvider):
@@ -25,8 +25,9 @@ class FakeProvider(ChainProvider):
 
     def check_connection(self, **kwargs) -> None: ...
 
-    def fetch_matching_tx(self, tx_hash, expected_recipient, expected_amount,
-                          block_hint=0, max_scan_blocks=150) -> Optional[TransactionInfo]:
+    def fetch_matching_tx(
+        self, tx_hash, expected_recipient, expected_amount, block_hint=0, max_scan_blocks=150
+    ) -> Optional[TransactionInfo]:
         return self._tx
 
     def get_current_block_height(self) -> Optional[int]:
@@ -49,14 +50,17 @@ class FakeProvider(ChainProvider):
 
 
 def _tx(sender: str, recipient: str) -> TransactionInfo:
-    return TransactionInfo(tx_hash='0xabc', confirmed=True, sender=sender,
-                           recipient=recipient, amount=100, confirmations=6)
+    return TransactionInfo(
+        tx_hash='0xabc', confirmed=True, sender=sender, recipient=recipient, amount=100, confirmations=6
+    )
 
 
 def test_self_transfer_is_rejected():
     provider = FakeProvider(_tx(sender='5Aaa', recipient='5Aaa'))
     result = provider.verify_transaction(
-        tx_hash='0xabc', expected_recipient='5Aaa', expected_amount=100,
+        tx_hash='0xabc',
+        expected_recipient='5Aaa',
+        expected_amount=100,
         expected_sender='5Aaa',
     )
     assert result is None
@@ -65,7 +69,9 @@ def test_self_transfer_is_rejected():
 def test_cross_party_transfer_passes():
     provider = FakeProvider(_tx(sender='5Miner', recipient='5User'))
     result = provider.verify_transaction(
-        tx_hash='0xabc', expected_recipient='5User', expected_amount=100,
+        tx_hash='0xabc',
+        expected_recipient='5User',
+        expected_amount=100,
         expected_sender='5Miner',
     )
     assert result is not None
@@ -76,6 +82,8 @@ def test_self_transfer_rejected_even_without_expected_sender():
     # The dest-confirm path pins expected_sender, but guard A->A regardless.
     provider = FakeProvider(_tx(sender='5Aaa', recipient='5Aaa'))
     result = provider.verify_transaction(
-        tx_hash='0xabc', expected_recipient='5Aaa', expected_amount=100,
+        tx_hash='0xabc',
+        expected_recipient='5Aaa',
+        expected_amount=100,
     )
     assert result is None
