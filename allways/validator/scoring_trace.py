@@ -231,8 +231,7 @@ def diagnose_non_earner(
         have = collaterals[hotkey]
         if min_leg > 0 and have < min_leg:
             return (
-                f'insufficient_collateral ({from_c}→{to_c}: have={have / TAO_TO_RAO:g}t '
-                f'need={min_leg / TAO_TO_RAO:g}t)'
+                f'insufficient_collateral ({from_c}→{to_c}: have={have / TAO_TO_RAO:g}t need={min_leg / TAO_TO_RAO:g}t)'
             )
         # Competitive and funded — lost to a tie split, busy, or active-flag timing.
         return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
