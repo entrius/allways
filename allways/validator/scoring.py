@@ -294,6 +294,8 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
+        min_swap_rao=min_swap_amount,
+        max_swap_rao=max_swap_amount,
     )
 
     if storage_enabled:
@@ -577,8 +579,14 @@ def replay_crown_time_window(
         # Boundary-squat per-block gate: a miner whose own rate forces a TAO
         # leg larger than their collateral_at_block earns no crown for that
         # block. Cascades to the next-best rate via crown_holders_at_instant.
+        # Fail open when collateral is *unknown* (no event ever recorded):
+        # absent != zero. The contract auto-deactivates anyone below
+        # min_collateral, so an active miner always holds enough; treating a
+        # missing baseline as 0 would silently drop them from crown.
+        if hotkey not in collaterals:
+            return True
         min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
-        return min_leg == 0 or collaterals.get(hotkey, 0) >= min_leg
+        return min_leg == 0 or collaterals[hotkey] >= min_leg
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
@@ -607,7 +615,9 @@ def replay_crown_time_window(
         split = duration / len(holders)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
-            cap = capacity_factor(collaterals.get(hk, 0), max_swap_rao)
+            # Unknown collateral (no event recorded) → capacity 1.0, matching
+            # can_fund's fail-open. Only a known value scales capacity down.
+            cap = capacity_factor(collaterals[hk], max_swap_rao) if hk in collaterals else 1.0
             cap_weighted_blocks[hk] = cap_weighted_blocks.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:
@@ -704,9 +714,12 @@ def snapshot_current_crown_holders(
         ) -> bool:
             # Mirror the scoring path's boundary-squat gate so the live table
             # never credits a holder whose collateral can't fund their own
-            # smallest legal leg, which the ledger drops.
+            # smallest legal leg, which the ledger drops. Fail open on unknown
+            # collateral (absent != zero) to match the scoring path exactly.
+            if hotkey not in collaterals:
+                return True
             min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
-            return min_leg == 0 or collaterals.get(hotkey, 0) >= min_leg
+            return min_leg == 0 or collaterals[hotkey] >= min_leg
 
         holders = crown_holders_at_instant(
             rates,

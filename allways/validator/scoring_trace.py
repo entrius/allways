@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
+from allways.chains import canonical_pair
 from allways.constants import (
     CREDIBILITY_MAX_TIMEOUTS,
     CREDIBILITY_RAMP_OBSERVATIONS,
     RECYCLE_UID,
     TAO_TO_RAO,
 )
+from allways.utils.rate import min_executable_tao_leg
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace
@@ -72,6 +74,8 @@ def log_scoring_trace(
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
+    min_swap_rao: int = 0,
+    max_swap_rao: int = 0,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -112,8 +116,24 @@ def log_scoring_trace(
             f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'
         )
 
+    # Collateral as-of window_start mirrors the scoring replay's starting
+    # state, so the non-earner diagnosis can tell "excluded by collateral"
+    # from "genuinely outbid". Absent hotkey == unknown (fail-open), per the
+    # gate in scoring.py.
+    collaterals = dict(self.event_watcher.get_miner_collaterals_at(window_start))
     lines.extend(
-        non_earner_lines(self, window_start, window_end, rewards, success_rates, direction_traces, recycle_uid)
+        non_earner_lines(
+            self,
+            window_start,
+            window_end,
+            rewards,
+            success_rates,
+            direction_traces,
+            recycle_uid,
+            collaterals,
+            min_swap_rao,
+            max_swap_rao,
+        )
     )
 
     if recycled > 0:
@@ -136,7 +156,11 @@ def non_earner_lines(
     success_rates: Dict[str, float],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     recycle_uid: int,
+    collaterals: Optional[Dict[str, int]] = None,
+    min_swap_rao: int = 0,
+    max_swap_rao: int = 0,
 ) -> List[str]:
+    collaterals = collaterals or {}
     ever_active = set(self.event_watcher.get_active_miners_at(window_start))
     for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
         if e['active']:
@@ -155,7 +179,9 @@ def non_earner_lines(
         if not latest_rates and hk not in ever_active:
             continue
         sr = success_rates.get(hk, 1.0)
-        reason = diagnose_non_earner(hk, latest_rates, sr, ever_active, direction_traces)
+        reason = diagnose_non_earner(
+            hk, latest_rates, sr, ever_active, direction_traces, collaterals, min_swap_rao, max_swap_rao
+        )
         out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
         if len(out) >= NON_EARNER_LINE_CAP:
             break
@@ -168,16 +194,47 @@ def diagnose_non_earner(
     sr: float,
     ever_active: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    collaterals: Optional[Dict[str, int]] = None,
+    min_swap_rao: int = 0,
+    max_swap_rao: int = 0,
 ) -> str:
+    """Best-effort reason a miner earned no crown. Direction-aware: tao→btc is
+    lower-rate-wins, btc→tao higher-wins, so "outbid" only fires when the
+    miner's own rate is genuinely worse than the winner's. A rate that is at
+    least as good as the winner's but still earned nothing was excluded by the
+    capacity / can_fund collateral gate — report that, not "outbid"."""
+    collaterals = collaterals or {}
     if not latest_rates:
         return 'no_rate_posted'
     if hotkey not in ever_active:
         return 'not_active_during_window'
     if sr <= 0:
         return 'credibility_zero'  # zero observations OR all-timeout history
-    parts = [
-        f'{direction[0]}→{direction[1]}: own={own:g} vs best={direction_traces[direction].best_rate:g}'
-        for direction, own in latest_rates.items()
-        if direction in direction_traces and direction_traces[direction].best_rate > 0
-    ]
-    return 'outbid (' + '; '.join(parts) + ')' if parts else 'no_competing_winner'
+
+    outbid_parts: List[str] = []
+    for (from_c, to_c), own in latest_rates.items():
+        trace = direction_traces.get((from_c, to_c))
+        if trace is None or trace.best_rate <= 0:
+            continue
+        best = trace.best_rate
+        canon_from, _ = canonical_pair(from_c, to_c)
+        lower_wins = from_c != canon_from
+        competitive = own <= best if lower_wins else own >= best
+        if not competitive:
+            outbid_parts.append(f'{from_c}→{to_c}: own={own:g} vs best={best:g}')
+            continue
+        # Rate is at least as good as the winner's, yet earned nothing — a
+        # qualification gate dropped this miner. Collateral is the usual cause.
+        if hotkey not in collaterals:
+            return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
+        min_leg = min_executable_tao_leg(own, from_c, to_c, min_swap_rao, max_swap_rao)
+        have = collaterals[hotkey]
+        if min_leg > 0 and have < min_leg:
+            return (
+                f'insufficient_collateral ({from_c}→{to_c}: have={have / TAO_TO_RAO:g}t '
+                f'need={min_leg / TAO_TO_RAO:g}t)'
+            )
+        # Competitive and funded — lost to a tie split, busy, or active-flag timing.
+        return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
+
+    return 'outbid (' + '; '.join(outbid_parts) + ')' if outbid_parts else 'no_competing_winner'

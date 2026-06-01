@@ -1798,14 +1798,13 @@ class TestCapacityWeighting:
         v.state_store.close()
 
     def test_zero_collateral_zeros_reward(self, tmp_path: Path):
-        """Collateral 0 with max_swap set → factor 0 → no reward, full recycle."""
+        """A *known* zero collateral event with max_swap set → factor 0 → no
+        reward, full recycle. Seeded as an explicit present-0 event (not an
+        absent series, which now fails open — see
+        test_unknown_collateral_fails_open)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(
-            tmp_path,
-            hotkeys,
-            max_swap_amount=500_000_000,
-            collaterals={'hk_a': 0},
-        )
+        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)
+        seed_collateral(v.event_watcher, 'hk_a', 0, block=0)  # present, known zero
         self.seed_tao_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v)
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -1847,17 +1846,18 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
-    def test_no_collateral_anchor_zeros_reward(self, tmp_path: Path):
-        """A miner with no collateral event in the watcher's series (e.g. cold-
-        bootstrap saw zero on-chain collateral, or the read failed) is treated
-        as zero collateral throughout the window → factor 0 → zero reward.
-        Scoring no longer reads collateral via RPC, so the failure mode is now
-        a missing series rather than a failing call."""
+    def test_unknown_collateral_fails_open(self, tmp_path: Path):
+        """A miner with NO collateral event in the watcher's series (unknown,
+        not zero) must fail OPEN: capacity 1.0 and can_fund passes, so it earns
+        the full pool. The contract auto-deactivates anyone below
+        min_collateral, so an active miner always holds enough — treating a
+        missing baseline as zero would silently drop honest miners from crown
+        (the collateral-baseline bug). Absent != zero."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)  # no collaterals dict
+        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)  # no collaterals dict → absent
         self.seed_tao_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v)
-        assert rewards[0] == 0.0
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_scoring_does_not_call_contract_for_collateral(self, tmp_path: Path):
@@ -2630,6 +2630,130 @@ class TestHistoricalCollateralReplay:
         ]
         assert watcher2.get_miner_collaterals_at(1_000) == {'hk_a': 200_000_000}
         store.close()
+
+    def test_fee_without_baseline_does_not_fabricate_zero(self, tmp_path: Path):
+        """SwapCompleted fee for a miner with NO collateral baseline must NOT
+        write ``0 + (-fee)`` clipped to 0 — that pinned the miner at zero and
+        dropped them from crown via the capacity / can_fund gate. With no
+        baseline the delta is skipped and the miner stays *unknown* (absent),
+        which the scoring gate fails open on."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        # No CollateralPosted first → unknown baseline.
+        watcher.apply_event(200, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.apply_event(
+            300, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a', 'tao_amount': 0, 'fee_amount': 50_000_000}
+        )
+        assert 'hk_a' not in watcher.collateral_events_by_hotkey  # no fabricated 0 row
+        assert watcher.get_miner_collaterals_at(300) == {}  # absent == unknown
+        assert watcher._latest_collateral('hk_a') is None
+        store.close()
+
+    def test_reconcile_collateral_from_contract(self, tmp_path: Path):
+        """Reconcile resyncs active miners to on-chain truth: heals a corrupted
+        present-0 (hk_a), seeds an unknown (hk_b), skips inactive miners
+        (hk_c), and is idempotent when values already match."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})  # hk_c not active
+        seed_collateral(watcher, 'hk_a', 0, block=100)  # corrupted present-0
+        contract = MagicMock()
+        vals = {'hk_a': 474_000_000, 'hk_b': 600_000_000, 'hk_c': 999_000_000}
+        contract.get_miner_collateral.side_effect = lambda hk: vals.get(hk, 0)
+        updated = watcher.reconcile_collateral_from_contract(9_000, ['hk_a', 'hk_b', 'hk_c'], contract)
+        assert updated == 2
+        snap = watcher.get_miner_collaterals_at(9_000)
+        assert snap == {'hk_a': 474_000_000, 'hk_b': 600_000_000}  # hk_c skipped (inactive)
+        # Idempotent: values now match → no new events.
+        assert watcher.reconcile_collateral_from_contract(9_100, ['hk_a', 'hk_b', 'hk_c'], contract) == 0
+        store.close()
+
+    def test_reconcile_skips_on_rpc_failure(self, tmp_path: Path):
+        """A contract read failure leaves the prior value untouched — a
+        transient RPC blip can't zero a miner's collateral."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        seed_collateral(watcher, 'hk_a', 123_000_000, block=0)
+        contract = MagicMock()
+        contract.get_miner_collateral.side_effect = RuntimeError('rpc down')
+        assert watcher.reconcile_collateral_from_contract(9_000, ['hk_a'], contract) == 0
+        assert watcher.get_miner_collaterals_at(9_000) == {'hk_a': 123_000_000}  # unchanged
+        store.close()
+
+
+class TestNonEarnerDiagnosis:
+    """diagnose_non_earner must report the true reason: direction-aware outbid
+    (tao→btc lower-wins, btc→tao higher-wins) and collateral exclusion, not a
+    blanket 'outbid' that hid the collateral-baseline bug."""
+
+    def _trace(self, best_rate: float):
+        from allways.validator.scoring import DirectionTrace
+
+        t = DirectionTrace(pool=0.5)
+        t.best_rate = best_rate
+        return t
+
+    def test_competitive_but_present_zero_is_insufficient_collateral(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        # tao→btc lower-wins: own 279.3 beats best 280 → competitive, but
+        # collateral is a known 0 → insufficient_collateral, NOT outbid.
+        reason = diagnose_non_earner(
+            'hk',
+            {('tao', 'btc'): 279.3},
+            sr=0.98,
+            ever_active={'hk'},
+            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            collaterals={'hk': 0},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert reason.startswith('insufficient_collateral'), reason
+
+    def test_competitive_but_unknown_collateral(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        reason = diagnose_non_earner(
+            'hk',
+            {('tao', 'btc'): 279.3},
+            sr=0.98,
+            ever_active={'hk'},
+            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            collaterals={},  # absent → unknown
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert reason.startswith('unknown_collateral'), reason
+
+    def test_genuinely_worse_rate_is_direction_aware_outbid(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        # tao→btc lower-wins: own 281 is worse than best 280 → outbid.
+        reason = diagnose_non_earner(
+            'hk',
+            {('tao', 'btc'): 281.0},
+            sr=0.98,
+            ever_active={'hk'},
+            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            collaterals={'hk': 500_000_000},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert reason.startswith('outbid'), reason
+
+    def test_competitive_and_funded_is_unfilled_not_outbid(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        reason = diagnose_non_earner(
+            'hk',
+            {('tao', 'btc'): 279.3},
+            sr=0.98,
+            ever_active={'hk'},
+            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            collaterals={'hk': 500_000_000},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+        assert reason.startswith('competitive_but_unfilled'), reason
 
 
 class TestScoringCadenceAndWindow:

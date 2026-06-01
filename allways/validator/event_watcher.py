@@ -480,6 +480,49 @@ class ContractEventWatcher:
                 self._record_collateral_event(self.cursor, hotkey, collateral)
         self.state_store.set_event_cursor(self.cursor)
 
+    def reconcile_collateral_from_contract(
+        self,
+        current_block: int,
+        metagraph_hotkeys: List[str],
+        contract_client: Any,
+    ) -> int:
+        """Resync each active miner's collateral against the contract.
+
+        The per-event series can drift from on-chain truth — a missed
+        CollateralPosted leaves a stale/absent baseline, and a fee/slash delta
+        on no baseline used to fabricate a 0 — and the capacity / can_fund gate
+        then reads that as low/zero collateral and drops the miner from crown.
+        Reading the contract for each active miner and recording a fresh event
+        when the value changed reconciles the series to truth.
+
+        Called at startup (heals the warm-restart path, which does no contract
+        reads) and once per scoring round. Only active miners can hold crown,
+        so we skip the rest — both correct and cheap. Writes at
+        ``current_block`` only, never retroactively, preserving the #409
+        no-post-window-top-up property. RPC failures skip that hotkey and keep
+        the prior value. Returns the count of miners updated."""
+        if not metagraph_hotkeys or contract_client is None:
+            return 0
+        updated = 0
+        for hotkey in metagraph_hotkeys:
+            if hotkey not in self.active_miners:
+                continue
+            try:
+                collateral = int(contract_client.get_miner_collateral(hotkey))
+            except Exception as e:
+                bt.logging.debug(f'EventWatcher reconcile: collateral read failed for {hotkey[:8]}: {e}')
+                continue
+            if collateral < 0 or self._latest_collateral(hotkey) == collateral:
+                continue
+            self._record_collateral_event(current_block, hotkey, collateral)
+            updated += 1
+        if updated:
+            bt.logging.info(
+                f'EventWatcher: reconciled collateral for {updated} active miner(s) '
+                f'from contract @ block {current_block}'
+            )
+        return updated
+
     def hydrate_from_db(self) -> None:
         """Rebuild every in-memory mirror from state.db. Called on warm restart
         when the persisted cursor is within one scoring window of head — the
@@ -974,11 +1017,14 @@ class ContractEventWatcher:
         self.busy_events.append(BusyEvent(hotkey=hotkey, delta=delta, block=block_num))
         self.state_store.insert_busy_event(block_num, hotkey, delta, swap_id)
 
-    def _latest_collateral(self, hotkey: str) -> int:
-        """Last known collateral for ``hotkey`` (0 if no event has fired)."""
+    def _latest_collateral(self, hotkey: str) -> Optional[int]:
+        """Last known collateral for ``hotkey``, or ``None`` if no event has
+        fired. ``None`` means *unknown* (we never observed a baseline), which
+        callers must not conflate with a known zero — applying a fee/slash
+        delta against an unknown baseline would fabricate a spurious 0."""
         history = self.collateral_events_by_hotkey.get(hotkey)
         if not history:
-            return 0
+            return None
         return history[-1].collateral_rao
 
     def _record_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int) -> None:
@@ -999,8 +1045,21 @@ class ContractEventWatcher:
         """Apply a signed delta against the last-known collateral. Used for
         fee (``confirm_swap``) and slash (``timeout_swap``) deductions that
         ``apply_collateral_penalty`` silently makes without emitting a
-        ``CollateralWithdrawn``. Clipped at zero."""
+        ``CollateralWithdrawn``. Clipped at zero.
+
+        With no known baseline the delta is meaningless — ``prior`` would be a
+        fabricated 0, so ``0 + (-fee)`` clips to 0 and permanently pins the
+        miner at zero collateral, dropping them from crown via the capacity /
+        can_fund gate. Skip instead; ``reconcile_collateral_from_contract``
+        and the next genuine CollateralPosted/Withdrawn establish the baseline,
+        and the scoring gate fails open while collateral is unknown."""
         prior = self._latest_collateral(hotkey)
+        if prior is None:
+            bt.logging.debug(
+                f'EventWatcher: skipping collateral delta {delta_rao} for {self._label(hotkey)} '
+                f'@ block {block_num} — no known baseline (would fabricate 0)'
+            )
+            return
         self._record_collateral_event(block_num, hotkey, prior + delta_rao)
 
     def prune_old_events(self, current_block: int) -> None:
