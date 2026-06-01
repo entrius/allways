@@ -375,6 +375,15 @@ async def handle_swap_reserve(
                 f'miner_from={commitment.from_address} miner_to={commitment.to_address}'
             )
 
+            # A user address equal to one of the miner's committed addresses makes
+            # a swap leg a self-transfer (A->A) that delivers nothing. Reject early
+            # so a self-flow operator can't even hold the reservation.
+            if synapse.from_address in (commitment.from_address, commitment.to_address):
+                reject_synapse(
+                    synapse, 'Source address matches the miner commitment — self-transfers are not valid swaps', ctx
+                )
+                return synapse
+
             # Gate the user's quote against the rate read at reserve time, and
             # reject a tao_amount that doesn't match the submitted from/to legs.
             expected_to_amount = recompute_reserve_amounts(
@@ -629,6 +638,15 @@ async def handle_swap_confirm(
                 return synapse
             if not to_provider.is_valid_address(synapse.to_address):
                 reject_synapse(synapse, 'Invalid destination address format', ctx)
+                return synapse
+
+            # Reject self-transfer legs (A->A): a user address equal to the miner's
+            # deposit or payout address delivers nothing. verify_transaction also
+            # guards this on-chain; failing here avoids creating the swap at all.
+            if synapse.from_address == miner_from_address or synapse.to_address == miner_fulfillment_address:
+                reject_synapse(
+                    synapse, 'User address matches the miner commitment — self-transfers are not valid swaps', ctx
+                )
                 return synapse
 
             # Defend against user-snipes-miner by passing expected_sender: a user
