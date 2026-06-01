@@ -38,6 +38,7 @@ class SwapTracker:
         self.last_scanned_id = 0
         self.active: Dict[int, Swap] = {}
         self.voted_ids: Set[int] = set()
+        self.resolved_directions: Dict[int, tuple[str, str]] = {}
 
     def _label(self, swap: Swap) -> str:
         return _swap_label_with_uid(swap, self.metagraph)
@@ -82,6 +83,10 @@ class SwapTracker:
         swap = self.active.pop(swap_id, None)
         if swap is None:
             return
+        self.resolved_directions[swap_id] = (
+            (swap.from_chain or '').lower(),
+            (swap.to_chain or '').lower(),
+        )
         swap.status = status
         swap.completed_block = block
         self.voted_ids.discard(swap_id)

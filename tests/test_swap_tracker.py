@@ -160,6 +160,15 @@ class TestRefreshNullHandling:
 
         assert 51 not in tracker.active
 
+    def test_resolve_caches_direction_for_late_terminal_events(self):
+        tracker = make_tracker()
+        swap = make_swap(swap_id=52, from_chain='btc', to_chain='tao')
+        tracker.active[swap.id] = swap
+
+        tracker.resolve(swap_id=52, status=SwapStatus.COMPLETED, block=600)
+
+        assert tracker.resolved_directions[52] == ('btc', 'tao')
+
     def test_terminal_status_drops_without_retry(self):
         tracker = make_tracker()
         swap = make_swap(swap_id=53)
