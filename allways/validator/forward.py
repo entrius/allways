@@ -308,6 +308,7 @@ def try_extend_reservation(
         # The matching ReservationExtensionFinalized event won't be picked up
         # until the next forward step's event_watcher.sync_to.
         self.state_store.update_reserved_until(item.miner_hotkey, finalized_target)
+        self.state_store.update_reservation_pin_reserved_until(item.miner_hotkey, finalized_target)
         reserved_until = finalized_target
         # The just-finalized proposal is gone from contract storage; refresh
         # so downstream challenge/propose see the post-finalize state instead
