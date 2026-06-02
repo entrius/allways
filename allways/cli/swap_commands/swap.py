@@ -112,23 +112,36 @@ def sign_and_broadcast_confirm(
         to_chain=to_chain,
     )
 
-    with loading(f'Broadcasting confirmation to {len(validator_axons)} validators...'):
-        confirm_responses = broadcast_synapse(ephemeral_wallet, validator_axons, confirm_synapse, timeout=60.0)
+    # The confirm proof is over the tx hash (not block-anchored), so the synapse
+    # is stable across retries. On a 429 the request was rejected at the edge
+    # proxy and never reached the validator — back off and re-broadcast rather
+    # than failing the user mid-confirm (the worst place to drop them).
+    confirm_max_retries = 2
+    for attempt in range(confirm_max_retries + 1):
+        with loading(f'Broadcasting confirmation to {len(validator_axons)} validators...'):
+            confirm_responses = broadcast_synapse(ephemeral_wallet, validator_axons, confirm_synapse, timeout=60.0)
 
-    info = render_and_aggregate(
-        console,
-        confirm_responses,
-        label='V',
-        context={
-            'from_chain': from_chain,
-            'from_chain_upper': from_chain.upper(),
-            'to_chain': to_chain,
-            'to_chain_upper': to_chain.upper(),
-            'from_address': user_from_address,
-            'miner_hotkey': miner_hotkey,
-            'miner_uid': miner_uid,
-        },
-    )
+        info = render_and_aggregate(
+            console,
+            confirm_responses,
+            label='V',
+            context={
+                'from_chain': from_chain,
+                'from_chain_upper': from_chain.upper(),
+                'to_chain': to_chain,
+                'to_chain_upper': to_chain.upper(),
+                'from_address': user_from_address,
+                'miner_hotkey': miner_hotkey,
+                'miner_uid': miner_uid,
+            },
+        )
+
+        if info.category == 'rate_limited' and attempt < confirm_max_retries:
+            backoff_s = 6
+            with console.status(f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'):
+                time.sleep(backoff_s)
+            continue
+        break
 
     if info.accepted == 0 and info.headline:
         # tx_not_found is almost always propagation lag, not a real failure —
@@ -253,6 +266,20 @@ def broadcast_reserve_with_retry(
         accepted = info.accepted
 
         if accepted == 0:
+            # Rate limited at the validator edge proxy (429) — transient and
+            # self-healing. Back off and retry automatically; an instant retry
+            # would just re-trip the limit (tokens refill over a few seconds).
+            if info.category == 'rate_limited':
+                if attempt < max_retries:
+                    backoff_s = 6
+                    with console.status(
+                        f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'
+                    ):
+                        time.sleep(backoff_s)
+                    continue
+                console.print('\n[red]Still rate limited after retries — wait a minute and try again.[/red]')
+                return None
+
             if info.headline:
                 console.print(f'\n[red]{info.headline}[/red]')
             else:

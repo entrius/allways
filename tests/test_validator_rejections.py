@@ -142,6 +142,35 @@ def test_no_response_only():
     assert 'no validators responded' in info.headline.lower()
 
 
+def _rate_limited_resp() -> FakeResp:
+    # A 429 from the edge proxy: no synapse rejection_reason (the validator never
+    # ran), but the dendrite records status_code 429 from the JSON error body.
+    from types import SimpleNamespace
+
+    resp = FakeResp(accepted=False, rejection_reason='')
+    resp.dendrite = SimpleNamespace(status_code='429')
+    return resp
+
+
+def test_rate_limited_429_is_distinct_from_no_response():
+    info = render_and_aggregate(_silent_console(), [_rate_limited_resp(), _rate_limited_resp()])
+    assert info.rate_limited == 2
+    assert info.no_response == 0
+    assert info.category == 'rate_limited'
+    assert info.deterministic is False
+    assert 'rate limited' in info.headline.lower()
+
+
+def test_rate_limited_mixed_with_rejection_does_not_claim_pure_headline():
+    # 429 + a real rejection: must not be labeled the pure rate_limited category
+    # (the auto-backoff retry keys off that), but stays transient so a retry is allowed.
+    responses = [_rate_limited_resp(), FakeResp(accepted=False, rejection_reason='miner busy')]
+    info = render_and_aggregate(_silent_console(), responses, context={'miner_uid': 1})
+    assert info.rate_limited == 1
+    assert info.category != 'rate_limited'
+    assert info.deterministic is False
+
+
 def test_unmatched_falls_back_to_raw():
     info = render_and_aggregate(
         _silent_console(),
