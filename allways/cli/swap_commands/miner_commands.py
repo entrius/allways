@@ -169,13 +169,6 @@ def miner_activate():
     except ContractError:
         pass
 
-    # Build synapse
-    timestamp = str(int(time.time()))
-    message = f'activate:{hotkey}:{timestamp}'
-    signature = wallet.hotkey.sign(message.encode()).hex()
-
-    synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message)
-
     # Discover whitelisted validators from metagraph
     dendrite = bt.Dendrite(wallet=wallet)
     with loading('Discovering validators...'):
@@ -185,14 +178,31 @@ def miner_activate():
         console.print('[red]No validators found on metagraph[/red]\n')
         return
 
-    # Broadcast
+    # Broadcast, re-signing a fresh timestamp each attempt. On a 429 the request
+    # was rejected at the edge proxy and never reached the validator — back off
+    # and retry rather than surfacing a transient rate-limit as a failure.
     timeout = resolve_dendrite_timeout(60.0)
-    with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
-        responses = asyncio.get_event_loop().run_until_complete(
-            dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
-        )
+    activate_max_retries = 2
+    for attempt in range(activate_max_retries + 1):
+        timestamp = str(int(time.time()))
+        message = f'activate:{hotkey}:{timestamp}'
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message)
 
-    info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
+        with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
+            responses = asyncio.get_event_loop().run_until_complete(
+                dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
+            )
+
+        info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
+
+        if info.category == 'rate_limited' and attempt < activate_max_retries:
+            backoff_s = 6
+            with console.status(f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'):
+                time.sleep(backoff_s)
+            continue
+        break
+
     accepted = info.accepted
     no_response = info.no_response
     if accepted == 0 and info.headline:

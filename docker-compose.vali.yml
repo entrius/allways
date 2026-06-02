@@ -8,7 +8,8 @@ services:
     env_file:
       - .env
     ports:
-      - "${PORT}:${PORT}"
+      # Set AXON_PUBLISH=127.0.0.1:<port> to bind loopback-only behind a proxy (unset = raw internet publish).
+      - "${AXON_PUBLISH:-0.0.0.0:${PORT}}:${PORT}"
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
       - ./data/allways:/root/.allways

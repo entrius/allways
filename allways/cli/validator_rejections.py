@@ -27,6 +27,7 @@ class RejectionInfo:
         queued: subset of accepted where the validator queued for confirmations.
         rejected: validators that responded with a rejection_reason.
         no_response: validators that timed out / didn't respond.
+        rate_limited: validators whose edge proxy returned 429 (rate limited).
         headline: user-facing translated message when all rejections agree;
             empty when validators disagreed or accepted >= 1.
         deterministic: True when retrying with identical inputs cannot succeed.
@@ -41,6 +42,7 @@ class RejectionInfo:
     queued: int = 0
     rejected: int = 0
     no_response: int = 0
+    rate_limited: int = 0
     headline: str = ''
     deterministic: bool = False
     category: str = ''
@@ -354,6 +356,15 @@ def render_and_aggregate(
                 console.print(f'  {label}{i}: [green]ok[/green]')
             continue
 
+        # A 429 from the edge proxy carries no synapse rejection_reason — the
+        # validator never ran. Detect it off the dendrite status so it reads as
+        # "rate limited" (retryable after a short wait), not a generic timeout.
+        status_code = str(getattr(getattr(resp, 'dendrite', None), 'status_code', '') or '')
+        if not raw and status_code == '429':
+            info.rate_limited += 1
+            console.print(f'  {label}{i}: [yellow]rate limited[/yellow] [dim]— retry in a few seconds[/dim]')
+            continue
+
         info.raw_reasons.append(raw)
         if not raw:
             info.no_response += 1
@@ -361,6 +372,15 @@ def render_and_aggregate(
         else:
             info.rejected += 1
             console.print(f'  {label}{i}: [red]no[/red] [dim]{raw}[/dim]')
+
+    # Rate-limited (429) with no accepts: transient by nature — a short backoff
+    # and retry clears it. Set this before the no-response early-return below so
+    # a pure-429 round reads as "rate limited", not a generic timeout.
+    if info.accepted == 0 and info.rate_limited > 0 and info.rejected == 0 and info.no_response == 0:
+        info.category = 'rate_limited'
+        info.headline = 'Rate limited by the validator edge proxy — wait a few seconds and retry.'
+        info.deterministic = False
+        return info
 
     if info.accepted > 0 or (info.rejected == 0 and info.no_response == 0):
         return info
