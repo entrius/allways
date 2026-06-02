@@ -316,7 +316,7 @@ class SubtensorProvider(ChainProvider):
         """Verify an sr25519 signature from the given SS58 address."""
         try:
             keypair = Keypair(ss58_address=address)
-            sig_bytes = bytes.fromhex(signature)
+            sig_bytes = bytes.fromhex(signature[2:] if signature.startswith('0x') else signature)
             return keypair.verify(message.encode(), sig_bytes)
         except Exception as e:
             bt.logging.error(f'TAO verify_from_proof failed: {e}')
