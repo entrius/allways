@@ -272,9 +272,7 @@ def broadcast_reserve_with_retry(
             if info.category == 'rate_limited':
                 if attempt < max_retries:
                     backoff_s = 6
-                    with console.status(
-                        f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'
-                    ):
+                    with console.status(f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'):
                         time.sleep(backoff_s)
                     continue
                 console.print('\n[red]Still rate limited after retries — wait a minute and try again.[/red]')
