@@ -430,6 +430,42 @@ class TestReservationPin:
         assert pin.miner_to_address == '5miner'
         w.state_store.close()
 
+    def test_existing_synchronous_pin_is_not_overwritten(self, tmp_path: Path):
+        """The reserve handler's synchronous pin captures the rate the user's
+        quote was validated against and is authoritative. A later MinerReserved
+        re-read at the inclusion block must NOT clobber it, even when the miner
+        moved its commitment in between — that divergence short-changed the user
+        in swap 2405 (reserved at 370, overwritten to 280)."""
+        from allways.validator.state_store import ReservationPin
+
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        # Synchronous pin as handle_swap_reserve writes it at quote time.
+        w.state_store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='hk_a',
+                reserve_block=898,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='370',
+                counter_rate_str='0.0029',
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                reserved_until=1000,
+            )
+        )
+        # The inclusion-block read sees the miner's oscillated-down rate.
+        moved = make_pinned_commitment(rate_str='280')
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=moved,
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin.rate_str == '370'  # preserved — not overwritten with 280
+        assert pin.reserve_block == 898
+        w.state_store.close()
+
     def test_commitment_read_raising_writes_no_pin(self, tmp_path: Path):
         """A transient RPC error or a pruned block must not write a pin and
         must not let the exception escape apply_event."""

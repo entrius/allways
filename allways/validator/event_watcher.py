@@ -874,19 +874,49 @@ class ContractEventWatcher:
                 f'{block_num} — no pin written, will fall back'
             )
             return
-        self.state_store.upsert_reservation_pin(
-            ReservationPin(
-                miner_hotkey=miner,
-                reserve_block=block_num,
-                from_chain=commitment.from_chain,
-                to_chain=commitment.to_chain,
-                rate_str=commitment.rate_str,
-                counter_rate_str=commitment.counter_rate_str,
-                miner_from_address=commitment.from_address,
-                miner_to_address=commitment.to_address,
-                reserved_until=reserved_until,
+        # Only BACKFILL the settlement pin — never overwrite one the reserve
+        # handler already wrote. ``handle_swap_reserve`` pins the commitment at
+        # the instant it validated the user's quote, which is the rate the
+        # on-chain ``to_amount`` was reserved against. Re-reading at ``block_num``
+        # can capture a DIFFERENT rate when the miner moved its commitment
+        # between the handler's read and the on-chain inclusion of
+        # ``vote_reserve`` — e.g. a miner oscillating its rate every few blocks
+        # lands the reservation's inclusion block on a stale tick. Overwriting
+        # then makes the settlement rate disagree with the reserved ``to_amount``
+        # and the user is short-changed at confirm (see swap 2405: reserved at
+        # 370, pinned to 280, settled 24% low). The synchronous pin is
+        # authoritative; this read only matters when that write failed.
+        #
+        # NOTE / TODO(contract-v2, multi-validator): with one validator the
+        # synchronous pin is always present and correct, so preferring it fully
+        # closes the divergence. Once multiple validators reserve, each one's
+        # synchronous pin is read at its own instant and they are NOT
+        # deterministic across the set. The real fix then is to bind
+        # (reserve_block, rate) into the reservation at quorum and verify
+        # rate == CommitmentOf(reserve_block) within the user's slippage band,
+        # so every validator derives an identical, quote-consistent settlement
+        # rate. That requires the reserve hash + Reservation struct to carry the
+        # rate, i.e. a smart-contract iteration. Until v2 lands, back off to the
+        # synchronous pin here.
+        if self.state_store.get_reservation_pin(miner) is None:
+            self.state_store.upsert_reservation_pin(
+                ReservationPin(
+                    miner_hotkey=miner,
+                    reserve_block=block_num,
+                    from_chain=commitment.from_chain,
+                    to_chain=commitment.to_chain,
+                    rate_str=commitment.rate_str,
+                    counter_rate_str=commitment.counter_rate_str,
+                    miner_from_address=commitment.from_address,
+                    miner_to_address=commitment.to_address,
+                    reserved_until=reserved_until,
+                )
             )
-        )
+        else:
+            bt.logging.info(
+                f'EventWatcher: reserve-time pin already present for {miner[:8]} '
+                f'at block {block_num} — preserving synchronous pin (not overwriting)'
+            )
         # Emit pin lifecycle events into the scoring overlay. The reservation
         # locks in BOTH offered directions for this miner (the contract takes
         # the miner offline for any new swap until this reservation resolves),
