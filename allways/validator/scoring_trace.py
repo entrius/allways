@@ -44,9 +44,13 @@ class WeightingTrace:
     volume_factor: float = 1.0
     closed_swaps: int = 0
     credibility_ramp: float = 0.0
+    quality_factor: float = 1.0
 
     def record_capacity(self, factor: float) -> None:
         self.capacity_factor = factor
+
+    def record_quality(self, factor: float) -> None:
+        self.quality_factor = factor
 
     def record_volume(self, vol_rao: int, total_volume_rao: int, crown_share: float, factor: float) -> None:
         self.volume_rao = vol_rao
@@ -111,6 +115,7 @@ def log_scoring_trace(
                 f' cap={wt.capacity_factor:.2f}'
                 f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
                 f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
+                f' quality_f={wt.quality_factor:.2f}'
             )
         lines.append(
             f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'

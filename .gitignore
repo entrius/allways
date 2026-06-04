@@ -17,6 +17,9 @@ __pycache__
 CLAUDE.md
 .claude/
 .vscode/
+.mcp.json
+.vouch
+*.md
 
 # Rust/Cargo build artifacts
 target/

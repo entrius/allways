@@ -2805,3 +2805,252 @@ class TestScoringCadenceAndWindow:
         seed = max(0, block - SCORING_WINDOW_BLOCKS)
         start, end = scoring_window_bounds(current_block=block, last_scored_block=seed)
         assert (start, end) == (block - SCORING_WINDOW_BLOCKS, block)
+
+
+class TestQualityReferenceHelper:
+    """Unit tests for the depth reference + quality-factor pure functions."""
+
+    def test_empty_observations_bootstrap_none(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        assert compute_quality_reference([], now_block=1_000) is None
+
+    def test_below_n_min_bootstrap_none(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(10.0, 1, 0, 'a'), (11.0, 1, 0, 'b')]
+        assert compute_quality_reference(obs, now_block=0, n_min=5) is None
+
+    def test_volume_weighted_mean(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(10.0, 1, 0, 'a'), (20.0, 99, 0, 'b')]
+        ref = compute_quality_reference(obs, now_block=0, n_min=2, trim_pct=0.0, per_miner_cap=1.0)
+        # (1·10 + 99·20) / 100 = 19.9 — big swap dominates.
+        assert np.isclose(ref, 19.9)
+
+    def test_recency_decay_favors_recent(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(10.0, 1, 0, 'a'), (20.0, 1, 1_000, 'b')]
+        ref = compute_quality_reference(
+            obs, now_block=1_000, n_min=2, trim_pct=0.0, per_miner_cap=1.0, half_life_blocks=1_000
+        )
+        # old weight 2^-1 = 0.5, recent 2^0 = 1.0 → (5 + 20) / 1.5.
+        assert np.isclose(ref, 25.0 / 1.5)
+
+    def test_trim_drops_outlier(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(10.0, 1, 0, f'm{i}') for i in range(10)] + [(1e6, 1, 0, 'outlier')]
+        ref = compute_quality_reference(obs, now_block=0, n_min=5, trim_pct=0.10, per_miner_cap=1.0)
+        # 11 rows, drop 1 each tail → the 1e6 outlier is trimmed away.
+        assert np.isclose(ref, 10.0)
+
+    def test_per_miner_cap_limits_flood(self):
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(100.0, 1, 0, 'flood') for _ in range(20)] + [(10.0, 1, 0, f'h{i}') for i in range(5)]
+        ref = compute_quality_reference(obs, now_block=0, n_min=5, trim_pct=0.0, per_miner_cap=0.30)
+        uncapped = (20 * 100 + 5 * 10) / 25  # 80.4 — flood dominates
+        assert ref < uncapped
+        # flood capped to 30% of weight → 800 / 12.5 = 64.0, pulled toward honest.
+        assert np.isclose(ref, 64.0)
+
+    def test_shuffle_invariance(self):
+        """Determinism: the reference must be byte-identical regardless of input
+        order (guards the stable-sort + math.fsum consensus requirement)."""
+        from allways.validator.scoring import compute_quality_reference
+
+        obs = [(10.0 + i, (i % 3) + 1, i * 10, f'm{i % 4}') for i in range(15)]
+        ref1 = compute_quality_reference(obs, now_block=200, n_min=3)
+        ref2 = compute_quality_reference(list(reversed(obs)), now_block=200, n_min=3)
+        ref3 = compute_quality_reference(obs[7:] + obs[:7], now_block=200, n_min=3)
+        assert ref1 == ref2 == ref3
+
+    def test_factor_none_reference_is_noop(self):
+        from allways.validator.scoring import quality_factor
+
+        assert quality_factor(123.0, None, False) == 1.0
+
+    def test_factor_at_market_is_floor(self):
+        from allways.validator.scoring import quality_factor
+
+        assert quality_factor(100.0, 100.0, False) == 0.5
+        assert quality_factor(100.0, 100.0, True) == 0.5
+
+    def test_factor_anchor_saturates_both_directions(self):
+        from allways.validator.scoring import quality_factor
+
+        # btc→tao: 5% higher = full bonus. tao→btc: 5% lower = full bonus.
+        assert np.isclose(quality_factor(105.0, 100.0, False), 1.0)
+        assert np.isclose(quality_factor(95.0, 100.0, True), 1.0)
+
+    def test_factor_half_anchor_interpolates(self):
+        from allways.validator.scoring import quality_factor
+
+        # 2.5% improvement = half the anchor → 0.5 + 0.5·0.5 = 0.75.
+        assert np.isclose(quality_factor(102.5, 100.0, False), 0.75)
+
+    def test_factor_below_market_floored(self):
+        from allways.validator.scoring import quality_factor
+
+        assert quality_factor(98.0, 100.0, False) == 0.5  # worse than market, higher-better
+        assert quality_factor(105.0, 100.0, True) == 0.5  # worse than market, lower-better
+
+    def test_factor_past_anchor_capped(self):
+        from allways.validator.scoring import quality_factor
+
+        assert quality_factor(200.0, 100.0, False) == 1.0
+
+
+class TestQualityWeighting:
+    """End-to-end depth/quality weighting via calculate_miner_rewards."""
+
+    def seed_crown(self, v, hotkey, rate, from_chain='tao', to_chain='btc'):
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            (hotkey, from_chain, to_chain, rate, 0),
+        )
+        conn.commit()
+
+    def seed_clearing(
+        self, v, hotkey, rate, n=25, from_chain='tao', to_chain='btc', tao_amount=100_000_000, swap_id_base=1_000
+    ):
+        for i in range(n):
+            v.state_store.insert_swap_outcome(
+                swap_id=swap_id_base + i,
+                miner_hotkey=hotkey,
+                completed=True,
+                resolved_block=9_900,  # inside the default [9_700, 10_000] window
+                tao_amount=tao_amount,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                clearing_rate=rate,
+            )
+
+    def test_deep_rate_earns_full_pool(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        # tao→btc: lower is deeper. Reference 0.00020, holder posts 6% lower.
+        self.seed_clearing(v, 'hk_a', rate=0.00020)
+        self.seed_crown(v, 'hk_a', rate=0.00020 * 0.94)
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_at_market_rate_earns_floor(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_clearing(v, 'hk_a', rate=0.00020)
+        self.seed_crown(v, 'hk_a', rate=0.00020)  # at reference → quality floor
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
+        # Unearned half + the empty btc→tao pool recycle; total still 1.0.
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_bootstrap_below_n_min_behaves_like_today(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        # Only 5 observations (< QUALITY_N_MIN) → reference disabled → factor 1.0.
+        self.seed_clearing(v, 'hk_a', rate=0.00020, n=5)
+        self.seed_crown(v, 'hk_a', rate=0.00020)  # at market, but depth is off
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_btc_tao_direction_deep_earns_full(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        # btc→tao: higher is deeper. Reference 280, holder posts 6% higher.
+        self.seed_clearing(v, 'hk_a', rate=280.0, from_chain='btc', to_chain='tao')
+        self.seed_crown(v, 'hk_a', rate=280.0 * 1.06, from_chain='btc', to_chain='tao')
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        v.state_store.close()
+
+    def test_idle_and_shallow_stacks_to_quarter(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        # hk_a holds crown at market (quality 0.5); hk_b serves all volume so
+        # hk_a's vol_factor is the idle floor (0.5). Independent multiply → 0.25.
+        self.seed_crown(v, 'hk_a', rate=0.00020)
+        self.seed_clearing(v, 'hk_b', rate=0.00020, swap_id_base=2_000)
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.25, atol=1e-6)
+        v.state_store.close()
+
+
+class TestClearingRateStorage:
+    """clearing_rate column + per-direction query for the depth reference."""
+
+    def test_round_trip(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_swap_outcome(
+            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
+            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.00021,
+        )
+        rows = store.get_clearing_rates_by_direction_since(0, 'tao', 'btc')
+        assert len(rows) == 1
+        rate, tao, block, hk = rows[0]
+        assert np.isclose(rate, 0.00021)
+        assert (tao, block, hk) == (5, 100, 'hk_a')
+        store.close()
+
+    def test_excludes_zero_rate_and_timed_out(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        # completed but no usable rate (legacy / unresolved)
+        store.insert_swap_outcome(
+            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
+            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0,
+        )
+        # timed out (never excluded by completed=1)
+        store.insert_swap_outcome(
+            swap_id=2, miner_hotkey='hk_a', completed=False, resolved_block=100,
+            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0003,
+        )
+        assert store.get_clearing_rates_by_direction_since(0, 'tao', 'btc') == []
+        store.close()
+
+    def test_direction_filter_lowercased(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_swap_outcome(
+            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
+            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0002,
+        )
+        store.insert_swap_outcome(
+            swap_id=2, miner_hotkey='hk_a', completed=True, resolved_block=100,
+            tao_amount=5, from_chain='btc', to_chain='tao', clearing_rate=300.0,
+        )
+        # Query with uppercase → normalized to lowercase, matches the tao→btc row only.
+        rows = store.get_clearing_rates_by_direction_since(0, 'TAO', 'BTC')
+        assert len(rows) == 1 and np.isclose(rows[0][0], 0.0002)
+        store.close()
+
+
+class TestEventWatcherPassesClearingRate:
+    """SwapCompleted resolves the swap's clearing rate into the outcome row."""
+
+    def test_swap_completed_persists_clearing_rate(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        swap = SimpleNamespace(rate='0.00022', from_chain='tao', to_chain='btc')
+        watcher.swap_tracker = SimpleNamespace(active={7: swap}, resolve=MagicMock())
+        watcher.apply_event(100, 'SwapInitiated', {'swap_id': 7, 'miner': 'hk_a'})
+        watcher.apply_event(200, 'SwapCompleted', {'swap_id': 7, 'miner': 'hk_a', 'tao_amount': 5})
+        rows = store.get_clearing_rates_by_direction_since(0, 'tao', 'btc')
+        assert len(rows) == 1 and np.isclose(rows[0][0], 0.00022)
+        store.close()
+
+    def test_unparseable_rate_falls_back_to_zero(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        swap = SimpleNamespace(rate='', from_chain='tao', to_chain='btc')
+        watcher.swap_tracker = SimpleNamespace(active={7: swap}, resolve=MagicMock())
+        watcher.apply_event(100, 'SwapInitiated', {'swap_id': 7, 'miner': 'hk_a'})
+        watcher.apply_event(200, 'SwapCompleted', {'swap_id': 7, 'miner': 'hk_a', 'tao_amount': 5})
+        # Row written with clearing_rate 0 → excluded from the reference.
+        assert store.get_clearing_rates_by_direction_since(0, 'tao', 'btc') == []
+        store.close()
