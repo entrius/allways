@@ -2989,8 +2989,14 @@ class TestClearingRateStorage:
     def test_round_trip(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         store.insert_swap_outcome(
-            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
-            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.00021,
+            swap_id=1,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=100,
+            tao_amount=5,
+            from_chain='tao',
+            to_chain='btc',
+            clearing_rate=0.00021,
         )
         rows = store.get_clearing_rates_by_direction_since(0, 'tao', 'btc')
         assert len(rows) == 1
@@ -3003,13 +3009,25 @@ class TestClearingRateStorage:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         # completed but no usable rate (legacy / unresolved)
         store.insert_swap_outcome(
-            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
-            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0,
+            swap_id=1,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=100,
+            tao_amount=5,
+            from_chain='tao',
+            to_chain='btc',
+            clearing_rate=0.0,
         )
         # timed out (never excluded by completed=1)
         store.insert_swap_outcome(
-            swap_id=2, miner_hotkey='hk_a', completed=False, resolved_block=100,
-            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0003,
+            swap_id=2,
+            miner_hotkey='hk_a',
+            completed=False,
+            resolved_block=100,
+            tao_amount=5,
+            from_chain='tao',
+            to_chain='btc',
+            clearing_rate=0.0003,
         )
         assert store.get_clearing_rates_by_direction_since(0, 'tao', 'btc') == []
         store.close()
@@ -3017,12 +3035,24 @@ class TestClearingRateStorage:
     def test_direction_filter_lowercased(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         store.insert_swap_outcome(
-            swap_id=1, miner_hotkey='hk_a', completed=True, resolved_block=100,
-            tao_amount=5, from_chain='tao', to_chain='btc', clearing_rate=0.0002,
+            swap_id=1,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=100,
+            tao_amount=5,
+            from_chain='tao',
+            to_chain='btc',
+            clearing_rate=0.0002,
         )
         store.insert_swap_outcome(
-            swap_id=2, miner_hotkey='hk_a', completed=True, resolved_block=100,
-            tao_amount=5, from_chain='btc', to_chain='tao', clearing_rate=300.0,
+            swap_id=2,
+            miner_hotkey='hk_a',
+            completed=True,
+            resolved_block=100,
+            tao_amount=5,
+            from_chain='btc',
+            to_chain='tao',
+            clearing_rate=300.0,
         )
         # Query with uppercase → normalized to lowercase, matches the tao→btc row only.
         rows = store.get_clearing_rates_by_direction_since(0, 'TAO', 'BTC')

@@ -216,9 +216,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         # of recent completed-swap clearing rates. None until enough swaps accrue
         # (bootstrap), in which case the quality factor is a 1.0 no-op. Same 30-day
         # lookback the table is pruned to; the EMA half-life down-weights old swaps.
-        clearing_obs = self.state_store.get_clearing_rates_by_direction_since(
-            credibility_since, from_chain, to_chain
-        )
+        clearing_obs = self.state_store.get_clearing_rates_by_direction_since(credibility_since, from_chain, to_chain)
         quality_reference = compute_quality_reference(clearing_obs, window_end)
         trace.quality_reference = quality_reference
         crown_blocks = replay_crown_time_window(
@@ -401,7 +399,7 @@ def compute_quality_reference(
     rows.sort(key=lambda o: (o[0], o[2], o[3], o[1]))
     n = len(rows)
     drop = int(math.floor(n * trim_pct))
-    trimmed = rows[drop:n - drop] if drop > 0 else rows
+    trimmed = rows[drop : n - drop] if drop > 0 else rows
     if len(trimmed) < n_min:
         return None
 
