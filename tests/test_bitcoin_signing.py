@@ -13,6 +13,7 @@ from allways.chain_providers.bitcoin import (
     ADDR_TYPE_P2WPKH,
     BitcoinProvider,
     detect_address_type,
+    to_mainnet_address,
 )
 
 # Known test WIF (compressed)
@@ -271,3 +272,84 @@ class TestBroadcastedTxidsTracking:
         consumed tx hash can't leak across processes."""
         provider = make_lightweight_provider()
         assert provider.broadcasted_txids == set()
+
+
+class TestIsValidAddress:
+    """BTC address format validation — must accept every standard type
+    (legacy, segwit v0, and Taproot/bech32m) and reject malformed input.
+
+    Taproot regression guard: the old bech32-only check rejected all `bc1p…`
+    addresses, blocking TAO->BTC payouts to Taproot wallets (issue #448).
+    """
+
+    # mainnet / testnet / regtest × P2PKH / P2SH / P2WPKH / P2WSH / P2TR
+    VALID = [
+        '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',  # mainnet P2PKH
+        '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy',  # mainnet P2SH
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',  # mainnet P2WPKH
+        'bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3',  # mainnet P2WSH
+        'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',  # mainnet P2TR
+        'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn',  # testnet P2PKH
+        '2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc',  # testnet P2SH
+        'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',  # testnet P2WPKH
+        'tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c',  # testnet P2TR (BIP-350)
+        'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',  # regtest P2WPKH
+        'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6',  # regtest P2TR
+    ]
+
+    INVALID = [
+        '',
+        'notanaddress',
+        '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',  # ETH address
+        'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrXXX',  # bad checksum
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3XX',  # corrupted v0
+    ]
+
+    def test_accepts_all_standard_types(self):
+        provider = make_lightweight_provider()
+        for addr in self.VALID:
+            assert provider.is_valid_address(addr), f'should accept {addr}'
+
+    def test_accepts_taproot(self):
+        """Explicit #448 guard: Taproot payout addresses must validate."""
+        provider = make_lightweight_provider()
+        assert provider.is_valid_address('bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr')
+
+    def test_rejects_malformed(self):
+        provider = make_lightweight_provider()
+        for addr in self.INVALID:
+            assert not provider.is_valid_address(addr), f'should reject {addr!r}'
+
+    def test_rejects_non_string(self):
+        provider = make_lightweight_provider()
+        assert not provider.is_valid_address(None)
+
+
+class TestToMainnetAddress:
+    """testnet/regtest -> mainnet re-encoding used by the BIP-137 verify path.
+    Conversions must be byte-identical to the prior bech32/base58 behavior."""
+
+    def test_testnet_p2pkh(self):
+        assert to_mainnet_address('mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn') == '14JetYAhLevTRaePcAAX1vRMwaJt2QGRzp'
+
+    def test_testnet_p2sh(self):
+        assert to_mainnet_address('2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc') == '38rjNhr9g3nVEPDLnMnEJ78GgEWi6yM4He'
+
+    def test_testnet_p2wpkh(self):
+        assert (
+            to_mainnet_address('tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx')
+            == 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
+        )
+
+    def test_regtest_p2wpkh(self):
+        assert (
+            to_mainnet_address('bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080')
+            == 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
+        )
+
+    def test_mainnet_passthrough(self):
+        addr = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
+        assert to_mainnet_address(addr) == addr
+
+    def test_unparseable_returns_unchanged(self):
+        assert to_mainnet_address('notanaddress') == 'notanaddress'

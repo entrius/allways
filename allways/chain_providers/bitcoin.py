@@ -4,10 +4,11 @@ from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
 
 import base58
-import bech32
 import bittensor as bt
 import requests
 from bitcoin_message_tool.bmt import sign_message, verify_message
+from embit.networks import NETWORKS
+from embit.script import address_to_scriptpubkey
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_BTC, ChainDefinition
@@ -53,20 +54,15 @@ def to_mainnet_wif(wif: str) -> str:
 
 
 def to_mainnet_address(address: str) -> str:
-    """Convert a testnet/regtest address to mainnet equivalent for verification."""
-    if address.startswith('bcrt1') or address.startswith('tb1'):
-        hrp, data = bech32.bech32_decode(address)
-        if data is not None:
-            return bech32.bech32_encode('bc', data)
-    if address.startswith(('m', 'n')):
-        decoded = base58.b58decode_check(address)
-        if decoded[0] == 0x6F:
-            return base58.b58encode_check(bytes([0x00]) + decoded[1:]).decode()
-    if address.startswith('2'):
-        decoded = base58.b58decode_check(address)
-        if decoded[0] == 0xC4:
-            return base58.b58encode_check(bytes([0x05]) + decoded[1:]).decode()
-    return address
+    """Convert a testnet/regtest address to mainnet equivalent for verification.
+
+    Re-encodes the scriptPubKey under the mainnet network (handles legacy, segwit
+    v0, and Taproot); returns the address unchanged if it can't be parsed.
+    """
+    try:
+        return address_to_scriptpubkey(address).address(NETWORKS['main'])
+    except Exception:
+        return address
 
 
 def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tuple[str, Optional[dict]]]:
@@ -530,15 +526,11 @@ class BitcoinProvider(ChainProvider):
             return 0
 
     def is_valid_address(self, address: str) -> bool:
-        """Validate BTC address format without RPC (bech32/base58 decode)."""
+        """Validate BTC address format without RPC (embit decode; all types incl. Taproot)."""
         if not address or not isinstance(address, str):
             return False
         try:
-            if address.lower().startswith(('bc1', 'tb1', 'bcrt1')):
-                hrp, data = bech32.bech32_decode(address)
-                return data is not None
-            decoded = base58.b58decode_check(address)
-            return len(decoded) == 21 and decoded[0] in (0x00, 0x05, 0x6F, 0xC4)
+            return address_to_scriptpubkey(address) is not None
         except Exception:
             return False
 
