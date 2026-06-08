@@ -12,12 +12,14 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
 )
+from allways.utils.rate import is_executable_rate, min_executable_tao_leg
 from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
     credibility_ramp,
     crown_holders_at_instant,
     due_for_scoring,
+    make_crown_predicates,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
@@ -2805,3 +2807,59 @@ class TestScoringCadenceAndWindow:
         seed = max(0, block - SCORING_WINDOW_BLOCKS)
         start, end = scoring_window_bounds(current_block=block, last_scored_block=seed)
         assert (start, end) == (block - SCORING_WINDOW_BLOCKS, block)
+
+
+class TestCrownPredicateParity:
+    """make_crown_predicates is the single source of crown eligibility for both
+    the scoring replay and the live snapshot. Lock its semantics to the shared
+    rate utils so a future edit can't let the live view drift from the ledger."""
+
+    # 0.1 / 0.5 TAO — the live on-chain swap bounds.
+    BOUNDS = [(0, 0), (100_000_000, 500_000_000)]
+    DIRECTIONS = [('btc', 'tao'), ('tao', 'btc')]
+    RATES = [0.00015, 1.0, 345.0, 50_000_000.0, 1e10, 0.0, -1.0, float('inf')]
+
+    def _reference(self, from_chain, to_chain, min_rao, max_rao, collaterals):
+        def exec_ref(rate):
+            return is_executable_rate(rate, from_chain, to_chain, min_rao, max_rao)
+
+        def fund_ref(hotkey, rate):
+            if hotkey not in collaterals:
+                return True
+            min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_rao, max_rao)
+            return min_leg == 0 or collaterals[hotkey] >= min_leg
+
+        return exec_ref, fund_ref
+
+    def test_matches_shared_rate_utils_across_matrix(self):
+        collaterals = {'hk_rich': 10_000_000_000, 'hk_poor': 1, 'hk_zero': 0}
+        probe_hotkeys = ['hk_rich', 'hk_poor', 'hk_zero', 'hk_absent']
+        for from_chain, to_chain in self.DIRECTIONS:
+            for min_rao, max_rao in self.BOUNDS:
+                executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_rao, max_rao, collaterals)
+                exec_ref, fund_ref = self._reference(from_chain, to_chain, min_rao, max_rao, collaterals)
+                for rate in self.RATES:
+                    assert executable_check(rate) == exec_ref(rate), (
+                        f'executable_check drift dir={from_chain}->{to_chain} bounds=({min_rao},{max_rao}) rate={rate}'
+                    )
+                    for hk in probe_hotkeys:
+                        assert can_fund(hk, rate) == fund_ref(hk, rate), (
+                            f'can_fund drift dir={from_chain}->{to_chain} '
+                            f'bounds=({min_rao},{max_rao}) hk={hk} rate={rate}'
+                        )
+
+    def test_fail_open_on_absent_collateral(self):
+        # absent != zero — a miner with no recorded baseline must not be dropped.
+        _, can_fund = make_crown_predicates('btc', 'tao', 100_000_000, 500_000_000, {})
+        assert can_fund('hk_unknown', 345.0) is True
+
+    def test_drops_holder_whose_collateral_cannot_fund_min_leg(self):
+        # 1-rao collateral can't cover any real in-band leg → boundary-squat drop;
+        # a richly-funded miner at the same rate passes.
+        collaterals = {'hk_poor': 1, 'hk_rich': 10_000_000_000}
+        _, can_fund = make_crown_predicates('btc', 'tao', 100_000_000, 500_000_000, collaterals)
+        rate = 345.0
+        min_leg = min_executable_tao_leg(rate, 'btc', 'tao', 100_000_000, 500_000_000)
+        assert min_leg > 0  # rate is executable, so the gate is live
+        assert can_fund('hk_poor', rate) is False
+        assert can_fund('hk_rich', rate) is True
