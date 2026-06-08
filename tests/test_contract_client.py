@@ -6,6 +6,7 @@ callback (which must replace ``client.subtensor`` with a fresh handle)
 and retries the call once. Anything else propagates as-is.
 """
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,3 +200,35 @@ class TestExtensionSelectorWiring:
             'TargetNotForward',
             'InvalidTarget',
         }
+
+
+class TestWriteLockSerialization:
+    """One hotkey = one nonce sequence; writes across connections must serialize."""
+
+    def test_shared_write_lock_object(self):
+        shared = threading.Lock()
+        a = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor(), write_lock=shared)
+        b = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor(), write_lock=shared)
+        assert a._write_lock is b._write_lock is shared
+
+    def test_default_write_lock_is_private(self):
+        a = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor())
+        b = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor())
+        assert a._write_lock is not b._write_lock
+
+    def test_write_lock_held_during_submit_not_reads(self):
+        # The submit closure runs under the write lock; the account-nonce/balance
+        # read (a lambda) runs outside it, so reads stay parallel.
+        shared = threading.Lock()
+        client = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor(), write_lock=shared)
+        receipt = MagicMock(is_success=True, extrinsic_hash='0xabc')
+        held_during = {}
+
+        def fake_substrate_call(fn):
+            held_during[getattr(fn, '__name__', '<lambda>')] = shared.locked()
+            return receipt if getattr(fn, '__name__', '') == 'submit_extrinsic' else MagicMock()
+
+        client.substrate_call = fake_substrate_call
+        client.exec_contract_raw('confirm_swap', args={'swap_id': 1}, keypair=client.readonly_keypair)
+        assert held_during.get('submit_extrinsic') is True
+        assert held_during.get('<lambda>') is False

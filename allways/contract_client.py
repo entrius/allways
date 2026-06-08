@@ -352,6 +352,7 @@ class AllwaysContractClient:
         subtensor: Optional[bt.Subtensor] = None,
         reconnect_subtensor: Optional[Callable[[], None]] = None,
         substrate_lock: Optional[Any] = None,
+        write_lock: Optional[Any] = None,
     ):
         self.contract_address = contract_address or get_contract_address() or ''
         self.subtensor = subtensor
@@ -366,6 +367,10 @@ class AllwaysContractClient:
         # access so concurrent threads can't both land in recv. Callers sharing
         # this subtensor elsewhere pass that path's lock to serialize as one.
         self._substrate_lock = substrate_lock or threading.Lock()
+        # One hotkey = one nonce sequence. Clients that sign with the same
+        # hotkey across separate connections must share this so two threads
+        # can't fetch the same nonce and get one extrinsic pool-banned.
+        self._write_lock = write_lock or threading.Lock()
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
@@ -573,7 +578,11 @@ class AllwaysContractClient:
             return s.submit_extrinsic(extrinsic, wait_for_inclusion=wait_for_inclusion, wait_for_finalization=False)
 
         try:
-            receipt = self.substrate_call(submit_extrinsic)
+            # Hold the write lock across nonce-fetch → submit → inclusion so the
+            # best-block nonce advances before the next signer (any connection on
+            # the same hotkey) composes. Reads stay outside it, so they're parallel.
+            with self._write_lock:
+                receipt = self.substrate_call(submit_extrinsic)
         except Exception as e:
             raise ContractError(f'{method}: exec failed: {e}') from e
 

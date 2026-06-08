@@ -70,9 +70,15 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
+        # Forward loop and axon handlers both sign contract writes with the
+        # validator hotkey over separate connections; share one lock so their
+        # nonce sequences can't collide (one would get pool-banned). Reads stay
+        # on their own per-connection locks, so they remain parallel.
+        self.write_lock = threading.Lock()
         self.contract_client = AllwaysContractClient(
             subtensor=self.subtensor,
             reconnect_subtensor=self.reconnect_and_propagate,
+            write_lock=self.write_lock,
         )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
@@ -159,6 +165,7 @@ class Validator(BaseValidatorNeuron):
             subtensor=self.axon_subtensor,
             reconnect_subtensor=self.reconnect_axon_subtensor,
             substrate_lock=self.axon_lock,
+            write_lock=self.write_lock,
         )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
         # Read block/bounds via axon_subtensor; the forward loop calls this too,
