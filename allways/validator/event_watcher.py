@@ -874,38 +874,11 @@ class ContractEventWatcher:
                 f'{block_num} — no pin written, will fall back'
             )
             return
-        # Only BACKFILL the settlement pin — never overwrite one the reserve
-        # handler already wrote. ``handle_swap_reserve`` pins the commitment at
-        # the instant it validated the user's quote, which is the rate the
-        # on-chain ``to_amount`` was reserved against. Re-reading at ``block_num``
-        # can capture a DIFFERENT rate when the miner moved its commitment
-        # between the handler's read and the on-chain inclusion of
-        # ``vote_reserve`` — e.g. a miner oscillating its rate every few blocks
-        # lands the reservation's inclusion block on a stale tick. Overwriting
-        # then makes the settlement rate disagree with the reserved ``to_amount``
-        # and the user is short-changed at confirm (see swap 2405: reserved at
-        # 370, pinned to 280, settled 24% low). The synchronous pin is
-        # authoritative; this read only matters when that write failed.
-        #
-        # NOTE / TODO(contract-v2, multi-validator): with one validator the
-        # synchronous pin is always present and correct, so preferring it fully
-        # closes the divergence. Once multiple validators reserve, each one's
-        # synchronous pin is read at its own instant and they are NOT
-        # deterministic across the set. The real fix then is to bind
-        # (reserve_block, rate) into the reservation at quorum and verify
-        # rate == CommitmentOf(reserve_block) within the user's slippage band,
-        # so every validator derives an identical, quote-consistent settlement
-        # rate. That requires the reserve hash + Reservation struct to carry the
-        # rate, i.e. a smart-contract iteration. Until v2 lands, back off to the
-        # synchronous pin here.
-        # Preserve only the synchronous pin for THIS reservation. ``reserved_until``
-        # is distinct per reservation, so an existing pin whose TTL differs belongs
-        # to a PRIOR reservation (e.g. one abandoned without a swap and not yet
-        # swept by ``purge_expired_reservation_pins``) and must still be
-        # overwritten — backfill, don't inherit it. Without this check a failed
-        # synchronous write, or an event replay on a fresh DB that sees an
-        # abandoned ``MinerReserved`` before this one, would settle the swap
-        # against the stale reservation's rate AND addresses.
+        # Backfill only — the synchronous pin from handle_swap_reserve is the rate
+        # the user's quote was validated against; this re-read can see a different
+        # tick if the miner moved. Key on reserved_until so a stale pin from a
+        # prior reservation is still overwritten. (Single-validator scope + the
+        # multi-validator/contract-v2 fix: see PR #451.)
         existing = self.state_store.get_reservation_pin(miner)
         if existing is None or existing.reserved_until != reserved_until:
             self.state_store.upsert_reservation_pin(
