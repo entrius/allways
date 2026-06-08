@@ -430,6 +430,83 @@ class TestReservationPin:
         assert pin.miner_to_address == '5miner'
         w.state_store.close()
 
+    def test_existing_synchronous_pin_is_not_overwritten(self, tmp_path: Path):
+        """The reserve handler's synchronous pin captures the rate the user's
+        quote was validated against and is authoritative. A later MinerReserved
+        re-read at the inclusion block must NOT clobber it, even when the miner
+        moved its commitment in between — that divergence short-changed the user
+        in swap 2405 (reserved at 370, overwritten to 280)."""
+        from allways.validator.state_store import ReservationPin
+
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        # Synchronous pin as handle_swap_reserve writes it at quote time.
+        w.state_store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='hk_a',
+                reserve_block=898,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='370',
+                counter_rate_str='0.0029',
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                reserved_until=1000,
+            )
+        )
+        # The inclusion-block read sees the miner's oscillated-down rate.
+        moved = make_pinned_commitment(rate_str='280')
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=moved,
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin.rate_str == '370'  # preserved — not overwritten with 280
+        assert pin.reserve_block == 898
+        w.state_store.close()
+
+    def test_stale_prior_reservation_pin_is_backfilled(self, tmp_path: Path):
+        """A pin left over from a PRIOR reservation (different reserved_until,
+        e.g. one abandoned without a swap and not yet purged) must not be
+        inherited by the current reservation. The guard keys on reserved_until,
+        so a MinerReserved for a new reservation backfills over the stale pin —
+        otherwise a failed synchronous write or a fresh-DB replay would settle
+        the new swap against the old reservation's rate and addresses."""
+        from allways.validator.state_store import ReservationPin
+
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        # Stale pin from a prior, abandoned reservation (reserved_until=1000).
+        w.state_store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='hk_a',
+                reserve_block=898,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='370',
+                counter_rate_str='0.0029',
+                miner_from_address='bc1-OLD',
+                miner_to_address='5old',
+                reserved_until=1000,
+            )
+        )
+        # A new reservation (reserved_until=1200) with no synchronous pin —
+        # the inclusion-block read is the only source, so it must write through.
+        fresh = make_pinned_commitment(rate_str='345', from_address='bc1-NEW', to_address='5new')
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=fresh,
+        ):
+            w.apply_event(1100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1200})
+
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin.reserved_until == 1200  # current reservation, not the stale one
+        assert pin.rate_str == '345'  # backfilled — stale 370 overwritten
+        assert pin.reserve_block == 1100
+        assert pin.miner_from_address == 'bc1-NEW'
+        assert pin.miner_to_address == '5new'
+        w.state_store.close()
+
     def test_commitment_read_raising_writes_no_pin(self, tmp_path: Path):
         """A transient RPC error or a pruned block must not write a pin and
         must not let the exception escape apply_event."""

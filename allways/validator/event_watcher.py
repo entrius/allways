@@ -874,19 +874,29 @@ class ContractEventWatcher:
                 f'{block_num} — no pin written, will fall back'
             )
             return
-        self.state_store.upsert_reservation_pin(
-            ReservationPin(
-                miner_hotkey=miner,
-                reserve_block=block_num,
-                from_chain=commitment.from_chain,
-                to_chain=commitment.to_chain,
-                rate_str=commitment.rate_str,
-                counter_rate_str=commitment.counter_rate_str,
-                miner_from_address=commitment.from_address,
-                miner_to_address=commitment.to_address,
-                reserved_until=reserved_until,
+        # Backfill only: keep handle_swap_reserve's synchronous pin (the rate the
+        # quote was validated against), but key on reserved_until so a stale pin
+        # from a prior reservation is still overwritten. See PR #451.
+        existing = self.state_store.get_reservation_pin(miner)
+        if existing is None or existing.reserved_until != reserved_until:
+            self.state_store.upsert_reservation_pin(
+                ReservationPin(
+                    miner_hotkey=miner,
+                    reserve_block=block_num,
+                    from_chain=commitment.from_chain,
+                    to_chain=commitment.to_chain,
+                    rate_str=commitment.rate_str,
+                    counter_rate_str=commitment.counter_rate_str,
+                    miner_from_address=commitment.from_address,
+                    miner_to_address=commitment.to_address,
+                    reserved_until=reserved_until,
+                )
             )
-        )
+        else:
+            bt.logging.info(
+                f'EventWatcher: reserve-time pin already present for {miner[:8]} '
+                f'at block {block_num} — preserving synchronous pin (not overwriting)'
+            )
         # Emit pin lifecycle events into the scoring overlay. The reservation
         # locks in BOTH offered directions for this miner (the contract takes
         # the miner offline for any new swap until this reservation resolves),
