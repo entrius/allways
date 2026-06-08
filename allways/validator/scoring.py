@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+from functools import partial
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
@@ -512,6 +513,39 @@ def merge_replay_events(
     return events
 
 
+def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
+    """Boundary-squat gate: a miner whose own rate forces a TAO leg larger than
+    their collateral earns no crown. Fail open on unknown collateral (absent !=
+    zero) so a missing baseline doesn't silently drop them."""
+    if hotkey not in collaterals:
+        return True
+    min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    return min_leg == 0 or collaterals[hotkey] >= min_leg
+
+
+def make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
+    """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
+    scoring replay and the live snapshot, so the live crown view can never diverge
+    from the rewarded ledger. Both are the shared rate utils with this direction's
+    bounds/collateral bound in."""
+    executable_check = partial(
+        is_executable_rate,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        min_swap_rao=min_swap_rao,
+        max_swap_rao=max_swap_rao,
+    )
+    can_fund = partial(
+        crown_can_fund,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        min_swap_rao=min_swap_rao,
+        max_swap_rao=max_swap_rao,
+        collaterals=collaterals,
+    )
+    return executable_check, can_fund
+
+
 def replay_crown_time_window(
     store: ValidatorStateStore,
     event_watcher: ContractEventWatcher,
@@ -555,8 +589,7 @@ def replay_crown_time_window(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
-    def executable_check(rate: float) -> bool:
-        return is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals)
 
     crown_blocks: Dict[str, float] = {}
     cap_weighted_blocks: Dict[str, float] = {}
@@ -574,19 +607,6 @@ def replay_crown_time_window(
         return merged
 
     bounds_set = min_swap_rao > 0 or max_swap_rao > 0
-
-    def can_fund(hotkey: str, rate: float) -> bool:
-        # Boundary-squat per-block gate: a miner whose own rate forces a TAO
-        # leg larger than their collateral_at_block earns no crown for that
-        # block. Cascades to the next-best rate via crown_holders_at_instant.
-        # Fail open when collateral is *unknown* (no event ever recorded):
-        # absent != zero. The contract auto-deactivates anyone below
-        # min_collateral, so an active miner always holds enough; treating a
-        # missing baseline as 0 would silently drop them from crown.
-        if hotkey not in collaterals:
-            return True
-        min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
-        return min_leg == 0 or collaterals[hotkey] >= min_leg
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
@@ -706,20 +726,12 @@ def snapshot_current_crown_holders(
         if pinned_rates:
             rates = {**rates, **pinned_rates}
 
-        def executable_check(rate: float, from_chain=from_chain, to_chain=to_chain) -> bool:
-            return is_executable_rate(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
-
-        def can_fund(
-            hotkey: str, rate: float, from_chain=from_chain, to_chain=to_chain, collaterals=collaterals
-        ) -> bool:
-            # Mirror the scoring path's boundary-squat gate so the live table
-            # never credits a holder whose collateral can't fund their own
-            # smallest legal leg, which the ledger drops. Fail open on unknown
-            # collateral (absent != zero) to match the scoring path exactly.
-            if hotkey not in collaterals:
-                return True
-            min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_amount, max_swap_amount)
-            return min_leg == 0 or collaterals[hotkey] >= min_leg
+        # Same predicates the scoring replay uses, so the live table never
+        # credits a holder the ledger drops. Built per direction so each
+        # closure captures the right chain pair.
+        executable_check, can_fund = make_crown_predicates(
+            from_chain, to_chain, min_swap_amount, max_swap_amount, collaterals
+        )
 
         holders = crown_holders_at_instant(
             rates,
