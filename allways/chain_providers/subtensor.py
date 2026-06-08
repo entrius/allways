@@ -20,6 +20,9 @@ class SubtensorProvider(ChainProvider):
     clear error if they attempt to send.
     """
 
+    # RPCs run on the shared substrate websocket — callers serialise via axon_lock.
+    uses_substrate = True
+
     # Balances pallet index and transfer call indices on Subtensor
     _BALANCES_PALLET = 5
     _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive', 7: 'transfer_all'}
