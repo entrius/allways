@@ -137,10 +137,6 @@ DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
 RESERVATION_TTL_BLOCKS = 50  # ~10 min
 
-# Blocks past a retained send-cache entry's last-known timeout_block before the
-# miner may discard it. An unmarked entry is kept to block a duplicate dest send
-# if a transiently-invisible swap reappears; once we're this far past its
-# deadline the swap provably can't still be active (sized above MAX_EXTENSION_
-# BLOCKS so a fully-extended swap is never discarded early), so retaining it
-# only leaks. ~300 blocks ≈ 1h at 12s/block.
+# Blocks past a retained send-cache entry's last-known timeout_block before the miner discards it. Above
+# MAX_EXTENSION_BLOCKS so a still-active (even fully-extended) swap is never dropped early. ~300 blocks ≈ 1h.
 SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
