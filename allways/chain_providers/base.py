@@ -31,6 +31,11 @@ class ChainProvider(ABC):
     3. Add {ENV_PREFIX}_* vars to .env
     """
 
+    # True if this provider's RPCs hit the shared substrate websocket, so
+    # callers must serialise them under axon_lock. HTTP-backed providers leave
+    # this False and stay lock-free.
+    uses_substrate: bool = False
+
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
 

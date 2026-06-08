@@ -889,6 +889,71 @@ class TestReserveExecutabilityGate:
         validator.axon_contract_client.vote_reserve.assert_not_called()
 
 
+class TestSourceBalanceLock:
+    """The source-balance check must serialise on axon_lock for a substrate
+    source (TAO) but stay lock-free for an HTTP source (BTC) — otherwise the
+    TAO get_balance races the lock-protected readers and trips the substrate
+    `cannot call recv while another thread is already running recv` error."""
+
+    def test_provider_uses_substrate_flags(self):
+        """TAO provider hits the shared websocket; BTC is HTTP and lock-free."""
+        from allways.chain_providers.base import ChainProvider
+        from allways.chain_providers.bitcoin import BitcoinProvider
+        from allways.chain_providers.subtensor import SubtensorProvider
+
+        assert ChainProvider.uses_substrate is False
+        assert SubtensorProvider.uses_substrate is True
+        assert BitcoinProvider.uses_substrate is False
+
+    def test_tao_source_balance_check_holds_axon_lock(self):
+        """A TAO-sourced reserve must acquire axon_lock around get_balance."""
+        validator = make_reserve_validator()
+        lock = validator.axon_lock
+
+        tao = MagicMock()
+        tao.uses_substrate = True
+        tao.verify_from_proof.return_value = True
+        # Record whether the lock is held at the moment get_balance runs.
+        held = {}
+
+        def _get_balance(_addr):
+            held['locked'] = not lock.acquire(blocking=False)
+            if not held['locked']:
+                lock.release()
+            return 10**18
+
+        tao.get_balance.side_effect = _get_balance
+        validator.axon_chain_providers = {'tao': tao, 'btc': MagicMock()}
+
+        commitment = make_commitment(from_chain='tao', to_chain='btc')
+        synapse = make_reserve_synapse(from_chain='tao', to_chain='btc', from_address='5user')
+        run_reserve_handler(validator, synapse, commitment=commitment)
+
+        assert held.get('locked') is True
+
+    def test_btc_source_balance_check_is_lock_free(self):
+        """A BTC-sourced reserve must NOT hold axon_lock during get_balance, so
+        a slow Esplora call can't stall the lock-protected forward loop."""
+        validator = make_reserve_validator()
+        lock = validator.axon_lock
+
+        btc = validator.axon_chain_providers['btc']
+        btc.uses_substrate = False
+        held = {}
+
+        def _get_balance(_addr):
+            held['locked'] = not lock.acquire(blocking=False)
+            if not held['locked']:
+                lock.release()
+            return 10**18
+
+        btc.get_balance.side_effect = _get_balance
+
+        run_reserve_handler(validator, make_reserve_synapse())
+
+        assert held.get('locked') is False
+
+
 class TestMinerActivateExecutability:
     def _activate_synapse(
         self, hotkey: str = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'

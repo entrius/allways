@@ -325,9 +325,14 @@ async def handle_swap_reserve(
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse
 
-        # Source-chain RPC — separate connection from substrate, so it doesn't
-        # need axon_lock and shouldn't block the substrate websocket.
-        balance = provider.get_balance(synapse.from_address)
+        # A TAO source reads balance over the shared substrate websocket, so it
+        # must serialise under axon_lock; a BTC source is HTTP and stays lock-free
+        # to avoid stalling the forward loop behind a slow Esplora call.
+        if provider.uses_substrate:
+            with validator.axon_lock:
+                balance = provider.get_balance(synapse.from_address)
+        else:
+            balance = provider.get_balance(synapse.from_address)
         if balance < synapse.from_amount:
             reject_synapse(synapse, 'Insufficient source balance', ctx)
             return synapse
