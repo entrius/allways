@@ -33,7 +33,6 @@ dependencies = [
     "rich",
     "embit",
     "base58",
-    "bech32",
     "pycryptodome",
     "numpy",
     "psycopg[binary]==3.3.4",
