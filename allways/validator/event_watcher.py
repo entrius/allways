@@ -874,11 +874,9 @@ class ContractEventWatcher:
                 f'{block_num} — no pin written, will fall back'
             )
             return
-        # Backfill only — the synchronous pin from handle_swap_reserve is the rate
-        # the user's quote was validated against; this re-read can see a different
-        # tick if the miner moved. Key on reserved_until so a stale pin from a
-        # prior reservation is still overwritten. (Single-validator scope + the
-        # multi-validator/contract-v2 fix: see PR #451.)
+        # Backfill only: keep handle_swap_reserve's synchronous pin (the rate the
+        # quote was validated against), but key on reserved_until so a stale pin
+        # from a prior reservation is still overwritten. See PR #451.
         existing = self.state_store.get_reservation_pin(miner)
         if existing is None or existing.reserved_until != reserved_until:
             self.state_store.upsert_reservation_pin(
