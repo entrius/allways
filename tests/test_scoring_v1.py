@@ -785,6 +785,52 @@ class TestSnapshotCurrentCrownHolders:
         v.state_store.close()
 
 
+class TestLedgerSnapshotAgreement:
+    """The #450 invariant end-to-end: the live snapshot and the scoring ledger
+    must resolve the crown to the same holder when fed identical state. Guards
+    against a future one-sided edit even if it bypassed make_crown_predicates."""
+
+    def test_squat_dropped_by_both_paths(self, tmp_path: Path):
+        # Squatter posts the best rate but can't fund the leg it forces; the
+        # funded runner-up is the only eligible holder. Both the per-forward
+        # snapshot and the windowed replay must agree on hk_funded and exclude
+        # hk_squat — the executability/funding gate applied identically.
+        v = make_validator(
+            tmp_path,
+            ['hk_squat', 'hk_funded'],
+            block=1100,
+            min_swap_amount=100_000_000,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_squat': 150_000_000, 'hk_funded': 500_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for hk, rate in (('hk_squat', 50000.0), ('hk_funded', 326.0)):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', rate, 0),
+            )
+        conn.commit()
+
+        snapshot_holders = [row[2] for row in snapshot_current_crown_holders(v)[('btc', 'tao')]]
+        ledger = replay_crown_time_window(
+            store=v.state_store,
+            event_watcher=v.event_watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_squat', 'hk_funded'},
+            min_swap_rao=100_000_000,
+            max_swap_rao=500_000_000,
+        )
+
+        assert snapshot_holders == ['hk_funded']
+        assert set(ledger) == {'hk_funded'}  # squatter credited zero blocks
+        # The whole point: live view and rewarded ledger name the same holder.
+        assert snapshot_holders == list(ledger.keys())
+        v.state_store.close()
+
+
 class TestPinnedRateDuringReservation:
     """Crown calculation must use the pinned rate during the reserved-not-busy
     window, not the live rate. Closes the bump-after-pin loophole."""
