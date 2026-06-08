@@ -466,6 +466,47 @@ class TestReservationPin:
         assert pin.reserve_block == 898
         w.state_store.close()
 
+    def test_stale_prior_reservation_pin_is_backfilled(self, tmp_path: Path):
+        """A pin left over from a PRIOR reservation (different reserved_until,
+        e.g. one abandoned without a swap and not yet purged) must not be
+        inherited by the current reservation. The guard keys on reserved_until,
+        so a MinerReserved for a new reservation backfills over the stale pin —
+        otherwise a failed synchronous write or a fresh-DB replay would settle
+        the new swap against the old reservation's rate and addresses."""
+        from allways.validator.state_store import ReservationPin
+
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        # Stale pin from a prior, abandoned reservation (reserved_until=1000).
+        w.state_store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='hk_a',
+                reserve_block=898,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='370',
+                counter_rate_str='0.0029',
+                miner_from_address='bc1-OLD',
+                miner_to_address='5old',
+                reserved_until=1000,
+            )
+        )
+        # A new reservation (reserved_until=1200) with no synchronous pin —
+        # the inclusion-block read is the only source, so it must write through.
+        fresh = make_pinned_commitment(rate_str='345', from_address='bc1-NEW', to_address='5new')
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=fresh,
+        ):
+            w.apply_event(1100, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1200})
+
+        pin = w.state_store.get_reservation_pin('hk_a')
+        assert pin.reserved_until == 1200  # current reservation, not the stale one
+        assert pin.rate_str == '345'  # backfilled — stale 370 overwritten
+        assert pin.reserve_block == 1100
+        assert pin.miner_from_address == 'bc1-NEW'
+        assert pin.miner_to_address == '5new'
+        w.state_store.close()
+
     def test_commitment_read_raising_writes_no_pin(self, tmp_path: Path):
         """A transient RPC error or a pruned block must not write a pin and
         must not let the exception escape apply_event."""

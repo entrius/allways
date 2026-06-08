@@ -898,7 +898,16 @@ class ContractEventWatcher:
         # rate. That requires the reserve hash + Reservation struct to carry the
         # rate, i.e. a smart-contract iteration. Until v2 lands, back off to the
         # synchronous pin here.
-        if self.state_store.get_reservation_pin(miner) is None:
+        # Preserve only the synchronous pin for THIS reservation. ``reserved_until``
+        # is distinct per reservation, so an existing pin whose TTL differs belongs
+        # to a PRIOR reservation (e.g. one abandoned without a swap and not yet
+        # swept by ``purge_expired_reservation_pins``) and must still be
+        # overwritten — backfill, don't inherit it. Without this check a failed
+        # synchronous write, or an event replay on a fresh DB that sees an
+        # abandoned ``MinerReserved`` before this one, would settle the swap
+        # against the stale reservation's rate AND addresses.
+        existing = self.state_store.get_reservation_pin(miner)
+        if existing is None or existing.reserved_until != reserved_until:
             self.state_store.upsert_reservation_pin(
                 ReservationPin(
                     miner_hotkey=miner,
