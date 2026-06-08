@@ -588,6 +588,7 @@ def make_reserve_validator(
     validator.bounds_cache.min_collateral.return_value = 0
     validator.bounds_cache.min_swap_amount.return_value = 0
     validator.bounds_cache.max_swap_amount.return_value = 0
+    validator.bounds_cache.halted.return_value = False
     validator.wallet = MagicMock()
     return validator
 
@@ -994,3 +995,22 @@ class TestMinerActivateExecutability:
         assert mock_read.call_args.kwargs['min_swap_rao'] == 500_000_000
         assert mock_read.call_args.kwargs['max_swap_rao'] == 5_000_000_000
         validator.axon_contract_client.vote_activate.assert_not_called()
+
+
+class TestHaltFastReject:
+    """A halted system rejects reservations without submitting any extrinsic."""
+
+    def test_halted_rejects_without_voting(self):
+        validator = make_reserve_validator()
+        validator.bounds_cache.halted.return_value = True
+        result = run_reserve_handler(validator, make_reserve_synapse())
+        assert result.accepted is False
+        assert 'halt' in (result.rejection_reason or '').lower()
+        validator.axon_contract_client.vote_reserve.assert_not_called()
+
+    def test_halted_short_circuits_before_substrate_work(self):
+        validator = make_reserve_validator()
+        validator.bounds_cache.halted.return_value = True
+        with patch('allways.validator.axon_handlers.read_miner_commitment') as read_cmt:
+            asyncio.run(handle_swap_reserve(validator, make_reserve_synapse()))
+        read_cmt.assert_not_called()

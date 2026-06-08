@@ -304,6 +304,13 @@ async def handle_swap_reserve(
     )
 
     try:
+        # Halt blocks reservations contract-side; fast-reject here so a halt
+        # can't flood doomed vote_reserve extrinsics that starve confirm/timeout
+        # votes. halted() fails open, so an RPC blip falls through to the contract.
+        if validator.bounds_cache.halted():
+            reject_synapse(synapse, 'System is halted — reservations paused', ctx)
+            return synapse
+
         # Cheap, local checks BEFORE axon_lock — invalid signatures, missing fields,
         # and bad direction are rejected without serializing on the substrate websocket.
         if not synapse.from_address or not synapse.from_address_proof:
