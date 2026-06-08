@@ -136,3 +136,7 @@ DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
 DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
 RESERVATION_TTL_BLOCKS = 50  # ~10 min
+
+# Blocks past a retained send-cache entry's last-known timeout_block before the miner discards it. Above
+# MAX_EXTENSION_BLOCKS so a still-active (even fully-extended) swap is never dropped early. ~300 blocks ≈ 1h.
+SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS

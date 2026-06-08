@@ -29,3 +29,8 @@ tmp/
 data/
 
 CLAUDE.md
+
+# Local tooling / scratch
+.mcp.json
+*.md
+.vouch/

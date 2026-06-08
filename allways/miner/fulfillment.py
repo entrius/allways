@@ -9,7 +9,7 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.classes import Swap
-from allways.constants import MINER_TIMEOUT_CUSHION_BLOCKS
+from allways.constants import MINER_TIMEOUT_CUSHION_BLOCKS, SENT_CACHE_DISCARD_MARGIN_BLOCKS
 from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
 from allways.utils.logging import log_on_change
 from allways.utils.rate import expected_swap_amounts
@@ -23,11 +23,16 @@ class SentSwap:
     True after the contract accepts ``mark_fulfilled``. A retry after crash
     finds this record, skips re-sending (prevents double-sends), and only
     re-calls mark_fulfilled if it didn't already succeed.
+
+    ``timeout_block`` is the swap's last-known (possibly extended) deadline,
+    snapshotted so ``cleanup_stale_sends`` can bound how long an unmarked entry
+    is retained. 0 means unknown (legacy cache entry) — never deadline-discarded.
     """
 
     to_tx_hash: str
     to_tx_block: int
     marked_fulfilled: bool
+    timeout_block: int = 0
 
 
 class SwapFulfiller:
@@ -62,6 +67,7 @@ class SwapFulfiller:
         self.sent: Dict[int, SentSwap] = {}
         self.mark_fulfilled_attempts: Dict[int, int] = {}
         self.cushion_warned: Set[int] = set()
+        self.unmarked_stale_warned: Set[int] = set()
         self.sent_cache_path = sent_cache_path
         self.load_sent_cache()
 
@@ -76,6 +82,7 @@ class SwapFulfiller:
                     to_tx_hash=entry[0],
                     to_tx_block=entry[1],
                     marked_fulfilled=bool(entry[2]),
+                    timeout_block=entry[3] if len(entry) > 3 else 0,
                 )
             if self.sent:
                 bt.logging.info(f'Restored {len(self.sent)} cached send(s) from disk')
@@ -88,7 +95,10 @@ class SwapFulfiller:
             return
         try:
             self.sent_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {str(swap_id): [s.to_tx_hash, s.to_tx_block, s.marked_fulfilled] for swap_id, s in self.sent.items()}
+            data = {
+                str(swap_id): [s.to_tx_hash, s.to_tx_block, s.marked_fulfilled, s.timeout_block]
+                for swap_id, s in self.sent.items()
+            }
             tmp = self.sent_cache_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data))
             tmp.rename(self.sent_cache_path)
@@ -96,21 +106,63 @@ class SwapFulfiller:
             bt.logging.error(f'CRITICAL: Failed to persist sent cache: {e}')
 
     def cleanup_stale_sends(self, active_swap_ids: Set[int]):
-        """Remove cached send results for swaps no longer active."""
+        """Drop cached send results that are safe to forget.
+
+        A transient ``get_swap`` gap can make the poller drop a still-active
+        swap, so an unmarked send (dest funds out, ``mark_fulfilled`` not yet
+        landed) must be retained: dropping it would let a rediscovered swap send
+        funds a second time. We keep unmarked entries until either they're
+        marked fulfilled, or the chain is provably past their last-known
+        deadline (``SENT_CACHE_DISCARD_MARGIN_BLOCKS`` beyond ``timeout_block``),
+        at which point the swap can't still be active and retention only leaks.
+        """
         stale = [sid for sid in self.sent if sid not in active_swap_ids]
-        unmarked = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
-        for sid in stale:
+        removable = [sid for sid in stale if self.sent[sid].marked_fulfilled]
+        unmarked_stale = [sid for sid in stale if not self.sent[sid].marked_fulfilled]
+
+        current_block = None
+        if unmarked_stale:
+            try:
+                current_block = self.subtensor.get_current_block()
+            except Exception as e:
+                # Without a block height we can't prove a deadline has passed —
+                # retain everything rather than risk discarding a live entry.
+                bt.logging.debug(f'cleanup_stale_sends: get_current_block failed, retaining unmarked sends: {e}')
+
+        expired = []
+        if current_block is not None:
+            expired = [
+                sid
+                for sid in unmarked_stale
+                if self.sent[sid].timeout_block > 0
+                and current_block > self.sent[sid].timeout_block + SENT_CACHE_DISCARD_MARGIN_BLOCKS
+            ]
+
+        for sid in removable + expired:
             self.sent.pop(sid)
             self.mark_fulfilled_attempts.pop(sid, None)
+            self.unmarked_stale_warned.discard(sid)
         self.cushion_warned -= self.cushion_warned - active_swap_ids
-        if stale:
-            bt.logging.info(f'Cleaned up stale send cache for {len(stale)} swap(s): {stale}')
-            if unmarked:
-                bt.logging.warning(
-                    f'Stale send(s) without confirmed mark_fulfilled — funds may have been sent without '
-                    f'on-chain credit: {unmarked}'
-                )
+        self.unmarked_stale_warned -= active_swap_ids
+
+        if removable or expired:
             self.save_sent_cache()
+        if removable:
+            bt.logging.info(f'Cleaned up stale send cache for {len(removable)} marked swap(s): {removable}')
+        if expired:
+            bt.logging.warning(
+                f'Discarded stale send(s) past deadline without confirmed mark_fulfilled — funds may have '
+                f'been sent without on-chain credit: {expired}'
+            )
+
+        retained = [sid for sid in unmarked_stale if sid not in expired]
+        newly_retained = [sid for sid in retained if sid not in self.unmarked_stale_warned]
+        if newly_retained:
+            bt.logging.warning(
+                f'Retaining unmarked send(s) to avoid duplicate destination sends if the swap reappears: '
+                f'{newly_retained}'
+            )
+            self.unmarked_stale_warned.update(newly_retained)
 
     def verify_swap_safety(self, swap: Swap) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill.
@@ -226,9 +278,10 @@ class SwapFulfiller:
 
         Idempotent across forward steps — the ``sent`` cache tracks both the
         dest-tx outcome and whether ``mark_fulfilled`` has landed, so retry
-        polls never double-send and never double-call the contract. Cache
+        polls never double-send and never double-call the contract. Marked
         entries live until ``cleanup_stale_sends`` drops them once the swap
-        leaves the active set.
+        leaves the active set; unmarked entries are retained (up to a deadline
+        margin) to keep a rediscovered swap from sending destination funds again.
 
         Three possible starting states when this runs:
           - no prior record → send dest funds, then mark fulfilled
@@ -264,10 +317,20 @@ class SwapFulfiller:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
                 return False
             to_tx_hash, to_tx_block = send_result
-            sent = SentSwap(to_tx_hash=to_tx_hash, to_tx_block=to_tx_block, marked_fulfilled=False)
+            sent = SentSwap(
+                to_tx_hash=to_tx_hash,
+                to_tx_block=to_tx_block,
+                marked_fulfilled=False,
+                timeout_block=swap.timeout_block,
+            )
             self.sent[swap.id] = sent
             self.save_sent_cache()
         else:
+            # Keep the retained deadline current with any extension seen while
+            # active, so cleanup never discards a still-extendable swap early.
+            if swap.timeout_block > sent.timeout_block:
+                sent.timeout_block = swap.timeout_block
+                self.save_sent_cache()
             bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {sent.to_tx_hash[:16]}...')
 
         # Step 4: Mark fulfilled on contract. We pass ``user_receives_amount``
