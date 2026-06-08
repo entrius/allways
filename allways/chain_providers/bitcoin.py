@@ -7,6 +7,8 @@ import base58
 import bittensor as bt
 import requests
 from bitcoin_message_tool.bmt import sign_message, verify_message
+from embit.networks import NETWORKS
+from embit.script import address_to_scriptpubkey
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_BTC, ChainDefinition
@@ -58,9 +60,6 @@ def to_mainnet_address(address: str) -> str:
     v0, and Taproot); returns the address unchanged if it can't be parsed.
     """
     try:
-        from embit.networks import NETWORKS
-        from embit.script import address_to_scriptpubkey
-
         return address_to_scriptpubkey(address).address(NETWORKS['main'])
     except Exception:
         return address
@@ -531,8 +530,6 @@ class BitcoinProvider(ChainProvider):
         if not address or not isinstance(address, str):
             return False
         try:
-            from embit.script import address_to_scriptpubkey
-
             return address_to_scriptpubkey(address) is not None
         except Exception:
             return False
