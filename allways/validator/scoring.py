@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+from functools import partial
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
@@ -512,22 +513,36 @@ def merge_replay_events(
     return events
 
 
+def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
+    """Boundary-squat gate: a miner whose own rate forces a TAO leg larger than
+    their collateral earns no crown. Fail open on unknown collateral (absent !=
+    zero) so a missing baseline doesn't silently drop them."""
+    if hotkey not in collaterals:
+        return True
+    min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    return min_leg == 0 or collaterals[hotkey] >= min_leg
+
+
 def make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
-    """Eligibility predicates shared by the scoring replay and the live snapshot,
-    so the live crown view can never diverge from the rewarded ledger."""
-
-    def executable_check(rate: float) -> bool:
-        return is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
-
-    def can_fund(hotkey: str, rate: float) -> bool:
-        # Boundary-squat gate: a miner whose own rate forces a TAO leg larger
-        # than their collateral earns no crown. Fail open on unknown collateral
-        # (absent != zero) so a missing baseline doesn't silently drop them.
-        if hotkey not in collaterals:
-            return True
-        min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
-        return min_leg == 0 or collaterals[hotkey] >= min_leg
-
+    """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
+    scoring replay and the live snapshot, so the live crown view can never diverge
+    from the rewarded ledger. Both are the shared rate utils with this direction's
+    bounds/collateral bound in."""
+    executable_check = partial(
+        is_executable_rate,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        min_swap_rao=min_swap_rao,
+        max_swap_rao=max_swap_rao,
+    )
+    can_fund = partial(
+        crown_can_fund,
+        from_chain=from_chain,
+        to_chain=to_chain,
+        min_swap_rao=min_swap_rao,
+        max_swap_rao=max_swap_rao,
+        collaterals=collaterals,
+    )
     return executable_check, can_fund
 
 
