@@ -57,10 +57,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
     ('tao', 'btc'): 0.5,
     ('btc', 'tao'): 0.5,
 }
-# 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
-SUCCESS_EXPONENT: int = 3
-# Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
-VOLUME_WEIGHT_ALPHA: float = 0.5
+# λ in reward = credibility · (λ·qvol_share + (1−λ)·crown_term). Crown-DOMINANT
+# on purpose: realized volume is sybil/wash-inflatable until swap counterparties
+# are verifiable, so the volume share is kept small. Raising λ toward volume is
+# gated on wash filtering — do not crank this without it.
+QVOL_REWARD_WEIGHT: float = 0.3
 # Closed swaps required for full credibility (0 → 100% linear ramp).
 CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 # More than this many timed-out swaps within CREDIBILITY_WINDOW_BLOCKS hard-zeros
@@ -69,10 +70,11 @@ CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 CREDIBILITY_MAX_TIMEOUTS: int = 2
 
 # ─── Depth / Quality ─────────────────────────────────────
-# Scale a crown holder's reward by how far their rate beats the per-direction
-# "market" reference (a trimmed, volume-weighted, recency-decayed average of the
-# subnet's own completed-swap clearing rates). Floored like VOLUME_WEIGHT_ALPHA
-# so it's forgiving. Reference and factor are scoring-side only — no contract change.
+# Weight reward by how far a rate beats the per-direction "market" reference (a
+# trimmed, volume-weighted, recency-decayed average of the subnet's own
+# completed-swap clearing rates) — applied to both crown availability and the
+# quality-weighted-volume term. Floored at QUALITY_FLOOR so it's forgiving.
+# Reference and factor are scoring-side only — no contract change.
 QUALITY_EMA_HALF_LIFE_BLOCKS: int = 7_200  # ~1 day — clearing-rate weight halves each
 QUALITY_TRIM_PCT: float = 0.10  # Drop top/bottom 10% by rate before averaging (kills wash/outlier extremes)
 QUALITY_PER_MINER_CAP: float = 0.30  # No single hotkey contributes >30% of the reference weight

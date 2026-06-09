@@ -39,11 +39,9 @@ class WeightingTrace:
     capacity_factor: float = 1.0
     volume_rao: int = 0
     crown_share: float = 0.0
-    volume_share: float = 0.0
-    participation: float = 1.0
-    volume_factor: float = 1.0
+    qvol_share: float = 0.0
     closed_swaps: int = 0
-    credibility_ramp: float = 0.0
+    credibility: float = 0.0
     quality_factor: float = 1.0
 
     def record_capacity(self, factor: float) -> None:
@@ -52,19 +50,17 @@ class WeightingTrace:
     def record_quality(self, factor: float) -> None:
         self.quality_factor = factor
 
-    def record_volume(self, vol_rao: int, total_volume_rao: int, crown_share: float, factor: float) -> None:
-        self.volume_rao = vol_rao
+    def record_shares(self, volume_rao: int, crown_share: float, qvol_share: float) -> None:
+        self.volume_rao = volume_rao
         self.crown_share = crown_share
-        self.volume_share = (vol_rao / total_volume_rao) if total_volume_rao > 0 else 0.0
-        self.participation = min(1.0, self.volume_share / crown_share) if crown_share > 0 else 1.0
-        self.volume_factor = factor
+        self.qvol_share = qvol_share
 
     def record_credibility(self, closed_swaps: int, ramp_target: int, timed_out: int = 0) -> None:
         self.closed_swaps = closed_swaps
         if timed_out > CREDIBILITY_MAX_TIMEOUTS:
-            self.credibility_ramp = 0.0
+            self.credibility = 0.0
         else:
-            self.credibility_ramp = min(1.0, closed_swaps / ramp_target) if ramp_target > 0 else 1.0
+            self.credibility = min(1.0, closed_swaps / ramp_target) if ramp_target > 0 else 1.0
 
 
 def log_scoring_trace(
@@ -74,7 +70,7 @@ def log_scoring_trace(
     window_end: int,
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     rewards: np.ndarray,
-    success_rates: Dict[str, float],
+    credibilities: Dict[str, float],
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
@@ -106,19 +102,19 @@ def log_scoring_trace(
         if uid == recycle_uid and crown_blk == 0:
             continue
         crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
-        sr = success_rates.get(hk, 0.0)
+        cred = credibilities.get(hk, 0.0)
         wt = weighting_traces.get(hk)
         extras = ''
         if wt is not None:
             extras = (
-                f' ({wt.closed_swaps}/{CREDIBILITY_RAMP_OBSERVATIONS} closed, ramp={wt.credibility_ramp:.2f})'
+                f' ({wt.closed_swaps}/{CREDIBILITY_RAMP_OBSERVATIONS} closed)'
                 f' cap={wt.capacity_factor:.2f}'
-                f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
-                f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
+                f' vol={wt.volume_rao / TAO_TO_RAO:g}t'
+                f' crown_share={wt.crown_share:.2f} qvol_share={wt.qvol_share:.2f}'
                 f' quality_f={wt.quality_factor:.2f}'
             )
         lines.append(
-            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'
+            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} cred={cred:.3f}{extras} reward={crown_reward:.3f}'
         )
 
     # Collateral as-of window_start mirrors the scoring replay's starting
@@ -132,7 +128,7 @@ def log_scoring_trace(
             window_start,
             window_end,
             rewards,
-            success_rates,
+            credibilities,
             direction_traces,
             recycle_uid,
             collaterals,
@@ -158,7 +154,7 @@ def non_earner_lines(
     window_start: int,
     window_end: int,
     rewards: np.ndarray,
-    success_rates: Dict[str, float],
+    credibilities: Dict[str, float],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
@@ -183,11 +179,11 @@ def non_earner_lines(
         latest_rates = rates_by_hotkey.get(hk, {})
         if not latest_rates and hk not in ever_active:
             continue
-        sr = success_rates.get(hk, 1.0)
+        cred = credibilities.get(hk, 1.0)
         reason = diagnose_non_earner(
-            hk, latest_rates, sr, ever_active, direction_traces, collaterals, min_swap_rao, max_swap_rao
+            hk, latest_rates, cred, ever_active, direction_traces, collaterals, min_swap_rao, max_swap_rao
         )
-        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
+        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" cred={cred:.3f}')
         if len(out) >= NON_EARNER_LINE_CAP:
             break
     return out
@@ -196,7 +192,7 @@ def non_earner_lines(
 def diagnose_non_earner(
     hotkey: str,
     latest_rates: Dict[Tuple[str, str], float],
-    sr: float,
+    cred: float,
     ever_active: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     collaterals: Optional[Dict[str, int]] = None,
@@ -213,8 +209,8 @@ def diagnose_non_earner(
         return 'no_rate_posted'
     if hotkey not in ever_active:
         return 'not_active_during_window'
-    if sr <= 0:
-        return 'credibility_zero'  # zero observations OR all-timeout history
+    if cred <= 0:
+        return 'credibility_zero'  # zero observations OR timeout cliff tripped
 
     outbid_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():

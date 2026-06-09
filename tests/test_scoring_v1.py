@@ -8,23 +8,23 @@ import numpy as np
 
 from allways.constants import (
     MAX_SCORING_BACKFILL_BLOCKS,
+    QVOL_REWARD_WEIGHT,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
-    SUCCESS_EXPONENT,
 )
 from allways.utils.rate import is_executable_rate, min_executable_tao_leg
 from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
-    credibility_ramp,
+    credibility,
     crown_holders_at_instant,
     due_for_scoring,
     make_crown_predicates,
+    quality_weighted_volume,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
     snapshot_current_crown_holders,
-    success_rate,
 )
 from allways.validator.state_store import ReservationPin, ValidatorStateStore
 
@@ -155,46 +155,29 @@ def pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
     return hotkeys
 
 
-class TestSuccessRateHelper:
-    def test_none_is_pessimistic(self):
-        """Zero observations earns no trust — the credibility hole closed."""
-        assert success_rate(None) == 0.0
+class TestCredibilityHelper:
+    """The single reliability term: a volume ramp gated by the timeout cliff
+    (replaces the old success_rate³ × credibility_ramp pair)."""
 
-    def test_zero_total_is_pessimistic(self):
-        assert success_rate((0, 0)) == 0.0
-
-    def test_raw_ratio_ignores_ramp(self):
-        """success_rate is the raw completed/closed ratio — no ramp folded in."""
-        assert success_rate((1, 0)) == 1.0
-        assert success_rate((5, 0)) == 1.0
-        assert success_rate((8, 2)) == 0.8
-        assert success_rate((90, 10)) == 0.9
-
-    def test_timed_out_swaps_drop_raw_rate(self):
-        # 5 completed + 5 timed_out → raw = 0.5
-        assert success_rate((5, 5)) == 0.5
-
-
-class TestCredibilityRampHelper:
     def test_none_is_zero(self):
-        assert credibility_ramp(None) == 0.0
-        assert credibility_ramp((0, 0)) == 0.0
+        assert credibility(None) == 0.0
+        assert credibility((0, 0)) == 0.0
 
     def test_scales_linearly_below_threshold(self):
-        """1 closed swap → ramp 0.1; 5 closed → 0.5. Counts tolerated timeouts too."""
-        assert credibility_ramp((1, 0)) == 0.1
-        assert credibility_ramp((5, 0)) == 0.5
-        assert credibility_ramp((3, 2)) == 0.5  # 2 timeouts tolerated
+        """1 closed swap → 0.1; 5 closed → 0.5. Counts tolerated timeouts too."""
+        assert credibility((1, 0)) == 0.1
+        assert credibility((5, 0)) == 0.5
+        assert credibility((3, 2)) == 0.5  # 2 timeouts tolerated
 
     def test_caps_at_full_ramp(self):
-        assert credibility_ramp((10, 0)) == 1.0
+        assert credibility((10, 0)) == 1.0
 
     def test_excess_timeouts_hard_zero(self):
         """More than CREDIBILITY_MAX_TIMEOUTS (2) timeouts → 0, regardless of volume."""
-        assert credibility_ramp((8, 2)) == 1.0  # 2 tolerated, fully ramped
-        assert credibility_ramp((8, 3)) == 0.0  # 3rd timeout zeros it
-        assert credibility_ramp((90, 10)) == 0.0  # high volume can't rescue it
-        assert credibility_ramp((0, 3)) == 0.0
+        assert credibility((8, 2)) == 1.0  # 2 tolerated, fully ramped
+        assert credibility((8, 3)) == 0.0  # 3rd timeout zeros it
+        assert credibility((90, 10)) == 0.0  # high volume can't rescue it
+        assert credibility((0, 3)) == 0.0
 
 
 class TestCrownHoldersHelper:
@@ -1168,9 +1151,10 @@ class TestCalculateMinerRewards:
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
-    def test_partial_success_reduces_reward_by_cube(self, tmp_path: Path):
+    def test_partial_credibility_ramp_reduces_reward(self, tmp_path: Path):
         # Opt out of the fixture's baseline credibility seed so the test's
-        # explicit 8-completed-2-timed-out profile is the only credibility data.
+        # explicit 5-completed profile is the only credibility data: 5/10 closed
+        # → credibility 0.5, scaling the sole crown holder's pool by half.
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys, baseline_credibility=False)
         conn = v.state_store.require_connection()
@@ -1179,14 +1163,13 @@ class TestCalculateMinerRewards:
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        for i in range(8):
+        for i in range(5):
             v.state_store.insert_swap_outcome(i + 1, 'hk_a', True, 100 + i)
-        for i in range(2):
-            v.state_store.insert_swap_outcome(100 + i, 'hk_a', False, 200 + i)
 
         rewards, _ = calculate_miner_rewards(v)
 
-        expected = POOL_TAO_BTC * (0.8**SUCCESS_EXPONENT)
+        # No clearing-rate volume → λ=0 → reward = pool · credibility · crown_share.
+        expected = POOL_TAO_BTC * 0.5
         np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
@@ -1788,64 +1771,40 @@ class TestCapacityFactorHelper:
         assert capacity_factor(100_000_000, -1) == 1.0
 
 
-class TestVolumeFactorHelper:
-    """Direct unit tests for the volume_factor pure function.
+class TestQualityWeightedVolumeHelper:
+    """quality_weighted_volume: per-miner Σ tao_amount × quality_factor(rate).
 
-    Signature: volume_factor(vol_rao, total_volume_rao, crown_share, alpha).
+    Observations are (clearing_rate, tao_amount, resolved_block, miner_hotkey).
     """
 
-    def test_idle_crown_loses_alpha(self):
-        """vol=0 of total=1 → vol_share=0, participation=0 → factor = (1-α)."""
-        from allways.validator.scoring import volume_factor
+    def test_bootstrap_reference_none_is_raw_volume(self):
+        # reference None → quality 1.0 → qvol == raw volume.
+        obs = [(345.0, 100, 0, 'a'), (350.0, 50, 0, 'b'), (345.0, 25, 0, 'a')]
+        qvol = quality_weighted_volume(obs, None, lower_rate_wins=False)
+        assert qvol == {'a': 125.0, 'b': 50.0}
 
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.5) == 0.5
+    def test_at_market_floors_volume(self):
+        # rate == reference → quality = QUALITY_FLOOR (0.5) → half credit.
+        obs = [(100.0, 200, 0, 'a')]
+        qvol = quality_weighted_volume(obs, 100.0, lower_rate_wins=False)
+        np.testing.assert_allclose(qvol['a'], 100.0, atol=1e-6)
 
-    def test_matching_volume_keeps_full_reward(self):
-        from allways.validator.scoring import volume_factor
+    def test_deep_rate_full_credit(self):
+        # btc→tao: 5% above reference → quality 1.0 → full volume credit.
+        obs = [(105.0, 200, 0, 'a')]
+        qvol = quality_weighted_volume(obs, 100.0, lower_rate_wins=False)
+        np.testing.assert_allclose(qvol['a'], 200.0, atol=1e-6)
 
-        # 500/1000 = 0.5 vol_share, crown_share 0.5 → participation 1.0.
-        assert volume_factor(500, 1_000, crown_share=0.5, alpha=0.5) == 1.0
+    def test_below_market_floored_not_zero(self):
+        # Worse than market → still the floor, never below.
+        obs = [(80.0, 200, 0, 'a')]
+        qvol = quality_weighted_volume(obs, 100.0, lower_rate_wins=False)
+        np.testing.assert_allclose(qvol['a'], 100.0, atol=1e-6)
 
-    def test_over_serving_capped_at_one(self):
-        """Anti-wash-trade: high volume / low crown stays at 1.0."""
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(900, 1_000, crown_share=0.1, alpha=0.5) == 1.0
-
-    def test_partial_mismatch_interpolates(self):
-        """vol_share/crown_share = 0.5 → factor = 0.5 + 0.5*0.5 = 0.75."""
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(250, 1_000, crown_share=0.5, alpha=0.5) == 0.75
-
-    def test_zero_crown_share_is_moot(self):
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(500, 1_000, crown_share=0.0, alpha=0.5) == 1.0
-
-    def test_idle_network_short_circuits_to_one(self):
-        """total_volume == 0 → factor = 1.0 (no penalty for a quiet window)."""
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(0, 0, crown_share=1.0, alpha=0.5) == 1.0
-
-    def test_alpha_zero_disables_volume_weighting(self):
-        from allways.validator.scoring import volume_factor
-
-        for vol in (0, 250, 500, 750, 1_000):
-            assert volume_factor(vol, 1_000, crown_share=1.0, alpha=0.0) == 1.0
-
-    def test_alpha_one_is_pure_volume_share(self):
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=1.0) == 0.0
-        assert volume_factor(250, 1_000, crown_share=0.5, alpha=1.0) == 0.5
-
-    def test_alpha_03_softer_penalty(self):
-        from allways.validator.scoring import volume_factor
-
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.3) == 0.7
-        np.testing.assert_allclose(volume_factor(500, 1_000, crown_share=1.0, alpha=0.3), 0.85, atol=1e-6)
+    def test_skips_nonpositive_rows(self):
+        obs = [(0.0, 100, 0, 'a'), (345.0, 0, 0, 'b'), (345.0, 50, 0, 'c')]
+        qvol = quality_weighted_volume(obs, None, lower_rate_wins=False)
+        assert qvol == {'c': 50.0}
 
 
 class TestCapacityWeighting:
@@ -2018,36 +1977,21 @@ class TestWeightingTraceRecorders:
         wt.record_capacity(factor=0.5)
         assert wt.capacity_factor == 0.5
 
-    def test_record_volume_computes_share_and_participation(self):
+    def test_record_shares_stores_crown_and_qvol(self):
         from allways.validator.scoring_trace import WeightingTrace
 
         wt = WeightingTrace()
-        # vol 250 of total 1000 = 25% share; crown_share 50% → participation 50%.
-        wt.record_volume(vol_rao=250, total_volume_rao=1_000, crown_share=0.5, factor=0.75)
+        wt.record_shares(volume_rao=250, crown_share=0.5, qvol_share=0.4)
         assert wt.volume_rao == 250
-        assert wt.volume_share == 0.25
         assert wt.crown_share == 0.5
-        assert wt.participation == 0.5
-        assert wt.volume_factor == 0.75
+        assert wt.qvol_share == 0.4
 
-    def test_record_volume_idle_network_zeros_share(self):
-        """total_volume == 0 → volume_share = 0, participation defaults to 1.0
-        only when crown_share also 0; otherwise participation = 0."""
+    def test_record_shares_defaults_are_zero(self):
         from allways.validator.scoring_trace import WeightingTrace
 
         wt = WeightingTrace()
-        wt.record_volume(vol_rao=0, total_volume_rao=0, crown_share=1.0, factor=1.0)
-        assert wt.volume_share == 0.0
-        assert wt.participation == 0.0  # vol_share / crown_share = 0/1 = 0
-        assert wt.volume_factor == 1.0  # set by caller (idle-network short-circuit)
-
-    def test_record_volume_caps_participation_at_one(self):
-        """Over-serving: vol_share/crown_share > 1 → participation capped."""
-        from allways.validator.scoring_trace import WeightingTrace
-
-        wt = WeightingTrace()
-        wt.record_volume(vol_rao=900, total_volume_rao=1_000, crown_share=0.1, factor=1.0)
-        assert wt.participation == 1.0  # min(1.0, 0.9/0.1)
+        assert wt.crown_share == 0.0
+        assert wt.qvol_share == 0.0
 
     def test_record_credibility_computes_ramp(self):
         from allways.validator.scoring_trace import WeightingTrace
@@ -2055,14 +1999,14 @@ class TestWeightingTraceRecorders:
         wt = WeightingTrace()
         wt.record_credibility(closed_swaps=5, ramp_target=10)
         assert wt.closed_swaps == 5
-        assert wt.credibility_ramp == 0.5
+        assert wt.credibility == 0.5
 
     def test_record_credibility_caps_at_one(self):
         from allways.validator.scoring_trace import WeightingTrace
 
         wt = WeightingTrace()
         wt.record_credibility(closed_swaps=20, ramp_target=10)
-        assert wt.credibility_ramp == 1.0
+        assert wt.credibility == 1.0
 
     def test_record_credibility_zero_target_is_unity(self):
         """Defensive: ramp_target=0 → divide-by-zero guarded → 1.0."""
@@ -2070,16 +2014,16 @@ class TestWeightingTraceRecorders:
 
         wt = WeightingTrace()
         wt.record_credibility(closed_swaps=5, ramp_target=0)
-        assert wt.credibility_ramp == 1.0
+        assert wt.credibility == 1.0
 
     def test_record_credibility_excess_timeouts_zero(self):
-        """Trace mirrors the reward rule: >3 timeouts → ramp shown as 0."""
+        """Trace mirrors the reward rule: >2 timeouts → credibility shown as 0."""
         from allways.validator.scoring_trace import WeightingTrace
 
         wt = WeightingTrace()
         wt.record_credibility(closed_swaps=100, ramp_target=10, timed_out=4)
         assert wt.closed_swaps == 100
-        assert wt.credibility_ramp == 0.0
+        assert wt.credibility == 0.0
 
 
 class TestVolumeWeighting:
@@ -2105,6 +2049,7 @@ class TestVolumeWeighting:
         completed: bool = True,
         from_chain: str = 'tao',
         to_chain: str = 'btc',
+        clearing_rate: float = 0.0,
     ) -> None:
         v.state_store.insert_swap_outcome(
             swap_id=swap_id,
@@ -2114,6 +2059,7 @@ class TestVolumeWeighting:
             tao_amount=tao_amount,
             from_chain=from_chain,
             to_chain=to_chain,
+            clearing_rate=clearing_rate,
         )
 
     def test_idle_network_no_penalty(self, tmp_path: Path):
@@ -2126,24 +2072,23 @@ class TestVolumeWeighting:
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
-    def test_idle_crown_holder_loses_alpha(self, tmp_path: Path):
-        """A holds 100% crown, B serves 100% volume → A factor = (1 - α)."""
+    def test_idle_crown_holder_yields_volume_share(self, tmp_path: Path):
+        """A holds 100% crown but serves no volume; B serves all the (quality)
+        volume with no crown. The λ volume slice goes to B, the (1−λ) crown
+        slice to A — so A keeps (1−λ)·pool and B earns λ·pool."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_tao_btc_crown(v, 'hk_a')
-        # B doesn't post a rate → never holds crown.
-        self.insert_volume(v, 'hk_b', tao_amount=1_000_000_000, swap_id=1)
+        # B never posts a rate (no crown) but serves quality volume.
+        self.insert_volume(v, 'hk_b', tao_amount=1_000_000_000, swap_id=1, clearing_rate=300.0)
         rewards, _ = calculate_miner_rewards(v)
-        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → factor = 0.5.
-        # B has crown_share = 0 → no crown reward to multiply.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
-        assert rewards[1] == 0.0
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * (1 - QVOL_REWARD_WEIGHT), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * QVOL_REWARD_WEIGHT, atol=1e-6)
         v.state_store.close()
 
-    def test_matched_crown_and_volume_full_reward(self, tmp_path: Path):
-        """Equal crown + equal volume → factor 1.0 for both."""
-        from allways.constants import VOLUME_WEIGHT_ALPHA  # noqa: F401 — keep imports tidy
-
+    def test_matched_crown_and_volume_split_evenly(self, tmp_path: Path):
+        """Equal crown + equal quality volume → each earns half the pool,
+        independent of λ (both terms are 50/50)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         conn = v.state_store.require_connection()
@@ -2153,44 +2098,40 @@ class TestVolumeWeighting:
                 (hk, 'tao', 'btc', 0.00020, 0),
             )
         conn.commit()
-        self.insert_volume(v, 'hk_a', tao_amount=500_000_000, swap_id=1)
-        self.insert_volume(v, 'hk_b', tao_amount=500_000_000, swap_id=2)
+        self.insert_volume(v, 'hk_a', tao_amount=500_000_000, swap_id=1, clearing_rate=300.0)
+        self.insert_volume(v, 'hk_b', tao_amount=500_000_000, swap_id=2, clearing_rate=300.0)
         rewards, _ = calculate_miner_rewards(v)
-        # Both 50/50 on crown and volume → participation 1.0 → factor 1.0 each.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
         np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * 0.5, atol=1e-6)
         v.state_store.close()
 
-    def test_over_serving_capped_no_bonus(self, tmp_path: Path):
-        """A holds 100% crown but B serves 9× more volume → A's factor still > 0,
-        B gets nothing (no crown). Verifies cap is one-sided: high volume can't
-        amplify a low crown holder."""
+    def test_volume_server_without_crown_earns_qvol_slice(self, tmp_path: Path):
+        """A holds 100% crown and serves 10% of volume; B serves 90% with no
+        crown. A = λ·0.1 + (1−λ)·1.0 of the pool; B = λ·0.9. Volume now *earns*
+        for a non-crown server — the old one-sided 'over-serve cap' is gone."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
-        # btc→tao: higher rate wins (canonical direction). A wins, B loses.
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'btc', 'tao', 200.0, 0),
         )
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_b', 'btc', 'tao', 100.0, 0),
-        )
         conn.commit()
-        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='btc', to_chain='tao')
-        self.insert_volume(v, 'hk_b', tao_amount=900_000_000, swap_id=2, from_chain='btc', to_chain='tao')
+        self.insert_volume(
+            v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='btc', to_chain='tao', clearing_rate=200.0
+        )
+        self.insert_volume(
+            v, 'hk_b', tao_amount=900_000_000, swap_id=2, from_chain='btc', to_chain='tao', clearing_rate=200.0
+        )
         rewards, _ = calculate_miner_rewards(v)
-        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → factor = 0.55
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.55, atol=1e-6)
-        # B: crown_share = 0 → factor moot, no reward to multiply.
-        assert rewards[1] == 0.0
+        lam = QVOL_REWARD_WEIGHT
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * (lam * 0.1 + (1 - lam) * 1.0), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_TAO * (lam * 0.9), atol=1e-6)
         v.state_store.close()
 
-    def test_partial_mismatch_interpolates(self, tmp_path: Path):
+    def test_partial_mismatch_blends_crown_and_volume(self, tmp_path: Path):
         """A holds 80% crown / 20% volume, B holds 20% crown / 80% volume.
-        Uses btc→tao (higher rate wins) so the rate-direction mapping is
-        self-evident in the test."""
+        Reward blends both shares at λ."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         conn = v.state_store.require_connection()
@@ -2203,41 +2144,32 @@ class TestVolumeWeighting:
             ('hk_b', 'btc', 'tao', 150.0, 0),
         )
         conn.commit()
-        # Window is (9700, 10000]. A busy block 9_800..9_860 (60 blocks within
-        # the window) so B holds crown 20% of window. We can't use a
-        # SwapCompleted event here because the direction lookup needs an
-        # active swap entry in the tracker — easier to just record the
-        # outcome and the busy delta directly.
+        # A busy 9_800..9_860 (60 of the 300-block window) so B holds crown 20%.
         v.event_watcher.apply_busy_delta(9_800, 'hk_a', +1)
         v.event_watcher.apply_busy_delta(9_860, 'hk_a', -1)
-        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='btc', to_chain='tao')
-        self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='btc', to_chain='tao')
-        rewards, _ = calculate_miner_rewards(v)
-        # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
-        # A participation = 0.2/0.8 = 0.25 → factor 0.625.
-        # B participation = min(1.0, 0.8/0.2) = 1.0 → factor 1.0.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8 * 0.625, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_TAO * 0.2 * 1.0, atol=1e-6)
-        v.state_store.close()
-
-    def test_timed_out_swaps_dont_count_as_volume(self, tmp_path: Path):
-        """SwapTimedOut hits credibility, not volume."""
-        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
-        self.seed_tao_btc_crown(v, 'hk_a')
         self.insert_volume(
-            v,
-            'hk_a',
-            tao_amount=1_000_000_000,
-            swap_id=1,
-            completed=False,
+            v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='btc', to_chain='tao', clearing_rate=200.0
+        )
+        self.insert_volume(
+            v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='btc', to_chain='tao', clearing_rate=200.0
         )
         rewards, _ = calculate_miner_rewards(v)
-        # Volume aggregator returns 0 → idle network short-circuit → factor 1.0.
-        # sr from (0 completed, 1 timed_out) = 0 → cubed = 0 → reward 0 via
-        # credibility, confirming the timed-out swap didn't sneak through as
-        # volume credit.
-        assert rewards[0] == 0.0
+        lam = QVOL_REWARD_WEIGHT
+        # Crown: A=0.8, B=0.2. Volume (qvol_share at the same clearing rate): A=0.2, B=0.8.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * (lam * 0.2 + (1 - lam) * 0.8), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_TAO * (lam * 0.8 + (1 - lam) * 0.2), atol=1e-6)
+        v.state_store.close()
+
+    def test_timed_out_swap_adds_no_qvol(self, tmp_path: Path):
+        """A timed-out swap is not completed, so it never enters quality-weighted
+        volume — the sole crown holder still earns the full pool (λ collapses to
+        crown when there's no realized volume)."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)  # baseline credibility → cred 1.0
+        self.seed_tao_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_a', tao_amount=1_000_000_000, swap_id=1, completed=False, clearing_rate=300.0)
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_volume_split_per_direction(self, tmp_path: Path):
@@ -2298,16 +2230,19 @@ class TestVolumeWeighting:
 
 
 class TestCapacityVolumeInteraction:
-    """Capacity + volume are independent multipliers — verify they compose."""
+    """Capacity discounts only the crown (availability) term; the qvol term is
+    independent. Verify they compose as ``λ·qvol + (1−λ)·crown·cap``."""
 
-    def test_both_factors_compose_multiplicatively(self, tmp_path: Path):
-        """Single miner, capacity 0.5, idle on volume → reward = pool * 0.5 * 0.5."""
-        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+    def test_capacity_discounts_only_crown_term(self, tmp_path: Path):
+        """A holds 100% crown at capacity 0.5 and serves 100% of the quality
+        volume. Capacity halves the crown slice but not the volume slice:
+        reward = pool · (λ·1.0 + (1−λ)·1.0·0.5)."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
             hotkeys,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 250_000_000},
+            collaterals={'hk_a': 250_000_000},  # capacity 0.5
         )
         conn = v.state_store.require_connection()
         conn.execute(
@@ -2315,19 +2250,19 @@ class TestCapacityVolumeInteraction:
             ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        # B serves some volume in A's market (tao→btc) so A's vol_share = 0.
         v.state_store.insert_swap_outcome(
             swap_id=1,
-            miner_hotkey='hk_b',
+            miner_hotkey='hk_a',
             completed=True,
-            resolved_block=9_900,  # within the default validator's scoring window
+            resolved_block=9_900,
             tao_amount=500_000_000,
             from_chain='tao',
             to_chain='btc',
+            clearing_rate=300.0,
         )
         rewards, _ = calculate_miner_rewards(v)
-        # A: pool 0.5 × crown 1.0 × sr 1.0 × capacity 0.5 × volume_factor 0.5
-        np.testing.assert_allclose(rewards[0], 0.5 * 1.0 * 1.0 * 0.5 * 0.5, atol=1e-6)
+        lam = QVOL_REWARD_WEIGHT
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * (lam * 1.0 + (1 - lam) * 1.0 * 0.5), atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2424,9 +2359,10 @@ class TestCredibilityRamp:
         np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         v.state_store.close()
 
-    def test_tolerated_timeouts_advance_ramp_but_hurt_raw_rate(self, tmp_path: Path):
-        """8 completed + 2 timed_out (within the 2-timeout tolerance) → ramp = 1.0,
-        raw = 0.8 → 0.8³ × 1.0."""
+    def test_tolerated_timeouts_keep_full_credibility(self, tmp_path: Path):
+        """8 completed + 2 timed_out: 10 closed → full ramp, and 2 timeouts are
+        within tolerance → credibility 1.0, so the sole crown holder earns the
+        full pool. (The old success_rate³ ratio penalty is gone.)"""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, baseline_credibility=False)
         self.seed_btc_tao_crown(v, 'hk_a')
@@ -2439,7 +2375,7 @@ class TestCredibilityRamp:
                 swap_id=100 + i, miner_hotkey='hk_a', completed=False, resolved_block=200 + i
             )
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.8**3, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         v.state_store.close()
 
     def test_excess_timeouts_zero_reward(self, tmp_path: Path):
@@ -2810,7 +2746,7 @@ class TestNonEarnerDiagnosis:
         reason = diagnose_non_earner(
             'hk',
             {('tao', 'btc'): 279.3},
-            sr=0.98,
+            cred=0.98,
             ever_active={'hk'},
             direction_traces={('tao', 'btc'): self._trace(280.0)},
             collaterals={'hk': 0},
@@ -2825,7 +2761,7 @@ class TestNonEarnerDiagnosis:
         reason = diagnose_non_earner(
             'hk',
             {('tao', 'btc'): 279.3},
-            sr=0.98,
+            cred=0.98,
             ever_active={'hk'},
             direction_traces={('tao', 'btc'): self._trace(280.0)},
             collaterals={},  # absent → unknown
@@ -2841,7 +2777,7 @@ class TestNonEarnerDiagnosis:
         reason = diagnose_non_earner(
             'hk',
             {('tao', 'btc'): 281.0},
-            sr=0.98,
+            cred=0.98,
             ever_active={'hk'},
             direction_traces={('tao', 'btc'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
@@ -2856,7 +2792,7 @@ class TestNonEarnerDiagnosis:
         reason = diagnose_non_earner(
             'hk',
             {('tao', 'btc'): 279.3},
-            sr=0.98,
+            cred=0.98,
             ever_active={'hk'},
             direction_traces={('tao', 'btc'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
@@ -3112,8 +3048,10 @@ class TestQualityWeighting:
         self.seed_clearing(v, 'hk_a', rate=0.00020)
         self.seed_crown(v, 'hk_a', rate=0.00020)  # at reference → quality floor
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
-        # Unearned half + the empty btc→tao pool recycle; total still 1.0.
+        # hk_a is sole crown holder AND sole server, both at-market: crown term =
+        # cap·quality = 0.5 (floor), qvol_share = 1.0. reward = λ·1 + (1−λ)·0.5.
+        lam = QVOL_REWARD_WEIGHT
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * (lam * 1.0 + (1 - lam) * 0.5), atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -3137,15 +3075,18 @@ class TestQualityWeighting:
         np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
         v.state_store.close()
 
-    def test_idle_and_shallow_stacks_to_quarter(self, tmp_path: Path):
+    def test_idle_holder_at_market_earns_crown_slice_only(self, tmp_path: Path):
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
-        # hk_a holds crown at market (quality 0.5); hk_b serves all volume so
-        # hk_a's vol_factor is the idle floor (0.5). Independent multiply → 0.25.
+        # hk_a holds crown at market (quality 0.5) but serves no volume; hk_b
+        # serves all the volume. hk_a gets only the (1−λ) crown slice, halved by
+        # the at-market quality floor; the λ volume slice goes to hk_b.
         self.seed_crown(v, 'hk_a', rate=0.00020)
         self.seed_clearing(v, 'hk_b', rate=0.00020, swap_id_base=2_000)
         rewards, _ = calculate_miner_rewards(v)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.25, atol=1e-6)
+        lam = QVOL_REWARD_WEIGHT
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * (1 - lam) * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * lam, atol=1e-6)
         v.state_store.close()
 
 
