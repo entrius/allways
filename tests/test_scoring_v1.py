@@ -26,7 +26,7 @@ from allways.validator.scoring import (
     snapshot_current_crown_holders,
     success_rate,
 )
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator.state_store import ReservationPin, ValidatorStateStore
 
 POOL_TAO_BTC = 0.5
 POOL_BTC_TAO = 0.5
@@ -932,6 +932,68 @@ class TestPinnedRateDuringReservation:
         # (100, 600]: A pinned at 200, B at 200 — tie, each earns 250.
         # (600, 1100]: A live at 300, B still 200 — A wins 500.
         assert crown == {'hk_a': 750.0, 'hk_b': 250.0}
+        store.close()
+
+    def test_expired_reservation_pin_stops_earning_crown(self, tmp_path: Path):
+        """End-to-end: a reservation that lapses without a swap must stop
+        earning crown at the pinned rate. ``expire_stale_reservation_pins``
+        emits the missing pin-end at reserved_until + 1, so once the live rate
+        reverts to junk after expiry the miner can no longer crown-squat on the
+        stale pinned rate."""
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        conn = store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'tao', 200.0, 0),
+            )
+        # A bumps its live rate to junk at block 700 — only the stale pin would
+        # keep it winning crown at 200 past expiry.
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'tao', 25000.0, 700),
+        )
+        conn.commit()
+
+        # A is reserved at block 300, TTL through 600, and never swaps — the
+        # synchronous pin row + the scoring 'start' both land, but no terminal
+        # event ever closes the pin.
+        store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='hk_a',
+                reserve_block=300,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='200',
+                counter_rate_str='0',
+                miner_from_address='bc1-a',
+                miner_to_address='5a',
+                reserved_until=600,
+                created_at=1.0,
+            )
+        )
+        watcher._record_reservation_pin_event(
+            block_num=300, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0
+        )
+
+        # The forward loop's expiry sweep fires once the block passes the TTL.
+        store.current_block_fn = lambda: 601
+        watcher.expire_stale_reservation_pins()
+
+        crown = replay_crown_time_window(
+            store=store,
+            event_watcher=watcher,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+        )
+        # (100, 601]: A pinned at 200, tie with B → 250.5 each.
+        # (601, 700]: pin closed, A live at 200, tie with B → 49.5 each.
+        # (700, 1100]: A live at junk 25000 — wins the rate sort, earns 400.
+        assert crown == {'hk_a': 700.0, 'hk_b': 300.0}
         store.close()
 
     def test_pin_only_applies_to_pinned_direction(self, tmp_path: Path):

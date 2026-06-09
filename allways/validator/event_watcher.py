@@ -991,6 +991,14 @@ class ContractEventWatcher:
                     rate=0.0,
                 )
 
+    def expire_stale_reservation_pins(self) -> int:
+        """Close crown pins for reservations that lapsed without a swap (no
+        contract event fires on natural expiry), then purge them. End emitted at
+        ``reserved_until + 1`` so crown stops at the last live block. Returns rows purged."""
+        for pin in self.state_store.get_expired_reservation_pins():
+            self._emit_reservation_pin_ends(pin.reserved_until + 1, pin.miner_hotkey)
+        return self.state_store.purge_expired_reservation_pins()
+
     def record_active_transition(self, block_num: int, hotkey: str, active: bool) -> None:
         """Apply an on-chain active-flag transition to both the current-state
         snapshot and the historical event log. A no-op if the flag already

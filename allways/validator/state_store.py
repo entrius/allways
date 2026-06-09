@@ -267,6 +267,22 @@ class ValidatorStateStore:
             (reserved_until, miner_hotkey),
         )
 
+    def get_expired_reservation_pins(self) -> List[ReservationPin]:
+        """Pins whose reservation has lapsed as of the current block.
+
+        Read before ``purge_expired_reservation_pins`` so the caller can emit a
+        scoring pin-end event per expired pin — otherwise the crown overlay's
+        'start' outlives the on-chain reservation and keeps earning crown at the
+        pinned rate after expiry.
+        """
+        if self.current_block_fn is None:
+            return []
+        rows = self._fetchall(
+            'SELECT * FROM reservation_pins WHERE reserved_until < ?',
+            (self.current_block_fn(),),
+        )
+        return [self.row_to_reservation_pin(row) for row in rows]
+
     def purge_expired_reservation_pins(self) -> int:
         """Drop pins whose reservation has already expired."""
         if self.current_block_fn is None:
