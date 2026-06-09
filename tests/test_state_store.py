@@ -10,7 +10,7 @@ fresh ``init_db()`` creating the table.
 from dataclasses import replace
 from pathlib import Path
 
-from allways.validator.state_store import ReservationPin, ValidatorStateStore
+from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
 
 PIN_SAMPLE1 = ReservationPin(
     miner_hotkey='miner-1',
@@ -155,6 +155,43 @@ class TestReservationPinPurge:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         store.update_reservation_pin_reserved_until('miner-unknown', 9999)
         assert store.get_reservation_pin('miner-unknown') is None
+        store.close()
+
+    def test_extend_reservation_deadline_bumps_both_copies(self, tmp_path: Path):
+        """The shared mutator must advance BOTH the pending_confirms row and the
+        reservation pin, so neither purge sweep drops a still-live reservation
+        (#441). Updating only one copy is what desynced the pin."""
+        store = ValidatorStateStore(
+            db_path=tmp_path / 'state.db',
+            current_block_fn=lambda: 1003,
+        )
+        store.upsert_reservation_pin(PIN_SAMPLE1)  # reserved_until=1000
+        store.enqueue(
+            PendingConfirm(
+                miner_hotkey='miner-1',
+                from_tx_hash='tx-1',
+                from_chain='btc',
+                to_chain='tao',
+                from_address='bc1-user',
+                to_address='5user',
+                tao_amount=123,
+                from_amount=456,
+                to_amount=789,
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                rate_str='345',
+                reserved_until=1000,
+                queued_at=1.0,
+            )
+        )
+
+        store.extend_reservation_deadline('miner-1', 1300)
+
+        assert store.get_reservation_pin('miner-1').reserved_until == 1300
+        assert store.get_all()[0].reserved_until == 1300
+        # Same-block purges leave both rows alone now that both TTLs are current.
+        assert store.purge_expired_pending_confirms() == 0
+        assert store.purge_expired_reservation_pins() == 0
         store.close()
 
 

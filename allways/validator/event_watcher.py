@@ -790,22 +790,18 @@ class ContractEventWatcher:
             if miner and isinstance(remaining, int):
                 self._record_collateral_event(block_num, miner, int(remaining))
         elif name == 'ReservationExtensionFinalized':
-            # Event-driven cache update for the local pending_confirms row —
-            # replaces the polling refresh that the legacy vote-extend flow
-            # needed (commit 1b942e8). Without this write the upstream
-            # purge_expired sweep would delete a still-live entry at its
-            # stale reserved_until.
+            # Event-driven cache update — bumps both the pending_confirms row and
+            # the reservation pin so neither purge sweep drops a still-live entry
+            # at its stale reserved_until. Replaces the polling refresh the legacy
+            # vote-extend flow needed (commit 1b942e8).
             miner = values.get('miner', '')
             applied_target = values.get('applied_target')
             if miner and isinstance(applied_target, int):
-                self.state_store.update_reserved_until(miner, applied_target)
+                self.state_store.extend_reservation_deadline(miner, applied_target)
                 bt.logging.info(
                     f'EventWatcher: {self._label(miner)} ReservationExtensionFinalized '
                     f'applied_target={applied_target} @ block {block_num}'
                 )
-                # Keep the pin's TTL in step so purge_expired_reservation_pins
-                # doesn't drop a still-live pin at its stale deadline.
-                self.state_store.update_reservation_pin_reserved_until(miner, applied_target)
         elif name == 'TimeoutExtensionFinalized':
             swap_id = values.get('swap_id')
             applied_target = values.get('applied_target')
