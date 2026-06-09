@@ -301,6 +301,16 @@ CONTRACT_ERROR_VARIANTS = {
 }
 
 
+class _NullContext:
+    """No-op context manager used when no write_lock is provided."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
 class ContractError(Exception):
     """Raised when a contract call fails.
 
@@ -352,6 +362,7 @@ class AllwaysContractClient:
         subtensor: Optional[bt.Subtensor] = None,
         reconnect_subtensor: Optional[Callable[[], None]] = None,
         substrate_lock: Optional[Any] = None,
+        write_lock: Optional[threading.Lock] = None,
     ):
         self.contract_address = contract_address or get_contract_address() or ''
         self.subtensor = subtensor
@@ -366,6 +377,13 @@ class AllwaysContractClient:
         # access so concurrent threads can't both land in recv. Callers sharing
         # this subtensor elsewhere pass that path's lock to serialize as one.
         self._substrate_lock = substrate_lock or threading.Lock()
+        # Optional cross-connection write serializer. When two AllwaysContractClient
+        # instances share the same hotkey (forward loop and axon handlers), they must
+        # serialize nonce-fetch + submit across connections — AccountNonceApi returns
+        # the best-block nonce, which doesn't count pending pool txs, so concurrent
+        # signers can grab the same nonce and one tx gets banned (1012 Temporarily
+        # Banned). Pass the same threading.Lock() to both clients to prevent this.
+        self._write_lock = write_lock
 
         if not self.contract_address:
             bt.logging.warning('Allways contract address not set')
@@ -572,24 +590,35 @@ class AllwaysContractClient:
             extrinsic = s.create_signed_extrinsic(call=call, keypair=keypair)
             return s.submit_extrinsic(extrinsic, wait_for_inclusion=wait_for_inclusion, wait_for_finalization=False)
 
+        # Hold write_lock (if shared with another client) from nonce-fetch through
+        # inclusion so the best-block nonce is guaranteed to advance before the
+        # sibling client composes its next extrinsic. The balance read above is
+        # informational and intentionally left outside the lock to keep reads parallel.
+        write_cm = self._write_lock if self._write_lock is not None else _NullContext()
         try:
-            receipt = self.substrate_call(submit_extrinsic)
+            with write_cm:
+                try:
+                    receipt = self.substrate_call(submit_extrinsic)
+                except Exception as e:
+                    raise ContractError(f'{method}: exec failed: {e}') from e
+
+                if not wait_for_inclusion:
+                    # No block to inspect; trust the submission and let the next event
+                    # sync surface the actual outcome. Caller relies on contract-side
+                    # idempotency to absorb stale-view duplicates.
+                    return receipt.extrinsic_hash
+
+                try:
+                    if receipt.is_success:
+                        return receipt.extrinsic_hash
+                    else:
+                        raise ContractError(f'{method}: {receipt.error_message}')
+                except _EXTRINSIC_NOT_FOUND:
+                    return receipt.extrinsic_hash
+        except ContractError:
+            raise
         except Exception as e:
             raise ContractError(f'{method}: exec failed: {e}') from e
-
-        if not wait_for_inclusion:
-            # No block to inspect; trust the submission and let the next event
-            # sync surface the actual outcome. Caller relies on contract-side
-            # idempotency to absorb stale-view duplicates.
-            return receipt.extrinsic_hash
-
-        try:
-            if receipt.is_success:
-                return receipt.extrinsic_hash
-            else:
-                raise ContractError(f'{method}: {receipt.error_message}')
-        except _EXTRINSIC_NOT_FOUND:
-            return receipt.extrinsic_hash
 
     # =========================================================================
     # SCALE encoding / decoding helpers

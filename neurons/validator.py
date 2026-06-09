@@ -70,9 +70,16 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
+        # Shared write lock: both contract clients sign with the same validator
+        # hotkey. AccountNonceApi returns the best-block nonce, which doesn't
+        # count pending pool txs, so two concurrent signers can fetch the same
+        # nonce and one tx gets banned (error 1012). Serialising writes across
+        # both connections prevents the collision.
+        self._write_lock = threading.Lock()
         self.contract_client = AllwaysContractClient(
             subtensor=self.subtensor,
             reconnect_subtensor=self.reconnect_and_propagate,
+            write_lock=self._write_lock,
         )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
 
@@ -159,6 +166,7 @@ class Validator(BaseValidatorNeuron):
             subtensor=self.axon_subtensor,
             reconnect_subtensor=self.reconnect_axon_subtensor,
             substrate_lock=self.axon_lock,
+            write_lock=self._write_lock,
         )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
         # Read block/bounds via axon_subtensor; the forward loop calls this too,
