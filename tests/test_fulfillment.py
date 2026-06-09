@@ -126,6 +126,41 @@ class TestSentCacheCleanup:
         assert set(fulfiller.sent) == {1, 3}
         assert fulfiller.mark_fulfilled_attempts == {1: 2, 3: 1}
 
+    def test_mark_fulfilled_retry_not_gated_by_cushion_after_send(self):
+        # Regression for #462: once dest funds are out, the swap stays Active
+        # until mark_fulfilled lands, and an Active swap is slashed at timeout.
+        # The cushion is scoped to STARTING a fulfill, so it must NOT gate the
+        # post-send mark_fulfilled retry — otherwise a transient mark_fulfilled
+        # failure inside the final cushion window guarantees a slash of a miner
+        # that already paid. Uses the REAL verify_swap_safety (not stubbed) so
+        # the cushion actually runs on the retry path.
+        from allways.contract_client import ContractError
+
+        swap = make_swap(timeout_block=500)
+        fulfiller = make_fulfiller()
+        fulfiller.fee_divisor = 100
+        # Inside the cushion window: a first SEND would be gated off here.
+        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS
+        # Dest funds already sent on a prior pass, mark_fulfilled not yet landed.
+        fulfiller.sent[swap.id] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False, timeout_block=500)
+        fulfiller.send_dest_funds = MagicMock()
+        # Transient (non-rejection) failure — keeps the entry retryable.
+        fulfiller.client.mark_fulfilled.side_effect = ContractError('transient rpc failure')
+
+        result = fulfiller.process_swap(swap)
+
+        assert result is False  # mark_fulfilled didn't land this pass
+        fulfiller.send_dest_funds.assert_not_called()  # never re-send
+        # The retry was attempted despite being inside the cushion window.
+        fulfiller.client.mark_fulfilled.assert_called_once_with(
+            wallet=fulfiller.wallet,
+            swap_id=swap.id,
+            to_tx_hash='already-sent-dest-tx',
+            to_amount=3_415_500_000,
+            to_tx_block=777,
+        )
+        assert fulfiller.sent[swap.id].marked_fulfilled is False  # still retryable next pass
+
     def test_retained_send_blocks_resend_after_poller_misses_and_rediscovery(self):
         swap = make_swap(timeout_block=500)
         poll_client = MagicMock()
