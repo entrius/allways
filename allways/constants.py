@@ -137,10 +137,7 @@ DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
 DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
 RESERVATION_TTL_BLOCKS = 50  # ~10 min
 
-# Blocks past a retained send-cache entry's last-known timeout_block before the miner discards it. Sized for
-# the worst case the contract permits: each of MAX_EXTENSIONS_PER_SWAP extensions can push timeout_block forward
-# by up to MAX_EXTENSION_BLOCKS (the per-extension cap is relative to its own propose block, not cumulative — see
-# lib.rs propose_extend_timeout), so a fully-extended live deadline can reach D0 + MAX_EXTENSIONS_PER_SWAP *
-# MAX_EXTENSION_BLOCKS. A smaller margin can discard a still-active twice-extended swap whose cached deadline
-# predates both extensions, re-sending destination funds on rediscovery (#461). ~550 blocks ≈ 1.8h.
+# Blocks past a retained entry's last-known timeout_block before discard. Sized for the contract's worst case:
+# MAX_EXTENSIONS_PER_SWAP extensions each push the deadline up to MAX_EXTENSION_BLOCKS further (not cumulative).
+# A smaller margin can discard a still-active twice-extended swap and re-send on rediscovery (#461). ~550 ≈ 1.8h.
 SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
