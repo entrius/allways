@@ -514,16 +514,18 @@ class ValidatorStateStore:
         tao_amount: int = 0,
         from_chain: str = '',
         to_chain: str = '',
+        clearing_rate: float = 0.0,
     ) -> None:
         # Direction is normalized to lowercase on write so the per-direction
         # volume query is robust to upstream case drift. SQLite text
         # comparisons are case-sensitive and DIRECTION_POOLS keys are
-        # lowercase.
+        # lowercase. ``clearing_rate`` (canonical TAO/BTC) feeds the depth
+        # reference; 0.0 means "no usable observation" (timed-out or legacy).
         self._execute(
             """
             INSERT OR REPLACE INTO swap_outcomes
-                (swap_id, miner_hotkey, completed, resolved_block, tao_amount, from_chain, to_chain)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (swap_id, miner_hotkey, completed, resolved_block, tao_amount, from_chain, to_chain, clearing_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 swap_id,
@@ -533,6 +535,7 @@ class ValidatorStateStore:
                 int(tao_amount or 0),
                 (from_chain or '').lower(),
                 (to_chain or '').lower(),
+                float(clearing_rate or 0.0),
             ),
         )
 
@@ -591,6 +594,32 @@ class ValidatorStateStore:
             (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
         )
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
+
+    def get_clearing_rates_by_direction_since(
+        self, since_block: int, from_chain: str, to_chain: str
+    ) -> List[Tuple[float, int, int, str]]:
+        """Completed-swap clearing rates for one direction, for the depth
+        reference. Each row is ``(clearing_rate, tao_amount, resolved_block,
+        miner_hotkey)``. Rows with ``clearing_rate = 0`` (timed-out swaps,
+        pre-migration legacy) are excluded — they carry no usable rate, same
+        as the volume query excludes ``tao_amount = 0``. Direction is
+        lowercased to match ``insert_swap_outcome``."""
+        rows = self._fetchall(
+            """
+            SELECT clearing_rate, tao_amount, resolved_block, miner_hotkey
+            FROM swap_outcomes
+            WHERE resolved_block >= ?
+              AND completed = 1
+              AND clearing_rate > 0
+              AND from_chain = ?
+              AND to_chain = ?
+            """,
+            (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
+        )
+        return [
+            (float(r['clearing_rate']), int(r['tao_amount'] or 0), int(r['resolved_block']), r['miner_hotkey'])
+            for r in rows
+        ]
 
     def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
         if cutoff_block <= 0:
@@ -893,7 +922,8 @@ class ValidatorStateStore:
                     resolved_block  INTEGER NOT NULL,
                     tao_amount      INTEGER NOT NULL DEFAULT 0,
                     from_chain      TEXT NOT NULL DEFAULT '',
-                    to_chain        TEXT NOT NULL DEFAULT ''
+                    to_chain        TEXT NOT NULL DEFAULT '',
+                    clearing_rate   REAL NOT NULL DEFAULT 0.0
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_outcomes_hotkey
                     ON swap_outcomes(miner_hotkey);
@@ -992,6 +1022,7 @@ class ValidatorStateStore:
                 ('swap_outcomes', 'tao_amount', 'INTEGER NOT NULL DEFAULT 0'),
                 ('swap_outcomes', 'from_chain', "TEXT NOT NULL DEFAULT ''"),
                 ('swap_outcomes', 'to_chain', "TEXT NOT NULL DEFAULT ''"),
+                ('swap_outcomes', 'clearing_rate', 'REAL NOT NULL DEFAULT 0.0'),
             ):
                 try:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
