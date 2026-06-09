@@ -12,7 +12,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from allways.classes import Swap, SwapStatus
-from allways.constants import MINER_TIMEOUT_CUSHION_BLOCKS, SENT_CACHE_DISCARD_MARGIN_BLOCKS
+from allways.constants import (
+    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
+    MAX_EXTENSION_BLOCKS,
+    MAX_EXTENSIONS_PER_SWAP,
+    MINER_TIMEOUT_CUSHION_BLOCKS,
+    SENT_CACHE_DISCARD_MARGIN_BLOCKS,
+)
 from allways.miner.fulfillment import SentSwap, SwapFulfiller
 from allways.miner.swap_poller import MAX_REFRESH_MISSES, SwapPoller
 
@@ -183,6 +189,32 @@ class TestSentCacheCleanup:
 
         fulfiller.cleanup_stale_sends(active_swap_ids=set())
         assert set(fulfiller.sent) == {1, 2}
+
+    def test_unmarked_stale_retained_across_two_extensions(self):
+        # Regression for #461: the contract permits MAX_EXTENSIONS_PER_SWAP (2)
+        # timeout extensions, each pushing timeout_block forward by up to
+        # MAX_EXTENSION_BLOCKS relative to its own propose block (not cumulative),
+        # so a live deadline can reach D0 + 2 * MAX_EXTENSION_BLOCKS. If the cached
+        # snapshot predates both extensions (a get_swap gap drops the swap from the
+        # active set, so process_swap never refreshes it), the margin must still
+        # cover the fully-extended deadline. The old margin (1 * MAX_EXTENSION_BLOCKS
+        # + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS) would discard here and re-send on
+        # rediscovery.
+        d0 = 100
+        old_single_extension_margin = MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+        live_deadline = d0 + MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS
+        # Sanity-check this case actually exercises the gap the fix closes: the
+        # current block is past the old margin but the swap is still live on-chain.
+        current = d0 + old_single_extension_margin + 1
+        assert current > d0 + old_single_extension_margin  # would have been discarded pre-fix
+        assert current <= live_deadline  # but the swap is still active on-chain
+
+        fulfiller = make_fulfiller()
+        fulfiller.sent = {1: SentSwap('twice-extended-tx', 50, marked_fulfilled=False, timeout_block=d0)}
+        fulfiller.subtensor.get_current_block.return_value = current
+
+        fulfiller.cleanup_stale_sends(active_swap_ids=set())
+        assert set(fulfiller.sent) == {1}
 
     def test_legacy_entry_without_deadline_never_discarded(self):
         fulfiller = make_fulfiller()
