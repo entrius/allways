@@ -67,8 +67,9 @@ def main():
     print(f'\nUsing {addr_type} address: {my_address}')
     print(f'Sending {amount} sat to {to_address}')
 
-    is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
-    input_vsize = 68 if is_segwit else 148
+    # Per-type input vsizes (matches BitcoinProvider._INPUT_VSIZE, issue #459)
+    _input_vsize_map = {'p2wpkh': 68, 'p2sh-p2wpkh': 91, 'p2pkh': 148, 'p2tr': 57}
+    input_vsize = _input_vsize_map.get(addr_type, 148)
 
     # Select UTXOs
     selected = []

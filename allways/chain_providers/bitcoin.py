@@ -701,10 +701,9 @@ class BitcoinProvider(ChainProvider):
                 bt.logging.info(f'Reusing prior tx {existing} from {my_address} → {to_address} ({amount} sat)')
                 return (existing, 0)
 
-            is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            coin_selection = self.select_utxos(utxos, amount, is_segwit, fee_rate_override=fee_rate_override)
+            coin_selection = self.select_utxos(utxos, amount, addr_type, fee_rate_override=fee_rate_override)
             if coin_selection is None:
                 return None
             selected, total_in, fee = coin_selection
@@ -826,10 +825,28 @@ class BitcoinProvider(ChainProvider):
         self._send_error('No UTXOs found for any address type')
         return None
 
-    def select_utxos(self, utxos, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None):
-        """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
+    # Input vsizes by address type (vbytes, from weight units):
+    #   P2WPKH:      41 B non-witness ×4 = 164  + 108 witness  = 272 wu → 68 vB
+    #   P2SH-P2WPKH: 64 B non-witness ×4 = 256  + 108 witness  = 364 wu → 91 vB
+    #   P2PKH:       ~148 B non-witness, no witness
+    _INPUT_VSIZE = {
+        ADDR_TYPE_P2WPKH: 68,
+        ADDR_TYPE_P2SH_P2WPKH: 91,
+        ADDR_TYPE_P2PKH: 148,
+        ADDR_TYPE_P2TR: 57,  # 41 B non-witness ×4 = 164 + 65 witness = 229 wu → 58 vB (rounded)
+    }
+    _INPUT_VSIZE_DEFAULT = 148  # conservative fallback for unknown types
+
+    def select_utxos(self, utxos, amount: int, addr_type: str, fee_rate_override: Optional[int] = None):
+        """Greedy UTXO selection sized per input address type.
+
+        Returns (selected, total_in, fee) or None on insufficient funds.
+        Uses per-type input vsizes so P2SH-P2WPKH inputs (91 vB) are no longer
+        undersized as P2WPKH (68 vB), which could cause below-target fee payment
+        on multi-input sends (issue #459).
+        """
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
-        input_vsize = 68 if is_segwit else 148
+        input_vsize = self._INPUT_VSIZE.get(addr_type, self._INPUT_VSIZE_DEFAULT)
         selected = []
         total_in = 0
         for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
