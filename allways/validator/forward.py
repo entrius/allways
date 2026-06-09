@@ -80,7 +80,10 @@ async def forward(self: Validator) -> None:
             f'forward: purged {purged} expired pending_confirms (reservations elapsed without tx confirmation)'
         )
 
-    purged_pins = self.state_store.purge_expired_reservation_pins()
+    # Emits crown pin-end events for expired reservations *before* purging, so a
+    # reservation that lapses without a swap can't keep earning crown at its
+    # pinned rate. Runs before scoring in this same forward pass.
+    purged_pins = self.event_watcher.expire_stale_reservation_pins()
     if purged_pins:
         bt.logging.info(f'forward: purged {purged_pins} expired reservation_pins (reservations elapsed without a swap)')
 

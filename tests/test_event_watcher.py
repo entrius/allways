@@ -567,6 +567,66 @@ class TestReservationPin:
         assert w.state_store.get_reservation_pin('hk_a') is None
         w.state_store.close()
 
+    def test_expired_reservation_emits_pin_end_and_purges(self, tmp_path: Path):
+        """A reservation that lapses without a swap emits no contract event, so
+        nothing closes the crown pin. ``expire_stale_reservation_pins`` must
+        emit an 'end' (at reserved_until + 1) for every open direction and purge
+        the synchronous pin row — otherwise the miner keeps earning crown at the
+        pinned rate with no live reservation."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        w.state_store.current_block_fn = lambda: 1001  # past reserved_until=1000
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        purged = w.expire_stale_reservation_pins()
+
+        assert purged == 1
+        assert w.state_store.get_reservation_pin('hk_a') is None
+        ends = [ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end']
+        # One 'end' per pinned direction (primary btc→tao + counter tao→btc),
+        # at reserved_until + 1 so crown is credited through the last live block.
+        assert {(ev.from_chain, ev.to_chain) for ev in ends} == {('btc', 'tao'), ('tao', 'btc')}
+        assert all(ev.block_num == 1001 for ev in ends)
+        w.state_store.close()
+
+    def test_live_reservation_not_closed_by_expiry_sweep(self, tmp_path: Path):
+        """A reservation whose TTL is still in the future must be left alone —
+        no pin-end, no purge."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        w.state_store.current_block_fn = lambda: 950  # before reserved_until=1000
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        purged = w.expire_stale_reservation_pins()
+
+        assert purged == 0
+        assert w.state_store.get_reservation_pin('hk_a') is not None
+        assert not [ev for ev in w.reservation_pin_events if ev.hotkey == 'hk_a' and ev.kind == 'end']
+        w.state_store.close()
+
+    def test_expiry_sweep_is_idempotent(self, tmp_path: Path):
+        """Re-running after the row is purged emits no further 'end' events."""
+        w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
+        w.state_store.current_block_fn = lambda: 1001
+        with patch(
+            'allways.validator.event_watcher.read_miner_commitment',
+            return_value=make_pinned_commitment(),
+        ):
+            w.apply_event(900, 'MinerReserved', {'miner': 'hk_a', 'reserved_until': 1000})
+
+        assert w.expire_stale_reservation_pins() == 1
+        ends_after_first = [ev for ev in w.reservation_pin_events if ev.kind == 'end']
+        assert w.expire_stale_reservation_pins() == 0
+        ends_after_second = [ev for ev in w.reservation_pin_events if ev.kind == 'end']
+        assert ends_after_second == ends_after_first
+        w.state_store.close()
+
     def test_reservation_extension_finalized_bumps_pin_ttl(self, tmp_path: Path):
         w = make_watcher(tmp_path, netuid=2, subtensor=MagicMock())
         with patch(

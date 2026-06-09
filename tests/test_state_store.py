@@ -113,6 +113,26 @@ class TestReservationPinPurge:
         assert store.get_reservation_pin('miner-1') == PIN_SAMPLE1
         store.close()
 
+    def test_get_expired_returns_only_expired_rows(self, tmp_path: Path):
+        store = ValidatorStateStore(
+            db_path=tmp_path / 'state.db',
+            current_block_fn=lambda: 1001,
+        )
+        store.upsert_reservation_pin(PIN_SAMPLE1)  # reserved_until=1000 → expired at 1001
+        store.upsert_reservation_pin(PIN_SAMPLE2)  # reserved_until=1005 → still live
+
+        expired = store.get_expired_reservation_pins()
+        assert expired == [PIN_SAMPLE1]
+        # Read-only: the row is left for the caller to emit a pin-end before purging.
+        assert store.get_reservation_pin('miner-1') == PIN_SAMPLE1
+        store.close()
+
+    def test_get_expired_without_current_block_fn_is_empty(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.upsert_reservation_pin(PIN_SAMPLE1)
+        assert store.get_expired_reservation_pins() == []
+        store.close()
+
     def test_update_reserved_until_keeps_row_a_purge_would_drop(self, tmp_path: Path):
         """Regression: after the contract extends a reservation, refreshing the
         pin's reserved_until must keep it alive past its original TTL — exactly
