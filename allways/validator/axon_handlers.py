@@ -332,18 +332,6 @@ async def handle_swap_reserve(
             reject_synapse(synapse, 'Invalid source address proof', ctx)
             return synapse
 
-        # A TAO source reads balance over the shared substrate websocket, so it
-        # must serialise under axon_lock; a BTC source is HTTP and stays lock-free
-        # to avoid stalling the forward loop behind a slow Esplora call.
-        if provider.uses_substrate:
-            with validator.axon_lock:
-                balance = provider.get_balance(synapse.from_address)
-        else:
-            balance = provider.get_balance(synapse.from_address)
-        if balance < synapse.from_amount:
-            reject_synapse(synapse, 'Insufficient source balance', ctx)
-            return synapse
-
         # Pure-local crypto — compute the request hash outside the lock as a cheap pre-check.
         from_addr_bytes = synapse.from_address.encode('utf-8')
         miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
@@ -359,7 +347,11 @@ async def handle_swap_reserve(
             )
         )
 
-        # Everything below touches substrate (commitment read, contract reads, vote).
+        # Substrate early-reject checks (commitment / slippage / already-reserved /
+        # cooldown) run BEFORE the source-balance lookup. The balance call is the
+        # only external dependency on this path — for a BTC source it is an uncached
+        # Esplora HTTP request — so doing it last means spam destined for any of these
+        # cheap rejections never reaches it, capping per-request amplification.
         with validator.axon_lock:
             commitment = load_swap_commitment(validator, miner)
             if commitment is None:
@@ -466,6 +458,26 @@ async def handle_swap_reserve(
                     )
                     return synapse
 
+        # Source balance is the most expensive gate, so it runs last — only after a
+        # request has cleared every cheap rejection. A TAO source reads balance over
+        # the shared substrate websocket, so it must serialise under axon_lock; a BTC
+        # source is HTTP and stays lock-free to avoid stalling the forward loop behind
+        # a slow Esplora call.
+        if provider.uses_substrate:
+            with validator.axon_lock:
+                balance = provider.get_balance(synapse.from_address)
+        else:
+            balance = provider.get_balance(synapse.from_address)
+        if balance < synapse.from_amount:
+            reject_synapse(synapse, 'Insufficient source balance', ctx)
+            return synapse
+
+        # Submit the reserve vote. The contract is the atomic gate; the handler
+        # checks above are best-effort early-rejects. Moving the balance lookup
+        # ahead of the vote opens a small window in which a concurrent request could
+        # reserve this miner first — that race costs at most one doomed vote_reserve,
+        # which the contract rejects, so the early-reject guarantee is unchanged.
+        with validator.axon_lock:
             bt.logging.info(
                 f'{ctx}: preflight ok — collateral={collateral} reserved_until={reserved_until} '
                 f'cur_block={cur_block} → submitting vote_reserve'
