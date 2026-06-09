@@ -992,21 +992,9 @@ class ContractEventWatcher:
                 )
 
     def expire_stale_reservation_pins(self) -> int:
-        """Close pins whose reservation lapsed without a swap, then purge the
-        synchronous pin rows. Returns the number of rows purged.
-
-        A reservation that simply expires emits no contract event, so the only
-        existing pin-end triggers (SwapInitiated/Completed/TimedOut, or a fresh
-        MinerReserved) never fire. Without this, the crown overlay's 'start'
-        outlives the on-chain reservation and the miner keeps earning crown at
-        the pinned rate — with no live reservation — until it next reserves or
-        swaps. The 'end' is emitted at ``reserved_until + 1`` so crown is
-        credited through the reservation's last live block and stops there.
-
-        Idempotent: ``_emit_reservation_pin_ends`` only closes directions whose
-        latest event is a 'start', and the pin row is purged afterward, so a
-        re-run emits nothing further.
-        """
+        """Close crown pins for reservations that lapsed without a swap (no
+        contract event fires on natural expiry), then purge them. End emitted at
+        ``reserved_until + 1`` so crown stops at the last live block. Returns rows purged."""
         for pin in self.state_store.get_expired_reservation_pins():
             self._emit_reservation_pin_ends(pin.reserved_until + 1, pin.miner_hotkey)
         return self.state_store.purge_expired_reservation_pins()
