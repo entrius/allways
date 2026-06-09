@@ -8,6 +8,7 @@ shortfall recycles to ``RECYCLE_UID``. Entry point is
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import partial
@@ -23,6 +24,12 @@ from allways.constants import (
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
     MAX_SCORING_BACKFILL_BLOCKS,
+    QUALITY_ANCHOR,
+    QUALITY_EMA_HALF_LIFE_BLOCKS,
+    QUALITY_FLOOR,
+    QUALITY_N_MIN,
+    QUALITY_PER_MINER_CAP,
+    QUALITY_TRIM_PCT,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
@@ -42,8 +49,10 @@ class DirectionTrace:
     pool: float = 0.0
     crown_blocks: Dict[str, float] = field(default_factory=dict)
     cap_weighted_blocks: Dict[str, float] = field(default_factory=dict)
+    quality_weighted_blocks: Dict[str, float] = field(default_factory=dict)
     unfilled_blocks: int = 0
     best_rate: float = 0.0
+    quality_reference: Optional[float] = None
 
 
 def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
@@ -204,6 +213,13 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain)] = intervals
+        # Per-direction depth reference: trimmed, volume/recency-weighted average
+        # of recent completed-swap clearing rates. None until enough swaps accrue
+        # (bootstrap), in which case the quality factor is a 1.0 no-op. Same 30-day
+        # lookback the table is pruned to; the EMA half-life down-weights old swaps.
+        clearing_obs = self.state_store.get_clearing_rates_by_direction_since(credibility_since, from_chain, to_chain)
+        quality_reference = compute_quality_reference(clearing_obs, window_end)
+        trace.quality_reference = quality_reference
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
             event_watcher=self.event_watcher,
@@ -216,6 +232,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             intervals_out=intervals,
             min_swap_rao=min_swap_amount,
             max_swap_rao=max_swap_amount,
+            quality_reference=quality_reference,
         )
         total_crown_dir = sum(crown_blocks.values())
         volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
@@ -246,8 +263,15 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             # already earned (#409).
             cap_blocks = trace.cap_weighted_blocks.get(hotkey, 0.0)
             cap = (cap_blocks / blocks) if blocks > 0 else 0.0
+            # Depth quality, integrated per-block like capacity: the time-weighted
+            # average of the floored quality factor over the miner's crown
+            # intervals (1.0 during bootstrap). A post-window rate change can't
+            # retroactively rescale credit already earned.
+            q_blocks = trace.quality_weighted_blocks.get(hotkey, 0.0)
+            quality = (q_blocks / blocks) if blocks > 0 else 0.0
             wt = weighting_traces.setdefault(hotkey, WeightingTrace())
             wt.record_capacity(factor=cap)
+            wt.record_quality(factor=quality)
             wt.record_credibility(
                 closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
                 ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
@@ -261,7 +285,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
                 pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * credibility_ramps[hotkey] * cap
             )
             unweighted_rewards[uid] += base
-            rewards[uid] += base * vol_factor
+            rewards[uid] += base * vol_factor * quality
             if vol_factor < 1.0:
                 bt.logging.debug(
                     f'V1 scoring [{from_chain}→{to_chain}] {hotkey[:8]}: '
@@ -345,6 +369,93 @@ def volume_factor(
         return 1.0
     participation = min(1.0, (vol_rao / total_volume_rao) / crown_share)
     return (1.0 - alpha) + alpha * participation
+
+
+def compute_quality_reference(
+    observations: List[Tuple[float, int, int, str]],
+    now_block: int,
+    *,
+    half_life_blocks: int = QUALITY_EMA_HALF_LIFE_BLOCKS,
+    trim_pct: float = QUALITY_TRIM_PCT,
+    per_miner_cap: float = QUALITY_PER_MINER_CAP,
+    n_min: int = QUALITY_N_MIN,
+) -> Optional[float]:
+    """Per-direction "market" reference from completed-swap clearing rates.
+
+    ``observations`` are ``(rate, tao_amount, resolved_block, miner_hotkey)``.
+    Trimmed (top/bottom ``trim_pct`` by rate), volume- and recency-weighted
+    (weight halves every ``half_life_blocks``), with each miner's summed weight
+    capped at ``per_miner_cap`` of the total. Returns ``None`` when fewer than
+    ``n_min`` observations survive the trim — caller treats that as "depth off"
+    (factor 1.0), matching the self-bootstrapping rollout.
+
+    DETERMINISM: this feeds emissions → consensus, so every validator must get a
+    byte-identical result. We sort by a stable total-order key and sum with
+    ``math.fsum`` over that fixed order — never reduce over an unordered set.
+    ``now_block`` must be an on-chain block (window_end), never wall-clock.
+    """
+    rows = [o for o in observations if o[0] > 0]
+    # Stable TOTAL order so trim drops identical rows on every validator: rate,
+    # then block, miner, volume. Two rows equal on all four are interchangeable.
+    rows.sort(key=lambda o: (o[0], o[2], o[3], o[1]))
+    n = len(rows)
+    drop = int(math.floor(n * trim_pct))
+    trimmed = rows[drop : n - drop] if drop > 0 else rows
+    if len(trimmed) < n_min:
+        return None
+
+    weights: List[float] = []
+    by_miner: Dict[str, float] = {}
+    for rate, vol, block, miner in trimmed:
+        recency = 2.0 ** (-(now_block - block) / half_life_blocks)
+        w = max(0.0, float(vol)) * recency
+        weights.append(w)
+        by_miner[miner] = by_miner.get(miner, 0.0) + w
+
+    total_w = math.fsum(weights)
+    if total_w <= 0:
+        return None
+
+    # Per-miner cap: scale down any miner whose summed weight exceeds the cap so
+    # no single operator (or sybil cluster sharing a hotkey) defines the market.
+    cap_w = per_miner_cap * total_w
+    scale = {m: (cap_w / w if w > cap_w else 1.0) for m, w in by_miner.items()}
+
+    capped = [w * scale[trimmed[i][3]] for i, w in enumerate(weights)]
+    denom = math.fsum(capped)
+    if denom <= 0:
+        return None
+    numer = math.fsum(capped[i] * trimmed[i][0] for i in range(len(trimmed)))
+    return numer / denom
+
+
+def direction_aware_improvement(rate: float, reference: float, lower_rate_wins: bool) -> float:
+    """Fractional improvement of ``rate`` past the reference, signed so deeper
+    is positive in either direction. btc→tao: higher TAO/BTC is the better deal;
+    tao→btc (``lower_rate_wins``): lower TAO/BTC is. Returns 0 for a non-positive
+    reference."""
+    if reference <= 0:
+        return 0.0
+    return (reference - rate) / reference if lower_rate_wins else (rate - reference) / reference
+
+
+def quality_factor(
+    rate: float,
+    reference: Optional[float],
+    lower_rate_wins: bool,
+    *,
+    anchor: float = QUALITY_ANCHOR,
+    floor: float = QUALITY_FLOOR,
+) -> float:
+    """Depth multiplier in ``[floor, 1.0]``. At/below market → floor; at or past
+    ``anchor`` improvement → 1.0; linear between. ``reference is None`` (bootstrap)
+    → 1.0, so depth is a no-op until the reference exists. Mirrors
+    ``volume_factor``'s floored-ramp shape."""
+    if reference is None or anchor <= 0:
+        return 1.0
+    improvement = direction_aware_improvement(rate, reference, lower_rate_wins)
+    depth_ramp = min(1.0, max(0.0, improvement / anchor))
+    return floor + (1.0 - floor) * depth_ramp
 
 
 def record_volume_traces(
@@ -558,6 +669,7 @@ def replay_crown_time_window(
     intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
     min_swap_rao: int = 0,
     max_swap_rao: int = 0,
+    quality_reference: Optional[float] = None,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
@@ -593,6 +705,7 @@ def replay_crown_time_window(
 
     crown_blocks: Dict[str, float] = {}
     cap_weighted_blocks: Dict[str, float] = {}
+    quality_weighted_blocks: Dict[str, float] = {}
     prev_block = window_start
 
     def effective_rates() -> Dict[str, float]:
@@ -633,12 +746,16 @@ def replay_crown_time_window(
         if intervals_out is not None:
             intervals_out.append((interval_start, interval_end, list(holders), winner_rate))
         split = duration / len(holders)
+        # All holders are tied at winner_rate, so the depth factor is shared.
+        # None reference (bootstrap) → 1.0, leaving credit unchanged.
+        qf = quality_factor(winner_rate, quality_reference, lower_rate_wins)
         for hk in holders:
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
             # Unknown collateral (no event recorded) → capacity 1.0, matching
             # can_fund's fail-open. Only a known value scales capacity down.
             cap = capacity_factor(collaterals[hk], max_swap_rao) if hk in collaterals else 1.0
             cap_weighted_blocks[hk] = cap_weighted_blocks.get(hk, 0.0) + split * cap
+            quality_weighted_blocks[hk] = quality_weighted_blocks.get(hk, 0.0) + split * qf
 
     def apply_event(event: ReplayEvent) -> None:
         if event.kind is EventKind.RATE:
@@ -671,6 +788,7 @@ def replay_crown_time_window(
     if trace is not None:
         trace.crown_blocks = dict(crown_blocks)
         trace.cap_weighted_blocks = dict(cap_weighted_blocks)
+        trace.quality_weighted_blocks = dict(quality_weighted_blocks)
     return crown_blocks
 
 

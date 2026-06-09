@@ -720,6 +720,7 @@ class ContractEventWatcher:
                 tao = int(values.get('tao_amount') or 0)
                 fee = int(values.get('fee_amount') or 0)
                 from_chain, to_chain = self._lookup_swap_direction(swap_id)
+                clearing_rate = self._lookup_swap_clearing_rate(swap_id)
                 self.state_store.insert_swap_outcome(
                     swap_id=swap_id,
                     miner_hotkey=miner,
@@ -728,6 +729,7 @@ class ContractEventWatcher:
                     tao_amount=tao,
                     from_chain=from_chain,
                     to_chain=to_chain,
+                    clearing_rate=clearing_rate,
                 )
                 # The contract's apply_collateral_penalty deducts ``fee_amount``
                 # from collateral without emitting a CollateralWithdrawn event,
@@ -834,6 +836,22 @@ class ContractEventWatcher:
         if swap is None:
             return '', ''
         return (swap.from_chain or '').lower(), (swap.to_chain or '').lower()
+
+    def _lookup_swap_clearing_rate(self, swap_id: int) -> float:
+        """Clearing rate (canonical TAO/BTC) for a just-completed swap, read
+        from the tracker's still-live Swap (resolve() runs after we record the
+        outcome). Snapshotted from the miner's commitment at initiation, so it's
+        the rate the swap actually cleared at. Returns 0.0 when unknown or
+        unparseable — excluded from the depth reference, same as a legacy row."""
+        if self.swap_tracker is None:
+            return 0.0
+        swap = self.swap_tracker.active.get(swap_id)
+        if swap is None:
+            return 0.0
+        try:
+            return float(swap.rate) if swap.rate else 0.0
+        except (TypeError, ValueError):
+            return 0.0
 
     def record_reservation_pin(self, block_num: int, miner: str, reserved_until: int) -> None:
         """Pin the miner's commitment as of the reservation block ``block_num``.

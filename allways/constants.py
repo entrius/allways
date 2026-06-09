@@ -68,6 +68,20 @@ CREDIBILITY_RAMP_OBSERVATIONS: int = 10
 # out of the rolling window. 0-2 tolerated; the 3rd timeout zeros credibility.
 CREDIBILITY_MAX_TIMEOUTS: int = 2
 
+# ─── Depth / Quality ─────────────────────────────────────
+# Scale a crown holder's reward by how far their rate beats the per-direction
+# "market" reference (a trimmed, volume-weighted, recency-decayed average of the
+# subnet's own completed-swap clearing rates). Floored like VOLUME_WEIGHT_ALPHA
+# so it's forgiving. Reference and factor are scoring-side only — no contract change.
+QUALITY_EMA_HALF_LIFE_BLOCKS: int = 7_200  # ~1 day — clearing-rate weight halves each
+QUALITY_TRIM_PCT: float = 0.10  # Drop top/bottom 10% by rate before averaging (kills wash/outlier extremes)
+QUALITY_PER_MINER_CAP: float = 0.30  # No single hotkey contributes >30% of the reference weight
+QUALITY_N_MIN: int = 20  # Below this many post-trim observations → reference disabled (factor 1.0)
+# Improvement past the reference that earns the full bonus. THE tuning knob —
+# calibrate against real live rate dispersion before trusting it.
+QUALITY_ANCHOR: float = 0.05  # 5% better than market → full bonus
+QUALITY_FLOOR: float = 0.5  # Crown holder never earns below half on rate quality alone
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
