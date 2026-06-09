@@ -274,30 +274,41 @@ class TestBroadcastedTxidsTracking:
         assert provider.broadcasted_txids == set()
 
 
-class TestIsValidAddress:
-    """BTC address format validation — must accept every standard type
-    (legacy, segwit v0, and Taproot/bech32m) and reject malformed input.
+def make_lightweight_provider_for_network(network: str) -> 'BitcoinProvider':
+    env = {'BTC_MODE': 'lightweight', 'BTC_PRIVATE_KEY': TEST_WIF, 'BTC_NETWORK': network}
+    with patch.dict(os.environ, env, clear=False):
+        return BitcoinProvider()
 
-    Taproot regression guard: the old bech32-only check rejected all `bc1p…`
-    addresses, blocking TAO->BTC payouts to Taproot wallets (issue #448).
+
+class TestIsValidAddress:
+    """BTC address format and network validation.
+
+    Each provider network must accept only its own addresses and reject
+    addresses from other networks (issue #460). Taproot regression guard:
+    the old bech32-only check rejected all bc1p… addresses (issue #448).
     """
 
-    # mainnet / testnet / regtest × P2PKH / P2SH / P2WPKH / P2WSH / P2TR
-    VALID = [
-        '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',  # mainnet P2PKH
-        '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy',  # mainnet P2SH
-        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',  # mainnet P2WPKH
-        'bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3',  # mainnet P2WSH
-        'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',  # mainnet P2TR
-        'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn',  # testnet P2PKH
-        '2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc',  # testnet P2SH
-        'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',  # testnet P2WPKH
-        'tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c',  # testnet P2TR (BIP-350)
-        'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',  # regtest P2WPKH
-        'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6',  # regtest P2TR
+    MAINNET_ADDRS = [
+        '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',  # P2PKH
+        '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy',  # P2SH
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',  # P2WPKH
+        'bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3',  # P2WSH
+        'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',  # P2TR
     ]
-
-    INVALID = [
+    TESTNET_ADDRS = [
+        'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn',  # P2PKH (base58 shared with regtest)
+        '2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc',  # P2SH  (base58 shared with regtest)
+        'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',  # P2WPKH
+        'tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c',  # P2TR
+    ]
+    REGTEST_ADDRS = [
+        'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',  # P2WPKH
+        'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6',  # P2TR
+        # m/n/2 base58 accepted by regtest (shares testnet version bytes)
+        'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn',
+        '2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc',
+    ]
+    MALFORMED = [
         '',
         'notanaddress',
         '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',  # ETH address
@@ -305,19 +316,72 @@ class TestIsValidAddress:
         'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3XX',  # corrupted v0
     ]
 
-    def test_accepts_all_standard_types(self):
-        provider = make_lightweight_provider()
-        for addr in self.VALID:
-            assert provider.is_valid_address(addr), f'should accept {addr}'
+    # --- mainnet provider ---
 
-    def test_accepts_taproot(self):
-        """Explicit #448 guard: Taproot payout addresses must validate."""
+    def test_mainnet_accepts_mainnet_addresses(self):
+        provider = make_lightweight_provider()  # defaults to mainnet
+        for addr in self.MAINNET_ADDRS:
+            assert provider.is_valid_address(addr), f'mainnet provider should accept {addr}'
+
+    def test_mainnet_accepts_taproot(self):
+        """Explicit #448 guard: Taproot payout addresses must validate on mainnet."""
         provider = make_lightweight_provider()
         assert provider.is_valid_address('bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr')
 
+    def test_mainnet_rejects_testnet_addresses(self):
+        provider = make_lightweight_provider()
+        for addr in self.TESTNET_ADDRS:
+            assert not provider.is_valid_address(addr), f'mainnet provider should reject testnet {addr}'
+
+    def test_mainnet_rejects_regtest_bech32_addresses(self):
+        provider = make_lightweight_provider()
+        for addr in ('bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',
+                     'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6'):
+            assert not provider.is_valid_address(addr), f'mainnet provider should reject regtest {addr}'
+
+    # --- testnet provider ---
+
+    def test_testnet_accepts_testnet_addresses(self):
+        provider = make_lightweight_provider_for_network('testnet')
+        for addr in self.TESTNET_ADDRS:
+            assert provider.is_valid_address(addr), f'testnet provider should accept {addr}'
+
+    def test_testnet_rejects_mainnet_addresses(self):
+        provider = make_lightweight_provider_for_network('testnet')
+        for addr in self.MAINNET_ADDRS:
+            assert not provider.is_valid_address(addr), f'testnet provider should reject mainnet {addr}'
+
+    def test_testnet_rejects_regtest_bech32_addresses(self):
+        """bcrt1… is regtest-only and must be rejected by a testnet provider."""
+        provider = make_lightweight_provider_for_network('testnet')
+        for addr in ('bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',
+                     'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6'):
+            assert not provider.is_valid_address(addr), f'testnet provider should reject {addr}'
+
+    # --- regtest provider ---
+
+    def test_regtest_accepts_regtest_addresses(self):
+        provider = make_lightweight_provider_for_network('regtest')
+        for addr in self.REGTEST_ADDRS:
+            assert provider.is_valid_address(addr), f'regtest provider should accept {addr}'
+
+    def test_regtest_rejects_mainnet_addresses(self):
+        provider = make_lightweight_provider_for_network('regtest')
+        for addr in self.MAINNET_ADDRS:
+            assert not provider.is_valid_address(addr), f'regtest provider should reject mainnet {addr}'
+
+    def test_regtest_rejects_testnet_bech32_addresses(self):
+        """tb1… is testnet-only bech32; regtest uses bcrt1…."""
+        provider = make_lightweight_provider_for_network('regtest')
+        for addr in ('tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',
+                     'tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c'):
+            assert not provider.is_valid_address(addr), f'regtest provider should reject testnet bech32 {addr}'
+
+    # --- common ---
+
     def test_rejects_malformed(self):
         provider = make_lightweight_provider()
-        for addr in self.INVALID:
+        for addr in self.MALFORMED:
             assert not provider.is_valid_address(addr), f'should reject {addr!r}'
 
     def test_rejects_non_string(self):

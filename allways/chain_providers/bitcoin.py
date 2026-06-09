@@ -45,6 +45,29 @@ def detect_address_type(address: str) -> str:
     return 'unknown'
 
 
+def _address_network(address: str) -> str:
+    """Classify an address by its implied BTC network.
+
+    Returns one of:
+    - 'mainnet'         — bc1q…, bc1p…, 1…, 3…
+    - 'testnet-bech32'  — tb1q…, tb1p…  (testnet/testnet4 native-segwit only)
+    - 'testnet-base58'  — m…, n…, 2…  (testnet base58 version bytes,
+                          shared with regtest due to Bitcoin Core's design)
+    - 'regtest'         — bcrt1q…, bcrt1p…
+    - 'unknown'
+    """
+    if address.startswith(('bc1q', 'bc1p', '1', '3')):
+        return 'mainnet'
+    if address.startswith(('tb1q', 'tb1p')):
+        return 'testnet-bech32'
+    if address.startswith(('bcrt1q', 'bcrt1p')):
+        return 'regtest'
+    # base58 version bytes 0x6f (m/n) and 0xc4 (2) are shared by testnet and regtest
+    if address[:1] in ('m', 'n', '2'):
+        return 'testnet-base58'
+    return 'unknown'
+
+
 def to_mainnet_wif(wif: str) -> str:
     """Convert a testnet/regtest WIF (0xef) to mainnet (0x80) for signing libraries."""
     decoded = base58.b58decode_check(wif)
@@ -526,13 +549,31 @@ class BitcoinProvider(ChainProvider):
             return 0
 
     def is_valid_address(self, address: str) -> bool:
-        """Validate BTC address format without RPC (embit decode; all types incl. Taproot)."""
+        """Validate BTC address format and network against the configured BTC_NETWORK.
+
+        Rejects addresses that belong to a different network (e.g. testnet addresses
+        on a mainnet provider) to prevent misdirected on-chain sends.
+        """
         if not address or not isinstance(address, str):
             return False
         try:
-            return address_to_scriptpubkey(address) is not None
+            if address_to_scriptpubkey(address) is None:
+                return False
         except Exception:
             return False
+        addr_net = _address_network(address)
+        if addr_net == 'unknown':
+            return False
+        configured = self.network  # 'mainnet', 'testnet', 'testnet4', or 'regtest'
+        if configured in ('mainnet', ''):
+            return addr_net == 'mainnet'
+        if configured in ('testnet', 'testnet4'):
+            # tb1… (bech32) and m/n/2 (base58) are valid; bcrt1… is regtest-only
+            return addr_net in ('testnet-bech32', 'testnet-base58')
+        if configured == 'regtest':
+            # regtest uses bcrt1… bech32 and the testnet base58 version bytes (m/n/2)
+            return addr_net in ('regtest', 'testnet-base58')
+        return False
 
     def get_wif(self, address: str) -> Optional[str]:
         """Get WIF private key from env var or Bitcoin Core wallet."""
