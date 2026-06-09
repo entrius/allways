@@ -908,6 +908,9 @@ class TestSourceBalanceLock:
 
     def test_tao_source_balance_check_holds_axon_lock(self):
         """A TAO-sourced reserve must acquire axon_lock around get_balance."""
+        from allways.utils.rate import derive_tao_leg
+        from allways.validator.axon_handlers import recompute_reserve_amounts
+
         validator = make_reserve_validator()
         lock = validator.axon_lock
 
@@ -926,8 +929,21 @@ class TestSourceBalanceLock:
         tao.get_balance.side_effect = _get_balance
         validator.axon_chain_providers = {'tao': tao, 'btc': MagicMock()}
 
+        # The balance lookup now runs after the quote checks, so the request must
+        # carry a self-consistent quote to reach it. Derive the amounts from the
+        # same functions the handler uses so it passes exactly.
         commitment = make_commitment(from_chain='tao', to_chain='btc')
-        synapse = make_reserve_synapse(from_chain='tao', to_chain='btc', from_address='5user')
+        from_amount = _RESERVE_TAO_AMOUNT
+        to_amount = recompute_reserve_amounts(commitment, 'tao', 'btc', from_amount)
+        tao_amount = derive_tao_leg('tao', from_amount, 'btc', to_amount)
+        synapse = make_reserve_synapse(
+            from_chain='tao',
+            to_chain='btc',
+            from_address='5user',
+            from_amount=from_amount,
+            to_amount=to_amount,
+            tao_amount=tao_amount,
+        )
         run_reserve_handler(validator, synapse, commitment=commitment)
 
         assert held.get('locked') is True
