@@ -297,21 +297,19 @@ class SwapFulfiller:
 
         bt.logging.info(f'Processing swap {swap.id}: {swap.from_chain} -> {swap.to_chain}')
 
-        # Step 1: Verify swap safety (timeout, rate, collateral)
-        safety_result = self.verify_swap_safety(swap)
-        if safety_result is None:
-            bt.logging.warning(f'Swap {swap.id}: failed safety checks, skipping')
-            return False
-
-        user_receives_amount, my_source_address = safety_result
-
-        # Step 2: Verify user sent source funds
-        if not self.verify_user_sent_funds(swap, my_source_address):
-            return False
-
-        # Step 3: Send destination funds — unless we already did on a previous
-        # pass, in which case we skip straight to the mark_fulfilled retry.
         if sent is None:
+            # First pass — gate the send on safety (timeout cushion, rate,
+            # source funds), then send. The cushion blocks STARTING a fulfill
+            # with too little runway left for a rescue extension.
+            safety_result = self.verify_swap_safety(swap)
+            if safety_result is None:
+                bt.logging.warning(f'Swap {swap.id}: failed safety checks, skipping')
+                return False
+            user_receives_amount, my_source_address = safety_result
+
+            if not self.verify_user_sent_funds(swap, my_source_address):
+                return False
+
             send_result = self.send_dest_funds(swap, user_receives_amount)
             if not send_result:
                 bt.logging.error(f'Swap {swap.id}: failed to send dest funds')
@@ -326,6 +324,11 @@ class SwapFulfiller:
             self.sent[swap.id] = sent
             self.save_sent_cache()
         else:
+            # Funds are already out — skip the cushion/safety gate (scoped to
+            # STARTING a fulfill); retrying mark_fulfilled to the deadline only
+            # helps and avoids a timeout slash of a miner that paid (#462).
+            # Recompute the post-fee amount (rate is snapshotted on the swap).
+            _, user_receives_amount = expected_swap_amounts(swap, self.fee_divisor)
             # Keep the retained deadline current with any extension seen while
             # active, so cleanup never discards a still-extendable swap early.
             if swap.timeout_block > sent.timeout_block:
@@ -333,10 +336,9 @@ class SwapFulfiller:
                 self.save_sent_cache()
             bt.logging.info(f'Swap {swap.id}: retrying mark_fulfilled for cached send tx {sent.to_tx_hash[:16]}...')
 
-        # Step 4: Mark fulfilled on contract. We pass ``user_receives_amount``
-        # as ``to_amount`` because at mark_fulfilled time the contract stores
-        # the actual sent amount (post-fee), which is what ``swap.to_amount``
-        # becomes after the call.
+        # Mark fulfilled on contract. ``user_receives_amount`` is the post-fee
+        # amount the contract stores as ``to_amount`` (what ``swap.to_amount``
+        # becomes after the call).
         try:
             self.client.mark_fulfilled(
                 wallet=self.wallet,
