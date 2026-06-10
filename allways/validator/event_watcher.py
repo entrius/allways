@@ -790,10 +790,9 @@ class ContractEventWatcher:
             if miner and isinstance(remaining, int):
                 self._record_collateral_event(block_num, miner, int(remaining))
         elif name == 'ReservationExtensionFinalized':
-            # Event-driven cache update — bumps both the pending_confirms row and
+            # Event-driven cache update: bumps both the pending_confirms row and
             # the reservation pin so neither purge sweep drops a still-live entry
-            # at its stale reserved_until. Replaces the polling refresh the legacy
-            # vote-extend flow needed (commit 1b942e8).
+            # at its stale reserved_until. Replaces the legacy polling refresh.
             miner = values.get('miner', '')
             applied_target = values.get('applied_target')
             if miner and isinstance(applied_target, int):

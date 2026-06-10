@@ -321,12 +321,9 @@ def try_extend_reservation(
         pending=pending,
     )
     if finalized_target is not None:
-        # Same-step write so the upstream purge sweeps see the bumped deadline.
-        # Bumps BOTH the pending_confirms row and the reservation pin — the pin
-        # purge keys off its own cached TTL, so updating only the row would let
-        # expire_stale_reservation_pins drop a still-live pin (#441). The
-        # matching ReservationExtensionFinalized event won't be picked up until
-        # the next forward step's event_watcher.sync_to.
+        # Same-step write so the upstream purge sweeps see the bumped deadline,
+        # bumping BOTH the pending_confirms row and the pin — updating only the
+        # row would let the pin purge drop a still-live pin at its stale TTL (#441).
         self.state_store.extend_reservation_deadline(item.miner_hotkey, finalized_target)
         reserved_until = finalized_target
         # The just-finalized proposal is gone from contract storage; refresh

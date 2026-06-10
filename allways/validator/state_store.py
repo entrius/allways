@@ -268,11 +268,9 @@ class ValidatorStateStore:
         )
 
     def extend_reservation_deadline(self, miner_hotkey: str, reserved_until: int) -> None:
-        """Advance a reservation's deadline on BOTH cached copies — the
-        pending_confirms row and the reservation pin — so neither purge sweep
-        drops a still-live reservation. The single write path every extension-
-        finalize caller must use; bumping only one copy desyncs the pin and
-        prematurely purges it (#441).
+        """Advance a reservation's deadline on BOTH cached copies (pending_confirms
+        row and reservation pin) so neither purge sweep drops a still-live
+        reservation. The one write path all extension-finalize callers must use (#441).
         """
         self.update_reserved_until(miner_hotkey, reserved_until)
         self.update_reservation_pin_reserved_until(miner_hotkey, reserved_until)
