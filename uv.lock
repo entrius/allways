@@ -164,7 +164,7 @@ wheels = [
 
 [[package]]
 name = "allways"
-version = "1.0.9"
+version = "1.0.12"
 source = { editable = "." }
 dependencies = [
     { name = "base58" },
