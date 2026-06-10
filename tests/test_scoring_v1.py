@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from allways.constants import (
+    DIRECTION_POOLS,
     MAX_SCORING_BACKFILL_BLOCKS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
@@ -28,8 +29,9 @@ from allways.validator.scoring import (
 )
 from allways.validator.state_store import ReservationPin, ValidatorStateStore
 
-POOL_TAO_BTC = 0.5
-POOL_BTC_TAO = 0.5
+# Mirror production pool shares so these stay in sync if DIRECTION_POOLS changes.
+POOL_TAO_BTC = DIRECTION_POOLS[('tao', 'btc')]
+POOL_BTC_TAO = DIRECTION_POOLS[('btc', 'tao')]
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -1886,10 +1888,10 @@ class TestCapacityWeighting:
         self.seed_tao_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v)
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.25, atol=1e-6)
-        # Pool conservation: hk_a got 0.125, btc→tao bucket fully recycles (0.5),
-        # plus capacity shortfall on tao→btc (0.375) → recycle = 0.875.
+        # Pool conservation: hk_a got POOL_TAO_BTC*0.25; the rest of both buckets
+        # and the unallocated pool all recycle, so recycle = 1 - that share.
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 0.875, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_TAO_BTC * 0.25, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1939,10 +1941,10 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v)
-        # Both split crown 50/50. A's capacity = 1.0, B's = 0.2. Direction pool = 0.5.
-        # A earns 0.5 * 0.5 * 1.0 = 0.25; B earns 0.5 * 0.5 * 0.2 = 0.05.
-        np.testing.assert_allclose(rewards[0], 0.25, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], 0.05, atol=1e-6)
+        # Both split crown 50/50. A's capacity = 1.0, B's = 0.2.
+        # A earns pool * 0.5 * 1.0; B earns pool * 0.5 * 0.2.
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5 * 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * 0.5 * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_cold_start_max_swap_zero_is_fail_safe(self, tmp_path: Path):
@@ -2326,8 +2328,8 @@ class TestCapacityVolumeInteraction:
             to_chain='btc',
         )
         rewards, _ = calculate_miner_rewards(v)
-        # A: pool 0.5 × crown 1.0 × sr 1.0 × capacity 0.5 × volume_factor 0.5
-        np.testing.assert_allclose(rewards[0], 0.5 * 1.0 * 1.0 * 0.5 * 0.5, atol=1e-6)
+        # A: pool × crown 1.0 × sr 1.0 × capacity 0.5 × volume_factor 0.5
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 1.0 * 1.0 * 0.5 * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
