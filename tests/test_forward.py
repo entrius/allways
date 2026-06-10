@@ -7,11 +7,13 @@ block instead of the freshly extended deadline, collapsing its runway. This
 reproduces the swap 206 timeout.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from allways.classes import Swap, SwapStatus
-from allways.validator.forward import extend_fulfilled_near_timeout
+from allways.validator.forward import extend_fulfilled_near_timeout, try_extend_reservation
+from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
 from allways.validator.swap_tracker import SwapTracker
 
 # Real swap 206 numbers: extension 2 was proposed at this block, and a BTC
@@ -136,3 +138,82 @@ class TestExtendFulfilledNearTimeout:
 
         v.optimistic_extensions.maybe_propose_timeout.assert_not_called()
         v.optimistic_extensions.maybe_challenge_timeout.assert_not_called()
+
+
+def make_reservation_validator(store, current_block, finalized_target):
+    """Stand-in Validator for ``try_extend_reservation`` carrying a real state
+    store. ``maybe_finalize_reservation`` returns ``finalized_target`` (an int
+    for an inline finalize this step)."""
+    ext = MagicMock()
+    ext.fetch_pending_reservation.return_value = MagicMock()
+    ext.maybe_finalize_reservation.return_value = finalized_target
+
+    subtensor = MagicMock()
+    subtensor.get_current_block.return_value = current_block
+
+    contract_client = MagicMock()
+    contract_client.get_miner_reserved_until.return_value = 1000
+
+    return SimpleNamespace(
+        subtensor=subtensor,
+        contract_client=contract_client,
+        optimistic_extensions=ext,
+        state_store=store,
+    )
+
+
+class TestTryExtendReservationPinSync:
+    """Regression for #441: an inline reservation-extension finalize must bump
+    BOTH the pending_confirms row and the reservation pin, so the same forward
+    step's pin purge can't drop a still-live pin at its stale TTL."""
+
+    def _seed(self, store):
+        store.upsert_reservation_pin(
+            ReservationPin(
+                miner_hotkey='miner-1',
+                reserve_block=900,
+                from_chain='btc',
+                to_chain='tao',
+                rate_str='345',
+                counter_rate_str='0.0029',
+                miner_from_address='bc1-miner',
+                miner_to_address='5miner',
+                reserved_until=1000,
+                created_at=1.0,
+            )
+        )
+        item = PendingConfirm(
+            miner_hotkey='miner-1',
+            from_tx_hash='tx-1',
+            from_chain='btc',
+            to_chain='tao',
+            from_address='bc1-user',
+            to_address='5user',
+            tao_amount=123,
+            from_amount=456,
+            to_amount=789,
+            miner_from_address='bc1-miner',
+            miner_to_address='5miner',
+            rate_str='345',
+            reserved_until=1000,
+            queued_at=1.0,
+        )
+        store.enqueue(item)
+        return item
+
+    def test_inline_finalize_bumps_pin_so_same_step_purge_keeps_it(self, tmp_path: Path):
+        # Current block is past the original reserved_until (1000), so the pin
+        # purge would drop the pin unless the inline finalize bumped its TTL.
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db', current_block_fn=lambda: 1003)
+        item = self._seed(store)
+        v = make_reservation_validator(store, current_block=1003, finalized_target=1300)
+
+        # tx_info=None returns right after the finalize block, so we exercise the
+        # finalize path without the propose/challenge machinery.
+        try_extend_reservation(v, item, current_block=1003, swap_label='X', miner_short='Y', tx_info=None)
+
+        assert store.get_reservation_pin('miner-1').reserved_until == 1300
+        assert store.get_all()[0].reserved_until == 1300
+        assert store.purge_expired_reservation_pins() == 0
+        assert store.get_reservation_pin('miner-1') is not None
+        store.close()

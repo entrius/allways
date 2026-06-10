@@ -159,8 +159,8 @@ class OptimisticExtensionWatcher:
 
         Returns the applied ``target_block`` on success, ``None`` otherwise.
         Callers use the returned target to refresh local caches (e.g.
-        state_store.update_reserved_until) without waiting for the next event
-        sync. ``pending`` is the caller-supplied snapshot — see
+        state_store.extend_reservation_deadline) without waiting for the next
+        event sync. ``pending`` is the caller-supplied snapshot — see
         ``maybe_propose_reservation``. The contract's own check is
         authoritative; the local pending read just lets us avoid a
         known-doomed tx. ``challenge_window_blocks`` is passed in (rather

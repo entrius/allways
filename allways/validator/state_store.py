@@ -154,18 +154,6 @@ class ValidatorStateStore:
         )
         return self.row_to_pending(row) if row is not None else None
 
-    def update_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
-        """Refresh the cached reserved_until on an existing pending_confirms row.
-
-        Called after the contract's reservation has been extended on-chain — without
-        this, the row's stale value causes ``purge_expired_pending_confirms`` to
-        delete a still-live entry the moment the original TTL elapses.
-        """
-        self._execute(
-            'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
-            (reserved_until, miner_hotkey),
-        )
-
     def has(self, miner_hotkey: str) -> bool:
         row = self._fetchone(
             'SELECT 1 FROM pending_confirms WHERE miner_hotkey = ? LIMIT 1',
@@ -255,13 +243,17 @@ class ValidatorStateStore:
         )
         return self.row_to_reservation_pin(row) if row is not None else None
 
-    def update_reservation_pin_reserved_until(self, miner_hotkey: str, reserved_until: int) -> None:
-        """Refresh the cached reserved_until on an existing pin row.
-
-        Mirrors ``update_reserved_until`` — called after the contract extends
-        the reservation, so ``purge_expired_reservation_pins`` doesn't drop a
-        still-live pin at its stale TTL.
+    def extend_reservation_deadline(self, miner_hotkey: str, reserved_until: int) -> None:
+        """Advance a reservation's deadline on BOTH cached copies (pending_confirms
+        row and reservation pin) so neither purge sweep drops a still-live
+        reservation. The one write path all extension-finalize callers must use:
+        bumping only one table is what desynced the pin and prematurely purged
+        it (#441). Each UPDATE is a no-op when that table has no matching row.
         """
+        self._execute(
+            'UPDATE pending_confirms SET reserved_until = ? WHERE miner_hotkey = ?',
+            (reserved_until, miner_hotkey),
+        )
         self._execute(
             'UPDATE reservation_pins SET reserved_until = ? WHERE miner_hotkey = ?',
             (reserved_until, miner_hotkey),
