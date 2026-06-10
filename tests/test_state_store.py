@@ -133,16 +133,15 @@ class TestReservationPinPurge:
         assert store.get_expired_reservation_pins() == []
         store.close()
 
-    def test_update_reserved_until_keeps_row_a_purge_would_drop(self, tmp_path: Path):
-        """Regression: after the contract extends a reservation, refreshing the
-        pin's reserved_until must keep it alive past its original TTL — exactly
-        as update_reserved_until does for pending_confirms."""
+    def test_extend_reservation_deadline_keeps_pin_a_purge_would_drop(self, tmp_path: Path):
+        """Regression: after the contract extends a reservation, bumping the
+        pin's reserved_until must keep it alive past its original TTL."""
         store = ValidatorStateStore(
             db_path=tmp_path / 'state.db',
             current_block_fn=lambda: 1003,
         )
         store.upsert_reservation_pin(PIN_SAMPLE1)  # reserved_until=1000, would be purged at 1003
-        store.update_reservation_pin_reserved_until('miner-1', 1300)
+        store.extend_reservation_deadline('miner-1', 1300)
 
         pin = store.get_reservation_pin('miner-1')
         assert pin.reserved_until == 1300
@@ -151,9 +150,9 @@ class TestReservationPinPurge:
         assert store.get_reservation_pin('miner-1') is not None
         store.close()
 
-    def test_update_reserved_until_unknown_hotkey_is_noop(self, tmp_path: Path):
+    def test_extend_reservation_deadline_unknown_hotkey_is_noop(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        store.update_reservation_pin_reserved_until('miner-unknown', 9999)
+        store.extend_reservation_deadline('miner-unknown', 9999)
         assert store.get_reservation_pin('miner-unknown') is None
         store.close()
 

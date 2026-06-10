@@ -232,8 +232,8 @@ class TestMaybeFinalizeReservation:
             pending=w.fetch_pending_reservation(MINER),
         )
         # Returns the applied target so the caller can refresh local caches
-        # (e.g. state_store.update_reserved_until) without waiting for the
-        # next event sync.
+        # (e.g. state_store.extend_reservation_deadline) without waiting for
+        # the next event sync.
         assert result == 1180
         w.contract_client.finalize_extend_reservation.assert_called_once()
 
