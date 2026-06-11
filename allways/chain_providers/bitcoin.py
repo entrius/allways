@@ -25,22 +25,34 @@ LOG_ESPLORA = '[Esplora]'
 
 def detect_address_type(address: str) -> str:
     """Detect Bitcoin address type from its prefix."""
-    if address.startswith('bc1q'):
+    if not address:
+        return 'unknown'
+
+    lower = address.lower()
+    if lower.startswith(('bc1', 'tb1', 'bcrt1')):
+        # BIP-173: bech32 must be all-lowercase or all-uppercase, never mixed.
+        if address != lower and address != address.upper():
+            return 'unknown'
+        addr = lower
+    else:
+        addr = address
+
+    if addr.startswith('bc1q'):
         return ADDR_TYPE_P2WPKH
-    if address.startswith('bc1p'):
+    if addr.startswith('bc1p'):
         return ADDR_TYPE_P2TR
-    if address.startswith('3'):
+    if addr.startswith('3'):
         return ADDR_TYPE_P2SH_P2WPKH
-    if address.startswith('1'):
+    if addr.startswith('1'):
         return ADDR_TYPE_P2PKH
     # Regtest/testnet prefixes
-    if address.startswith('bcrt1q') or address.startswith('tb1q'):
+    if addr.startswith('bcrt1q') or addr.startswith('tb1q'):
         return ADDR_TYPE_P2WPKH
-    if address.startswith('bcrt1p') or address.startswith('tb1p'):
+    if addr.startswith('bcrt1p') or addr.startswith('tb1p'):
         return ADDR_TYPE_P2TR
-    if address.startswith('2'):
+    if addr.startswith('2'):
         return ADDR_TYPE_P2SH_P2WPKH
-    if address.startswith('m') or address.startswith('n'):
+    if addr.startswith('m') or addr.startswith('n'):
         return ADDR_TYPE_P2PKH
     return 'unknown'
 
@@ -59,6 +71,9 @@ def to_mainnet_address(address: str) -> str:
     Re-encodes the scriptPubKey under the mainnet network (handles legacy, segwit
     v0, and Taproot); returns the address unchanged if it can't be parsed.
     """
+    lower = address.lower()
+    if lower.startswith(('bc1', 'tb1', 'bcrt1')) and (address == lower or address == address.upper()):
+        address = lower
     try:
         return address_to_scriptpubkey(address).address(NETWORKS['main'])
     except Exception:

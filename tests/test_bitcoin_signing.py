@@ -28,6 +28,15 @@ class TestDetectAddressType:
     def test_p2wpkh(self):
         assert detect_address_type('bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc') == ADDR_TYPE_P2WPKH
 
+    def test_p2wpkh_uppercase_bech32(self):
+        assert (
+            detect_address_type('BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4')
+            == ADDR_TYPE_P2WPKH
+        )
+
+    def test_mixed_case_bech32_rejected(self):
+        assert detect_address_type('Bc1qw508d6qejxtdg4y5r3zarvvary0c5xw7kv8f3t4') == 'unknown'
+
     def test_p2sh_p2wpkh(self):
         assert detect_address_type('37XAVCtKEvPbx2rpkxx7FmrUsetFXSawx5') == ADDR_TYPE_P2SH_P2WPKH
 
@@ -190,6 +199,11 @@ class TestBitcoinProviderVerifyFromProof:
         addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
 
         assert provider.verify_from_proof(addr, TEST_MESSAGE, signature) is True
+
+    def test_uppercase_bech32_address_verifies(self):
+        provider = make_lightweight_provider()
+        addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
+        assert provider.verify_from_proof(addr.upper(), TEST_MESSAGE, signature) is True
 
     def test_wrong_message_fails_verification(self):
         provider = make_lightweight_provider()
