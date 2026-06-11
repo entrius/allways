@@ -1,0 +1,74 @@
+use anchor_lang::prelude::*;
+
+/// Collateral-affecting events carry the **resulting total**, not a blind delta — so any consumer
+/// can set an absolute baseline from a single event instead of accumulating from an unknown start
+/// (v2 cleanup #5; the missing-baseline footgun behind the v1.0.9 mass-recycle outage). Phase 4's
+/// fee/slash events MUST follow the same post-total rule.
+#[event]
+pub struct CollateralPosted {
+    pub miner: Pubkey,
+    /// Amount added this call (lamports).
+    pub amount: u64,
+    /// Miner's resulting collateral total after this call (lamports).
+    pub total: u64,
+}
+
+#[event]
+pub struct CollateralWithdrawn {
+    pub miner: Pubkey,
+    /// Amount removed this call (lamports).
+    pub amount: u64,
+    /// Miner's resulting collateral total after this call (lamports).
+    pub total: u64,
+}
+
+// --- Phase 4: swap lifecycle (keyed by swap_key = keccak(from_tx_hash)) ---
+
+#[event]
+pub struct SwapInitiated {
+    pub swap_key: [u8; 32],
+    pub user: Pubkey,
+    pub miner: Pubkey,
+    pub sol_amount: u64,
+    pub from_amount: u128,
+    pub to_amount: u128,
+    pub initiated_at: i64,
+}
+
+#[event]
+pub struct SwapFulfilled {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub to_tx_hash: String,
+    /// Emitted so indexers don't re-read the contract for the delivered amount (v2 cleanup).
+    pub to_amount: u128,
+}
+
+#[event]
+pub struct SwapCompleted {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub sol_amount: u64,
+    /// Protocol fee taken from collateral into the treasury (lamports).
+    pub fee: u64,
+}
+
+#[event]
+pub struct SwapTimedOut {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub sol_amount: u64,
+    /// Collateral slashed and refunded to the user (lamports).
+    pub slash: u64,
+}
+
+// --- Phase 6: treasury ---
+
+#[event]
+pub struct TreasuryWithdrawn {
+    pub recipient: Pubkey,
+    /// Amount withdrawn this call (lamports).
+    pub amount: u64,
+    /// Treasury balance remaining after this call (lamports) — post-total per the §5 convention.
+    pub total: u64,
+}

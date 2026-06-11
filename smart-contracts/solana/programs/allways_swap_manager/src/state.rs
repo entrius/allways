@@ -1,0 +1,182 @@
+use anchor_lang::prelude::*;
+
+use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, MAX_TX_LEN, MAX_VALIDATORS};
+
+/// Singleton config PDA (`seeds = [CONFIG_SEED]`).
+///
+/// Grows phase by phase (treasury counter, swap config — see SOLANA_MIGRATION_RESEARCH.md §14).
+/// All amounts in lamports, durations in seconds.
+#[account]
+#[derive(InitSpace)]
+pub struct Config {
+    /// Admin authority (treasury withdrawals + config setters).
+    pub admin: Pubkey,
+    /// On-chain schema version, for upgrade tracking.
+    pub version: u32,
+    /// Minimum collateral a miner must hold to be activatable (lamports).
+    pub min_collateral: u64,
+    /// Maximum collateral a miner may post (lamports). 0 = no cap.
+    pub max_collateral: u64,
+    /// Swap fulfillment timeout (seconds). Phase 1 cooldown = 2×; Phase 4 swap timeout.
+    pub fulfillment_timeout_secs: i64,
+    /// Swap-size bounds on the collateral-backed (SOL) amount, in lamports. 0 = unbounded.
+    pub min_swap_amount: u64,
+    pub max_swap_amount: u64,
+    /// How long a reservation holds a miner exclusive, in seconds.
+    pub reservation_ttl_secs: i64,
+    /// Quorum threshold, percent of the whitelisted validator set (e.g. 66).
+    pub consensus_threshold_percent: u8,
+    /// Whitelisted validator set (consensus participants), capped at MAX_VALIDATORS.
+    #[max_len(MAX_VALIDATORS)]
+    pub validators: Vec<Pubkey>,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Singleton native-SOL collateral vault PDA (`seeds = [VAULT_SEED]`), program-owned.
+///
+/// Invariant: vault.lamports == rent_exempt_minimum + total_collateral (+ treasury + pending, later).
+#[account]
+#[derive(InitSpace)]
+pub struct Vault {
+    /// Σ of all miners' collateral credited to the vault (lamports), excludes the rent reserve.
+    pub total_collateral: u64,
+    /// Accrued protocol fees held in the vault (lamports), awaiting admin withdrawal (Phase 6).
+    pub treasury_total: u64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Per-miner state PDA (`seeds = [MINER_SEED, miner]`).
+#[account]
+#[derive(InitSpace)]
+pub struct MinerState {
+    /// The miner (hotkey-equivalent) this state belongs to.
+    pub miner: Pubkey,
+    /// Collateral credited to this miner (lamports). Backed 1:1 by lamports in the Vault.
+    pub collateral: u64,
+    /// Whether the miner is active (set via consensus).
+    pub active: bool,
+    /// Whether the miner currently has an in-flight swap (Phase 4).
+    pub has_active_swap: bool,
+    /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
+    pub deactivation_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// A consensus vote round PDA (`seeds = [VOTE_SEED, &[request_type], target]`).
+///
+/// Accumulates validator votes for one request (e.g. activate a miner). `bound_hash` binds
+/// every voter to identical request parameters (keccak of the canonical request) — for requests
+/// whose params live entirely in the seeds this is trivially satisfied, but later phases
+/// (reserve/initiate) carry amounts/addresses the seeds don't, where it prevents bait-and-switch.
+#[account]
+#[derive(InitSpace)]
+pub struct VoteRound {
+    /// keccak-256 of the canonical request params; set by the first voter, checked by the rest.
+    pub bound_hash: [u8; 32],
+    /// Validators who have voted this round (deduplicated), capped at MAX_VALIDATORS.
+    #[max_len(MAX_VALIDATORS)]
+    pub voters: Vec<Pubkey>,
+    /// Unix timestamp the round opened (0 = empty/available). Used for TTL reset.
+    pub created_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Confirmed reservation for a miner (`seeds = [RESV_SEED, miner]`).
+///
+/// Created on `vote_reserve` quorum; consumed by `vote_initiate` (Phase 4) or cleared by
+/// `cancel_reservation`. `reserved_until == 0` means no active reservation (slot empty/cleared);
+/// `reserved_until >= now` means active; `0 < reserved_until < now` means expired (overwritable).
+/// `from_addr` is kept so Phase 4 can verify the initiating user matches the reserver.
+#[account]
+#[derive(InitSpace)]
+pub struct Reservation {
+    /// keccak-256 binding (miner, from_addr, chains, amounts) — same preimage validators voted on.
+    pub bound_hash: [u8; 32],
+    /// User's source-chain address (the reserver).
+    #[max_len(MAX_ADDR_LEN)]
+    pub from_addr: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    /// Collateral-backed swap size (SOL lamports). Bounded by Config min/max_swap_amount.
+    pub sol_amount: u64,
+    /// Off-chain leg amounts in their own assets (u128 to cover wei-scale).
+    pub from_amount: u128,
+    pub to_amount: u128,
+    /// Pinned miner quote — captured + hash-bound at reserve time so it is an immutable quote.
+    /// Phase 4's `vote_initiate` MUST honor these (not the miner's live commitment): this closes
+    /// the rate-swing / deposit-address-theft total-loss bug (v2 cleanup #1).
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_to_addr: String,
+    #[max_len(MAX_RATE_LEN)]
+    pub rate: String,
+    /// Expiry, unix seconds (0 = empty).
+    pub reserved_until: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Swap lifecycle status. Terminal states (Completed/TimedOut) are not stored — the Swap PDA is
+/// closed on confirm/timeout — so only the two live states exist here.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum SwapStatus {
+    Active,
+    Fulfilled,
+}
+
+/// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
+/// Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`.
+/// Chains/amounts/miner-quote are copied from the (immutable) Reservation; user-side fields come
+/// from the initiate vote (and are hash-bound). Identified by from_tx_hash, not a u64 counter.
+#[account]
+#[derive(InitSpace)]
+pub struct Swap {
+    pub user: Pubkey,
+    pub miner: Pubkey,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_to_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_to_addr: String,
+    #[max_len(MAX_RATE_LEN)]
+    pub rate: String,
+    /// Collateral-backed swap size (SOL lamports) — fee/slash basis.
+    pub sol_amount: u64,
+    pub from_amount: u128,
+    pub to_amount: u128,
+    #[max_len(MAX_TX_LEN)]
+    pub from_tx_hash: String,
+    pub from_tx_block: u32,
+    #[max_len(MAX_TX_LEN)]
+    pub to_tx_hash: String,
+    pub to_tx_block: u32,
+    pub status: SwapStatus,
+    pub initiated_at: i64,
+    pub timeout_at: i64,
+    pub fulfilled_at: i64,
+    pub bump: u8,
+}
+
+/// Permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`). Set `used = true` on initiate
+/// quorum and never closed — outlives the Swap (which closes on completion), mirroring ink!'s
+/// `used_from_tx`. A from_tx_hash can initiate at most one swap, ever.
+#[account]
+#[derive(InitSpace)]
+pub struct TxMarker {
+    pub used: bool,
+    pub bump: u8,
+}
