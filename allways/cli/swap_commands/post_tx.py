@@ -17,7 +17,12 @@ from allways.cli.swap_commands.helpers import (
     print_contract_error,
     resolve_source_tx_block,
 )
-from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
+from allways.cli.swap_commands.swap import (
+    from_smallest_unit,
+    poll_for_swap_creation,
+    resolve_recent_swap_id,
+    sign_and_broadcast_confirm,
+)
 from allways.constants import NETUID_FINNEY
 from allways.contract_client import ContractError
 
@@ -70,6 +75,20 @@ def post_tx_command(tx_hash: str, tx_block: int):
         return
 
     if reserved_until <= current_block:
+        # reserved_until drops to 0 the moment the swap initiates (the contract clears
+        # the reservation row in vote_initiate), which by block number alone is
+        # indistinguishable from a genuine expiry. Check for a live swap first so we
+        # don't tell the user their reservation expired — and delete the pending
+        # record — when it actually advanced into a swap.
+        try:
+            swap_id = resolve_recent_swap_id(client, state.miner_hotkey)
+        except ContractError:
+            swap_id = None
+        if swap_id is not None:
+            clear_pending_swap()
+            console.print(f'\n[green]Your reservation has advanced into a swap. ID: {swap_id}[/green]')
+            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
+            return
         clear_pending_swap()
         console.print('[red]Reservation has expired.[/red]')
         console.print('[dim]Run `alw swap now` to start a new swap.[/dim]')
