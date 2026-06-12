@@ -20,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
+    probe_pending_reservation,
     resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import (
@@ -91,6 +92,48 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
     except ContractError:
         pass
 
+    # Reconcile against on-chain state before rendering the summary. After
+    # vote_initiate the reservation row is gone, so hydration leaves
+    # from_chain empty and the old summary-first flow crashed in
+    # from_smallest_unit via get_chain('') (#473). The probe also tells an
+    # initiated swap apart from an expired reservation.
+    with loading('Checking on-chain swap status...'):
+        current_block = subtensor.get_current_block()
+        status = probe_pending_reservation(client, state, current_block)
+
+    if status.kind == 'rpc_error':
+        console.print('[red]Failed to read reservation status from contract.[/red]')
+        console.print('[dim]State file kept — retry with: alw swap resume-reservation[/dim]')
+        return
+
+    if status.kind == 'our_swap':
+        clear_pending_swap()
+        console.print(f'\n[green]Swap already on-chain! ID: {status.swap.id}[/green]')
+        console.print(f'[dim]Watch with: alw view swap {status.swap.id} --watch[/dim]')
+        if not skip_confirm:
+            from allways.cli.swap_commands.view import watch_swap
+
+            final = watch_swap(client, status.swap.id)
+            if final and final.status == SwapStatus.COMPLETED:
+                from allways.cli.swap_commands.swap import display_receipt
+
+                display_receipt(final)
+        return
+
+    if status.kind in ('expired', 'replaced'):
+        clear_pending_swap()
+        console.print('\n[yellow]Reservation is no longer active.[/yellow]')
+        console.print(
+            '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
+            'or completed. Check with: alw view active-swaps[/dim]\n'
+        )
+        console.print('[dim]Start a new swap with: alw swap now[/dim]')
+        return
+
+    # ours_active — the reservation row exists and matches our local state,
+    # so hydration populated the display fields the summary needs.
+    reserved_until = status.reserved_until
+
     # Display pending swap summary
     elapsed_min = (time.time() - state.created_at) / 60
     human_send = from_smallest_unit(state.from_amount, state.from_chain)
@@ -107,53 +150,6 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
     )
     console.print()
     console.print(Panel(summary, title='[bold]Pending Swap[/bold]', expand=False))
-
-    # Check if swap is already on-chain (cheap bool check before expensive scan)
-    try:
-        with loading('Checking on-chain swap status...'):
-            has_swap = client.get_miner_has_active_swap(state.miner_hotkey)
-        if has_swap:
-            for swap in client.get_miner_active_swaps(state.miner_hotkey):
-                is_ours = (
-                    swap.user_from_address == state.user_from_address or swap.user_to_address == state.receive_address
-                )
-                if is_ours:
-                    clear_pending_swap()
-                    console.print(f'\n[green]Swap already on-chain! ID: {swap.id}[/green]')
-                    if not skip_confirm:
-                        from allways.cli.swap_commands.view import watch_swap
-
-                        final = watch_swap(client, swap.id)
-                        if final and final.status == SwapStatus.COMPLETED:
-                            from allways.cli.swap_commands.swap import display_receipt
-
-                            display_receipt(final)
-                    return
-    except ContractError:
-        pass
-
-    # Check reservation status — if expired, there's nothing to resume
-    try:
-        with loading('Reading reservation status...'):
-            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-            current_block = subtensor.get_current_block()
-        reservation_active = reserved_until > current_block
-    except ContractError as e:
-        console.print(f'[red]Failed to read reservation status: {e}[/red]')
-        return
-
-    if not reservation_active:
-        # Reservation is cleared either on expiry or when vote_initiate succeeds.
-        # A silent initiate means the swap is already in flight or has completed —
-        # surface both possibilities rather than assuming expiry.
-        clear_pending_swap()
-        console.print('\n[yellow]Reservation is no longer active.[/yellow]')
-        console.print(
-            '[dim]Either the reservation expired, or your swap already initiated and may be in progress '
-            'or completed. Check with: alw view active-swaps[/dim]\n'
-        )
-        console.print('[dim]Start a new swap with: alw swap now[/dim]')
-        return
 
     remaining = reserved_until - current_block
     console.print(f'\n[green]Reservation still active ({blocks_to_minutes_str(remaining)} left)[/green]')
