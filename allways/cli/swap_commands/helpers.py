@@ -174,6 +174,16 @@ def sign_or_prompt_external(
 
     Returns an empty string when no valid signature is obtained.
     """
+    # For BTC sources, address types the proof path can't sign/verify (Taproot)
+    # otherwise pass is_valid_address, then dead-end at the misleading "no signing
+    # key" prompt below. Reject them up front with the actual reason.
+    if chain == 'btc' and not getattr(provider, 'is_proof_supported', lambda _addr: True)(address):
+        console.print(
+            f'[red]Taproot (bc1p) source addresses are not yet supported for reserve proofs: {address}\n'
+            'Move the funds to a SegWit (bc1q...), P2SH (3...) or legacy (1...) address and try again.[/red]'
+        )
+        return ''
+
     try:
         signature = provider.sign_from_proof(address, message, key)
     except Exception as e:

@@ -113,6 +113,28 @@ def make_lightweight_provider() -> BitcoinProvider:
         return BitcoinProvider()
 
 
+class TestIsProofSupported:
+    """is_proof_supported gates swap *sources* to address types the BIP-137 proof
+    path can actually sign/verify, so a Taproot source is rejected up front instead
+    of passing is_valid_address and dead-ending at reserve (issue #476)."""
+
+    def test_p2wpkh_supported(self):
+        assert make_lightweight_provider().is_proof_supported('bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc')
+
+    def test_p2pkh_supported(self):
+        assert make_lightweight_provider().is_proof_supported('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa')
+
+    def test_p2sh_p2wpkh_supported(self):
+        assert make_lightweight_provider().is_proof_supported('37XAVCtKEvPbx2rpkxx7FmrUsetFXSawx5')
+
+    def test_taproot_not_supported(self):
+        # Same bc1p source is_valid_address accepts but the proof path cannot handle.
+        assert not make_lightweight_provider().is_proof_supported('bc1pxyz0000000000000000000000000000000000000000000000000000')
+
+    def test_unknown_not_supported(self):
+        assert not make_lightweight_provider().is_proof_supported('xyz-not-a-bitcoin-address')
+
+
 class TestBitcoinProviderSignFromProof:
     """Direct coverage of BitcoinProvider.sign_from_proof — the wrapper our
     validator/CLI actually invoke, not the underlying library."""

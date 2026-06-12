@@ -551,6 +551,17 @@ class BitcoinProvider(ChainProvider):
         result = self.rpc_call('dumpprivkey', [address])
         return result if isinstance(result, str) else None
 
+    def is_proof_supported(self, address: str) -> bool:
+        """Whether ownership of this address can be proven via the BIP-137 proof path.
+
+        ``is_valid_address`` accepts every type embit can decode (incl. Taproot), which
+        is correct for swap *destinations*. Swap *sources* additionally need a reserve
+        proof, and ``sign_from_proof`` / ``verify_from_proof`` only handle P2PKH, P2WPKH
+        and P2SH-P2WPKH. Taproot (P2TR) and unrecognized types return False so callers
+        can reject a bc1p source up front instead of dead-ending after validation.
+        """
+        return detect_address_type(address) in (ADDR_TYPE_P2PKH, ADDR_TYPE_P2WPKH, ADDR_TYPE_P2SH_P2WPKH)
+
     def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message proving ownership of a Bitcoin address.
 
