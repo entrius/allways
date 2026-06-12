@@ -613,7 +613,13 @@ def probe_pending_reservation(client, state: PendingSwapState, current_block: in
     try:
         if client.get_miner_has_active_swap(state.miner_hotkey):
             for swap in client.get_miner_active_swaps(state.miner_hotkey):
-                if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
+                # vote_initiate removes the reservation row, so a post-initiate
+                # hydrate can't recover user_from_address. Match on the
+                # persisted receive_address and require from-address agreement
+                # only when we have one.
+                to_match = bool(state.receive_address) and swap.user_to_address == state.receive_address
+                from_match = not state.user_from_address or swap.user_from_address == state.user_from_address
+                if to_match and from_match:
                     return ReservationStatus(kind='our_swap', swap=swap)
     except ContractError:
         return ReservationStatus(kind='rpc_error')

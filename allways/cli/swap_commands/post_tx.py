@@ -14,12 +14,11 @@ from allways.cli.swap_commands.helpers import (
     load_pending_swap,
     loading,
     mark_pending_swap_tx_sent,
-    print_contract_error,
+    probe_pending_reservation,
     resolve_source_tx_block,
 )
 from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
 from allways.constants import NETUID_FINNEY
-from allways.contract_client import ContractError
 
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
@@ -60,20 +59,31 @@ def post_tx_command(tx_hash: str, tx_block: int):
     # amounts, miner addresses are pulled live from get_reservation.
     hydrate_pending_swap(state, client)
 
-    # Validate reservation is still active on-chain
-    try:
-        with loading('Reading reservation status...'):
-            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-            current_block = subtensor.get_current_block()
-    except ContractError as e:
-        print_contract_error('Failed to read reservation status', e)
+    # Reconcile against on-chain state. vote_initiate removes the reservation
+    # row, so a bare `reserved_until <= current_block` check reads an initiated
+    # swap as an expired reservation (#473) — the probe tells them apart.
+    with loading('Reading reservation status...'):
+        current_block = subtensor.get_current_block()
+        status = probe_pending_reservation(client, state, current_block)
+
+    if status.kind == 'rpc_error':
+        console.print('[red]Failed to read reservation status from contract.[/red]')
+        console.print('[dim]State file kept — you can retry this command.[/dim]')
         return
 
-    if reserved_until <= current_block:
+    if status.kind == 'our_swap':
         clear_pending_swap()
-        console.print('[red]Reservation has expired.[/red]')
+        console.print(f'\n[green bold]Your swap is already on-chain! ID: {status.swap.id}[/green bold]')
+        console.print(f'[dim]Watch with: alw view swap {status.swap.id} --watch[/dim]\n')
+        return
+
+    if status.kind in ('expired', 'replaced'):
+        clear_pending_swap()
+        console.print('[red]Reservation is no longer active.[/red]')
         console.print('[dim]Run `alw swap now` to start a new swap.[/dim]')
         return
+
+    reserved_until = status.reserved_until
 
     remaining = reserved_until - current_block
     human_amount = from_smallest_unit(state.from_amount, state.from_chain)

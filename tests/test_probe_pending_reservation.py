@@ -123,6 +123,57 @@ def test_active_swap_for_different_user_does_not_match():
     assert result.kind == 'expired'
 
 
+def test_our_swap_matches_on_receive_address_when_hydration_failed():
+    """#473: vote_initiate removes the reservation row, so a post-initiate
+    hydrate can't recover user_from_address. The persisted receive_address
+    alone must be enough to recognize our swap instead of reporting it
+    expired."""
+    state = make_state(user_from_address='')
+    swap = make_swap(user_to_address=state.receive_address)
+    client = make_client(active_swaps=[swap])
+
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'our_swap'
+    assert result.swap is swap
+
+
+def test_unhydrated_state_still_excludes_other_users_swaps():
+    """Relaxing the from-address requirement must not loosen the match for
+    swaps sending to someone else's receive address."""
+    state = make_state(user_from_address='')
+    other = make_swap(user_from_address='tb1qsomeoneelse', user_to_address='5OtherHk')
+    client = make_client(active_swaps=[other])
+
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'expired'
+
+
+def test_from_address_mismatch_is_not_our_swap_when_hydrated():
+    """When we do know our from-address, a swap that matches only the
+    receive address must still agree on it."""
+    state = make_state()
+    swap = make_swap(user_from_address='tb1qsomeoneelse', user_to_address=state.receive_address)
+    client = make_client(active_swaps=[swap])
+
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'expired'
+
+
+def test_blank_receive_address_never_matches():
+    """A degenerate state file with no receive_address must not wildcard-match
+    a swap whose user_to_address is also empty."""
+    state = make_state(user_from_address='', receive_address='')
+    swap = make_swap(user_to_address='')
+    client = make_client(active_swaps=[swap])
+
+    result = probe_pending_reservation(client, state, CURRENT_BLOCK)
+
+    assert result.kind == 'expired'
+
+
 def test_expired_when_no_swap_and_no_reservation():
     state = make_state()
     client = make_client()
