@@ -28,20 +28,35 @@ class TestDetectAddressType:
     def test_p2wpkh(self):
         assert detect_address_type('bc1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvwjgxxc') == ADDR_TYPE_P2WPKH
 
+    def test_uppercase_p2wpkh(self):
+        assert detect_address_type('BC1Q6TVMNMETJ8VFZ98VUETPVUTUPLQTJ4UVVWJGXXC') == ADDR_TYPE_P2WPKH
+
     def test_p2sh_p2wpkh(self):
         assert detect_address_type('37XAVCtKEvPbx2rpkxx7FmrUsetFXSawx5') == ADDR_TYPE_P2SH_P2WPKH
 
     def test_p2tr(self):
         assert detect_address_type('bc1pxyz') == ADDR_TYPE_P2TR
 
+    def test_uppercase_p2tr(self):
+        assert detect_address_type('BC1PXYZ') == ADDR_TYPE_P2TR
+
+    def test_mixed_case_bech32_rejected(self):
+        assert detect_address_type('bc1Q6TVMNMETJ8VFZ98VUETPVUTUPLQTJ4UVVWJGXXC') == 'unknown'
+
     def test_regtest_p2wpkh(self):
         assert detect_address_type('bcrt1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvtest') == ADDR_TYPE_P2WPKH
+
+    def test_uppercase_regtest_p2wpkh(self):
+        assert detect_address_type('BCRT1Q6TVMNMETJ8VFZ98VUETPVUTUPLQTJ4UVVTEST') == ADDR_TYPE_P2WPKH
 
     def test_regtest_p2tr(self):
         assert detect_address_type('bcrt1pxyz') == ADDR_TYPE_P2TR
 
     def test_testnet_p2wpkh(self):
         assert detect_address_type('tb1q6tvmnmetj8vfz98vuetpvtuplqtj4uvvtest') == ADDR_TYPE_P2WPKH
+
+    def test_uppercase_testnet_p2wpkh(self):
+        assert detect_address_type('TB1Q6TVMNMETJ8VFZ98VUETPVUTUPLQTJ4UVVTEST') == ADDR_TYPE_P2WPKH
 
     def test_unknown(self):
         assert detect_address_type('xyz123') == 'unknown'
@@ -190,6 +205,12 @@ class TestBitcoinProviderVerifyFromProof:
         addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
 
         assert provider.verify_from_proof(addr, TEST_MESSAGE, signature) is True
+
+    def test_uppercase_p2wpkh_signature_verifies(self):
+        provider = make_lightweight_provider()
+        addr, _, signature = sign_message(TEST_WIF, 'p2wpkh', TEST_MESSAGE, deterministic=True)
+
+        assert provider.verify_from_proof(addr.upper(), TEST_MESSAGE, signature) is True
 
     def test_wrong_message_fails_verification(self):
         provider = make_lightweight_provider()

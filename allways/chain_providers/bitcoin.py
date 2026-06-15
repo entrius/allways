@@ -23,8 +23,19 @@ LOG_RPC = '[BTC-RPC]'
 LOG_ESPLORA = '[Esplora]'
 
 
+def canonical_bech32_address(address: str) -> str:
+    """Lowercase uniform-case bech32/bech32m addresses; reject mixed-case."""
+    lower = address.lower()
+    if not lower.startswith(('bc1', 'tb1', 'bcrt1')):
+        return address
+    if address != lower and address != address.upper():
+        return ''
+    return lower
+
+
 def detect_address_type(address: str) -> str:
     """Detect Bitcoin address type from its prefix."""
+    address = canonical_bech32_address(address)
     if address.startswith('bc1q'):
         return ADDR_TYPE_P2WPKH
     if address.startswith('bc1p'):
@@ -60,7 +71,7 @@ def to_mainnet_address(address: str) -> str:
     v0, and Taproot); returns the address unchanged if it can't be parsed.
     """
     try:
-        return address_to_scriptpubkey(address).address(NETWORKS['main'])
+        return address_to_scriptpubkey(canonical_bech32_address(address)).address(NETWORKS['main'])
     except Exception:
         return address
 
