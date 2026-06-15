@@ -69,4 +69,10 @@ pub enum ErrorCode {
     // --- Phase 6: treasury ---
     #[msg("Withdrawal exceeds the accrued treasury balance")]
     InsufficientTreasury,
+
+    // --- Phase 8: miner quotes ---
+    #[msg("from_chain and to_chain must differ")]
+    SameChain,
+    #[msg("A required string field is empty")]
+    EmptyField,
 }

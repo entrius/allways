@@ -2,6 +2,17 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
+/// A whitelisted validator and its draw weight (Phase 8).
+///
+/// `weight` is the stake-weight seam a future oracle writes through (Phase 10); for now the admin
+/// sets it (`add_validator` / `set_validator_weight`), default uniform `1`. Consensus stays
+/// count-based — `weight` is consumed ONLY by the Phase 9 reservation-lottery draw.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct ValidatorInfo {
+    pub key: Pubkey,
+    pub weight: u64,
+}
+
 /// Singleton config PDA (`seeds = [CONFIG_SEED]`).
 ///
 /// Grows phase by phase (treasury counter, swap config — see SOLANA_MIGRATION_RESEARCH.md §14).
@@ -26,9 +37,9 @@ pub struct Config {
     pub reservation_ttl_secs: i64,
     /// Quorum threshold, percent of the whitelisted validator set (e.g. 66).
     pub consensus_threshold_percent: u8,
-    /// Whitelisted validator set (consensus participants), capped at MAX_VALIDATORS.
+    /// Whitelisted validator set (consensus participants) + draw weights, capped at MAX_VALIDATORS.
     #[max_len(MAX_VALIDATORS)]
-    pub validators: Vec<Pubkey>,
+    pub validators: Vec<ValidatorInfo>,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -178,5 +189,40 @@ pub struct Swap {
 #[derive(InitSpace)]
 pub struct TxMarker {
     pub used: bool,
+    pub bump: u8,
+}
+
+/// A miner's standing on-chain quote for one pair-direction (Phase 8)
+/// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain]`).
+///
+/// Replaces the off-chain Bittensor commitment string. A miner advertises its whole book by writing
+/// one of these per pair-direction it offers (`tao→btc`, `btc→tao`, `sol→btc`, …) — the `(from_chain,
+/// to_chain)` ordering encodes direction, so there is no `counter_rate` field (the reverse direction
+/// is its own PDA). Permissionless to write (`set_quote`); the validator/UI filters to registered
+/// miners. Mutable: `set_quote` overwrites in place — pools (Phase 9) pin whatever's current, so
+/// staleness is the miner's problem. Closed + rent-refunded via `remove_quote`.
+#[account]
+#[derive(InitSpace)]
+pub struct MinerQuote {
+    /// The miner (signer) that owns this quote.
+    pub miner: Pubkey,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    /// Where the miner receives the source asset (on `from_chain`).
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_from_addr: String,
+    /// Where the miner sends the destination asset (on `to_chain`).
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_to_addr: String,
+    /// Offered rate, dest per 1 source, for THIS direction (string for exact sig-fig precision).
+    #[max_len(MAX_RATE_LEN)]
+    pub rate: String,
+    /// Advertised depth in the asset's own units (u128 to cover wei-scale).
+    pub liquidity: u128,
+    /// Unix timestamp of the last write (staleness signal for off-chain consumers).
+    pub updated_at: i64,
+    /// Stored PDA bump.
     pub bump: u8,
 }

@@ -72,3 +72,22 @@ pub struct TreasuryWithdrawn {
     /// Treasury balance remaining after this call (lamports) — post-total per the §5 convention.
     pub total: u64,
 }
+
+// --- Phase 8: miner quotes (one per (miner, from_chain, to_chain)) ---
+
+#[event]
+pub struct QuoteSet {
+    pub miner: Pubkey,
+    pub from_chain: String,
+    pub to_chain: String,
+    pub rate: String,
+    pub liquidity: u128,
+    pub updated_at: i64,
+}
+
+#[event]
+pub struct QuoteRemoved {
+    pub miner: Pubkey,
+    pub from_chain: String,
+    pub to_chain: String,
+}

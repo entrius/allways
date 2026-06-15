@@ -24,7 +24,9 @@ use {
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::state::{Config, MinerState, Reservation, Swap, SwapStatus, TxMarker, Vault},
+    allways_swap_manager::state::{
+        Config, MinerQuote, MinerState, Reservation, Swap, SwapStatus, TxMarker, Vault,
+    },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -181,7 +183,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
 fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::AddValidator { validator: v }.data(),
+        &allways_swap_manager::instruction::AddValidator { validator: v, weight: 1 }.data(),
         allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
             .to_account_metas(None),
     )
@@ -371,7 +373,7 @@ fn shared() -> &'static Shared {
         // Whitelist the 3 validators iff not already in the set (idempotent).
         let cfg = read_config(&rpc);
         for v in &validators {
-            if !cfg.validators.contains(&v.pubkey()) {
+            if !cfg.validators.iter().any(|x| x.key == v.pubkey()) {
                 send(&rpc, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin)
                     .expect("add_validator");
             }
@@ -432,7 +434,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 1, "schema version");
+    assert_eq!(cfg.version, 2, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -450,7 +452,7 @@ fn onchain_add_three_validators() {
     let cfg = read_config(&rpc);
     assert!(cfg.validators.len() >= 3, "at least 3 validators whitelisted");
     for v in &vals {
-        assert!(cfg.validators.contains(&v.pubkey()), "validator {} in set", v.pubkey());
+        assert!(cfg.validators.iter().any(|x| x.key == v.pubkey()), "validator {} in set", v.pubkey());
     }
 }
 
@@ -694,4 +696,107 @@ fn onchain_non_admin_withdraw_treasury_rejected() {
         &outsider.pubkey(), &outsider);
     assert!(res.is_err(), "non-admin withdraw_treasury must be rejected");
     assert_eq!(read_vault(&rpc).treasury_total, treasury_before, "treasury untouched");
+}
+
+// ─── Phase 8: miner quotes + validator weights ───────────────────────────────────
+
+fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
+        &pid(),
+    )
+    .0
+}
+
+fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetQuote {
+            from_chain: from_chain.to_string(),
+            to_chain: to_chain.to_string(),
+            miner_from_addr: MINER_FROM.to_string(),
+            miner_to_addr: MINER_TO.to_string(),
+            rate: rate.to_string(),
+            liquidity: 1_000,
+        }
+        .data(),
+        allways_swap_manager::accounts::SetQuote {
+            miner: *m,
+            quote: quote_pda(m, from_chain, to_chain),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn remove_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::RemoveQuote {
+            from_chain: from_chain.to_string(),
+            to_chain: to_chain.to_string(),
+        }
+        .data(),
+        allways_swap_manager::accounts::RemoveQuote { miner: *m, quote: quote_pda(m, from_chain, to_chain) }
+            .to_account_metas(None),
+    )
+}
+
+fn set_validator_weight_ix(admin: &Pubkey, v: Pubkey, weight: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetValidatorWeight { validator: v, weight }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
+            .to_account_metas(None),
+    )
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_set_quote_creates_pda() {
+    let _ = shared();
+    let rpc = rpc();
+    let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
+
+    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", "1.5"), &miner.pubkey(), &miner)
+        .expect("set_quote");
+
+    let a = rpc.get_account(&quote_pda(&miner.pubkey(), "BTC", "SOL")).expect("quote account");
+    let q = MinerQuote::try_deserialize(&mut a.data.as_slice()).unwrap();
+    assert_eq!(q.miner, miner.pubkey());
+    assert_eq!(q.from_chain, "BTC");
+    assert_eq!(q.to_chain, "SOL");
+    assert_eq!(q.rate, "1.5");
+    assert!(q.updated_at > 0, "updated_at set from on-chain clock");
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_remove_quote_closes_pda() {
+    let _ = shared();
+    let rpc = rpc();
+    let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
+
+    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", "1.5"), &miner.pubkey(), &miner).expect("set");
+    assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote exists after set");
+
+    send(&rpc, remove_quote_ix(&miner.pubkey(), "BTC", "SOL"), &miner.pubkey(), &miner).expect("remove");
+    assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote closed after remove");
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_set_validator_weight() {
+    let _ = shared();
+    let rpc = rpc();
+    let admin = admin_keypair();
+    let v = Keypair::new();
+
+    // Add a fresh validator with weight 5, then bump it to 9 via set_validator_weight.
+    send(&rpc, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add (weight 1)");
+    send(&rpc, set_validator_weight_ix(&admin.pubkey(), v.pubkey(), 9), &admin.pubkey(), &admin).expect("set weight");
+
+    let cfg = read_config(&rpc);
+    let w = cfg.validators.iter().find(|x| x.key == v.pubkey()).map(|x| x.weight);
+    assert_eq!(w, Some(9), "validator weight updated to 9");
 }

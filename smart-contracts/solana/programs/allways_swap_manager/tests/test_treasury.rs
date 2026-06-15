@@ -105,7 +105,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
         let v = Keypair::new();
         svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
         send(&mut svm, Instruction::new_with_bytes(pid(),
-            &allways_swap_manager::instruction::AddValidator { validator: v.pubkey() }.data(),
+            &allways_swap_manager::instruction::AddValidator { validator: v.pubkey(), weight: 1 }.data(),
             allways_swap_manager::accounts::AdminConfig { admin: admin.pubkey(), config: cfg() }.to_account_metas(None),
         ), &admin.pubkey(), &admin).expect("add val");
         vals.push(v);

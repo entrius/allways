@@ -83,7 +83,10 @@ pub fn record_vote<'info>(
     now: i64,
 ) -> Result<bool> {
     require!(!config.validators.is_empty(), ErrorCode::NoValidators);
-    require!(config.validators.contains(&validator), ErrorCode::NotValidator);
+    require!(
+        config.validators.iter().any(|v| v.key == validator),
+        ErrorCode::NotValidator
+    );
 
     // An empty voter list means no open round (freshly allocated, or reset after a prior
     // round closed) — robust regardless of the clock's absolute value. A non-empty but

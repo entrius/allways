@@ -53,15 +53,23 @@ pub mod allways_swap_manager {
         withdraw_collateral::handler(ctx, amount)
     }
 
-    // --- Phase 2: validator-set admin ---
-    pub fn add_validator(ctx: Context<AdminConfig>, validator: Pubkey) -> Result<()> {
-        admin::add_validator(ctx, validator)
+    // --- Phase 2: validator-set admin (Phase 8: per-validator draw weight) ---
+    pub fn add_validator(ctx: Context<AdminConfig>, validator: Pubkey, weight: u64) -> Result<()> {
+        admin::add_validator(ctx, validator, weight)
     }
     pub fn remove_validator(ctx: Context<AdminConfig>, validator: Pubkey) -> Result<()> {
         admin::remove_validator(ctx, validator)
     }
     pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result<()> {
         admin::set_consensus_threshold(ctx, percent)
+    }
+    /// Phase 8: set a validator's draw weight (stake-oracle seam; consensus stays count-based).
+    pub fn set_validator_weight(
+        ctx: Context<AdminConfig>,
+        validator: Pubkey,
+        weight: u64,
+    ) -> Result<()> {
+        admin::set_validator_weight(ctx, validator, weight)
     }
 
     // --- Phase 2: miner activation consensus ---
@@ -155,5 +163,37 @@ pub mod allways_swap_manager {
     /// Admin withdraws accrued protocol fees from the vault treasury to a recipient.
     pub fn withdraw_treasury(ctx: Context<WithdrawTreasury>, amount: u64) -> Result<()> {
         withdraw_treasury::handler(ctx, amount)
+    }
+
+    // --- Phase 8: on-chain miner quotes ---
+    /// Miner publishes/overwrites its standing quote for one pair-direction
+    /// (`(from_chain, to_chain)` encodes direction; the reverse direction is a separate quote).
+    /// Permissionless: any signer may post; the validator/UI filters to registered miners.
+    pub fn set_quote(
+        ctx: Context<SetQuote>,
+        from_chain: String,
+        to_chain: String,
+        miner_from_addr: String,
+        miner_to_addr: String,
+        rate: String,
+        liquidity: u128,
+    ) -> Result<()> {
+        set_quote::handler(
+            ctx,
+            from_chain,
+            to_chain,
+            miner_from_addr,
+            miner_to_addr,
+            rate,
+            liquidity,
+        )
+    }
+    /// Miner removes one of its quotes; the PDA is closed and its rent refunded to the miner.
+    pub fn remove_quote(
+        ctx: Context<RemoveQuote>,
+        from_chain: String,
+        to_chain: String,
+    ) -> Result<()> {
+        remove_quote::handler(ctx, from_chain, to_chain)
     }
 }

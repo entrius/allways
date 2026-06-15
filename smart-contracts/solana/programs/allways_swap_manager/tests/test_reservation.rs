@@ -77,7 +77,7 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
 fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::AddValidator { validator: v }.data(),
+        &allways_swap_manager::instruction::AddValidator { validator: v, weight: 1 }.data(),
         allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
             .to_account_metas(None),
     )

@@ -29,8 +29,14 @@ pub const SWAP_SEED: &[u8] = b"swap";
 #[constant]
 pub const TX_SEED: &[u8] = b"tx";
 
+/// PDA seed prefix for a miner's standing per-pair quote
+/// (`seeds = [QUOTE_SEED, miner_pubkey, from_chain, to_chain]`). Phase 8.
+#[constant]
+pub const QUOTE_SEED: &[u8] = b"quote";
+
 /// On-chain schema/version, surfaced for upgrade tracking. Bumped as phases land.
-pub const CONFIG_VERSION: u32 = 1;
+/// v2: Phase 8 (on-chain miner quotes + per-validator weights).
+pub const CONFIG_VERSION: u32 = 2;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
