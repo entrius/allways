@@ -6,6 +6,7 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
     allways_swap_manager::state::Vault,
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
@@ -16,6 +17,7 @@ use {
 };
 
 const SYS: Pubkey = anchor_lang::solana_program::system_program::ID;
+const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const BASE_TS: i64 = 1_700_000_000;
 const SOL_AMOUNT: u64 = 2_000_000_000;
 
@@ -36,6 +38,12 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+}
+fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
+fn pool_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 fn swap_pda(k: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", k], &pid()).0
@@ -81,7 +89,8 @@ fn withdraw_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Instruction {
     )
 }
 
-/// Full flow that accrues one fee into the treasury; returns (svm, admin, fee, vault_rent_reserve).
+/// Full flow that accrues treasury (one reservation fee from the lottery + the 1% confirm fee);
+/// returns (svm, admin, total_treasury, vault_rent_reserve).
 fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
@@ -127,18 +136,21 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     activate(&mut svm, &vals[0]);
     activate(&mut svm, &vals[1]);
 
-    let reserve = |svm: &mut LiteSVM, v: &Keypair| {
-        send(svm, Instruction::new_with_bytes(pid(),
-            &allways_swap_manager::instruction::VoteReserve {
-                from_addr: "userBTC".to_string(), from_chain: "BTC".to_string(), to_chain: "SOL".to_string(),
-                sol_amount: SOL_AMOUNT, from_amount: 1, to_amount: 0,
-                miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: "1".to_string(),
-            }.data(),
-            allways_swap_manager::accounts::VoteReserve { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(1, miner.pubkey().as_ref()), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
-        ), &v.pubkey(), v).expect("reserve");
-    };
-    reserve(&mut svm, &vals[0]);
-    reserve(&mut svm, &vals[1]);
+    // Reservation via the lottery (set quote → open → warp past window → resolve; sole entrant wins).
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::SetQuote { from_chain: "BTC".to_string(), to_chain: "SOL".to_string(), miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: "1".to_string(), liquidity: 1 }.data(),
+        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), system_program: SYS }.to_account_metas(None),
+    ), &miner.pubkey(), &miner).expect("set_quote");
+    let pool_user = Keypair::new().pubkey();
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "BTC".to_string(), to_chain: "SOL".to_string(), user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), sol_amount: SOL_AMOUNT, from_amount: 1, to_amount: 0 }.data(),
+        allways_swap_manager::accounts::OpenOrRequest { validator: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), pool: pool_pda(&miner.pubkey()), vault: vault_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::ResolvePool {}.data(),
+        allways_swap_manager::accounts::ResolvePool { caller: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), pool: pool_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), slot_hashes: SLOT_HASHES_ID, system_program: SYS }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("resolve");
 
     let key = skey("tx1");
     let user = Keypair::new().pubkey();
@@ -165,7 +177,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     confirm(&mut svm, &vals[0]);
     confirm(&mut svm, &vals[1]);
 
-    (svm, admin, SOL_AMOUNT / 100, rent_reserve)
+    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS, rent_reserve)
 }
 
 #[test]

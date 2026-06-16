@@ -226,3 +226,57 @@ pub struct MinerQuote {
     /// Stored PDA bump.
     pub bump: u8,
 }
+
+/// One validator's entry into a reservation lottery `Pool` (Phase 9). Carries the taker-side intent;
+/// the miner quote (rate/addresses/chains) is the pool's pinned snapshot, not per-request.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct Request {
+    /// The validator that routed this request (also the lottery weight key + dedup key).
+    pub validator: Pubkey,
+    /// The taker.
+    pub user: Pubkey,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_to_addr: String,
+    /// Collateral-backed swap size (SOL lamports). Bounded by Config min/max_swap_amount.
+    pub sol_amount: u64,
+    pub from_amount: u128,
+    pub to_amount: u128,
+}
+
+/// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`), Phase 9.
+///
+/// Opened by the first validator to route a request (which pins the miner's on-chain quote for the
+/// chosen pair); collects ≤16 requests over a window; `resolve_pool` runs a stake-weighted draw after
+/// `closes_at` and creates the (unchanged) `Reservation` for the winner. Keyed **per-miner** — the
+/// opener pins the pair and later in-window requests must match it. Rent is paid once by the first
+/// opener and the account is **reused** across contests (`opened_at == 0` = available, mirroring
+/// `VoteRound`); `resolve_pool` / `cancel_pool` reset it rather than closing.
+#[account]
+#[derive(InitSpace)]
+pub struct Pool {
+    pub miner: Pubkey,
+    /// Pinned pair + miner-quote snapshot, copied from the `MinerQuote` PDA at open.
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    pub miner_to_addr: String,
+    #[max_len(MAX_RATE_LEN)]
+    pub rate: String,
+    /// Unix seconds the pool opened (0 = available/empty slot).
+    pub opened_at: i64,
+    /// Unix seconds the request window closes; `resolve_pool` is callable after this.
+    pub closes_at: i64,
+    /// Future slot whose SlotHash seeds the draw (pinned at open).
+    pub seed_slot: u64,
+    /// Requests this contest (deduped by validator), capped at MAX_VALIDATORS.
+    #[max_len(MAX_VALIDATORS)]
+    pub requests: Vec<Request>,
+    /// Stored PDA bump.
+    pub bump: u8,
+}

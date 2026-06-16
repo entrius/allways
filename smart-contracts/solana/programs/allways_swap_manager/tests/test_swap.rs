@@ -5,6 +5,7 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
     allways_swap_manager::state::{MinerState, Swap, Vault},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
@@ -15,8 +16,8 @@ use {
 };
 
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
+const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
-const REQ_RESERVE: u8 = 1;
 const REQ_INITIATE: u8 = 2;
 const REQ_CONFIRM: u8 = 6;
 const REQ_TIMEOUT: u8 = 7;
@@ -51,6 +52,12 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+}
+fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
+fn pool_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -134,28 +141,66 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn vote_reserve_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
+fn set_quote_ix(miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteReserve {
-            from_addr: FROM_ADDR.to_string(),
+        &allways_swap_manager::instruction::SetQuote {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
-            sol_amount: SOL_AMOUNT,
-            from_amount: 100_000,
-            to_amount: 0,
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE.to_string(),
+            liquidity: 1_000,
         }
         .data(),
-        allways_swap_manager::accounts::VoteReserve {
+        allways_swap_manager::accounts::SetQuote {
+            miner: *miner,
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::OpenOrRequest {
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+            user: *user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: "userSOLaddr".to_string(),
+            sol_amount: SOL_AMOUNT,
+            from_amount: 100_000,
+            to_amount: 0,
+        }
+        .data(),
+        allways_swap_manager::accounts::OpenOrRequest {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vote_round: vote_pda(REQ_RESERVE, miner.as_ref()),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            pool: pool_pda(miner),
+            vault: vault_pda(),
             reservation: resv_pda(miner),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::ResolvePool {}.data(),
+        allways_swap_manager::accounts::ResolvePool {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            pool: pool_pda(miner),
+            reservation: resv_pda(miner),
+            slot_hashes: SLOT_HASHES_ID,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -285,11 +330,20 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
-    // reserve (2/3)
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("r0");
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("r1");
+
+    // Reservation via the lottery, run *before* BASE_TS so each test still starts at BASE_TS with an
+    // active reservation (reserved_until = setup_ts + TTL > BASE_TS) — the swap-time assertions are
+    // unchanged. Single requester → that requester wins the draw deterministically.
+    let setup_ts = BASE_TS - 100;
+    set_clock(&mut svm, setup_ts);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    set_clock(&mut svm, BASE_TS);
 
     (svm, vals, miner, rent_reserve)
 }
@@ -297,6 +351,16 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
 fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str, user: &Pubkey) {
     send(svm, initiate_ix(&vals[0].pubkey(), miner, tx, user, "userSOLaddr"), &vals[0].pubkey(), &vals[0]).expect("i0");
     send(svm, initiate_ix(&vals[1].pubkey(), miner, tx, user, "userSOLaddr"), &vals[1].pubkey(), &vals[1]).expect("i1");
+}
+
+/// Reserve a miner via the lottery (open → warp past the window → resolve; sole entrant wins). Leaves
+/// the clock advanced past the window; the reservation is active for TTL.
+fn do_reserve(svm: &mut LiteSVM, opener: &Keypair, miner: &Pubkey) {
+    let now = svm.get_sysvar::<Clock>().unix_timestamp;
+    let user = Keypair::new().pubkey();
+    send(svm, open_ix(&opener.pubkey(), miner, &user), &opener.pubkey(), opener).expect("open");
+    set_clock(svm, now + POOL_WINDOW_SECS + 1);
+    send(svm, resolve_ix(&opener.pubkey(), miner), &opener.pubkey(), opener).expect("resolve");
 }
 
 fn invariant_holds(svm: &LiteSVM, rent_reserve: u64) -> bool {
@@ -388,7 +452,8 @@ fn test_fulfill_confirm_fee_and_invariant() {
 
     let fee = SOL_AMOUNT / 100;
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee taken");
-    assert_eq!(vault(&svm).treasury_total, fee, "fee accrued to treasury");
+    // treasury holds the setup's reservation fee plus this swap's 1% confirm fee.
+    assert_eq!(vault(&svm).treasury_total, RESERVATION_FEE_LAMPORTS + fee, "fees accrued to treasury");
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, rent), "vault invariant after fee");
@@ -436,9 +501,8 @@ fn test_replay_guard_survives_completion() {
     send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
-    // miner freed → re-reserve, then re-initiate with the SAME from_tx_hash → replay rejected.
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("r0b");
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("r1b");
+    // miner freed → re-reserve via the lottery, then re-initiate with the SAME from_tx_hash → replay rejected.
+    do_reserve(&mut svm, &vals[0], &miner.pubkey());
     let replay = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "userSOLaddr"), &vals[0].pubkey(), &vals[0]);
     assert!(replay.is_err(), "reused source tx must be rejected even after the swap closed");
 }

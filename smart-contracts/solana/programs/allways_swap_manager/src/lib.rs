@@ -3,6 +3,7 @@ pub mod consensus;
 pub mod error;
 pub mod events;
 pub mod instructions;
+pub mod lottery;
 pub mod penalty;
 pub mod state;
 
@@ -86,36 +87,43 @@ pub mod allways_swap_manager {
         deactivate::handler(ctx)
     }
 
-    // --- Phase 3: reservations ---
-    /// A validator votes to reserve a miner for a pending swap (reserved on quorum).
-    /// The reservation pins the miner's deposit/payout addresses + rate as an immutable quote.
+    // --- Phase 9: reservation lottery (replaces vote_reserve) ---
+    /// A validator opens or joins a per-miner reservation-lottery pool for a pair. First caller pins
+    /// the miner's on-chain quote; every caller pays a flat anti-spam fee → treasury.
     #[allow(clippy::too_many_arguments)]
-    pub fn vote_reserve(
-        ctx: Context<VoteReserve>,
-        from_addr: String,
+    pub fn open_or_request(
+        ctx: Context<OpenOrRequest>,
         from_chain: String,
         to_chain: String,
+        user: Pubkey,
+        user_from_addr: String,
+        user_to_addr: String,
         sol_amount: u64,
         from_amount: u128,
         to_amount: u128,
-        miner_from_addr: String,
-        miner_to_addr: String,
-        rate: String,
     ) -> Result<()> {
-        vote_reserve::handler(
+        open_or_request::handler(
             ctx,
-            from_addr,
             from_chain,
             to_chain,
+            user,
+            user_from_addr,
+            user_to_addr,
             sol_amount,
             from_amount,
             to_amount,
-            miner_from_addr,
-            miner_to_addr,
-            rate,
         )
     }
-    /// Admin clears a miner's reservation + any in-flight reserve vote round.
+    /// Permissionless: after the window closes, run the stake-weighted draw and create the winner's
+    /// reservation.
+    pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
+        resolve_pool::handler(ctx)
+    }
+    /// Admin resets a stuck/abandoned pool (frees the miner; collected fees stay in the treasury).
+    pub fn cancel_pool(ctx: Context<CancelPool>) -> Result<()> {
+        cancel_pool::handler(ctx)
+    }
+    /// Admin clears a miner's active reservation.
     pub fn cancel_reservation(ctx: Context<CancelReservation>) -> Result<()> {
         cancel_reservation::handler(ctx)
     }

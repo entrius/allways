@@ -1,11 +1,17 @@
-// Phase 3 — reservations: quorum reserve, bounds, hash-binding, cancel, expiry guards (LiteSVM).
+// Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards, cancel (LiteSVM).
 //   cargo test -p allways_swap_manager --test test_reservation
+//
+// The weighted draw itself is unit-tested as a pure fn in src/lottery.rs (LiteSVM doesn't populate
+// SlotHashes with future slots, so resolve here uses the deterministic fallback seed). These tests
+// cover the on-chain machinery: open pins the miner quote, the per-request fee accrues to treasury,
+// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve, cancel.
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::state::{MinerState, Reservation},
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::state::{MinerState, Pool, Reservation, Vault},
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -14,10 +20,15 @@ use {
 };
 
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
+const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
-const REQ_RESERVE: u8 = 1;
 const BASE_TS: i64 = 1_700_000_000;
 const TTL: i64 = 1_800;
+
+// Default pinned quote (matches the pair the tests open on).
+const MFROM: &str = "minerBTCaddr";
+const MTO: &str = "minerSOLaddr";
+const RATE: &str = "1.5";
 
 fn pid() -> Pubkey {
     allways_swap_manager::id()
@@ -36,6 +47,12 @@ fn vote_pda(req: u8, m: &Pubkey) -> Pubkey {
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+}
+fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
+fn pool_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 
 fn set_clock(svm: &mut LiteSVM, ts: i64) {
@@ -74,10 +91,10 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
         .to_account_metas(None),
     )
 }
-fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
+fn add_validator_ix(admin: &Pubkey, v: Pubkey, weight: u64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::AddValidator { validator: v, weight: 1 }.data(),
+        &allways_swap_manager::instruction::AddValidator { validator: v, weight }.data(),
         allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
             .to_account_metas(None),
     )
@@ -111,45 +128,84 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
+fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: &str) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetQuote {
+            from_chain: f.to_string(),
+            to_chain: t.to_string(),
+            miner_from_addr: mfrom.to_string(),
+            miner_to_addr: mto.to_string(),
+            rate: rate.to_string(),
+            liquidity: 1_000,
+        }
+        .data(),
+        allways_swap_manager::accounts::SetQuote {
+            miner: *miner,
+            quote: quote_pda(miner, f, t),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
 #[allow(clippy::too_many_arguments)]
-fn vote_reserve_ix(
+fn open_ix(
     validator: &Pubkey,
     miner: &Pubkey,
-    from_addr: &str,
-    from_chain: &str,
-    to_chain: &str,
+    f: &str,
+    t: &str,
+    user: &Pubkey,
+    ufrom: &str,
+    uto: &str,
     sol_amount: u64,
     from_amount: u128,
     to_amount: u128,
 ) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteReserve {
-            from_addr: from_addr.to_string(),
-            from_chain: from_chain.to_string(),
-            to_chain: to_chain.to_string(),
+        &allways_swap_manager::instruction::OpenOrRequest {
+            from_chain: f.to_string(),
+            to_chain: t.to_string(),
+            user: *user,
+            user_from_addr: ufrom.to_string(),
+            user_to_addr: uto.to_string(),
             sol_amount,
             from_amount,
             to_amount,
-            // pinned miner quote (v2 #1a) — fixed here; the dedicated binding test varies the rate
-            miner_from_addr: "minerBTCaddr".to_string(),
-            miner_to_addr: "minerSOLaddr".to_string(),
-            rate: "1.5".to_string(),
         }
         .data(),
-        allways_swap_manager::accounts::VoteReserve {
+        allways_swap_manager::accounts::OpenOrRequest {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vote_round: vote_pda(REQ_RESERVE, miner),
+            quote: quote_pda(miner, f, t),
+            pool: pool_pda(miner),
+            vault: vault_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
 }
-fn cancel_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
+fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::ResolvePool {}.data(),
+        allways_swap_manager::accounts::ResolvePool {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            pool: pool_pda(miner),
+            reservation: resv_pda(miner),
+            slot_hashes: SLOT_HASHES_ID,
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn cancel_reservation_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::CancelReservation {}.data(),
@@ -158,7 +214,19 @@ fn cancel_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
             config: config_pda(),
             miner: *miner,
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_RESERVE, miner),
+        }
+        .to_account_metas(None),
+    )
+}
+fn cancel_pool_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CancelPool {}.data(),
+        allways_swap_manager::accounts::CancelPool {
+            admin: *admin,
+            config: config_pda(),
+            miner: *miner,
+            pool: pool_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -180,12 +248,21 @@ fn reservation(svm: &LiteSVM, miner: &Pubkey) -> Reservation {
     let a = svm.get_account(&resv_pda(miner)).unwrap();
     Reservation::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
+fn pool(svm: &LiteSVM, miner: &Pubkey) -> Pool {
+    let a = svm.get_account(&pool_pda(miner)).unwrap();
+    Pool::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+fn treasury(svm: &LiteSVM) -> u64 {
+    let a = svm.get_account(&vault_pda()).unwrap();
+    Vault::try_deserialize(&mut a.data.as_slice()).unwrap().treasury_total
+}
 fn is_active(svm: &LiteSVM, miner: &Pubkey) -> bool {
     let a = svm.get_account(&miner_pda(miner)).unwrap();
     MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().active
 }
 
-/// init + 3 validators + a funded, active miner. Clock at BASE_TS.
+/// init + 3 validators (weight 1) + a funded, active miner with a BTC→SOL quote posted. Clock at
+/// BASE_TS. Returns (svm, admin, validators, miner).
 fn setup(min_swap: u64, max_swap: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
@@ -199,140 +276,206 @@ fn setup(min_swap: u64, max_swap: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypa
     for _ in 0..3 {
         let v = Keypair::new();
         svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
-        send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add val");
+        send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey(), 1), &admin.pubkey(), &admin).expect("add val");
         vals.push(v);
     }
 
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), 10_000_000_000), &miner.pubkey(), &miner).expect("post");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "SOL", MFROM, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
     (svm, admin, vals, miner)
 }
 
 #[test]
-fn test_quorum_reserve() {
+fn test_open_pins_quote_and_charges_fee() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    let amt = 2_000_000_000u64;
+    let user = Keypair::new().pubkey();
+    let t0 = treasury(&svm);
 
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "bc1quser", "BTC", "SOL", amt, 100_000, 0), &vals[0].pubkey(), &vals[0]).expect("r0");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "below quorum → not reserved");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2_000_000_000, 100_000, 0), &vals[0].pubkey(), &vals[0]).expect("open");
 
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey(), "bc1quser", "BTC", "SOL", amt, 100_000, 0), &vals[1].pubkey(), &vals[1]).expect("r1");
+    let p = pool(&svm, &miner.pubkey());
+    assert_eq!(p.from_chain, "BTC");
+    assert_eq!(p.to_chain, "SOL");
+    assert_eq!(p.miner_from_addr, MFROM, "pinned from MinerQuote");
+    assert_eq!(p.miner_to_addr, MTO);
+    assert_eq!(p.rate, RATE);
+    assert_eq!(p.opened_at, BASE_TS);
+    assert_eq!(p.closes_at, BASE_TS + POOL_WINDOW_SECS);
+    assert_eq!(p.requests.len(), 1);
+    assert_eq!(p.requests[0].validator, vals[0].pubkey());
+    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "flat fee accrued to treasury");
+}
+
+#[test]
+fn test_each_request_charges_fee() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    let t0 = treasury(&svm);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 1, 1, 0), &vals[1].pubkey(), &vals[1]).expect("join");
+    assert_eq!(treasury(&svm), t0 + 2 * RESERVATION_FEE_LAMPORTS, "both opener and joiner pay");
+    assert_eq!(pool(&svm, &miner.pubkey()).requests.len(), 2);
+}
+
+#[test]
+fn test_duplicate_validator_rejected() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    let dup = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]);
+    assert!(dup.is_err(), "same validator twice in one pool must be rejected");
+    assert_eq!(pool(&svm, &miner.pubkey()).requests.len(), 1);
+}
+
+#[test]
+fn test_pair_mismatch_rejected() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    // Miner also quotes BTC→TAO so that quote account exists for the join attempt.
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "TAO", MFROM, "minerTAOaddr", "2.0"), &miner.pubkey(), &miner).expect("quote2");
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open BTC/SOL");
+    let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "TAO", &user, "u2", "uTAO", 1, 1, 0), &vals[1].pubkey(), &vals[1]);
+    assert!(mism.is_err(), "joining with a different pair than the pinned one must be rejected");
+}
+
+#[test]
+fn test_single_requester_resolve_creates_reservation() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "userBTC", "userSOL", 2_000_000_000, 100_000, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+
+    // before close → cannot resolve
+    let early = send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]);
+    assert!(early.is_err(), "resolve before window close must fail");
+
+    // warp past close, resolve (sole entrant wins regardless of seed)
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+
     let r = reservation(&svm, &miner.pubkey());
-    assert_eq!(r.reserved_until, BASE_TS + TTL, "reserved on quorum");
-    assert_eq!(r.sol_amount, amt);
-    assert_eq!(r.from_addr, "bc1quser");
+    assert_eq!(r.reserved_until, BASE_TS + POOL_WINDOW_SECS + 1 + TTL, "reserved with TTL from resolve time");
+    assert_eq!(r.from_addr, "userBTC", "winner's user source addr");
     assert_eq!(r.from_chain, "BTC");
     assert_eq!(r.to_chain, "SOL");
-    // pinned miner quote (v2 #1a) — captured immutably at reserve time
-    assert_eq!(r.miner_from_addr, "minerBTCaddr");
-    assert_eq!(r.miner_to_addr, "minerSOLaddr");
-    assert_eq!(r.rate, "1.5");
+    assert_eq!(r.sol_amount, 2_000_000_000);
+    assert_eq!(r.miner_from_addr, MFROM, "pinned miner quote carried into reservation");
+    assert_eq!(r.miner_to_addr, MTO);
+    assert_eq!(r.rate, RATE);
+    // pool reset for reuse
+    assert_eq!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool reset after resolve");
+    assert!(pool(&svm, &miner.pubkey()).requests.is_empty());
 }
 
-/// The pinned quote (rate/addresses) is part of the bound hash: two validators differing only in
-/// `rate` must not both count toward quorum (v2 #1a — closes the rate-swing / address-theft hole).
 #[test]
-fn test_reserve_quote_binding() {
+fn test_multi_requester_resolve_picks_one() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    let amt = 2_000_000_000u64;
-    let mk_ix = |validator: &Pubkey, rate: &str| {
-        Instruction::new_with_bytes(
-            pid(),
-            &allways_swap_manager::instruction::VoteReserve {
-                from_addr: "u".to_string(),
-                from_chain: "BTC".to_string(),
-                to_chain: "SOL".to_string(),
-                sol_amount: amt,
-                from_amount: 1,
-                to_amount: 0,
-                miner_from_addr: "minerBTCaddr".to_string(),
-                miner_to_addr: "minerSOLaddr".to_string(),
-                rate: rate.to_string(),
-            }
-            .data(),
-            allways_swap_manager::accounts::VoteReserve {
-                validator: *validator,
-                config: config_pda(),
-                miner: miner.pubkey(),
-                miner_state: miner_pda(&miner.pubkey()),
-                vote_round: vote_pda(REQ_RESERVE, &miner.pubkey()),
-                reservation: resv_pda(&miner.pubkey()),
-                system_program: SYSTEM_PROGRAM,
-            }
-            .to_account_metas(None),
-        )
-    };
-    send(&mut svm, mk_ix(&vals[0].pubkey(), "1.5"), &vals[0].pubkey(), &vals[0]).expect("v0");
-    let mismatched = send(&mut svm, mk_ix(&vals[1].pubkey(), "2.0"), &vals[1].pubkey(), &vals[1]);
-    assert!(mismatched.is_err(), "differing rate on the same round must be rejected");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "no quorum");
+    let u0 = Keypair::new().pubkey();
+    let u1 = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u0, "from0", "to0", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &u1, "from1", "to1", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]).expect("join");
+
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]).expect("resolve");
+
+    let r = reservation(&svm, &miner.pubkey());
+    assert!(r.reserved_until > 0, "a winner was reserved");
+    assert!(r.from_addr == "from0" || r.from_addr == "from1", "winner is one of the two entrants");
 }
 
 #[test]
-fn test_reserve_amount_bounds() {
+fn test_resolve_empty_pool_fails() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    // never opened → NoRequests
+    let r = send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]);
+    assert!(r.is_err(), "resolving a never-opened pool must fail");
+}
+
+#[test]
+fn test_join_after_close_fails() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    let late = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 1, 1, 0), &vals[1].pubkey(), &vals[1]);
+    assert!(late.is_err(), "joining after the window closed must fail (must resolve first)");
+}
+
+#[test]
+fn test_amount_bounds() {
     let (mut svm, _admin, vals, miner) = setup(1_000_000_000, 5_000_000_000);
-    let below = send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", 500_000_000, 1, 0), &vals[0].pubkey(), &vals[0]);
+    let user = Keypair::new().pubkey();
+    let below = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 500_000_000, 1, 0), &vals[0].pubkey(), &vals[0]);
     assert!(below.is_err(), "below min rejected");
-    let above = send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", 9_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]);
+    let above = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 9_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]);
     assert!(above.is_err(), "above max rejected");
 }
 
 #[test]
-fn test_reserve_requires_active_miner() {
+fn test_requires_active_miner() {
     let (mut svm, _admin, vals, _miner) = setup(0, 0);
-    // a different miner that posted collateral but was never activated
+    // an inactive miner that posted collateral + a quote but was never activated
     let inactive = Keypair::new();
     svm.airdrop(&inactive.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&inactive.pubkey(), 1_000_000_000), &inactive.pubkey(), &inactive).expect("post");
-    let res = send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &inactive.pubkey(), "u", "BTC", "SOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]);
-    assert!(res.is_err(), "inactive miner cannot be reserved");
+    send(&mut svm, set_quote_ix(&inactive.pubkey(), "BTC", "SOL", MFROM, MTO, RATE), &inactive.pubkey(), &inactive).expect("quote");
+    let user = Keypair::new().pubkey();
+    let res = send(&mut svm, open_ix(&vals[0].pubkey(), &inactive.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]);
+    assert!(res.is_err(), "inactive miner cannot be pooled");
 }
 
 #[test]
-fn test_reserve_hash_binding() {
-    // Two validators vote the same miner/round with DIFFERENT amounts → the second must be rejected
-    // by the bound-hash. This is the load-bearing property reservations add.
-    let (mut svm, _admin, vals, miner) = setup(0, 0);
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("v0");
-    let mismatched = send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", 3_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]);
-    assert!(mismatched.is_err(), "differing terms on the same round must be rejected (VoteHashMismatch)");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "no quorum reached");
-}
-
-#[test]
-fn test_cancel_then_reserve_again() {
+fn test_open_blocked_while_reserved_then_cancel_reopens() {
     let (mut svm, admin, vals, miner) = setup(0, 0);
-    let amt = 2_000_000_000u64;
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", amt, 1, 0), &vals[0].pubkey(), &vals[0]).expect("v0");
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", amt, 1, 0), &vals[1].pubkey(), &vals[1]).expect("v1");
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
     assert!(reservation(&svm, &miner.pubkey()).reserved_until > 0);
 
-    send(&mut svm, cancel_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "cancel clears reservation");
+    // a new open is blocked while the reservation is active
+    let blocked = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]);
+    assert!(blocked.is_err(), "cannot open a new pool while a reservation is active");
 
-    // re-reserve works after cancel
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u2", "BTC", "SOL", amt, 1, 0), &vals[0].pubkey(), &vals[0]).expect("v0b");
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey(), "u2", "BTC", "SOL", amt, 1, 0), &vals[1].pubkey(), &vals[1]).expect("v1b");
-    assert_eq!(reservation(&svm, &miner.pubkey()).from_addr, "u2");
+    // admin cancels the reservation → open works again
+    send(&mut svm, cancel_reservation_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel resv");
+    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0);
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]).expect("re-open after cancel");
+}
+
+#[test]
+fn test_cancel_pool_resets() {
+    let (mut svm, admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0);
+
+    send(&mut svm, cancel_pool_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel pool");
+    assert_eq!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool reset");
+    assert!(pool(&svm, &miner.pubkey()).requests.is_empty());
+
+    // can open a fresh contest after cancel
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 1, 1, 0), &vals[1].pubkey(), &vals[1]).expect("re-open");
 }
 
 #[test]
 fn test_reservation_blocks_deactivate_until_expiry() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    let amt = 2_000_000_000u64;
-    send(&mut svm, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", amt, 1, 0), &vals[0].pubkey(), &vals[0]).expect("v0");
-    send(&mut svm, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey(), "u", "BTC", "SOL", amt, 1, 0), &vals[1].pubkey(), &vals[1]).expect("v1");
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
     assert!(is_active(&svm, &miner.pubkey()));
 
-    // blocked while reserved
     let blocked = send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner);
     assert!(blocked.is_err(), "cannot self-deactivate while reserved");
 
-    // warp past the reservation expiry → now allowed
-    set_clock(&mut svm, BASE_TS + TTL + 1);
+    let resv_until = reservation(&svm, &miner.pubkey()).reserved_until;
+    set_clock(&mut svm, resv_until + 1);
     send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("deactivate after expiry");
     assert!(!is_active(&svm, &miner.pubkey()), "miner deactivated once reservation expired");
 }

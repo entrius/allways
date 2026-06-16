@@ -57,7 +57,7 @@ fn test_initialize_creates_config() {
     let cfg_acct = svm.get_account(&config_pda).expect("config exists");
     let config = Config::try_deserialize(&mut cfg_acct.data.as_slice()).unwrap();
     assert_eq!(config.admin, admin_pk);
-    assert_eq!(config.version, 2);
+    assert_eq!(config.version, 3);
     assert_eq!(config.min_collateral, 1_000_000);
     assert_eq!(config.max_collateral, 500_000_000);
     assert_eq!(config.fulfillment_timeout_secs, 12_600);

@@ -34,9 +34,14 @@ pub const TX_SEED: &[u8] = b"tx";
 #[constant]
 pub const QUOTE_SEED: &[u8] = b"quote";
 
+/// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`). Phase 9.
+#[constant]
+pub const POOL_SEED: &[u8] = b"pool";
+
 /// On-chain schema/version, surfaced for upgrade tracking. Bumped as phases land.
 /// v2: Phase 8 (on-chain miner quotes + per-validator weights).
-pub const CONFIG_VERSION: u32 = 2;
+/// v3: Phase 9 (reservation lottery + flat reservation fee).
+pub const CONFIG_VERSION: u32 = 3;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -45,8 +50,8 @@ pub const MAX_VALIDATORS: usize = 16;
 pub const VOTE_ROUND_TTL_SECS: i64 = 1800;
 
 /// Request types (keys into a vote round). Mirror the ink! contract's request enum.
+/// (REQ_RESERVE removed in Phase 9 — reservations are now lottery-based, not consensus-voted.)
 pub const REQ_ACTIVATE: u8 = 0;
-pub const REQ_RESERVE: u8 = 1;
 pub const REQ_INITIATE: u8 = 2;
 pub const REQ_DEACTIVATE: u8 = 5;
 pub const REQ_CONFIRM: u8 = 6;
@@ -54,6 +59,18 @@ pub const REQ_TIMEOUT: u8 = 7;
 
 /// Protocol fee divisor — 1% (immutable), `fee = sol_amount / FEE_DIVISOR`.
 pub const FEE_DIVISOR: u64 = 100;
+
+/// Flat anti-spam fee (lamports) a validator pays per reservation request (`open_or_request`),
+/// non-refundable → vault treasury. Static at deployment (Phase 9). Default 0.001 SOL.
+pub const RESERVATION_FEE_LAMPORTS: u64 = 1_000_000;
+
+/// Reservation-lottery pooling window (seconds): how long a pool collects requests before it can be
+/// resolved. Contending validators route within slots (~400ms), so a few seconds suffices; tune at
+/// deployment. Must stay well below the reservation TTL (separate windows). Static at deployment.
+pub const POOL_WINDOW_SECS: i64 = 3;
+
+/// Solana slot time (ms), used to pin the draw's future seed slot from the window duration.
+pub const SLOT_MS: u64 = 400;
 
 /// Bounded max lengths for stored strings (see SOLANA_MIGRATION_RESEARCH.md §14).
 pub const MAX_ADDR_LEN: usize = 80;

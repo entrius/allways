@@ -91,3 +91,39 @@ pub struct QuoteRemoved {
     pub from_chain: String,
     pub to_chain: String,
 }
+
+// --- Phase 9: reservation lottery (pool keyed per miner) ---
+
+#[event]
+pub struct PoolOpened {
+    pub miner: Pubkey,
+    pub opener: Pubkey,
+    pub from_chain: String,
+    pub to_chain: String,
+    pub closes_at: i64,
+    pub seed_slot: u64,
+}
+
+#[event]
+pub struct ReservationRequested {
+    pub miner: Pubkey,
+    pub validator: Pubkey,
+    pub user: Pubkey,
+    /// Number of requests in the pool after this one.
+    pub requests: u8,
+}
+
+#[event]
+pub struct PoolResolved {
+    pub miner: Pubkey,
+    /// The validator whose request won the draw.
+    pub winner: Pubkey,
+    pub user: Pubkey,
+    /// How many requests contended.
+    pub requests: u8,
+}
+
+#[event]
+pub struct PoolCancelled {
+    pub miner: Pubkey,
+}

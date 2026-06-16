@@ -24,8 +24,9 @@ use {
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
+    allways_swap_manager::constants::POOL_WINDOW_SECS,
     allways_swap_manager::state::{
-        Config, MinerQuote, MinerState, Reservation, Swap, SwapStatus, TxMarker, Vault,
+        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, TxMarker, Vault,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -40,9 +41,9 @@ use {
 
 const RPC_URL: &str = "http://127.0.0.1:8899";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
+const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 
 const REQ_ACTIVATE: u8 = 0;
-const REQ_RESERVE: u8 = 1;
 const REQ_INITIATE: u8 = 2;
 const REQ_CONFIRM: u8 = 6;
 
@@ -80,6 +81,9 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+}
+fn pool_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -217,32 +221,54 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn vote_reserve_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
+fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteReserve {
-            from_addr: FROM_ADDR.to_string(),
+        &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            user: *user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: "userSOLaddr".to_string(),
             sol_amount: SOL_AMOUNT,
             from_amount: 100_000,
             to_amount: 0,
-            miner_from_addr: MINER_FROM.to_string(),
-            miner_to_addr: MINER_TO.to_string(),
-            rate: RATE.to_string(),
         }
         .data(),
-        allways_swap_manager::accounts::VoteReserve {
+        allways_swap_manager::accounts::OpenOrRequest {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vote_round: vote_pda(REQ_RESERVE, miner.as_ref()),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            pool: pool_pda(miner),
+            vault: vault_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
+}
+fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::ResolvePool {}.data(),
+        allways_swap_manager::accounts::ResolvePool {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            pool: pool_pda(miner),
+            reservation: resv_pda(miner),
+            slot_hashes: SLOT_HASHES_ID,
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+/// Sleep just past the pool window so `resolve_pool` is callable (real wall-clock on the validator).
+fn wait_pool_window() {
+    std::thread::sleep(std::time::Duration::from_millis((POOL_WINDOW_SECS as u64) * 1000 + 1200));
 }
 fn initiate_ix(
     validator: &Pubkey,
@@ -403,14 +429,18 @@ fn active_miner(rpc: &RpcClient) -> Keypair {
     miner
 }
 
-/// Active miner + a confirmed reservation (2-of-3 reserve quorum).
+/// Active miner + a confirmed reservation via the lottery (post quote → open pool → wait window →
+/// resolve; sole entrant wins deterministically).
 fn reserved_miner(rpc: &RpcClient) -> Keypair {
     let vals = validator_keypairs();
     let miner = active_miner(rpc);
-    send(rpc, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
-        .expect("reserve v0");
-    send(rpc, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1])
-        .expect("reserve v1");
+    let user = Keypair::new().pubkey();
+    send(rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
+    send(rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+        .expect("open pool");
+    wait_pool_window();
+    send(rpc, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
+        .expect("resolve pool");
     miner
 }
 
@@ -434,7 +464,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 2, "schema version");
+    assert_eq!(cfg.version, 3, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -498,28 +528,85 @@ fn onchain_vote_activate_quorum() {
 
 #[test]
 #[ignore = "requires a live solana-test-validator with the program deployed"]
-fn onchain_vote_reserve_pins_quote() {
+fn onchain_pool_open_pins_quote() {
     let _ = shared();
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = active_miner(&rpc);
+    let user = Keypair::new().pubkey();
 
-    send(&rpc, vote_reserve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
-        .expect("reserve v0");
-    // Quorum reached on the 2nd vote → reservation populated.
-    send(&rpc, vote_reserve_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1])
-        .expect("reserve v1");
+    send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+        .expect("open pool");
+
+    let p: Pool = {
+        let a = rpc.get_account(&pool_pda(&miner.pubkey())).expect("pool account");
+        Pool::try_deserialize(&mut a.data.as_slice()).unwrap()
+    };
+    assert_eq!(p.from_chain, FROM_CHAIN);
+    assert_eq!(p.to_chain, TO_CHAIN);
+    assert_eq!(p.miner_from_addr, MINER_FROM, "pinned from the on-chain quote");
+    assert_eq!(p.miner_to_addr, MINER_TO);
+    assert_eq!(p.rate, RATE);
+    assert_eq!(p.requests.len(), 1);
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_reservation_fee_to_treasury() {
+    let _ = shared();
+    let rpc = rpc();
+    let vals = validator_keypairs();
+    let miner = active_miner(&rpc);
+    let user = Keypair::new().pubkey();
+    send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
+
+    let before = read_vault(&rpc).treasury_total;
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+        .expect("open pool");
+    let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
+    assert_eq!(
+        read_vault(&rpc).treasury_total,
+        before + fee,
+        "flat reservation fee accrued to treasury"
+    );
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_resolve_pool_creates_reservation() {
+    let _ = shared();
+    let rpc = rpc();
+    let vals = validator_keypairs();
+    let miner = active_miner(&rpc);
+    let u0 = Keypair::new().pubkey();
+    let u1 = Keypair::new().pubkey();
+
+    // Two validators contend; real SlotHashes seeds the weighted draw.
+    send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &u0), &vals[0].pubkey(), &vals[0])
+        .expect("open");
+    send(&rpc, open_ix(&vals[1].pubkey(), &miner.pubkey(), &u1), &vals[1].pubkey(), &vals[1])
+        .expect("join");
+    wait_pool_window();
+    send(&rpc, resolve_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2])
+        .expect("resolve");
 
     let r = read_reservation(&rpc, &miner.pubkey());
-    assert_eq!(r.from_addr, FROM_ADDR);
+    assert!(r.reserved_until > 0, "a winner was reserved");
     assert_eq!(r.from_chain, FROM_CHAIN);
     assert_eq!(r.to_chain, TO_CHAIN);
     assert_eq!(r.sol_amount, SOL_AMOUNT);
-    // Pinned immutable miner quote.
-    assert_eq!(r.miner_from_addr, MINER_FROM);
+    assert_eq!(r.miner_from_addr, MINER_FROM, "pinned miner quote carried in");
     assert_eq!(r.miner_to_addr, MINER_TO);
     assert_eq!(r.rate, RATE);
-    assert!(r.reserved_until > 0, "reservation active (reserved_until set)");
+    assert_eq!(r.from_addr, FROM_ADDR, "winner's user source addr");
+    // pool reset for reuse
+    let p: Pool = {
+        let a = rpc.get_account(&pool_pda(&miner.pubkey())).expect("pool account");
+        Pool::try_deserialize(&mut a.data.as_slice()).unwrap()
+    };
+    assert_eq!(p.opened_at, 0, "pool reset after resolve");
 }
 
 #[test]

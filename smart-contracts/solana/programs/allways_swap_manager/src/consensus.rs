@@ -11,37 +11,6 @@ pub fn request_hash(request_type: u8, target: &Pubkey) -> [u8; 32] {
     hashv(&[&[request_type], target.as_ref()]).to_bytes()
 }
 
-/// Bound hash for a reserve round — binds every field validators must agree on (amounts/addresses
-/// the PDA seeds don't cover) PLUS the pinned miner quote (deposit/payout addresses + rate), so the
-/// reservation is a complete immutable quote that can't be swapped after the user commits (v2 #1a).
-#[allow(clippy::too_many_arguments)]
-pub fn reserve_hash(
-    miner: &Pubkey,
-    from_addr: &str,
-    from_chain: &str,
-    to_chain: &str,
-    sol_amount: u64,
-    from_amount: u128,
-    to_amount: u128,
-    miner_from_addr: &str,
-    miner_to_addr: &str,
-    rate: &str,
-) -> [u8; 32] {
-    hashv(&[
-        miner.as_ref(),
-        from_addr.as_bytes(),
-        from_chain.as_bytes(),
-        to_chain.as_bytes(),
-        &sol_amount.to_le_bytes(),
-        &from_amount.to_le_bytes(),
-        &to_amount.to_le_bytes(),
-        miner_from_addr.as_bytes(),
-        miner_to_addr.as_bytes(),
-        rate.as_bytes(),
-    ])
-    .to_bytes()
-}
-
 /// Bound hash for an initiate round — binds the user-side payout fields the seeds/reservation don't
 /// cover (closes v2 #2 / #411: `user`, `user_from_addr`, `user_to_addr`, `from_tx_block`). The
 /// miner quote + amounts come from the immutable reservation, so they need not be re-bound here.

@@ -1,10 +1,10 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::reset_round;
-use crate::constants::{CONFIG_SEED, REQ_RESERVE, RESV_SEED, VOTE_SEED};
-use crate::state::{Config, Reservation, VoteRound};
+use crate::constants::{CONFIG_SEED, RESV_SEED};
+use crate::state::{Config, Reservation};
 
-/// Admin clears a miner's reservation and any in-flight reserve vote round.
+/// Admin clears a miner's active reservation (Phase 9: reservations come from the lottery; there is no
+/// reserve vote round to reset anymore — pools are reset via `cancel_pool`).
 #[derive(Accounts)]
 pub struct CancelReservation<'info> {
     pub admin: Signer<'info>,
@@ -15,12 +15,9 @@ pub struct CancelReservation<'info> {
     /// CHECK: identified by address only; used in PDA seeds.
     pub miner: UncheckedAccount<'info>,
 
-    // Canonical bumps (not stored) so this works whether the reservation was populated yet or not.
+    // Canonical bump (not stored) so this works whether the reservation was populated yet or not.
     #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump)]
     pub reservation: Account<'info, Reservation>,
-
-    #[account(mut, seeds = [VOTE_SEED, &[REQ_RESERVE], miner.key().as_ref()], bump)]
-    pub vote_round: Account<'info, VoteRound>,
 }
 
 pub fn handler(ctx: Context<CancelReservation>) -> Result<()> {
@@ -37,7 +34,6 @@ pub fn handler(ctx: Context<CancelReservation>) -> Result<()> {
     r.rate = String::new();
     r.reserved_until = 0;
 
-    reset_round(&mut ctx.accounts.vote_round);
     msg!("reservation cancelled: {}", ctx.accounts.miner.key());
     Ok(())
 }

@@ -75,4 +75,16 @@ pub enum ErrorCode {
     SameChain,
     #[msg("A required string field is empty")]
     EmptyField,
+
+    // --- Phase 9: reservation lottery ---
+    #[msg("Request pair does not match the open pool's pinned pair")]
+    PoolPairMismatch,
+    #[msg("Pool window has closed; resolve it before requesting again")]
+    PoolClosed,
+    #[msg("Pool window has not closed yet")]
+    PoolNotClosed,
+    #[msg("Validator already has a request in this pool")]
+    AlreadyRequested,
+    #[msg("Pool has no requests to resolve")]
+    NoRequests,
 }
