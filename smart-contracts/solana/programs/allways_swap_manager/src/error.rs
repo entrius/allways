@@ -87,4 +87,10 @@ pub enum ErrorCode {
     AlreadyRequested,
     #[msg("Pool has no requests to resolve")]
     NoRequests,
+
+    // --- Phase 10: consensus validator weights ---
+    #[msg("Weights vector length must match the validator set")]
+    InvalidWeightsVector,
+    #[msg("Minimum interval between weight updates has not elapsed")]
+    WeightsUpdateTooSoon,
 }

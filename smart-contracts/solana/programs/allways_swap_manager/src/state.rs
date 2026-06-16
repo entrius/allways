@@ -40,6 +40,8 @@ pub struct Config {
     /// Whitelisted validator set (consensus participants) + draw weights, capped at MAX_VALIDATORS.
     #[max_len(MAX_VALIDATORS)]
     pub validators: Vec<ValidatorInfo>,
+    /// Unix timestamp of the last consensus weight update (0 = never). Gates the update cadence floor.
+    pub last_weights_update: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }

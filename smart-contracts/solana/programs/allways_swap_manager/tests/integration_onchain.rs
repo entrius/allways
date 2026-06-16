@@ -46,6 +46,7 @@ const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111
 const REQ_ACTIVATE: u8 = 0;
 const REQ_INITIATE: u8 = 2;
 const REQ_CONFIRM: u8 = 6;
+const REQ_SET_WEIGHTS: u8 = 8;
 
 // Generous, wall-clock-proof bounds so nothing expires during a real-time run.
 const TTL_SECS: i64 = 86_400; // reservation TTL: 1 day
@@ -84,6 +85,9 @@ fn resv_pda(m: &Pubkey) -> Pubkey {
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+}
+fn weights_round_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"vote", &[REQ_SET_WEIGHTS]], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -348,6 +352,19 @@ fn withdraw_treasury_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Inst
         .to_account_metas(None),
     )
 }
+fn vote_weights_ix(validator: &Pubkey, weights: Vec<u64>) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::VoteSetWeights { weights }.data(),
+        allways_swap_manager::accounts::VoteSetWeights {
+            validator: *validator,
+            config: config_pda(),
+            vote_round: weights_round_pda(),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
 
 // ─── shared one-time setup: Config + 3-validator whitelist ───────────────────────
 //
@@ -464,7 +481,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 3, "schema version");
+    assert_eq!(cfg.version, 4, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -484,6 +501,31 @@ fn onchain_add_three_validators() {
     for v in &vals {
         assert!(cfg.validators.iter().any(|x| x.key == v.pubkey()), "validator {} in set", v.pubkey());
     }
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_vote_set_weights_quorum() {
+    // Must run before any test that grows the validator set (so quorum = 2 of 3 here).
+    let _ = shared();
+    let rpc = rpc();
+    let vals = validator_keypairs();
+    let cfg = read_config(&rpc);
+    let n = cfg.validators.len();
+
+    // Full vector index-aligned to Config.validators; bump index 0 to a distinguishable value.
+    let mut weights: Vec<u64> = cfg.validators.iter().map(|v| v.weight).collect();
+    weights[0] = 42;
+
+    send(&rpc, vote_weights_ix(&vals[0].pubkey(), weights.clone()), &vals[0].pubkey(), &vals[0])
+        .expect("weights v0");
+    send(&rpc, vote_weights_ix(&vals[1].pubkey(), weights.clone()), &vals[1].pubkey(), &vals[1])
+        .expect("weights v1");
+
+    let after = read_config(&rpc);
+    assert_eq!(after.validators.len(), n, "set size unchanged");
+    assert_eq!(after.validators[0].weight, 42, "consensus weight applied");
+    assert!(after.last_weights_update > 0, "cadence stamp set");
 }
 
 #[test]

@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 use solana_keccak_hasher::hashv;
 
-use crate::constants::{MAX_VALIDATORS, VOTE_ROUND_TTL_SECS};
+use crate::constants::{MAX_VALIDATORS, REQ_SET_WEIGHTS, VOTE_ROUND_TTL_SECS};
 use crate::error::ErrorCode;
-use crate::state::{Config, VoteRound};
+use crate::state::{Config, ValidatorInfo, VoteRound};
 
 /// Canonical bound hash for a vote round, from (request_type, target pubkey).
 /// Later phases extend the preimage with amounts/addresses the seeds don't cover.
@@ -39,6 +39,23 @@ pub fn initiate_hash(
 /// so this is a trivial binding like activate/deactivate.
 pub fn swap_request_hash(request_type: u8, swap_key: &[u8; 32]) -> [u8; 32] {
     hashv(&[&[request_type], swap_key]).to_bytes()
+}
+
+/// Bound hash for the validator-weight round (Phase 10): binds the full snapshot —
+/// `REQ_SET_WEIGHTS || (each validator key in config order) || (each weight LE)`. Binding the keys too
+/// means a validator-set change between voters invalidates the round (hash mismatch), so a stale
+/// vector can't be applied to a changed set. `validators` and `weights` are index-aligned.
+pub fn weights_hash(validators: &[ValidatorInfo], weights: &[u64]) -> [u8; 32] {
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(1 + validators.len() + weights.len());
+    parts.push(vec![REQ_SET_WEIGHTS]);
+    for v in validators {
+        parts.push(v.key.as_ref().to_vec());
+    }
+    for w in weights {
+        parts.push(w.to_le_bytes().to_vec());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
+    hashv(&refs).to_bytes()
 }
 
 /// Record a validator's vote into `round`; returns true iff quorum is now reached.

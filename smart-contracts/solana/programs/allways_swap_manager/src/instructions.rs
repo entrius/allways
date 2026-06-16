@@ -14,6 +14,7 @@ pub mod timeout_swap;
 pub mod vote_activate;
 pub mod vote_deactivate;
 pub mod vote_initiate;
+pub mod vote_set_weights;
 pub mod withdraw_collateral;
 pub mod withdraw_treasury;
 
@@ -36,5 +37,6 @@ pub use timeout_swap::*;
 pub use vote_activate::*;
 pub use vote_deactivate::*;
 pub use vote_initiate::*;
+pub use vote_set_weights::*;
 pub use withdraw_collateral::*;
 pub use withdraw_treasury::*;

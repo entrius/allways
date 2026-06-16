@@ -41,7 +41,8 @@ pub const POOL_SEED: &[u8] = b"pool";
 /// On-chain schema/version, surfaced for upgrade tracking. Bumped as phases land.
 /// v2: Phase 8 (on-chain miner quotes + per-validator weights).
 /// v3: Phase 9 (reservation lottery + flat reservation fee).
-pub const CONFIG_VERSION: u32 = 3;
+/// v4: Phase 10 (consensus-governed validator weights).
+pub const CONFIG_VERSION: u32 = 4;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -56,6 +57,8 @@ pub const REQ_INITIATE: u8 = 2;
 pub const REQ_DEACTIVATE: u8 = 5;
 pub const REQ_CONFIRM: u8 = 6;
 pub const REQ_TIMEOUT: u8 = 7;
+/// Phase 10: global (non-per-target) round for the validator-weight vector.
+pub const REQ_SET_WEIGHTS: u8 = 8;
 
 /// Protocol fee divisor — 1% (immutable), `fee = sol_amount / FEE_DIVISOR`.
 pub const FEE_DIVISOR: u64 = 100;
@@ -71,6 +74,11 @@ pub const POOL_WINDOW_SECS: i64 = 3;
 
 /// Solana slot time (ms), used to pin the draw's future seed slot from the window duration.
 pub const SLOT_MS: u64 = 400;
+
+/// Phase 10: minimum seconds between successful validator-weight updates — a floor (anti-thrash /
+/// anti-grief), not a schedule. Validators' actual cadence (e.g. daily) is an off-chain policy ≥ this.
+/// Tunable at deployment.
+pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
 /// Bounded max lengths for stored strings (see SOLANA_MIGRATION_RESEARCH.md §14).
 pub const MAX_ADDR_LEN: usize = 80;

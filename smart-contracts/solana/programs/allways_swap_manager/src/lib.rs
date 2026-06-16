@@ -64,13 +64,21 @@ pub mod allways_swap_manager {
     pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result<()> {
         admin::set_consensus_threshold(ctx, percent)
     }
-    /// Phase 8: set a validator's draw weight (stake-oracle seam; consensus stays count-based).
+    /// Phase 8: set a validator's draw weight (admin bootstrap/fallback; superseded for routine use
+    /// by the Phase 10 consensus path below).
     pub fn set_validator_weight(
         ctx: Context<AdminConfig>,
         validator: Pubkey,
         weight: u64,
     ) -> Result<()> {
         admin::set_validator_weight(ctx, validator, weight)
+    }
+
+    // --- Phase 10: consensus-governed validator weights ---
+    /// A validator submits the full weight vector (index-aligned to `Config.validators`); on quorum
+    /// the weights are saved. Validators read stake off-chain and converge on one snapshot.
+    pub fn vote_set_weights(ctx: Context<VoteSetWeights>, weights: Vec<u64>) -> Result<()> {
+        vote_set_weights::handler(ctx, weights)
     }
 
     // --- Phase 2: miner activation consensus ---

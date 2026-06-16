@@ -127,3 +127,12 @@ pub struct PoolResolved {
 pub struct PoolCancelled {
     pub miner: Pubkey,
 }
+
+// --- Phase 10: consensus-governed validator weights ---
+
+#[event]
+pub struct ValidatorWeightsUpdated {
+    /// Number of validators whose weights were set (the full set; read the vector from Config).
+    pub count: u8,
+    pub updated_at: i64,
+}
