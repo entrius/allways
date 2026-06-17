@@ -273,6 +273,47 @@ class TestBroadcastedTxidsTracking:
         provider = make_lightweight_provider()
         assert provider.broadcasted_txids == set()
 
+    def test_nested_segwit_lightweight_send_serializes_scriptsig(self):
+        """Regression guard for #470: nested-segwit finalize must store a Script
+        object on script_sig, not raw bytes, so tx serialization succeeds."""
+        provider = make_lightweight_provider()
+        from_address, _, _ = sign_message(TEST_WIF, 'p2wpkh-p2sh', 'x', deterministic=True)
+        to_address, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'y', deterministic=True)
+
+        utxo_resp = MagicMock()
+        utxo_resp.raise_for_status.return_value = None
+        utxo_resp.json.return_value = [{'txid': '11' * 32, 'vout': 0, 'value': 80_000}]
+
+        captured = {}
+
+        def fake_post(path: str, data: str, timeout: int = 30):
+            captured['raw_tx'] = data
+            return SimpleNamespace(status_code=200, text='aa' * 32)
+
+        with (
+            patch.dict(os.environ, {'BTC_PRIVATE_KEY': TEST_WIF}, clear=False),
+            patch.object(provider, 'btc_api_get', return_value=utxo_resp),
+            patch.object(provider, 'btc_api_post', side_effect=fake_post),
+        ):
+            result = provider.send_amount_lightweight(
+                to_address=to_address,
+                amount=10_000,
+                from_address=from_address,
+                fee_rate_override=1,
+            )
+
+        assert result == ('aa' * 32, 0)
+        raw_tx = captured.get('raw_tx')
+        assert raw_tx, 'expected send_amount_lightweight to broadcast a serialized transaction'
+
+        from embit.ec import PrivateKey
+        from embit.script import p2wpkh
+        from embit.transaction import Transaction as EmbitTx
+
+        tx = EmbitTx.from_string(raw_tx)
+        expected_redeem = p2wpkh(PrivateKey.from_wif(TEST_WIF).get_public_key()).serialize().hex()
+        assert tx.vin[0].script_sig.data.hex() == expected_redeem
+
 
 class TestIsValidAddress:
     """BTC address format validation — must accept every standard type

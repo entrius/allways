@@ -38,12 +38,12 @@ def claim_command(swap_id: int, yes: bool):
         print_contract_error('Failed to read pending slash', e)
         return
 
-    if pending_rao == 0:
-        try:
-            swap = client.get_swap(swap_id)
-        except ContractError:
-            swap = None
+    try:
+        swap = client.get_swap(swap_id)
+    except ContractError:
+        swap = None
 
+    if pending_rao == 0:
         if swap is not None and swap.status in (SwapStatus.ACTIVE, SwapStatus.FULFILLED):
             console.print(
                 f'[yellow]Swap #{swap_id} is still in progress (status: {swap.status.name}).[/yellow]\n'
@@ -60,9 +60,30 @@ def claim_command(swap_id: int, yes: bool):
         )
         return
 
+    signer_keypair = wallet.hotkey
+    signer_ss58 = wallet.hotkey.ss58_address
+    required_claimant = None
+    if swap is not None:
+        required_claimant = swap.user_hotkey
+        if required_claimant == wallet.coldkeypub.ss58_address:
+            signer_keypair = wallet.coldkey
+            signer_ss58 = wallet.coldkeypub.ss58_address
+        elif required_claimant == wallet.hotkey.ss58_address:
+            signer_keypair = wallet.hotkey
+            signer_ss58 = wallet.hotkey.ss58_address
+        else:
+            console.print(f'  Swap user:  [yellow]{required_claimant}[/yellow]')
+            console.print(
+                '[red]This wallet cannot claim this slash.[/red]\n'
+                '[dim]Claim must be signed by the original swap user account above.[/dim]\n'
+            )
+            return
+
     console.print(f'  Swap ID:    {swap_id}')
     console.print(f'  Amount:     [green]{from_rao(pending_rao):.4f} TAO[/green] ({pending_rao} rao)')
-    console.print(f'  Claiming:   {wallet.hotkey.ss58_address}')
+    if required_claimant:
+        console.print(f'  Swap user:  {required_claimant}')
+    console.print(f'  Claiming:   {signer_ss58}')
     console.print('[dim]  Only the original swap user can claim; others will be rejected on-chain.[/dim]\n')
 
     if not yes and not click.confirm('Confirm claiming slash?'):
@@ -71,7 +92,7 @@ def claim_command(swap_id: int, yes: bool):
 
     try:
         with loading('Submitting transaction...'):
-            client.claim_slash(wallet=wallet, swap_id=swap_id)
+            client.claim_slash(wallet=wallet, swap_id=swap_id, keypair=signer_keypair)
         console.print(f'[green]Successfully claimed {from_rao(pending_rao):.4f} TAO from swap #{swap_id}![/green]\n')
     except ContractError as e:
         print_contract_error('Failed to claim slash', e)

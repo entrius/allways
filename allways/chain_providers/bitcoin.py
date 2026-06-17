@@ -720,10 +720,12 @@ class BitcoinProvider(ChainProvider):
             final_tx = psbt.tx
             for i, inp in enumerate(psbt.inputs):
                 if is_segwit:
+                    from embit.script import Script
+
                     for pub, sig in inp.partial_sigs.items():
                         final_tx.vin[i].witness = Witness([sig, pub.sec()])
                         if addr_type == 'p2sh-p2wpkh':
-                            final_tx.vin[i].script_sig = segwit_script.serialize()
+                            final_tx.vin[i].script_sig = Script(segwit_script.serialize())
                 else:
                     from embit.script import Script
 

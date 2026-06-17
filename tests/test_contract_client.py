@@ -199,3 +199,40 @@ class TestExtensionSelectorWiring:
             'TargetNotForward',
             'InvalidTarget',
         }
+
+
+class TestClaimSlashSigner:
+    def test_claim_slash_uses_explicit_keypair_when_provided(self):
+        client = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor())
+        client.ensure_initialized = MagicMock()
+        client.exec_contract_raw = MagicMock(return_value='0xabc')
+        wallet = MagicMock()
+        wallet.hotkey = MagicMock()
+        cold = MagicMock()
+
+        tx_hash = client.claim_slash(wallet=wallet, swap_id=42, keypair=cold)
+
+        assert tx_hash == '0xabc'
+        client.exec_contract_raw.assert_called_once_with(
+            'claim_slash',
+            args={'swap_id': 42},
+            keypair=cold,
+            value=0,
+        )
+
+    def test_claim_slash_defaults_to_hotkey_signer(self):
+        client = AllwaysContractClient(contract_address='5xx', subtensor=make_subtensor())
+        client.ensure_initialized = MagicMock()
+        client.exec_contract_raw = MagicMock(return_value='0xdef')
+        wallet = MagicMock()
+        wallet.hotkey = MagicMock()
+
+        tx_hash = client.claim_slash(wallet=wallet, swap_id=7)
+
+        assert tx_hash == '0xdef'
+        client.exec_contract_raw.assert_called_once_with(
+            'claim_slash',
+            args={'swap_id': 7},
+            keypair=wallet.hotkey,
+            value=0,
+        )

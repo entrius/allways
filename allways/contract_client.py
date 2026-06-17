@@ -1015,9 +1015,10 @@ class AllwaysContractClient:
         log_msg: str,
         args: Optional[dict] = None,
         value: int = 0,
+        keypair: Optional[Any] = None,
     ) -> str:
         self.ensure_initialized()
-        tx_hash = self.exec_contract_raw(method, args=args, keypair=wallet.hotkey, value=value)
+        tx_hash = self.exec_contract_raw(method, args=args, keypair=keypair or wallet.hotkey, value=value)
         bt.logging.info(f'{log_msg}: {tx_hash}')
         return tx_hash
 
@@ -1283,8 +1284,14 @@ class AllwaysContractClient:
         """Deactivate a miner directly on contract (permissionless)."""
         return self._exec_logged('deactivate', wallet, f'Miner {miner} deactivated', {'miner': miner})
 
-    def claim_slash(self, wallet: bt.Wallet, swap_id: int) -> str:
-        return self._exec_logged('claim_slash', wallet, f'Slash claimed for swap {swap_id}', {'swap_id': swap_id})
+    def claim_slash(self, wallet: bt.Wallet, swap_id: int, keypair: Optional[Any] = None) -> str:
+        return self._exec_logged(
+            'claim_slash',
+            wallet,
+            f'Slash claimed for swap {swap_id}',
+            {'swap_id': swap_id},
+            keypair=keypair,
+        )
 
     # =========================================================================
     # Admin Transaction Functions (Write — owner-only)
