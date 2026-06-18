@@ -1,6 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, CONFIG_VERSION, VAULT_SEED};
+use crate::constants::{
+    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, VAULT_SEED,
+    WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+};
 use crate::error::ErrorCode;
 use crate::state::{Config, Vault};
 
@@ -62,6 +65,9 @@ pub fn handler(
     config.validators = Vec::new();
     config.last_weights_update = 0;
     config.halted = false;
+    config.reservation_fee_lamports = RESERVATION_FEE_LAMPORTS;
+    config.pool_window_secs = POOL_WINDOW_SECS;
+    config.weights_update_min_interval_secs = WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
     config.bump = ctx.bumps.config;
 
     let vault = &mut ctx.accounts.vault;
