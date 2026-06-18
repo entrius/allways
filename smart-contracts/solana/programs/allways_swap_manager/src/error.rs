@@ -41,6 +41,8 @@ pub enum ErrorCode {
     NotMiner,
     #[msg("No validators configured")]
     NoValidators,
+    #[msg("System is halted")]
+    SystemHalted,
 
     // --- Phase 3: reservations ---
     #[msg("Swap amount is below the configured minimum")]

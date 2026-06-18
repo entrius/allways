@@ -42,6 +42,8 @@ pub struct Config {
     pub validators: Vec<ValidatorInfo>,
     /// Unix timestamp of the last consensus weight update (0 = never). Gates the update cadence floor.
     pub last_weights_update: i64,
+    /// Emergency halt: when true, new deposits / activations / reservation pools are rejected.
+    pub halted: bool,
     /// Stored PDA bump.
     pub bump: u8,
 }

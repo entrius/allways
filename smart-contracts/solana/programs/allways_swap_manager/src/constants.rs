@@ -42,7 +42,8 @@ pub const POOL_SEED: &[u8] = b"pool";
 /// v2: Phase 8 (on-chain miner quotes + per-validator weights).
 /// v3: Phase 9 (reservation lottery + flat reservation fee).
 /// v4: Phase 10 (consensus-governed validator weights).
-pub const CONFIG_VERSION: u32 = 4;
+/// v5: emergency halt switch.
+pub const CONFIG_VERSION: u32 = 5;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
