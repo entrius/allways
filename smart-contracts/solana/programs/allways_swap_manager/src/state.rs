@@ -44,6 +44,12 @@ pub struct Config {
     pub last_weights_update: i64,
     /// Emergency halt: when true, new deposits / activations / reservation pools are rejected.
     pub halted: bool,
+    /// Flat anti-spam fee per reservation request, lamports (runtime-tunable; 0 disables).
+    pub reservation_fee_lamports: u64,
+    /// Reservation-lottery pooling window, seconds (runtime-tunable).
+    pub pool_window_secs: i64,
+    /// Minimum seconds between consensus weight updates (runtime-tunable anti-thrash floor).
+    pub weights_update_min_interval_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }
