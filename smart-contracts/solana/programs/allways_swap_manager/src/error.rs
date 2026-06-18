@@ -79,8 +79,10 @@ pub enum ErrorCode {
     EmptyField,
 
     // --- Phase 9: reservation lottery ---
-    #[msg("Request pair does not match the open pool's pinned pair")]
-    PoolPairMismatch,
+    #[msg("Miner has an open reservation pool for a different pair; wait for it to resolve")]
+    MinerBusyDifferentPair,
+    #[msg("Miner has an open reservation pool; cannot proceed")]
+    MinerBusy,
     #[msg("Pool window has closed; resolve it before requesting again")]
     PoolClosed,
     #[msg("Pool window has not closed yet")]

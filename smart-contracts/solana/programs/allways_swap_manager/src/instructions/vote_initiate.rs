@@ -173,6 +173,7 @@ pub fn handler(
         tx_marker.bump = tx_marker_bump;
 
         ctx.accounts.miner_state.has_active_swap = true;
+        ctx.accounts.miner_state.busy_until = timeout_at; // stay busy through the swap deadline
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         reset_round(&mut ctx.accounts.vote_round);
 

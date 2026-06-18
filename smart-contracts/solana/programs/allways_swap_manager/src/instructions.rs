@@ -1,6 +1,4 @@
 pub mod admin;
-pub mod cancel_pool;
-pub mod cancel_reservation;
 pub mod confirm_swap;
 pub mod deactivate;
 pub mod initialize;
@@ -22,8 +20,6 @@ pub mod withdraw_treasury;
 // (Emits a benign "ambiguous glob re-exports" warning for the shared `handler` name;
 // handlers are always called fully-qualified, e.g. `initialize::handler`.)
 pub use admin::*;
-pub use cancel_pool::*;
-pub use cancel_reservation::*;
 pub use confirm_swap::*;
 pub use deactivate::*;
 pub use initialize::*;
