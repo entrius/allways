@@ -43,9 +43,62 @@ pub fn required_collateral(sol_amount: u64) -> u64 {
     req.min(u64::MAX as u128) as u64
 }
 
+// --- Quote-update churn fee (anti-flashing) ---
+//
+// Updating a *standing* quote too soon after its last write costs a small, treasury-bound fee that
+// **decays to zero** the longer the quote has stood. This discourages rapid quote-flashing without
+// scaring miners off the network: first-time creation is free (only rent), and a quote left to
+// stand becomes free to update again. Stepwise (not continuous exponential) — deterministic and
+// cheap on-chain, with the same "cheaper the longer you wait" intent.
+//
+// Tiers, by seconds since the previous update:
+//   elapsed < TIER1_MAX_SECS          → TIER1_LAMPORTS  (rapid churn — most expensive)
+//   TIER1_MAX ≤ elapsed < TIER2_MAX   → TIER2_LAMPORTS
+//   elapsed ≥ TIER2_MAX_SECS          → 0               (a stable quote — free)
+// All collected fees go to the vault treasury.
+pub const QUOTE_UPDATE_FEE_TIER1_LAMPORTS: u64 = 10_000_000; // 0.01 SOL — churn within 5 min
+pub const QUOTE_UPDATE_FEE_TIER1_MAX_SECS: i64 = 300; // 5 min
+pub const QUOTE_UPDATE_FEE_TIER2_LAMPORTS: u64 = 1_000_000; // 0.001 SOL — 5–10 min
+pub const QUOTE_UPDATE_FEE_TIER2_MAX_SECS: i64 = 600; // 10 min → free thereafter
+
+// Sanity: windows must increase and the fee must not increase as time passes (monotone decay).
+const _: () = assert!(
+    QUOTE_UPDATE_FEE_TIER1_MAX_SECS < QUOTE_UPDATE_FEE_TIER2_MAX_SECS
+        && QUOTE_UPDATE_FEE_TIER1_LAMPORTS >= QUOTE_UPDATE_FEE_TIER2_LAMPORTS,
+    "quote-update fee tiers must decay over increasing windows"
+);
+
+/// Fee (lamports) for updating a standing quote `elapsed_secs` after its previous write. A negative
+/// or zero elapsed (clock skew / same-second churn) falls into the most-expensive tier. Applies only
+/// to updates — the caller charges nothing on first creation.
+pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
+    if elapsed_secs < QUOTE_UPDATE_FEE_TIER1_MAX_SECS {
+        QUOTE_UPDATE_FEE_TIER1_LAMPORTS
+    } else if elapsed_secs < QUOTE_UPDATE_FEE_TIER2_MAX_SECS {
+        QUOTE_UPDATE_FEE_TIER2_LAMPORTS
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_update_fee_decays_by_tier() {
+        // Same-second / rapid churn → top tier.
+        assert_eq!(quote_update_fee(0), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+        assert_eq!(quote_update_fee(299), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+        // 5-min boundary drops to tier 2.
+        assert_eq!(quote_update_fee(300), QUOTE_UPDATE_FEE_TIER2_LAMPORTS);
+        assert_eq!(quote_update_fee(599), QUOTE_UPDATE_FEE_TIER2_LAMPORTS);
+        // 10 min and beyond → free.
+        assert_eq!(quote_update_fee(600), 0);
+        assert_eq!(quote_update_fee(86_400), 0);
+        // Clock skew (negative elapsed) → most-expensive tier, never free.
+        assert_eq!(quote_update_fee(-100), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+    }
 
     #[test]
     fn collateral_requirement_within_bounds() {

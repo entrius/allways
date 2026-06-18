@@ -83,6 +83,9 @@ pub struct QuoteSet {
     pub rate: String,
     pub liquidity: u128,
     pub updated_at: i64,
+    /// Anti-flashing churn fee paid into the treasury this call (lamports); 0 on first creation
+    /// and once a quote has stood past the decay window.
+    pub update_fee: u64,
 }
 
 #[event]

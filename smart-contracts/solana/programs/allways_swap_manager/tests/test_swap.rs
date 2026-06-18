@@ -156,6 +156,7 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            vault: vault_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

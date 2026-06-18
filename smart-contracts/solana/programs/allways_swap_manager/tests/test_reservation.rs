@@ -143,6 +143,7 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(miner, f, t),
+            vault: vault_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
