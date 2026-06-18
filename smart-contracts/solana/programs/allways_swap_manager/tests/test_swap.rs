@@ -310,6 +310,12 @@ fn lamports(svm: &LiteSVM, p: &Pubkey) -> u64 {
 /// init + 3 validators + active miner + a confirmed reservation. Returns (svm, vals, miner,
 /// vault rent reserve). Clock at BASE_TS.
 fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
+    setup_with_collateral(COLLATERAL)
+}
+
+/// As `setup`, but the miner posts an arbitrary collateral amount (to exercise the
+/// over-collateralization boundary at `vote_initiate`).
+fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
     set_clock(&mut svm, BASE_TS);
@@ -329,7 +335,7 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
 
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
-    send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post");
+    send(&mut svm, post_ix(&miner.pubkey(), collateral), &miner.pubkey(), &miner).expect("post");
     send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
@@ -389,6 +395,24 @@ fn test_initiate_creates_swap() {
     // side effects
     assert!(miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&tx_pda(&key)).is_some());
+}
+
+#[test]
+fn test_initiate_rejected_below_overcollateralization() {
+    // Miner holds 2.1 SOL: ≥ min_collateral (1) and ≥ 1.0× the 2 SOL swap, but < 1.10× (2.2 SOL).
+    // Activation + reservation succeed (they only gate on min_collateral), but vote_initiate's
+    // over-collateralization guard (v2 #4) must reject it.
+    let under = SOL_AMOUNT + SOL_AMOUNT / 20; // 2.1 SOL (< 2.2)
+    let (mut svm, vals, miner, _rent) = setup_with_collateral(under);
+    let user = Keypair::new().pubkey();
+    let res = send(
+        &mut svm,
+        initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "userSOLaddr"),
+        &vals[0].pubkey(),
+        &vals[0],
+    );
+    assert!(res.is_err(), "initiate must reject collateral below 1.1x the swap size");
+    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "no swap created");
 }
 
 #[test]
@@ -480,9 +504,11 @@ fn test_timeout_slash_refund_and_invariant() {
     send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &user.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
     send(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &user.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
 
-    let slash = SOL_AMOUNT; // collateral (10) >= swap size (2)
-    assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - slash, "collateral slashed");
-    assert_eq!(lamports(&svm, &user.pubkey()), user_before + slash, "user refunded slash");
+    // v2 #4: failed swaps are slashed at 1.10× the swap size, all refunded to the user.
+    // collateral (10 SOL) >= 1.1× swap size (2.2 SOL), so the full penalty is taken.
+    let slash = SOL_AMOUNT + SOL_AMOUNT / 10; // 1.10× = 2.2 SOL
+    assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - slash, "collateral slashed 1.1x");
+    assert_eq!(lamports(&svm, &user.pubkey()), user_before + slash, "user refunded full 1.1x slash");
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, rent), "vault invariant after slash");

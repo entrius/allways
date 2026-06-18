@@ -98,8 +98,10 @@ pub fn handler(
             ErrorCode::NoReservation
         );
         require!(user_from_address == resv.from_addr, ErrorCode::UserMismatch);
+        // Over-collateralization gate (v2 #4): the miner must hold the swap size scaled by the
+        // tunable requirement (1.10× today), so a failed swap has a slash buffer beyond 1:1.
         require!(
-            ctx.accounts.miner_state.collateral >= resv.sol_amount,
+            ctx.accounts.miner_state.collateral >= crate::tunables::required_collateral(resv.sol_amount),
             ErrorCode::InsufficientCollateral
         );
     }

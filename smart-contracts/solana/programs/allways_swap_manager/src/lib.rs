@@ -6,6 +6,7 @@ pub mod instructions;
 pub mod lottery;
 pub mod penalty;
 pub mod state;
+pub mod tunables;
 
 use anchor_lang::prelude::*;
 
