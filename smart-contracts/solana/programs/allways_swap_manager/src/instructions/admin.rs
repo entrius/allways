@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{CONFIG_SEED, MAX_VALIDATORS};
 use crate::error::ErrorCode;
+use crate::events::HaltSet;
 use crate::state::{Config, ValidatorInfo};
 
 /// Admin-only config mutations (validator set + consensus threshold).
@@ -52,5 +53,12 @@ pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result
     require!((1..=100).contains(&percent), ErrorCode::InvalidThreshold);
     ctx.accounts.config.consensus_threshold_percent = percent;
     msg!("consensus threshold = {}%", percent);
+    Ok(())
+}
+
+pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
+    ctx.accounts.config.halted = halted;
+    emit!(HaltSet { halted });
+    msg!("halted = {}", halted);
     Ok(())
 }

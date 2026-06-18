@@ -136,3 +136,8 @@ pub struct ValidatorWeightsUpdated {
     pub count: u8,
     pub updated_at: i64,
 }
+
+#[event]
+pub struct HaltSet {
+    pub halted: bool,
+}

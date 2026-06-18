@@ -33,6 +33,7 @@ pub struct PostCollateral<'info> {
 }
 
 pub fn handler(ctx: Context<PostCollateral>, amount: u64) -> Result<()> {
+    require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(amount > 0, ErrorCode::InvalidAmount);
 
     let miner_key = ctx.accounts.miner.key();

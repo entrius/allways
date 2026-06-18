@@ -61,6 +61,7 @@ pub fn handler(
     config.consensus_threshold_percent = consensus_threshold_percent;
     config.validators = Vec::new();
     config.last_weights_update = 0;
+    config.halted = false;
     config.bump = ctx.bumps.config;
 
     let vault = &mut ctx.accounts.vault;

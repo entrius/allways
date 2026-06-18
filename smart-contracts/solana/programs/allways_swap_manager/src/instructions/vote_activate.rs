@@ -39,6 +39,7 @@ pub struct VoteActivate<'info> {
 }
 
 pub fn handler(ctx: Context<VoteActivate>) -> Result<()> {
+    require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(!ctx.accounts.miner_state.active, ErrorCode::MinerAlreadyActive);
     require!(
         ctx.accounts.miner_state.collateral >= ctx.accounts.config.min_collateral,

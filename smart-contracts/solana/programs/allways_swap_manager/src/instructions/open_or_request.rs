@@ -79,6 +79,7 @@ pub fn handler(
     from_amount: u128,
     to_amount: u128,
 ) -> Result<()> {
+    require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(
         !from_chain.is_empty()
             && !to_chain.is_empty()

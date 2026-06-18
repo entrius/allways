@@ -64,6 +64,11 @@ pub mod allways_swap_manager {
     pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result<()> {
         admin::set_consensus_threshold(ctx, percent)
     }
+    /// Emergency halt: admin toggles the global halt flag (gates deposits / activations /
+    /// reservation pools, mirroring the ink! `set_halted`).
+    pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
+        admin::set_halted(ctx, halted)
+    }
     /// Phase 8: set a validator's draw weight (admin bootstrap/fallback; superseded for routine use
     /// by the Phase 10 consensus path below).
     pub fn set_validator_weight(
