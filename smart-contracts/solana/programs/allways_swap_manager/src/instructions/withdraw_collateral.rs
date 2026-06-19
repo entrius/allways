@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, MINER_SEED, RESV_SEED, VAULT_SEED};
+use crate::constants::{CONFIG_SEED, MINER_SEED, VAULT_SEED};
 use crate::error::ErrorCode;
 use crate::events::CollateralWithdrawn;
-use crate::state::{Config, MinerState, Reservation, Vault};
+use crate::state::{Config, MinerState, Vault};
 
 /// Miner withdraws SOL collateral back to their wallet. Guards mirror the ink! contract:
 /// miner must be inactive, have no in-flight swap, and (if deactivated) be past the
@@ -27,11 +27,6 @@ pub struct WithdrawCollateral<'info> {
 
     #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
-
-    /// Optional: pass the miner's reservation if one exists, so the active-reservation guard runs.
-    /// `None` ⇒ the miner has never been reserved.
-    #[account(seeds = [RESV_SEED, miner.key().as_ref()], bump)]
-    pub reservation: Option<Account<'info, Reservation>>,
 }
 
 pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
@@ -40,6 +35,7 @@ pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
     let collateral = ctx.accounts.miner_state.collateral;
     let active = ctx.accounts.miner_state.active;
     let has_active_swap = ctx.accounts.miner_state.has_active_swap;
+    let busy_until = ctx.accounts.miner_state.busy_until;
     let deactivation_at = ctx.accounts.miner_state.deactivation_at;
 
     require!(!active, ErrorCode::MinerActive);
@@ -48,11 +44,8 @@ pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
 
     let now = Clock::get()?.unix_timestamp;
 
-    // Cannot withdraw while holding an active reservation.
-    if let Some(resv) = &ctx.accounts.reservation {
-        let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
-        require!(!active_reservation, ErrorCode::MinerReserved);
-    }
+    // Cannot withdraw while busy (open pool / held reservation) — read from state, non-bypassable.
+    require!(now >= busy_until, ErrorCode::MinerBusy);
 
     // Post-deactivation cooldown: wait 2× fulfillment timeout before pulling collateral.
     if deactivation_at != 0 {

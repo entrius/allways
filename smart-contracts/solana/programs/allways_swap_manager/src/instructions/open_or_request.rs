@@ -5,7 +5,6 @@ use crate::constants::{
     CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
     RESV_SEED, SLOT_MS, VAULT_SEED,
 };
-use crate::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS};
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
 use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Vault};
@@ -27,6 +26,7 @@ pub struct OpenOrRequest<'info> {
     pub miner: UncheckedAccount<'info>,
 
     #[account(
+        mut,
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
@@ -125,6 +125,7 @@ pub fn handler(
     require!(!active_reservation, ErrorCode::MinerReserved);
 
     // Flat, non-refundable anti-spam fee: validator → vault, accrued to treasury (every call).
+    let fee = ctx.accounts.config.reservation_fee_lamports;
     transfer(
         CpiContext::new(
             ctx.accounts.system_program.key(),
@@ -133,13 +134,13 @@ pub fn handler(
                 to: ctx.accounts.vault.to_account_info(),
             },
         ),
-        RESERVATION_FEE_LAMPORTS,
+        fee,
     )?;
     ctx.accounts.vault.treasury_total = ctx
         .accounts
         .vault
         .treasury_total
-        .checked_add(RESERVATION_FEE_LAMPORTS)
+        .checked_add(fee)
         .ok_or(ErrorCode::Overflow)?;
 
     let miner_key = ctx.accounts.miner.key();
@@ -163,10 +164,15 @@ pub fn handler(
             q.miner_to_addr.clone(),
             q.rate.clone(),
         );
+        let window = ctx.accounts.config.pool_window_secs;
         let seed_slot = clock
             .slot
-            .saturating_add((POOL_WINDOW_SECS as u64).saturating_mul(1000) / SLOT_MS);
-        let closes_at = now.saturating_add(POOL_WINDOW_SECS);
+            .saturating_add((window as u64).saturating_mul(1000) / SLOT_MS);
+        let closes_at = now.saturating_add(window);
+
+        // Busy from the moment the pool opens: covers the window + the eventual reservation TTL.
+        ctx.accounts.miner_state.busy_until =
+            closes_at.saturating_add(ctx.accounts.config.reservation_ttl_secs);
 
         let pool = &mut ctx.accounts.pool;
         pool.miner = miner_key;
@@ -196,7 +202,7 @@ pub fn handler(
         require!(now <= pool.closes_at, ErrorCode::PoolClosed);
         require!(
             pool.from_chain == from_chain && pool.to_chain == to_chain,
-            ErrorCode::PoolPairMismatch
+            ErrorCode::MinerBusyDifferentPair
         );
         require!(
             !pool.requests.iter().any(|r| r.validator == validator_key),

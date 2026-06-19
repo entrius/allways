@@ -2,7 +2,6 @@ use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, weights_hash};
 use crate::constants::{CONFIG_SEED, REQ_SET_WEIGHTS, VOTE_SEED};
-use crate::tunables::WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
 use crate::error::ErrorCode;
 use crate::events::ValidatorWeightsUpdated;
 use crate::state::{Config, VoteRound};
@@ -40,7 +39,8 @@ pub fn handler(ctx: Context<VoteSetWeights>, weights: Vec<u64>) -> Result<()> {
     // update (last_weights_update == 0) is always allowed.
     let last = ctx.accounts.config.last_weights_update;
     require!(
-        last == 0 || now.saturating_sub(last) >= WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+        last == 0
+            || now.saturating_sub(last) >= ctx.accounts.config.weights_update_min_interval_secs,
         ErrorCode::WeightsUpdateTooSoon
     );
 

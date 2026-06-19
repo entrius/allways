@@ -87,21 +87,28 @@ pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
 // compile-time constants: change-and-redeploy, nothing stored in `Config`. (Structural constants —
 // PDA seeds, request-type bytes, max string lengths, `SLOT_MS` — stay in `constants.rs`.)
 
-/// Protocol fee divisor — 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`.
+/// Protocol fee divisor — 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`. Compile-time
+/// only (not promoted to a runtime setter).
 pub const FEE_DIVISOR: u64 = 100;
 
-/// Flat anti-spam fee (lamports) a validator pays per reservation request (`open_or_request`),
-/// non-refundable → vault treasury (Phase 9). Default 0.001 SOL.
-pub const RESERVATION_FEE_LAMPORTS: u64 = 1_000_000;
+// The next three are **initial seed defaults** — `initialize` copies them into `Config` and they are
+// runtime-tunable thereafter via the admin setters added in #486 (`set_reservation_fee`,
+// `set_pool_window`, `set_weights_update_min_interval`). Kept here so the deploy-time defaults sit
+// with the other economic levers; handlers read the live `Config` value, not these consts.
 
-/// Reservation-lottery pooling window (seconds): how long a pool collects requests before it can be
-/// resolved. Contending validators route within slots (~400ms), so a few seconds suffices. Must stay
-/// well below the reservation TTL (separate windows). Paired with `constants::SLOT_MS` to pin the
-/// draw's future seed slot.
-pub const POOL_WINDOW_SECS: i64 = 3;
+/// Initial flat anti-spam fee (lamports) per reservation request (`open_or_request`), validator →
+/// vault treasury, non-refundable. Seeds `Config.reservation_fee_lamports`. 0.02 SOL — sized so a
+/// pool-open (which now busies the miner for the window + reservation TTL, #485) isn't cheap to grief.
+pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 
-/// Minimum seconds between successful validator-weight updates (Phase 10) — a floor (anti-thrash /
-/// anti-grief), not a schedule. Validators' actual cadence (e.g. daily) is an off-chain policy ≥ this.
+/// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs`. How long a
+/// pool collects contending requests before `resolve_pool` runs the stake-weighted draw — a longer
+/// window gathers more validators for a fairer draw at the cost of reservation latency. Must stay
+/// well below the reservation TTL. Paired with `constants::SLOT_MS` to pin the draw's future seed slot.
+pub const POOL_WINDOW_SECS: i64 = 60;
+
+/// Initial minimum seconds between successful validator-weight updates (Phase 10) — an anti-thrash
+/// floor, not a schedule. Seeds `Config.weights_update_min_interval_secs`.
 pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
 #[cfg(test)]

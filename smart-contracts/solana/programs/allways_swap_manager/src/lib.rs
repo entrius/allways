@@ -70,6 +70,35 @@ pub mod allways_swap_manager {
     pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
         admin::set_halted(ctx, halted)
     }
+
+    // --- Runtime config setters (admin) ---
+    pub fn set_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_min_collateral(ctx, amount)
+    }
+    pub fn set_max_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_max_collateral(ctx, amount)
+    }
+    pub fn set_fulfillment_timeout(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_fulfillment_timeout(ctx, secs)
+    }
+    pub fn set_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_min_swap_amount(ctx, amount)
+    }
+    pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_max_swap_amount(ctx, amount)
+    }
+    pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_reservation_ttl(ctx, secs)
+    }
+    pub fn set_reservation_fee(ctx: Context<AdminConfig>, lamports: u64) -> Result<()> {
+        admin::set_reservation_fee(ctx, lamports)
+    }
+    pub fn set_pool_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_pool_window(ctx, secs)
+    }
+    pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_weights_update_min_interval(ctx, secs)
+    }
     /// Phase 8: set a validator's draw weight (admin bootstrap/fallback; superseded for routine use
     /// by the Phase 10 consensus path below).
     pub fn set_validator_weight(
@@ -132,14 +161,6 @@ pub mod allways_swap_manager {
     /// reservation.
     pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
         resolve_pool::handler(ctx)
-    }
-    /// Admin resets a stuck/abandoned pool (frees the miner; collected fees stay in the treasury).
-    pub fn cancel_pool(ctx: Context<CancelPool>) -> Result<()> {
-        cancel_pool::handler(ctx)
-    }
-    /// Admin clears a miner's active reservation.
-    pub fn cancel_reservation(ctx: Context<CancelReservation>) -> Result<()> {
-        cancel_reservation::handler(ctx)
     }
 
     // --- Phase 4: swap lifecycle ---

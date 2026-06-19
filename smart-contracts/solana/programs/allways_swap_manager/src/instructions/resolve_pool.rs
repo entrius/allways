@@ -29,6 +29,7 @@ pub struct ResolvePool<'info> {
     pub miner: UncheckedAccount<'info>,
 
     #[account(
+        mut,
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
@@ -60,7 +61,8 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     require!(ctx.accounts.pool.opened_at != 0, ErrorCode::NoRequests);
     require!(!ctx.accounts.pool.requests.is_empty(), ErrorCode::NoRequests);
     require!(now > ctx.accounts.pool.closes_at, ErrorCode::PoolNotClosed);
-    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
+    // No active check: a miner force-deactivated mid-window still resolves into a reservation that
+    // simply expires unused (validators won't initiate). Keeps the pool from wedging open.
 
     let pool_key = ctx.accounts.pool.key();
     let seed_slot = ctx.accounts.pool.seed_slot;
@@ -150,6 +152,9 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.rate = rate;
     r.reserved_until = now.saturating_add(ttl);
     r.bump = reservation_bump;
+
+    // Lock the miner busy for the reservation's life (read by deactivate/withdraw, non-bypassable).
+    ctx.accounts.miner_state.busy_until = now.saturating_add(ttl);
 
     // Reset the pool for the next contest (rent stays parked).
     let miner_key = ctx.accounts.miner.key();

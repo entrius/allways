@@ -44,6 +44,12 @@ pub struct Config {
     pub last_weights_update: i64,
     /// Emergency halt: when true, new deposits / activations / reservation pools are rejected.
     pub halted: bool,
+    /// Flat anti-spam fee per reservation request, lamports (runtime-tunable; 0 disables).
+    pub reservation_fee_lamports: u64,
+    /// Reservation-lottery pooling window, seconds (runtime-tunable).
+    pub pool_window_secs: i64,
+    /// Minimum seconds between consensus weight updates (runtime-tunable anti-thrash floor).
+    pub weights_update_min_interval_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -74,6 +80,10 @@ pub struct MinerState {
     pub active: bool,
     /// Whether the miner currently has an in-flight swap (Phase 4).
     pub has_active_swap: bool,
+    /// Unix timestamp the miner is committed (busy) until — covers an open pool, a held reservation,
+    /// and an in-flight swap. `now >= busy_until` means free. Self-clearing (no clear instruction
+    /// needed). Read by `deactivate` / `withdraw_collateral` as the non-bypassable busy lock.
+    pub busy_until: i64,
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
     /// Stored PDA bump.
@@ -102,8 +112,8 @@ pub struct VoteRound {
 
 /// Confirmed reservation for a miner (`seeds = [RESV_SEED, miner]`).
 ///
-/// Created on `vote_reserve` quorum; consumed by `vote_initiate` (Phase 4) or cleared by
-/// `cancel_reservation`. `reserved_until == 0` means no active reservation (slot empty/cleared);
+/// Created by `resolve_pool` (lottery draw); consumed by `vote_initiate` (Phase 4) or left to
+/// expire. `reserved_until == 0` means no active reservation (slot empty/cleared);
 /// `reserved_until >= now` means active; `0 < reserved_until < now` means expired (overwritable).
 /// `from_addr` is kept so Phase 4 can verify the initiating user matches the reserver.
 #[account]
@@ -256,7 +266,7 @@ pub struct Request {
 /// `closes_at` and creates the (unchanged) `Reservation` for the winner. Keyed **per-miner** — the
 /// opener pins the pair and later in-window requests must match it. Rent is paid once by the first
 /// opener and the account is **reused** across contests (`opened_at == 0` = available, mirroring
-/// `VoteRound`); `resolve_pool` / `cancel_pool` reset it rather than closing.
+/// `VoteRound`); `resolve_pool` resets it rather than closing.
 #[account]
 #[derive(InitSpace)]
 pub struct Pool {

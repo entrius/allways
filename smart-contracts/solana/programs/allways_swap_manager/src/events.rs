@@ -126,11 +126,6 @@ pub struct PoolResolved {
     pub requests: u8,
 }
 
-#[event]
-pub struct PoolCancelled {
-    pub miner: Pubkey,
-}
-
 // --- Phase 10: consensus-governed validator weights ---
 
 #[event]
