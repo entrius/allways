@@ -43,7 +43,8 @@ pub const POOL_SEED: &[u8] = b"pool";
 /// v3: Phase 9 (reservation lottery + flat reservation fee).
 /// v4: Phase 10 (consensus-governed validator weights).
 /// v5: emergency halt switch.
-pub const CONFIG_VERSION: u32 = 5;
+/// v6: runtime config setters (fee/window/interval promoted to Config).
+pub const CONFIG_VERSION: u32 = 6;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -64,21 +65,19 @@ pub const REQ_SET_WEIGHTS: u8 = 8;
 /// Protocol fee divisor — 1% (immutable), `fee = sol_amount / FEE_DIVISOR`.
 pub const FEE_DIVISOR: u64 = 100;
 
-/// Flat anti-spam fee (lamports) a validator pays per reservation request (`open_or_request`),
-/// non-refundable → vault treasury. Static at deployment (Phase 9). Default 0.001 SOL.
+/// Initial flat anti-spam fee (lamports) per reservation request, seeded into Config at init and
+/// runtime-tunable via `set_reservation_fee`. Default 0.001 SOL.
 pub const RESERVATION_FEE_LAMPORTS: u64 = 1_000_000;
 
-/// Reservation-lottery pooling window (seconds): how long a pool collects requests before it can be
-/// resolved. Contending validators route within slots (~400ms), so a few seconds suffices; tune at
-/// deployment. Must stay well below the reservation TTL (separate windows). Static at deployment.
+/// Initial reservation-lottery pooling window (seconds), seeded into Config at init and tunable via
+/// `set_pool_window`. Must stay well below the reservation TTL (separate windows).
 pub const POOL_WINDOW_SECS: i64 = 3;
 
 /// Solana slot time (ms), used to pin the draw's future seed slot from the window duration.
 pub const SLOT_MS: u64 = 400;
 
-/// Phase 10: minimum seconds between successful validator-weight updates — a floor (anti-thrash /
-/// anti-grief), not a schedule. Validators' actual cadence (e.g. daily) is an off-chain policy ≥ this.
-/// Tunable at deployment.
+/// Initial minimum seconds between consensus weight updates — anti-thrash floor — seeded into Config
+/// at init and tunable via `set_weights_update_min_interval`.
 pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
 /// Bounded max lengths for stored strings (see SOLANA_MIGRATION_RESEARCH.md §14).

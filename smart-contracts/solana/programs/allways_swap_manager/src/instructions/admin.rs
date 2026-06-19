@@ -62,3 +62,64 @@ pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
     msg!("halted = {}", halted);
     Ok(())
 }
+
+// --- Runtime config setters ( port of ink! owner setters; 0 = "unset" where applicable) ---
+
+pub fn set_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    ctx.accounts.config.min_collateral = amount;
+    msg!("min_collateral = {}", amount);
+    Ok(())
+}
+
+pub fn set_max_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    ctx.accounts.config.max_collateral = amount;
+    msg!("max_collateral = {}", amount);
+    Ok(())
+}
+
+pub fn set_fulfillment_timeout(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    require!(secs >= 60, ErrorCode::InvalidAmount);
+    ctx.accounts.config.fulfillment_timeout_secs = secs;
+    msg!("fulfillment_timeout_secs = {}", secs);
+    Ok(())
+}
+
+pub fn set_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    require!(amount == 0 || amount >= 1000, ErrorCode::InvalidAmount);
+    ctx.accounts.config.min_swap_amount = amount;
+    msg!("min_swap_amount = {}", amount);
+    Ok(())
+}
+
+pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    ctx.accounts.config.max_swap_amount = amount;
+    msg!("max_swap_amount = {}", amount);
+    Ok(())
+}
+
+pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    require!(secs > 0, ErrorCode::InvalidAmount);
+    ctx.accounts.config.reservation_ttl_secs = secs;
+    msg!("reservation_ttl_secs = {}", secs);
+    Ok(())
+}
+
+pub fn set_reservation_fee(ctx: Context<AdminConfig>, lamports: u64) -> Result<()> {
+    ctx.accounts.config.reservation_fee_lamports = lamports;
+    msg!("reservation_fee_lamports = {}", lamports);
+    Ok(())
+}
+
+pub fn set_pool_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    require!(secs > 0, ErrorCode::InvalidAmount);
+    ctx.accounts.config.pool_window_secs = secs;
+    msg!("pool_window_secs = {}", secs);
+    Ok(())
+}
+
+pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    require!(secs >= 0, ErrorCode::InvalidAmount);
+    ctx.accounts.config.weights_update_min_interval_secs = secs;
+    msg!("weights_update_min_interval_secs = {}", secs);
+    Ok(())
+}
