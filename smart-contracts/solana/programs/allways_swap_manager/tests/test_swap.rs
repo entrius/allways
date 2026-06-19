@@ -5,7 +5,7 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
     allways_swap_manager::state::{MinerState, Swap, Vault},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,

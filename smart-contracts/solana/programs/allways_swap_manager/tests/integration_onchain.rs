@@ -24,7 +24,7 @@ use {
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::POOL_WINDOW_SECS,
+    allways_swap_manager::tunables::POOL_WINDOW_SECS,
     allways_swap_manager::state::{
         Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, TxMarker, Vault,
     },
@@ -606,7 +606,7 @@ fn onchain_reservation_fee_to_treasury() {
     let before = read_vault(&rpc).treasury_total;
     send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
-    let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
+    let fee = allways_swap_manager::tunables::RESERVATION_FEE_LAMPORTS;
     assert_eq!(
         read_vault(&rpc).treasury_total,
         before + fee,

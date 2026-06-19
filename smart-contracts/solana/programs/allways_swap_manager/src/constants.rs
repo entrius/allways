@@ -61,25 +61,14 @@ pub const REQ_TIMEOUT: u8 = 7;
 /// Phase 10: global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
 
-/// Protocol fee divisor — 1% (immutable), `fee = sol_amount / FEE_DIVISOR`.
-pub const FEE_DIVISOR: u64 = 100;
+// NOTE: deploy-time **economic** levers (FEE_DIVISOR, RESERVATION_FEE_LAMPORTS, POOL_WINDOW_SECS,
+// WEIGHTS_UPDATE_MIN_INTERVAL_SECS, plus the collateral & quote-fee knobs) now live in `tunables.rs`
+// — one home for everything you might retune at deploy. This file keeps only **structural** constants
+// (seeds, request-type bytes, max lengths, chain facts).
 
-/// Flat anti-spam fee (lamports) a validator pays per reservation request (`open_or_request`),
-/// non-refundable → vault treasury. Static at deployment (Phase 9). Default 0.001 SOL.
-pub const RESERVATION_FEE_LAMPORTS: u64 = 1_000_000;
-
-/// Reservation-lottery pooling window (seconds): how long a pool collects requests before it can be
-/// resolved. Contending validators route within slots (~400ms), so a few seconds suffices; tune at
-/// deployment. Must stay well below the reservation TTL (separate windows). Static at deployment.
-pub const POOL_WINDOW_SECS: i64 = 3;
-
-/// Solana slot time (ms), used to pin the draw's future seed slot from the window duration.
+/// Solana slot time (ms) — a chain property (not an economic lever), used with
+/// `tunables::POOL_WINDOW_SECS` to pin the draw's future seed slot from the window duration.
 pub const SLOT_MS: u64 = 400;
-
-/// Phase 10: minimum seconds between successful validator-weight updates — a floor (anti-thrash /
-/// anti-grief), not a schedule. Validators' actual cadence (e.g. daily) is an off-chain policy ≥ this.
-/// Tunable at deployment.
-pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
 /// Bounded max lengths for stored strings (see SOLANA_MIGRATION_RESEARCH.md §14).
 pub const MAX_ADDR_LEN: usize = 80;

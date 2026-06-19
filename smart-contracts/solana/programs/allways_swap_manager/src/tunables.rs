@@ -81,6 +81,29 @@ pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
     }
 }
 
+// --- Protocol fees & timing ---
+//
+// Moved here from `constants.rs` so every deploy-time economic lever lives in one file. All are
+// compile-time constants: change-and-redeploy, nothing stored in `Config`. (Structural constants —
+// PDA seeds, request-type bytes, max string lengths, `SLOT_MS` — stay in `constants.rs`.)
+
+/// Protocol fee divisor — 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`.
+pub const FEE_DIVISOR: u64 = 100;
+
+/// Flat anti-spam fee (lamports) a validator pays per reservation request (`open_or_request`),
+/// non-refundable → vault treasury (Phase 9). Default 0.001 SOL.
+pub const RESERVATION_FEE_LAMPORTS: u64 = 1_000_000;
+
+/// Reservation-lottery pooling window (seconds): how long a pool collects requests before it can be
+/// resolved. Contending validators route within slots (~400ms), so a few seconds suffices. Must stay
+/// well below the reservation TTL (separate windows). Paired with `constants::SLOT_MS` to pin the
+/// draw's future seed slot.
+pub const POOL_WINDOW_SECS: i64 = 3;
+
+/// Minimum seconds between successful validator-weight updates (Phase 10) — a floor (anti-thrash /
+/// anti-grief), not a schedule. Validators' actual cadence (e.g. daily) is an off-chain policy ≥ this.
+pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
+
 #[cfg(test)]
 mod tests {
     use super::*;

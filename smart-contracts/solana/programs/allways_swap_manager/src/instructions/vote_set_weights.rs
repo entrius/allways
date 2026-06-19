@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, weights_hash};
-use crate::constants::{CONFIG_SEED, REQ_SET_WEIGHTS, VOTE_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS};
+use crate::constants::{CONFIG_SEED, REQ_SET_WEIGHTS, VOTE_SEED};
+use crate::tunables::WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
 use crate::error::ErrorCode;
 use crate::events::ValidatorWeightsUpdated;
 use crate::state::{Config, VoteRound};

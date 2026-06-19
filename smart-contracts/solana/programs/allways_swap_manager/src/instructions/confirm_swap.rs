@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{CONFIG_SEED, FEE_DIVISOR, MINER_SEED, REQ_CONFIRM, SWAP_SEED, VAULT_SEED, VOTE_SEED};
+use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_CONFIRM, SWAP_SEED, VAULT_SEED, VOTE_SEED};
+use crate::tunables::FEE_DIVISOR;
 use crate::error::ErrorCode;
 use crate::events::SwapCompleted;
 use crate::penalty::apply_penalty;

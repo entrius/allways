@@ -2,9 +2,10 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::{
-    CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED, POOL_SEED, POOL_WINDOW_SECS, QUOTE_SEED,
-    RESERVATION_FEE_LAMPORTS, RESV_SEED, SLOT_MS, VAULT_SEED, MAX_VALIDATORS,
+    CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
+    RESV_SEED, SLOT_MS, VAULT_SEED,
 };
+use crate::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS};
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
 use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Vault};
