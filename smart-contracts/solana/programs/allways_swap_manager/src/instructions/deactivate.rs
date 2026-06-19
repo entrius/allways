@@ -1,11 +1,12 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{MINER_SEED, RESV_SEED};
+use crate::constants::MINER_SEED;
 use crate::error::ErrorCode;
-use crate::state::{MinerState, Reservation};
+use crate::state::MinerState;
 
-/// Miner self-deactivation (no consensus). Guards: caller is the miner, no in-flight swap,
-/// no active reservation.
+/// Miner self-deactivation (no consensus). Guards read entirely from `MinerState` (the mandatory
+/// account) so they can't be skipped: caller is the miner, no in-flight swap, and past `busy_until`
+/// (open pool / held reservation).
 #[derive(Accounts)]
 pub struct Deactivate<'info> {
     pub miner: Signer<'info>,
@@ -17,28 +18,18 @@ pub struct Deactivate<'info> {
         has_one = miner,
     )]
     pub miner_state: Account<'info, MinerState>,
-
-    /// Optional: pass the miner's reservation if one exists, so the active-reservation guard runs.
-    #[account(seeds = [RESV_SEED, miner.key().as_ref()], bump)]
-    pub reservation: Option<Account<'info, Reservation>>,
 }
 
 pub fn handler(ctx: Context<Deactivate>) -> Result<()> {
-    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
-    require!(
-        !ctx.accounts.miner_state.has_active_swap,
-        ErrorCode::MinerHasActiveSwap
-    );
-
     let now = Clock::get()?.unix_timestamp;
+    let ms = &mut ctx.accounts.miner_state;
 
-    if let Some(resv) = &ctx.accounts.reservation {
-        let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
-        require!(!active_reservation, ErrorCode::MinerReserved);
-    }
+    require!(ms.active, ErrorCode::MinerNotActive);
+    require!(!ms.has_active_swap, ErrorCode::MinerHasActiveSwap);
+    require!(now >= ms.busy_until, ErrorCode::MinerBusy);
 
-    ctx.accounts.miner_state.active = false;
-    ctx.accounts.miner_state.deactivation_at = now;
+    ms.active = false;
+    ms.deactivation_at = now;
     msg!("miner self-deactivated: {}", ctx.accounts.miner.key());
     Ok(())
 }

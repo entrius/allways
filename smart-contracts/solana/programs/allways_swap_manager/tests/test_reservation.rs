@@ -205,32 +205,6 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn cancel_reservation_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::CancelReservation {}.data(),
-        allways_swap_manager::accounts::CancelReservation {
-            admin: *admin,
-            config: config_pda(),
-            miner: *miner,
-            reservation: resv_pda(miner),
-        }
-        .to_account_metas(None),
-    )
-}
-fn cancel_pool_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::CancelPool {}.data(),
-        allways_swap_manager::accounts::CancelPool {
-            admin: *admin,
-            config: config_pda(),
-            miner: *miner,
-            pool: pool_pda(miner),
-        }
-        .to_account_metas(None),
-    )
-}
 fn deactivate_ix(miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -238,7 +212,6 @@ fn deactivate_ix(miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::Deactivate {
             miner: *miner,
             miner_state: miner_pda(miner),
-            reservation: Some(resv_pda(miner)),
         }
         .to_account_metas(None),
     )
@@ -429,8 +402,8 @@ fn test_requires_active_miner() {
 }
 
 #[test]
-fn test_open_blocked_while_reserved_then_cancel_reopens() {
-    let (mut svm, admin, vals, miner) = setup(0, 0);
+fn test_open_blocked_while_reserved() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
@@ -440,26 +413,18 @@ fn test_open_blocked_while_reserved_then_cancel_reopens() {
     // a new open is blocked while the reservation is active
     let blocked = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]);
     assert!(blocked.is_err(), "cannot open a new pool while a reservation is active");
-
-    // admin cancels the reservation → open works again
-    send(&mut svm, cancel_reservation_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel resv");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0);
-    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]).expect("re-open after cancel");
 }
 
 #[test]
-fn test_cancel_pool_resets() {
-    let (mut svm, admin, vals, miner) = setup(0, 0);
+fn test_open_pool_blocks_deactivate() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
     assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0);
 
-    send(&mut svm, cancel_pool_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel pool");
-    assert_eq!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool reset");
-    assert!(pool(&svm, &miner.pubkey()).requests.is_empty());
-
-    // can open a fresh contest after cancel
-    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u2", "uSOL", 1, 1, 0), &vals[1].pubkey(), &vals[1]).expect("re-open");
+    // miner is busy the moment a pool opens (pre-resolve) — cannot self-deactivate
+    let blocked = send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner);
+    assert!(blocked.is_err(), "cannot self-deactivate while a pool is open");
 }
 
 #[test]

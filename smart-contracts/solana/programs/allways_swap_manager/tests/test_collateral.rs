@@ -89,7 +89,6 @@ fn withdraw_ix(program_id: &Pubkey, miner: &Pubkey, amount: u64) -> Instruction 
             config: config_pda(program_id),
             miner_state: miner_pda(program_id, miner),
             vault: vault_pda(program_id),
-            reservation: None,
         }
         .to_account_metas(None),
     )

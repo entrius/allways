@@ -132,14 +132,6 @@ pub mod allways_swap_manager {
     pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
         resolve_pool::handler(ctx)
     }
-    /// Admin resets a stuck/abandoned pool (frees the miner; collected fees stay in the treasury).
-    pub fn cancel_pool(ctx: Context<CancelPool>) -> Result<()> {
-        cancel_pool::handler(ctx)
-    }
-    /// Admin clears a miner's active reservation.
-    pub fn cancel_reservation(ctx: Context<CancelReservation>) -> Result<()> {
-        cancel_reservation::handler(ctx)
-    }
 
     // --- Phase 4: swap lifecycle ---
     /// A validator votes to initiate a swap against an active reservation (created on quorum).

@@ -132,7 +132,6 @@ fn deactivate_ix(miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::Deactivate {
             miner: *miner,
             miner_state: miner_pda(miner),
-            reservation: None,
         }
         .to_account_metas(None),
     )

@@ -26,6 +26,7 @@ pub struct OpenOrRequest<'info> {
     pub miner: UncheckedAccount<'info>,
 
     #[account(
+        mut,
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
@@ -167,6 +168,10 @@ pub fn handler(
             .saturating_add((POOL_WINDOW_SECS as u64).saturating_mul(1000) / SLOT_MS);
         let closes_at = now.saturating_add(POOL_WINDOW_SECS);
 
+        // Busy from the moment the pool opens: covers the window + the eventual reservation TTL.
+        ctx.accounts.miner_state.busy_until =
+            closes_at.saturating_add(ctx.accounts.config.reservation_ttl_secs);
+
         let pool = &mut ctx.accounts.pool;
         pool.miner = miner_key;
         pool.from_chain = from_chain.clone();
@@ -195,7 +200,7 @@ pub fn handler(
         require!(now <= pool.closes_at, ErrorCode::PoolClosed);
         require!(
             pool.from_chain == from_chain && pool.to_chain == to_chain,
-            ErrorCode::PoolPairMismatch
+            ErrorCode::MinerBusyDifferentPair
         );
         require!(
             !pool.requests.iter().any(|r| r.validator == validator_key),
