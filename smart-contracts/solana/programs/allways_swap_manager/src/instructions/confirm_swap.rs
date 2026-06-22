@@ -10,7 +10,7 @@ use crate::penalty::apply_penalty;
 use crate::state::{Config, MinerState, Swap, SwapStatus, Treasury, Vault, VoteRound};
 
 /// Validators confirm a fulfilled swap. On quorum the 1% fee is moved from the miner's collateral
-/// into the vault's treasury accrual (lamports stay in the vault), the miner is freed, and the Swap
+/// into the Treasury PDA (lamports move vault → treasury), the miner is freed, and the Swap
 /// account is closed (rent reclaimed).
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]

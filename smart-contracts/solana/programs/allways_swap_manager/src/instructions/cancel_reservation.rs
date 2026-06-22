@@ -1,12 +1,13 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{CONFIG_SEED, MINER_SEED, RESV_SEED};
+use crate::error::ErrorCode;
 use crate::events::ReservationCancelled;
 use crate::state::{Config, MinerState, Reservation};
 
-/// Admin clears a miner's reservation and frees its busy lock — the escape hatch for a miner stranded
-/// in a stuck/abandoned reservation (otherwise it only clears at TTL expiry; review #4). Restores the
-/// pre-#485 admin recourse, now also resetting the state-based `busy_until`.
+/// Admin clears a miner's ACTIVE reservation and frees its busy lock — the escape hatch for a miner
+/// stranded in an abandoned reservation (else it only clears at TTL expiry; review #4). Requires an
+/// active reservation (use `cancel_pool` for an un-resolved open pool); also resets `busy_until`.
 #[derive(Accounts)]
 pub struct CancelReservation<'info> {
     pub admin: Signer<'info>,
@@ -25,12 +26,21 @@ pub struct CancelReservation<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    // Canonical bump (not stored) so this works whether the reservation slot was populated or not.
+    // Canonical bump (not stored). The PDA must already exist (it does once a pool was opened/resolved).
     #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump)]
     pub reservation: Account<'info, Reservation>,
 }
 
 pub fn handler(ctx: Context<CancelReservation>) -> Result<()> {
+    // Only an ACTIVE reservation is cancellable. An active reservation implies resolve_pool already
+    // reset the pool, so freeing busy_until here can't strand an open pool that resolve_pool would
+    // later match an inactive miner against — preserving the busy ⟹ active invariant. For an
+    // un-resolved open pool, the admin uses `cancel_pool` instead.
+    require!(
+        ctx.accounts.reservation.reserved_until != 0,
+        ErrorCode::NoReservation
+    );
+
     let r = &mut ctx.accounts.reservation;
     r.bound_hash = [0u8; 32];
     r.from_addr = String::new();
@@ -44,11 +54,9 @@ pub fn handler(ctx: Context<CancelReservation>) -> Result<()> {
     r.rate = String::new();
     r.reserved_until = 0;
 
-    // Free the busy lock so the miner can open new pools / deactivate / withdraw — but never override
-    // an in-flight swap's lock (that has its own confirm/timeout clear path).
-    if !ctx.accounts.miner_state.has_active_swap {
-        ctx.accounts.miner_state.busy_until = 0;
-    }
+    // Safe to free the busy lock: an active reservation can't coexist with an in-flight swap
+    // (vote_initiate consumes the reservation when it creates the swap).
+    ctx.accounts.miner_state.busy_until = 0;
 
     emit!(ReservationCancelled { miner: ctx.accounts.miner.key() });
     Ok(())

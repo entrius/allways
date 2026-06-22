@@ -33,7 +33,9 @@ pub struct RemoveQuote<'info> {
 
 pub fn handler(ctx: Context<RemoveQuote>, from_chain: String, to_chain: String) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
-    // Same decaying fee an in-place overwrite would cost, keyed on how long this quote stood.
+    // Same decaying fee an in-place overwrite would cost, keyed on how long this quote stood. By
+    // design this can make removal fail when the miner is low on SOL: posting a quote affirms a
+    // commitment to honor it, so retracting a fresh one is not consequence-free — miners know this.
     let fee = quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at));
     if fee > 0 {
         transfer(

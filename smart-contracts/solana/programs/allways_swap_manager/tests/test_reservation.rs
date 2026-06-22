@@ -600,3 +600,20 @@ fn test_swap_amount_bounds_cannot_be_contradictory() {
     assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 6_000_000_000), &admin.pubkey(), &admin).is_err(), "min > max rejected");
     send(&mut svm, set_max_swap_ix(&admin.pubkey(), 8_000_000_000), &admin.pubkey(), &admin).expect("widening max is allowed");
 }
+
+#[test]
+fn test_cancel_reservation_refuses_open_pool_miner() {
+    // cancel_reservation must NOT free a miner that only has an OPEN pool (no active reservation):
+    // otherwise the miner could be deactivated mid-contest and resolve_pool would match a removed
+    // miner. It errors (use cancel_pool for an open pool); the busy lock — and busy⟹active — survive.
+    let (mut svm, admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool open, no reservation yet");
+
+    let r = send(&mut svm, cancel_reservation_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin);
+    assert!(r.is_err(), "cancel_reservation on an open-pool (no active reservation) miner must error");
+    assert_ne!(busy_until(&svm, &miner.pubkey()), 0, "busy lock NOT cleared");
+    assert!(send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).is_err(), "still busy -> cannot deactivate");
+    assert!(is_active(&svm, &miner.pubkey()), "miner stays active");
+}

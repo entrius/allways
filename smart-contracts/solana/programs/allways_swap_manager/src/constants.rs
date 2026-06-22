@@ -142,7 +142,7 @@ pub const FEE_DIVISOR: u64 = 100;
 // runtime-tunable via the #486 admin setters. Handlers read the live `Config`, not these consts.
 
 /// Initial flat anti-spam fee (lamports) per reservation request (`open_or_request`), validator →
-/// vault treasury, non-refundable. Seeds `Config.reservation_fee_lamports`. 0.02 SOL — sized so a
+/// the Treasury PDA, non-refundable. Seeds `Config.reservation_fee_lamports`. 0.02 SOL — sized so a
 /// pool-open (which now busies the miner for the window + reservation TTL, #485) isn't cheap to grief.
 pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 

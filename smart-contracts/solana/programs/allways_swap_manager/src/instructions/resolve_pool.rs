@@ -61,9 +61,17 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     require!(ctx.accounts.pool.opened_at != 0, ErrorCode::NoRequests);
     require!(!ctx.accounts.pool.requests.is_empty(), ErrorCode::NoRequests);
     require!(now > ctx.accounts.pool.closes_at, ErrorCode::PoolNotClosed);
-    // No active check needed: a pool only opens on an active miner (open_or_request), and a busy miner
-    // can't be deactivated (deactivate / vote_deactivate require now >= busy_until), so any miner with
-    // an open pool is necessarily still active here (review #3 / busy ⟹ active invariant).
+    // An admin cancel frees busy_until, after which the miner can be deactivated mid-contest, so the
+    // busy ⟹ active invariant isn't guaranteed here. If the miner is inactive, reset the pool WITHOUT
+    // arming a reservation or the busy lock — never match a removed miner (fund-safety backstop).
+    if !ctx.accounts.miner_state.active {
+        let miner_key = ctx.accounts.miner.key();
+        let pool = &mut ctx.accounts.pool;
+        pool.opened_at = 0;
+        pool.requests.clear();
+        msg!("pool reset, no reservation (miner inactive): {}", miner_key);
+        return Ok(());
+    }
 
     let pool_key = ctx.accounts.pool.key();
     let seed_slot = ctx.accounts.pool.seed_slot;

@@ -97,6 +97,9 @@ pub fn handler(
             ErrorCode::NoReservation
         );
         require!(user_from_address == resv.from_addr, ErrorCode::UserMismatch);
+        // Never initiate against a miner the subnet has removed (defense-in-depth; resolve_pool also
+        // refuses to arm a reservation for an inactive miner).
+        require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
         // Over-collateralization gate: miner must hold the swap size x the tunable requirement,
         // so a failed swap has a slash buffer beyond 1:1.
         require!(

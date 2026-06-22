@@ -11,7 +11,7 @@ use crate::state::{MinerQuote, Treasury};
 /// the validator/UI filters to registered miners. `(from_chain, to_chain)` ordering encodes the
 /// direction, so the reverse direction is a separate quote (no `counter_rate`). First call lazily
 /// creates the PDA (miner pays rent) and is otherwise free; subsequent calls overwrite in place and
-/// pay a **decaying anti-flashing fee** (`constants::quote_update_fee`) into the vault treasury — high
+/// pay a **decaying anti-flashing fee** (`constants::quote_update_fee`) into the treasury PDA — high
 /// for rapid churn, zero once a quote has stood long enough.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]

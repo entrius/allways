@@ -193,14 +193,18 @@ fn test_withdraw_treasury_happy_path() {
     let (mut svm, admin, fee, rent) = setup_with_fee();
     assert_eq!(treasury(&svm).total, fee, "fee accrued");
 
+    // Treasury-side conservation: lamports above the rent reserve always equal `total`.
+    let treasury_rent = lam(&svm, &treasury_pda()) - treasury(&svm).total;
+
     let recipient = Keypair::new().pubkey();
     let before = lam(&svm, &recipient);
     send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee), &admin.pubkey(), &admin).expect("withdraw");
 
     assert_eq!(lam(&svm, &recipient), before + fee, "recipient received fees");
     assert_eq!(treasury(&svm).total, 0, "treasury drained");
-    // invariant still holds: the collateral vault holds only collateral + its rent reserve.
+    // both PDAs conserve lamports: vault == rent + collateral; treasury == rent + total.
     assert_eq!(lam(&svm, &vault_pda()), rent + vault(&svm).total_collateral);
+    assert_eq!(lam(&svm, &treasury_pda()), treasury_rent + treasury(&svm).total, "treasury lamports == rent + total");
 }
 
 #[test]
