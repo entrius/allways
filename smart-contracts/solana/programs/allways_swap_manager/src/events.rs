@@ -128,18 +128,6 @@ pub struct PoolResolved {
     pub requests: u8,
 }
 
-/// Admin reset a stuck/abandoned pool (and freed the miner's busy lock).
-#[event]
-pub struct PoolCancelled {
-    pub miner: Pubkey,
-}
-
-/// Admin cleared a miner's reservation (and freed the busy lock).
-#[event]
-pub struct ReservationCancelled {
-    pub miner: Pubkey,
-}
-
 // --- Phase 10: consensus-governed validator weights ---
 
 #[event]

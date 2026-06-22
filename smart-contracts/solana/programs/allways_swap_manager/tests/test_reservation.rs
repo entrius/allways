@@ -1,10 +1,10 @@
-// Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards, cancel (LiteSVM).
+// Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards (LiteSVM).
 //   cargo test -p allways_swap_manager --test test_reservation
 //
 // The weighted draw itself is unit-tested as a pure fn in src/lottery.rs (LiteSVM doesn't populate
 // SlotHashes with future slots, so resolve here uses the deterministic fallback seed). These tests
 // cover the on-chain machinery: open pins the miner quote, the per-request fee accrues to treasury,
-// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve, cancel.
+// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve.
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
@@ -450,7 +450,7 @@ fn test_reservation_blocks_deactivate_until_expiry() {
     assert!(!is_active(&svm, &miner.pubkey()), "miner deactivated once reservation expired");
 }
 
-// ---- Review-fix coverage (PR #484): over-collateral entry gate, busy-lock deactivation, admin cancels, bounds ----
+// ---- Review-fix coverage (PR #484): over-collateral entry gate, busy-lock deactivation, bounds ----
 
 const REQ_DEACTIVATE: u8 = 5;
 
@@ -465,34 +465,6 @@ fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_DEACTIVATE, miner),
             system_program: SYSTEM_PROGRAM,
-        }
-        .to_account_metas(None),
-    )
-}
-fn cancel_pool_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::CancelPool {}.data(),
-        allways_swap_manager::accounts::CancelPool {
-            admin: *admin,
-            config: config_pda(),
-            miner: *miner,
-            miner_state: miner_pda(miner),
-            pool: pool_pda(miner),
-        }
-        .to_account_metas(None),
-    )
-}
-fn cancel_reservation_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::CancelReservation {}.data(),
-        allways_swap_manager::accounts::CancelReservation {
-            admin: *admin,
-            config: config_pda(),
-            miner: *miner,
-            miner_state: miner_pda(miner),
-            reservation: resv_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -558,40 +530,6 @@ fn test_cannot_force_deactivate_while_reserved() {
     let blocked = send(&mut svm, vote_deactivate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
     assert!(blocked.is_err(), "cannot force-deactivate a reserved miner");
 }
-
-#[test]
-fn test_cancel_reservation_frees_miner() {
-    // Admin escape hatch: clear an active reservation and free the busy lock so the miner isn't stuck
-    // for the whole TTL (review #4).
-    let (mut svm, admin, vals, miner) = setup(0, 0);
-    let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
-    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
-    assert!(reservation(&svm, &miner.pubkey()).reserved_until > 0);
-    assert!(send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).is_err(), "blocked while reserved");
-
-    send(&mut svm, cancel_reservation_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel_reservation");
-    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "reservation cleared");
-    assert_eq!(busy_until(&svm, &miner.pubkey()), 0, "busy lock freed");
-    send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("free to deactivate after cancel");
-}
-
-#[test]
-fn test_cancel_pool_frees_miner() {
-    // Admin escape hatch for a stuck open pool: reset it + free the busy lock (review #4).
-    let (mut svm, admin, vals, miner) = setup(0, 0);
-    let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
-    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0);
-    assert!(send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).is_err(), "busy while pool open");
-
-    send(&mut svm, cancel_pool_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin).expect("cancel_pool");
-    assert_eq!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool reset");
-    assert_eq!(busy_until(&svm, &miner.pubkey()), 0, "busy lock freed");
-    send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("free after cancel_pool");
-}
-
 #[test]
 fn test_swap_amount_bounds_cannot_be_contradictory() {
     // Admin cannot drive max_swap < min_swap (or vice-versa) — would brick open_or_request (review #6).
@@ -599,21 +537,4 @@ fn test_swap_amount_bounds_cannot_be_contradictory() {
     assert!(send(&mut svm, set_max_swap_ix(&admin.pubkey(), 500_000_000), &admin.pubkey(), &admin).is_err(), "max < min rejected");
     assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 6_000_000_000), &admin.pubkey(), &admin).is_err(), "min > max rejected");
     send(&mut svm, set_max_swap_ix(&admin.pubkey(), 8_000_000_000), &admin.pubkey(), &admin).expect("widening max is allowed");
-}
-
-#[test]
-fn test_cancel_reservation_refuses_open_pool_miner() {
-    // cancel_reservation must NOT free a miner that only has an OPEN pool (no active reservation):
-    // otherwise the miner could be deactivated mid-contest and resolve_pool would match a removed
-    // miner. It errors (use cancel_pool for an open pool); the busy lock — and busy⟹active — survive.
-    let (mut svm, admin, vals, miner) = setup(0, 0);
-    let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
-    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool open, no reservation yet");
-
-    let r = send(&mut svm, cancel_reservation_ix(&admin.pubkey(), &miner.pubkey()), &admin.pubkey(), &admin);
-    assert!(r.is_err(), "cancel_reservation on an open-pool (no active reservation) miner must error");
-    assert_ne!(busy_until(&svm, &miner.pubkey()), 0, "busy lock NOT cleared");
-    assert!(send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).is_err(), "still busy -> cannot deactivate");
-    assert!(is_active(&svm, &miner.pubkey()), "miner stays active");
 }
