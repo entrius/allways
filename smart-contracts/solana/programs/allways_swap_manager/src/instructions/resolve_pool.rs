@@ -10,13 +10,13 @@ use crate::lottery::{draw_seed, pick_weighted};
 use crate::state::{Config, MinerState, Pool, Reservation};
 
 /// Permissionless. After a pool's window closes, run the stake-weighted draw over its requests and
-/// create the (unchanged) `Reservation` for the winning request's taker. Resets the pool for reuse.
+/// create the `Reservation` for the winner, then reset the pool for reuse.
 ///
-/// Randomness (Level 1): `seed = keccak(pool_key || SlotHashes[seed_slot])` — a future slot pinned at
-/// open, unknown then, fixed once produced. If that slot hasn't been produced yet → `SeedNotReady`
-/// (retry). If it has rolled off the SlotHashes window (or the sysvar is empty, e.g. LiteSVM) → a
-/// deterministic fallback seed keeps the pool resolvable (residual grind is bounded; a reservation
-/// only grants a hold — moving funds still needs `vote_initiate` consensus + a real on-chain tx).
+/// Randomness: `seed = keccak(pool_key || SlotHashes[seed_slot])` — a future slot pinned at open,
+/// unknown then, fixed once produced. If that slot rolled off the SlotHashes window (or the sysvar is
+/// empty, e.g. LiteSVM) a deterministic fallback keeps the pool resolvable; residual grind is bounded
+/// since a reservation only grants a hold — moving funds still needs `vote_initiate` consensus + a
+/// real on-chain tx.
 #[derive(Accounts)]
 pub struct ResolvePool<'info> {
     #[account(mut)]
@@ -68,12 +68,10 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let seed_slot = ctx.accounts.pool.seed_slot;
 
-    // Resolve the seed slot's hash from the SlotHashes sysvar (descending by slot, 40 bytes/entry
-    // after an 8-byte count). The time window (now > closes_at) guarantees the pinned slot is
-    // produced by the time this is callable on a real chain, so the exact match is the normal path.
-    // If it's absent — rolled off the ~512-slot window, or an empty sysvar under LiteSVM — fall back
-    // to a deterministic seed so the pool stays resolvable (bounded residual; a reservation is only
-    // a hold — funds still need vote_initiate consensus + a real on-chain tx).
+    // Resolve the seed slot's hash from SlotHashes (descending by slot, 40 bytes/entry after an
+    // 8-byte count). The time window (now > closes_at) guarantees the pinned slot is produced on a
+    // real chain, so the exact match is the normal path; absence (rolled off, or empty under LiteSVM)
+    // takes the deterministic fallback below.
     let slot_hash: Option<[u8; 32]> = {
         let data = ctx.accounts.slot_hashes.try_borrow_data()?;
         let mut found = None;
@@ -103,8 +101,8 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         None => draw_seed(&pool_key, &seed_slot.to_le_bytes()),
     };
 
-    // Weights aligned with requests: each request's validator weight from the config set (0 if it has
-    // been removed). pick_weighted falls back to uniform if every weight is 0.
+    // Weight per request = its validator's config weight (0 if removed). pick_weighted falls back to
+    // uniform if every weight is 0.
     let weights: Vec<u64> = ctx
         .accounts
         .pool
@@ -137,7 +135,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     };
 
     // Create the Reservation for the winner — same shape vote_reserve produced, so everything
-    // downstream (vote_initiate/fulfill/confirm/timeout) is unchanged.
+    // downstream is unchanged.
     let ttl = ctx.accounts.config.reservation_ttl_secs;
     let reservation_bump = ctx.bumps.reservation;
     let r = &mut ctx.accounts.reservation;

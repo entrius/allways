@@ -44,8 +44,7 @@ pub fn handler(
     rate: String,
     liquidity: u128,
 ) -> Result<()> {
-    // Mechanical sanity only — chain identity/validity is the off-chain layer's call (chains are
-    // opaque bounded strings on-chain).
+    // Mechanical sanity only — chains are opaque bounded strings; validity is the off-chain layer's call.
     require!(
         !from_chain.is_empty()
             && !to_chain.is_empty()

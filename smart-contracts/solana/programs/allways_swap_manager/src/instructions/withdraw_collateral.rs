@@ -5,10 +5,9 @@ use crate::error::ErrorCode;
 use crate::events::CollateralWithdrawn;
 use crate::state::{Config, MinerState, Vault};
 
-/// Miner withdraws SOL collateral back to their wallet. Guards mirror the ink! contract:
-/// miner must be inactive, have no in-flight swap, and (if deactivated) be past the
-/// post-deactivation cooldown (2× fulfillment timeout). Lamports move vault → miner via
-/// direct lamport math (the program owns the vault).
+/// Miner withdraws SOL collateral back to their wallet. Guards: miner must be inactive, have no
+/// in-flight swap, and (if deactivated) be past the post-deactivation cooldown (2x fulfillment
+/// timeout). Lamports move vault -> miner via direct lamport math (the program owns the vault).
 #[derive(Accounts)]
 pub struct WithdrawCollateral<'info> {
     #[account(mut)]

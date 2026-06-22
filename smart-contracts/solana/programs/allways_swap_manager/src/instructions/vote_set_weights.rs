@@ -6,11 +6,9 @@ use crate::error::ErrorCode;
 use crate::events::ValidatorWeightsUpdated;
 use crate::state::{Config, VoteRound};
 
-/// A validator votes to set the full validator-weight vector (Phase 10). Validators read every
-/// validator's stake off-chain, assemble a vector **index-aligned to `Config.validators`**, and submit
-/// it; on quorum the weights are saved. Everyone votes the same snapshot (hash-bound on keys+weights),
-/// so divergent vectors never co-count. Replaces the admin `set_validator_weight` stub for governance;
-/// the lottery draw already consumes `.weight`, so nothing downstream changes.
+/// A validator votes to set the full validator-weight vector. Validators submit a vector index-aligned
+/// to `Config.validators`; on quorum the weights are saved. Everyone votes the same snapshot
+/// (hash-bound on keys+weights), so divergent vectors never co-count.
 #[derive(Accounts)]
 pub struct VoteSetWeights<'info> {
     #[account(mut)]
@@ -35,8 +33,7 @@ pub struct VoteSetWeights<'info> {
 pub fn handler(ctx: Context<VoteSetWeights>, weights: Vec<u64>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
 
-    // Cadence floor: weights can't be re-set faster than the minimum interval (anti-thrash). First
-    // update (last_weights_update == 0) is always allowed.
+    // Cadence floor (anti-thrash): can't re-set faster than the min interval; first update is always allowed.
     let last = ctx.accounts.config.last_weights_update;
     require!(
         last == 0

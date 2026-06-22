@@ -30,11 +30,11 @@ pub const SWAP_SEED: &[u8] = b"swap";
 pub const TX_SEED: &[u8] = b"tx";
 
 /// PDA seed prefix for a miner's standing per-pair quote
-/// (`seeds = [QUOTE_SEED, miner_pubkey, from_chain, to_chain]`). Phase 8.
+/// (`seeds = [QUOTE_SEED, miner_pubkey, from_chain, to_chain]`).
 #[constant]
 pub const QUOTE_SEED: &[u8] = b"quote";
 
-/// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`). Phase 9.
+/// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
 
@@ -53,21 +53,20 @@ pub const MAX_VALIDATORS: usize = 16;
 /// A vote round older than this (seconds) is treated as stale and reset before recording a new vote.
 pub const VOTE_ROUND_TTL_SECS: i64 = 1800;
 
-/// Request types (keys into a vote round). Mirror the ink! contract's request enum.
-/// (REQ_RESERVE removed in Phase 9 — reservations are now lottery-based, not consensus-voted.)
+/// Request types (keys into a vote round). REQ_RESERVE is gone: reservations are lottery-based.
 pub const REQ_ACTIVATE: u8 = 0;
 pub const REQ_INITIATE: u8 = 2;
 pub const REQ_DEACTIVATE: u8 = 5;
 pub const REQ_CONFIRM: u8 = 6;
 pub const REQ_TIMEOUT: u8 = 7;
-/// Phase 10: global (non-per-target) round for the validator-weight vector.
+/// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
 
 /// Solana slot time (ms) — a chain property, used with `POOL_WINDOW_SECS` (economic-levers section
 /// below) to pin the draw's future seed slot from the window duration.
 pub const SLOT_MS: u64 = 400;
 
-/// Bounded max lengths for stored strings (see SOLANA_MIGRATION_RESEARCH.md §14).
+/// Bounded max lengths for stored strings.
 pub const MAX_ADDR_LEN: usize = 80;
 pub const MAX_CHAIN_LEN: usize = 16;
 pub const MAX_RATE_LEN: usize = 32;

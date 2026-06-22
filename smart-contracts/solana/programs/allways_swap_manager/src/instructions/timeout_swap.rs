@@ -7,9 +7,8 @@ use crate::events::SwapTimedOut;
 use crate::penalty::apply_penalty;
 use crate::state::{Config, MinerState, Swap, SwapStatus, Vault, VoteRound};
 
-/// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed up
-/// to the swap size and refunded to the user (native lamports, vault → user), the miner is freed,
-/// and the Swap account is closed.
+/// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed and
+/// refunded to the user (vault -> user), the miner is freed, and the Swap account is closed.
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct TimeoutSwap<'info> {

@@ -1,9 +1,8 @@
 use anchor_lang::prelude::*;
 
-/// Collateral-affecting events carry the **resulting total**, not a blind delta — so any consumer
-/// can set an absolute baseline from a single event instead of accumulating from an unknown start
-/// (v2 cleanup #5; the missing-baseline footgun behind the v1.0.9 mass-recycle outage). Phase 4's
-/// fee/slash events MUST follow the same post-total rule.
+/// Collateral events carry the resulting total, not a delta — so a consumer can set an absolute
+/// baseline from one event instead of accumulating from an unknown start. Fee/slash events follow
+/// the same post-total rule.
 #[event]
 pub struct CollateralPosted {
     pub miner: Pubkey,
@@ -69,7 +68,7 @@ pub struct TreasuryWithdrawn {
     pub recipient: Pubkey,
     /// Amount withdrawn this call (lamports).
     pub amount: u64,
-    /// Treasury balance remaining after this call (lamports) — post-total per the §5 convention.
+    /// Treasury balance remaining after this call (lamports) — post-total per convention.
     pub total: u64,
 }
 

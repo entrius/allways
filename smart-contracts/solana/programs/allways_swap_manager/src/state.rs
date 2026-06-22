@@ -2,21 +2,15 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
-/// A whitelisted validator and its draw weight (Phase 8).
-///
-/// `weight` is the stake-weight seam a future oracle writes through (Phase 10); for now the admin
-/// sets it (`add_validator` / `set_validator_weight`), default uniform `1`. Consensus stays
-/// count-based — `weight` is consumed ONLY by the Phase 9 reservation-lottery draw.
+/// A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the
+/// stake-weight seam consumed ONLY by the reservation-lottery draw; consensus stays count-based.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct ValidatorInfo {
     pub key: Pubkey,
     pub weight: u64,
 }
 
-/// Singleton config PDA (`seeds = [CONFIG_SEED]`).
-///
-/// Grows phase by phase (treasury counter, swap config — see SOLANA_MIGRATION_RESEARCH.md §14).
-/// All amounts in lamports, durations in seconds.
+/// Singleton config PDA (`seeds = [CONFIG_SEED]`). All amounts in lamports, durations in seconds.
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
@@ -28,7 +22,7 @@ pub struct Config {
     pub min_collateral: u64,
     /// Maximum collateral a miner may post (lamports). 0 = no cap.
     pub max_collateral: u64,
-    /// Swap fulfillment timeout (seconds). Phase 1 cooldown = 2×; Phase 4 swap timeout.
+    /// Swap fulfillment timeout (seconds); withdrawal cooldown = 2x this.
     pub fulfillment_timeout_secs: i64,
     /// Swap-size bounds on the collateral-backed (SOL) amount, in lamports. 0 = unbounded.
     pub min_swap_amount: u64,
@@ -91,11 +85,10 @@ pub struct MinerState {
     pub collateral: u64,
     /// Whether the miner is active (set via consensus).
     pub active: bool,
-    /// Whether the miner currently has an in-flight swap (Phase 4).
+    /// Whether the miner currently has an in-flight swap.
     pub has_active_swap: bool,
-    /// Unix timestamp the miner is committed (busy) until — covers an open pool, a held reservation,
-    /// and an in-flight swap. `now >= busy_until` means free. Self-clearing (no clear instruction
-    /// needed). Read by `deactivate` / `withdraw_collateral` as the non-bypassable busy lock.
+    /// Unix ts the miner is busy until (open pool, held reservation, or in-flight swap). Self-clearing
+    /// (`now >= busy_until` = free); the non-bypassable busy lock for deactivate/withdraw_collateral.
     pub busy_until: i64,
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
@@ -105,10 +98,8 @@ pub struct MinerState {
 
 /// A consensus vote round PDA (`seeds = [VOTE_SEED, &[request_type], target]`).
 ///
-/// Accumulates validator votes for one request (e.g. activate a miner). `bound_hash` binds
-/// every voter to identical request parameters (keccak of the canonical request) — for requests
-/// whose params live entirely in the seeds this is trivially satisfied, but later phases
-/// (reserve/initiate) carry amounts/addresses the seeds don't, where it prevents bait-and-switch.
+/// `bound_hash` binds every voter to identical request params (keccak of the canonical request),
+/// preventing bait-and-switch on requests whose params aren't fully in the seeds (reserve/initiate).
 #[account]
 #[derive(InitSpace)]
 pub struct VoteRound {
@@ -125,10 +116,9 @@ pub struct VoteRound {
 
 /// Confirmed reservation for a miner (`seeds = [RESV_SEED, miner]`).
 ///
-/// Created by `resolve_pool` (lottery draw); consumed by `vote_initiate` (Phase 4) or left to
-/// expire. `reserved_until == 0` means no active reservation (slot empty/cleared);
-/// `reserved_until >= now` means active; `0 < reserved_until < now` means expired (overwritable).
-/// `from_addr` is kept so Phase 4 can verify the initiating user matches the reserver.
+/// Created by `resolve_pool` (lottery draw); consumed by `vote_initiate` or left to expire.
+/// `reserved_until`: 0 = empty, >= now = active, 0 < it < now = expired (overwritable).
+/// `from_addr` is kept so initiate can verify the initiating user matches the reserver.
 #[account]
 #[derive(InitSpace)]
 pub struct Reservation {
@@ -146,9 +136,8 @@ pub struct Reservation {
     /// Off-chain leg amounts in their own assets (u128 to cover wei-scale).
     pub from_amount: u128,
     pub to_amount: u128,
-    /// Pinned miner quote — captured + hash-bound at reserve time so it is an immutable quote.
-    /// Phase 4's `vote_initiate` MUST honor these (not the miner's live commitment): this closes
-    /// the rate-swing / deposit-address-theft total-loss bug (v2 cleanup #1).
+    /// Pinned miner quote — hash-bound at reserve time. `vote_initiate` MUST honor these (not the
+    /// miner's live commitment): closes the rate-swing / deposit-address-theft total-loss bug.
     #[max_len(MAX_ADDR_LEN)]
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
@@ -170,9 +159,8 @@ pub enum SwapStatus {
 }
 
 /// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
-/// Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`.
-/// Chains/amounts/miner-quote are copied from the (immutable) Reservation; user-side fields come
-/// from the initiate vote (and are hash-bound). Identified by from_tx_hash, not a u64 counter.
+/// Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`. Chains/amounts/
+/// miner-quote copied from the immutable Reservation; user-side fields from the hash-bound initiate vote.
 #[account]
 #[derive(InitSpace)]
 pub struct Swap {
@@ -209,9 +197,8 @@ pub struct Swap {
     pub bump: u8,
 }
 
-/// Permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`). Set `used = true` on initiate
-/// quorum and never closed — outlives the Swap (which closes on completion), mirroring ink!'s
-/// `used_from_tx`. A from_tx_hash can initiate at most one swap, ever.
+/// Permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`). Set `used` on initiate quorum
+/// and never closed, so it outlives the Swap: a from_tx_hash can initiate at most one swap, ever.
 #[account]
 #[derive(InitSpace)]
 pub struct TxMarker {
@@ -219,15 +206,13 @@ pub struct TxMarker {
     pub bump: u8,
 }
 
-/// A miner's standing on-chain quote for one pair-direction (Phase 8)
+/// A miner's standing on-chain quote for one pair-direction
 /// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain]`).
 ///
-/// Replaces the off-chain Bittensor commitment string. A miner advertises its whole book by writing
-/// one of these per pair-direction it offers (`tao→btc`, `btc→tao`, `sol→btc`, …) — the `(from_chain,
-/// to_chain)` ordering encodes direction, so there is no `counter_rate` field (the reverse direction
-/// is its own PDA). Permissionless to write (`set_quote`); the validator/UI filters to registered
-/// miners. Mutable: `set_quote` overwrites in place — pools (Phase 9) pin whatever's current, so
-/// staleness is the miner's problem. Closed + rent-refunded via `remove_quote`.
+/// Replaces the off-chain Bittensor commitment string: one PDA per direction (the `(from_chain,
+/// to_chain)` ordering encodes direction, so no `counter_rate`). Permissionless to write
+/// (`set_quote`, overwrites in place); pools pin whatever's current, so staleness is the miner's
+/// problem. Closed + rent-refunded via `remove_quote`.
 #[account]
 #[derive(InitSpace)]
 pub struct MinerQuote {
@@ -254,8 +239,8 @@ pub struct MinerQuote {
     pub bump: u8,
 }
 
-/// One validator's entry into a reservation lottery `Pool` (Phase 9). Carries the taker-side intent;
-/// the miner quote (rate/addresses/chains) is the pool's pinned snapshot, not per-request.
+/// One validator's entry into a reservation lottery `Pool`. Carries only the taker-side intent;
+/// the miner quote is the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct Request {
     /// The validator that routed this request (also the lottery weight key + dedup key).
@@ -272,14 +257,12 @@ pub struct Request {
     pub to_amount: u128,
 }
 
-/// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`), Phase 9.
+/// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`).
 ///
-/// Opened by the first validator to route a request (which pins the miner's on-chain quote for the
-/// chosen pair); collects ≤16 requests over a window; `resolve_pool` runs a stake-weighted draw after
-/// `closes_at` and creates the (unchanged) `Reservation` for the winner. Keyed **per-miner** — the
-/// opener pins the pair and later in-window requests must match it. Rent is paid once by the first
-/// opener and the account is **reused** across contests (`opened_at == 0` = available, mirroring
-/// `VoteRound`); `resolve_pool` resets it rather than closing.
+/// Opened by the first validator to route a request (pinning the miner's quote for the chosen pair);
+/// later in-window requests must match that pair. `resolve_pool` runs a stake-weighted draw after
+/// `closes_at` and creates the winner's `Reservation`. Keyed per-miner; the account is reused across
+/// contests (`opened_at == 0` = available), reset rather than closed by `resolve_pool`.
 #[account]
 #[derive(InitSpace)]
 pub struct Pool {
