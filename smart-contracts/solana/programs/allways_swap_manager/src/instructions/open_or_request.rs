@@ -129,24 +129,35 @@ pub fn handler(
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
     require!(!active_reservation, ErrorCode::MinerReserved);
 
-    // Flat, non-refundable anti-spam fee: validator → treasury (subnet revenue, every call).
-    let fee = ctx.accounts.config.reservation_fee_lamports;
-    transfer(
-        CpiContext::new(
-            ctx.accounts.system_program.key(),
-            Transfer {
-                from: ctx.accounts.validator.to_account_info(),
-                to: ctx.accounts.treasury.to_account_info(),
-            },
-        ),
-        fee,
-    )?;
-    ctx.accounts.treasury.total = ctx
-        .accounts
-        .treasury
-        .total
-        .checked_add(fee)
-        .ok_or(ErrorCode::Overflow)?;
+    // Flat, non-refundable anti-spam fee: validator → treasury (subnet revenue). Charged only on a
+    // fresh entry (open or first join) — a same-validator in-window bid UPDATE is free, so refining a
+    // bid against the pinned rate isn't taxed.
+    let is_update = ctx.accounts.pool.opened_at != 0
+        && ctx
+            .accounts
+            .pool
+            .requests
+            .iter()
+            .any(|r| r.validator == ctx.accounts.validator.key());
+    if !is_update {
+        let fee = ctx.accounts.config.reservation_fee_lamports;
+        transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.key(),
+                Transfer {
+                    from: ctx.accounts.validator.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
+                },
+            ),
+            fee,
+        )?;
+        ctx.accounts.treasury.total = ctx
+            .accounts
+            .treasury
+            .total
+            .checked_add(fee)
+            .ok_or(ErrorCode::Overflow)?;
+    }
 
     let miner_key = ctx.accounts.miner.key();
     let validator_key = ctx.accounts.validator.key();
@@ -202,19 +213,21 @@ pub fn handler(
             seed_slot,
         });
     } else {
-        // JOIN — must be within the window, same pinned pair, and not a duplicate validator.
+        // JOIN or UPDATE — must be within the window and match the pinned pair.
         let pool = &mut ctx.accounts.pool;
         require!(now <= pool.closes_at, ErrorCode::PoolClosed);
         require!(
             pool.from_chain == from_chain && pool.to_chain == to_chain,
             ErrorCode::MinerBusyDifferentPair
         );
-        require!(
-            !pool.requests.iter().any(|r| r.validator == validator_key),
-            ErrorCode::AlreadyRequested
-        );
-        require!(pool.requests.len() < MAX_VALIDATORS, ErrorCode::ValidatorSetFull);
-        pool.requests.push(req);
+        // Upsert: a repeat call from the same validator updates its bid in place (dynamic bidding
+        // while the window is open); a new validator is appended, subject to the set cap.
+        if let Some(existing) = pool.requests.iter_mut().find(|r| r.validator == validator_key) {
+            *existing = req;
+        } else {
+            require!(pool.requests.len() < MAX_VALIDATORS, ErrorCode::ValidatorSetFull);
+            pool.requests.push(req);
+        }
 
         emit!(ReservationRequested {
             miner: miner_key,

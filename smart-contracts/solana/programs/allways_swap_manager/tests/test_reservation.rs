@@ -299,13 +299,21 @@ fn test_each_request_charges_fee() {
 }
 
 #[test]
-fn test_duplicate_validator_rejected() {
+fn test_validator_can_update_request() {
+    // A repeat call from the same validator while the pool is open UPDATES its bid in place (no
+    // AlreadyRequested reject): the request count stays 1 and the content reflects the new bid.
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
-    let dup = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]);
-    assert!(dup.is_err(), "same validator twice in one pool must be rejected");
-    assert_eq!(pool(&svm, &miner.pubkey()).requests.len(), 1);
+    let u1 = Keypair::new().pubkey();
+    let u2 = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u1, "u1", "uSOL", 1_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u2, "u2", "uSOL2", 2_000_000_000, 7, 0), &vals[0].pubkey(), &vals[0]).expect("update");
+
+    let p = pool(&svm, &miner.pubkey());
+    assert_eq!(p.requests.len(), 1, "update replaces in place, not appended");
+    assert_eq!(p.requests[0].validator, vals[0].pubkey());
+    assert_eq!(p.requests[0].user, u2, "bid updated to the new user");
+    assert_eq!(p.requests[0].user_from_addr, "u2");
+    assert_eq!(p.requests[0].sol_amount, 2_000_000_000, "bid updated to the new amount");
 }
 
 #[test]
@@ -536,4 +544,43 @@ fn test_swap_amount_bounds_cannot_be_contradictory() {
     assert!(send(&mut svm, set_max_swap_ix(&admin.pubkey(), 500_000_000), &admin.pubkey(), &admin).is_err(), "max < min rejected");
     assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 6_000_000_000), &admin.pubkey(), &admin).is_err(), "min > max rejected");
     send(&mut svm, set_max_swap_ix(&admin.pubkey(), 8_000_000_000), &admin.pubkey(), &admin).expect("widening max is allowed");
+}
+#[test]
+fn test_update_reflected_in_reservation() {
+    // The updated bid (not the original) is what wins and becomes the reservation.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let u1 = Keypair::new().pubkey();
+    let u2 = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u1, "fromA", "toA", 1_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u2, "fromB", "toB", 2_000_000_000, 9, 0), &vals[0].pubkey(), &vals[0]).expect("update");
+
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+
+    let r = reservation(&svm, &miner.pubkey());
+    assert_eq!(r.sol_amount, 2_000_000_000, "reservation reflects the updated bid amount");
+    assert_eq!(r.from_addr, "fromB", "reservation reflects the updated user");
+}
+
+#[test]
+fn test_update_is_free() {
+    // First entry pays the reservation fee; a same-validator in-window update is free.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    let t0 = treasury(&svm);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "first entry pays the fee");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2, 2, 0), &vals[0].pubkey(), &vals[0]).expect("update");
+    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "in-window update is free (no extra fee)");
+}
+
+#[test]
+fn test_update_after_window_close_fails() {
+    // Once the window closes, no further updates (must resolve first).
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    let late = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2, 2, 0), &vals[0].pubkey(), &vals[0]);
+    assert!(late.is_err(), "cannot update after the window closed");
 }
