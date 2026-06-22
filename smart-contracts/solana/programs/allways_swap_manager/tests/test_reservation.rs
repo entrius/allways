@@ -1,17 +1,17 @@
-// Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards, cancel (LiteSVM).
+// Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards (LiteSVM).
 //   cargo test -p allways_swap_manager --test test_reservation
 //
 // The weighted draw itself is unit-tested as a pure fn in src/lottery.rs (LiteSVM doesn't populate
 // SlotHashes with future slots, so resolve here uses the deterministic fallback seed). These tests
 // cover the on-chain machinery: open pins the miner quote, the per-request fee accrues to treasury,
-// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve, cancel.
+// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve.
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Pool, Reservation, Vault},
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::state::{MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -38,6 +38,9 @@ fn config_pda() -> Pubkey {
 }
 fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], &pid()).0
+}
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
 }
 fn miner_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
@@ -86,6 +89,7 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
             admin: *admin,
             config: config_pda(),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -143,7 +147,7 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(miner, f, t),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -182,7 +186,7 @@ fn open_ix(
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, f, t),
             pool: pool_pda(miner),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
@@ -227,8 +231,8 @@ fn pool(svm: &LiteSVM, miner: &Pubkey) -> Pool {
     Pool::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
 fn treasury(svm: &LiteSVM) -> u64 {
-    let a = svm.get_account(&vault_pda()).unwrap();
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap().treasury_total
+    let a = svm.get_account(&treasury_pda()).unwrap();
+    Treasury::try_deserialize(&mut a.data.as_slice()).unwrap().total
 }
 fn is_active(svm: &LiteSVM, miner: &Pubkey) -> bool {
     let a = svm.get_account(&miner_pda(miner)).unwrap();
@@ -444,4 +448,93 @@ fn test_reservation_blocks_deactivate_until_expiry() {
     set_clock(&mut svm, resv_until + 1);
     send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("deactivate after expiry");
     assert!(!is_active(&svm, &miner.pubkey()), "miner deactivated once reservation expired");
+}
+
+// ---- Review-fix coverage (PR #484): over-collateral entry gate, busy-lock deactivation, bounds ----
+
+const REQ_DEACTIVATE: u8 = 5;
+
+fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::VoteDeactivate {}.data(),
+        allways_swap_manager::accounts::VoteDeactivate {
+            validator: *validator,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            vote_round: vote_pda(REQ_DEACTIVATE, miner),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn set_max_swap_ix(admin: &Pubkey, amount: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetMaxSwapAmount { amount }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }.to_account_metas(None),
+    )
+}
+fn set_min_swap_ix(admin: &Pubkey, amount: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetMinSwapAmount { amount }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }.to_account_metas(None),
+    )
+}
+fn busy_until(svm: &LiteSVM, miner: &Pubkey) -> i64 {
+    let a = svm.get_account(&miner_pda(miner)).unwrap();
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_until
+}
+fn collateral(svm: &LiteSVM, miner: &Pubkey) -> u64 {
+    let a = svm.get_account(&miner_pda(miner)).unwrap();
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().collateral
+}
+
+#[test]
+fn test_open_requires_overcollateralization() {
+    // setup posts 10 SOL collateral; the requirement is 1.10×. A swap whose 1.10× need exceeds the
+    // collateral must be rejected at open (review #1) so vote_initiate can't later strand a user.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    assert_eq!(collateral(&svm, &miner.pubkey()), 10_000_000_000);
+
+    // 9.5 SOL × 1.10 = 10.45 SOL > 10 SOL → rejected.
+    let too_big = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 9_500_000_000, 1, 0), &vals[0].pubkey(), &vals[0]);
+    assert!(too_big.is_err(), "swap needing >collateral at 1.10× must be rejected at open");
+
+    // 9 SOL × 1.10 = 9.9 SOL ≤ 10 SOL → accepted.
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 9_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("affordable swap opens");
+}
+
+#[test]
+fn test_cannot_force_deactivate_while_pooled() {
+    // A miner with an open pool is busy and must not be force-deactivatable mid-window — deactivation
+    // is only for idle miners (preserves the busy ⟹ active invariant; user req / review #3).
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    let blocked = send(&mut svm, vote_deactivate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]);
+    assert!(blocked.is_err(), "cannot force-deactivate a miner with an open pool");
+    assert!(is_active(&svm, &miner.pubkey()), "miner stays active");
+}
+
+#[test]
+fn test_cannot_force_deactivate_while_reserved() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    let blocked = send(&mut svm, vote_deactivate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
+    assert!(blocked.is_err(), "cannot force-deactivate a reserved miner");
+}
+#[test]
+fn test_swap_amount_bounds_cannot_be_contradictory() {
+    // Admin cannot drive max_swap < min_swap (or vice-versa) — would brick open_or_request (review #6).
+    let (mut svm, admin, _vals, _miner) = setup(1_000_000_000, 5_000_000_000);
+    assert!(send(&mut svm, set_max_swap_ix(&admin.pubkey(), 500_000_000), &admin.pubkey(), &admin).is_err(), "max < min rejected");
+    assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 6_000_000_000), &admin.pubkey(), &admin).is_err(), "min > max rejected");
+    send(&mut svm, set_max_swap_ix(&admin.pubkey(), 8_000_000_000), &admin.pubkey(), &admin).expect("widening max is allowed");
 }

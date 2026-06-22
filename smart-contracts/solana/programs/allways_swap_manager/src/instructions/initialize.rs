@@ -1,11 +1,10 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, CONFIG_VERSION, VAULT_SEED};
-use crate::tunables::{
-    POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+use crate::constants::{
+    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, TREASURY_SEED,
+    VAULT_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
-use crate::error::ErrorCode;
-use crate::state::{Config, Vault};
+use crate::state::{Config, Treasury, Vault};
 
 /// Create the singleton Config + native-SOL Vault PDAs. Records admin, collateral bounds,
 /// fulfillment timeout (seconds), and the consensus threshold. Validator set starts empty
@@ -33,6 +32,15 @@ pub struct Initialize<'info> {
     )]
     pub vault: Account<'info, Vault>,
 
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + Treasury::INIT_SPACE,
+        seeds = [TREASURY_SEED],
+        bump,
+    )]
+    pub treasury: Account<'info, Treasury>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -47,10 +55,13 @@ pub fn handler(
     max_swap_amount: u64,
     reservation_ttl_secs: i64,
 ) -> Result<()> {
-    require!(
-        (1..=100).contains(&consensus_threshold_percent),
-        ErrorCode::InvalidThreshold
-    );
+    // Same validators the admin setters use, so init can't seed a value a setter would later reject.
+    crate::validate::consensus_threshold(consensus_threshold_percent)?;
+    crate::validate::fulfillment_timeout(fulfillment_timeout_secs)?;
+    crate::validate::reservation_ttl(reservation_ttl_secs)?;
+    crate::validate::min_swap_amount(min_swap_amount)?;
+    crate::validate::swap_bounds(min_swap_amount, max_swap_amount)?;
+    crate::validate::collateral_bounds(min_collateral, max_collateral)?;
 
     let config = &mut ctx.accounts.config;
     config.admin = ctx.accounts.admin.key();
@@ -72,8 +83,11 @@ pub fn handler(
 
     let vault = &mut ctx.accounts.vault;
     vault.total_collateral = 0;
-    vault.treasury_total = 0;
     vault.bump = ctx.bumps.vault;
+
+    let treasury = &mut ctx.accounts.treasury;
+    treasury.total = 0;
+    treasury.bump = ctx.bumps.treasury;
 
     msg!(
         "initialized: admin={}, threshold={}%, min_collateral={}, max_collateral={}, timeout_secs={}",

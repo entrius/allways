@@ -21,6 +21,9 @@ fn config_pda(program_id: &Pubkey) -> Pubkey {
 fn vault_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], program_id).0
 }
+fn treasury_pda(program_id: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], program_id).0
+}
 fn miner_pda(program_id: &Pubkey, miner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", miner.as_ref()], program_id).0
 }
@@ -57,6 +60,7 @@ fn setup(max_collateral: u64) -> (LiteSVM, Pubkey) {
             admin: admin.pubkey(),
             config: config_pda(&program_id),
             vault: vault_pda(&program_id),
+            treasury: treasury_pda(&program_id),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

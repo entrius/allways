@@ -7,8 +7,9 @@ use crate::state::{MinerState, Vault};
 /// collateral total, and auto-deactivate the miner if the remainder falls below `min_collateral`.
 /// Returns the actual amount deducted.
 ///
-/// Lamports are NOT moved here — the caller decides where the value goes (treasury vs. user payout),
-/// so the vault invariant (lamports == rent + total_collateral + treasury_total) stays the caller's.
+/// Lamports are NOT moved here — the caller decides where the deducted value goes (a fee moved to the
+/// treasury PDA on confirm, vs. a payout to the user on a slash), preserving the collateral-vault
+/// invariant (`lamports == rent + total_collateral`).
 pub fn apply_penalty(
     miner_state: &mut Account<MinerState>,
     vault: &mut Account<Vault>,

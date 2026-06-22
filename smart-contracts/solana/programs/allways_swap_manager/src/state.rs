@@ -50,14 +50,27 @@ pub struct Config {
 
 /// Singleton native-SOL collateral vault PDA (`seeds = [VAULT_SEED]`), program-owned.
 ///
-/// Invariant: vault.lamports == rent_exempt_minimum + total_collateral (+ treasury + pending, later).
+/// Holds ONLY miner collateral — never subnet revenue (that lives in the separate `Treasury`). This
+/// makes collateral trustless: it leaves only via the owning miner's `withdraw_collateral` or a slash
+/// to the wronged user on a failed swap. Invariant: vault.lamports == rent_exempt + total_collateral.
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
     /// Σ of all miners' collateral credited to the vault (lamports), excludes the rent reserve.
     pub total_collateral: u64,
-    /// Accrued protocol fees held in the vault (lamports), awaiting admin withdrawal (Phase 6).
-    pub treasury_total: u64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Singleton subnet-revenue treasury PDA (`seeds = [TREASURY_SEED]`), program-owned, admin-withdrawable.
+///
+/// Holds ONLY subnet income — swap-completion fees, requote (anti-flash) fees, reservation fees —
+/// kept entirely separate from collateral. Invariant: treasury.lamports == rent_exempt + total.
+#[account]
+#[derive(InitSpace)]
+pub struct Treasury {
+    /// Accrued protocol revenue (lamports), excludes the rent reserve. Drained by `withdraw_treasury`.
+    pub total: u64,
     /// Stored PDA bump.
     pub bump: u8,
 }

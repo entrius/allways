@@ -1,15 +1,16 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_CONFIRM, SWAP_SEED, VAULT_SEED, VOTE_SEED};
-use crate::tunables::FEE_DIVISOR;
+use crate::constants::{
+    CONFIG_SEED, FEE_DIVISOR, MINER_SEED, REQ_CONFIRM, SWAP_SEED, TREASURY_SEED, VAULT_SEED, VOTE_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::SwapCompleted;
 use crate::penalty::apply_penalty;
-use crate::state::{Config, MinerState, Swap, SwapStatus, Vault, VoteRound};
+use crate::state::{Config, MinerState, Swap, SwapStatus, Treasury, Vault, VoteRound};
 
 /// Validators confirm a fulfilled swap. On quorum the 1% fee is moved from the miner's collateral
-/// into the vault's treasury accrual (lamports stay in the vault), the miner is freed, and the Swap
+/// into the Treasury PDA (lamports move vault → treasury), the miner is freed, and the Swap
 /// account is closed (rent reclaimed).
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
@@ -33,6 +34,10 @@ pub struct ConfirmSwap<'info> {
 
     #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
+
+    /// Subnet treasury — the 1% fee moves here out of the miner's collateral.
+    #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
+    pub treasury: Account<'info, Treasury>,
 
     #[account(
         mut,
@@ -87,12 +92,18 @@ pub fn handler(ctx: Context<ConfirmSwap>, swap_key: [u8; 32]) -> Result<()> {
             fee,
             now,
         )?;
-        ctx.accounts.vault.treasury_total = ctx
-            .accounts
-            .vault
-            .treasury_total
-            .checked_add(actual_fee)
-            .ok_or(ErrorCode::Overflow)?;
+        // Move the fee lamports out of the collateral vault and into the subnet treasury (both are
+        // program-owned PDAs → direct lamport math). apply_penalty already shrank total_collateral.
+        if actual_fee > 0 {
+            ctx.accounts.vault.to_account_info().sub_lamports(actual_fee)?;
+            ctx.accounts.treasury.to_account_info().add_lamports(actual_fee)?;
+            ctx.accounts.treasury.total = ctx
+                .accounts
+                .treasury
+                .total
+                .checked_add(actual_fee)
+                .ok_or(ErrorCode::Overflow)?;
+        }
         ctx.accounts.miner_state.has_active_swap = false;
         ctx.accounts.miner_state.busy_until = 0;
 

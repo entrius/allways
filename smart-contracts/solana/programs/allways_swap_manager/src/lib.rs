@@ -6,7 +6,7 @@ pub mod instructions;
 pub mod lottery;
 pub mod penalty;
 pub mod state;
-pub mod tunables;
+pub mod validate;
 
 use anchor_lang::prelude::*;
 
@@ -203,7 +203,7 @@ pub mod allways_swap_manager {
     }
 
     // --- Treasury ---
-    /// Admin withdraws accrued protocol fees from the vault treasury to a recipient.
+    /// Admin withdraws accrued protocol fees from the treasury PDA to a recipient.
     pub fn withdraw_treasury(ctx: Context<WithdrawTreasury>, amount: u64) -> Result<()> {
         withdraw_treasury::handler(ctx, amount)
     }

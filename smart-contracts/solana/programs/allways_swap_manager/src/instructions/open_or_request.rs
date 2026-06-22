@@ -3,11 +3,11 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::{
     CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
-    RESV_SEED, SLOT_MS, VAULT_SEED,
+    RESV_SEED, SLOT_MS, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
-use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Vault};
+use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Treasury};
 
 /// A validator opens (or joins) a per-miner reservation-lottery pool for a pair. First caller opens
 /// and pins the miner's quote; later in-window callers add one request each (same pinned pair). Every
@@ -48,8 +48,9 @@ pub struct OpenOrRequest<'info> {
     )]
     pub pool: Account<'info, Pool>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// Subnet-revenue sink for the reservation fee (kept separate from the collateral vault).
+    #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
+    pub treasury: Account<'info, Treasury>,
 
     /// The per-miner reservation slot — checked so a new contest can't be opened while a reservation
     /// is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
@@ -112,6 +113,13 @@ pub fn handler(
         ctx.accounts.miner_state.collateral >= cfg.min_collateral,
         ErrorCode::InsufficientCollateral
     );
+    // Over-collateralization gate at entry: hold 1.10× THIS request's size up front. Collateral only
+    // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate
+    // can't later strand a user who has already sent source funds (review #1).
+    require!(
+        ctx.accounts.miner_state.collateral >= crate::constants::required_collateral(sol_amount),
+        ErrorCode::InsufficientCollateral
+    );
 
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;
@@ -121,22 +129,22 @@ pub fn handler(
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
     require!(!active_reservation, ErrorCode::MinerReserved);
 
-    // Flat, non-refundable anti-spam fee: validator → vault, accrued to treasury (every call).
+    // Flat, non-refundable anti-spam fee: validator → treasury (subnet revenue, every call).
     let fee = ctx.accounts.config.reservation_fee_lamports;
     transfer(
         CpiContext::new(
             ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.validator.to_account_info(),
-                to: ctx.accounts.vault.to_account_info(),
+                to: ctx.accounts.treasury.to_account_info(),
             },
         ),
         fee,
     )?;
-    ctx.accounts.vault.treasury_total = ctx
+    ctx.accounts.treasury.total = ctx
         .accounts
-        .vault
-        .treasury_total
+        .treasury
+        .total
         .checked_add(fee)
         .ok_or(ErrorCode::Overflow)?;
 

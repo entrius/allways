@@ -26,6 +26,9 @@ fn config_pda() -> Pubkey {
 fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], &pid()).0
 }
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
+}
 fn miner_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
 }
@@ -65,6 +68,7 @@ fn init_ix(admin: &Pubkey, min_collateral: u64, threshold: u8) -> Instruction {
             admin: *admin,
             config: config_pda(),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

@@ -39,9 +39,14 @@ pub struct VoteDeactivate<'info> {
 }
 
 pub fn handler(ctx: Context<VoteDeactivate>) -> Result<()> {
-    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
-
     let now = Clock::get()?.unix_timestamp;
+    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
+    // Only an idle miner can be deactivated — never one mid-commitment (open pool / held reservation /
+    // in-flight swap). Mirrors self-`deactivate` and keeps the "busy ⟹ active" invariant that
+    // open_or_request + resolve_pool rely on (review #3 / user req).
+    require!(!ctx.accounts.miner_state.has_active_swap, ErrorCode::MinerHasActiveSwap);
+    require!(now >= ctx.accounts.miner_state.busy_until, ErrorCode::MinerBusy);
+
     let miner_key = ctx.accounts.miner.key();
     let bound = request_hash(REQ_DEACTIVATE, &miner_key);
     let validator = ctx.accounts.validator.key();

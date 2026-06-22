@@ -1,16 +1,18 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, VAULT_SEED};
+use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, TREASURY_SEED};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
-use crate::state::{MinerQuote, Vault};
-use crate::tunables::quote_update_fee;
+use crate::state::{MinerQuote, Treasury};
 
-/// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: a quote
-/// is advertised data that can't move funds and rent self-limits spam. First call creates the PDA
-/// (free); subsequent calls overwrite in place and pay a decaying anti-flashing fee
-/// (`tunables::quote_update_fee`) into the vault treasury — high for rapid churn, zero once stable.
+/// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: any
+/// signer may post — a quote is advertised data that can't move funds, rent self-limits spam, and
+/// the validator/UI filters to registered miners. `(from_chain, to_chain)` ordering encodes the
+/// direction, so the reverse direction is a separate quote (no `counter_rate`). First call lazily
+/// creates the PDA (miner pays rent) and is otherwise free; subsequent calls overwrite in place and
+/// pay a **decaying anti-flashing fee** (`constants::quote_update_fee`) into the treasury PDA — high
+/// for rapid churn, zero once a quote has stood long enough.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
 pub struct SetQuote<'info> {
@@ -26,9 +28,9 @@ pub struct SetQuote<'info> {
     )]
     pub quote: Account<'info, MinerQuote>,
 
-    /// Treasury sink for the quote-update churn fee (native lamports accrue here).
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral.
+    #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
+    pub treasury: Account<'info, Treasury>,
 
     pub system_program: Program<'info, System>,
 }
@@ -66,8 +68,9 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
-    // Anti-flashing churn fee: only when overwriting (fresh PDA has zeroed `miner`), decaying to zero
-    // the longer the prior quote stood. Fee -> vault treasury, preserving the vault invariant.
+    // Anti-flashing churn fee on UPDATES only — creation is free (no onboarding barrier), decaying to
+    // zero the longer the prior quote stood; fee → treasury. The remove + re-create dodge is closed on
+    // the remove side (see `remove_quote`), so creation needn't be charged.
     let fee = if ctx.accounts.quote.miner != Pubkey::default() {
         quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
     } else {
@@ -79,14 +82,14 @@ pub fn handler(
                 ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.miner.to_account_info(),
-                    to: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
             fee,
         )?;
-        let vault = &mut ctx.accounts.vault;
-        vault.treasury_total = vault
-            .treasury_total
+        let treasury = &mut ctx.accounts.treasury;
+        treasury.total = treasury
+            .total
             .checked_add(fee)
             .ok_or(ErrorCode::Overflow)?;
     }
