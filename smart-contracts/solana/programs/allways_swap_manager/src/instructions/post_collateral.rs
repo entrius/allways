@@ -1,14 +1,14 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{CONFIG_SEED, MINER_SEED, VAULT_SEED};
+use crate::constants::{COLLATERAL_SEED, CONFIG_SEED, MINER_SEED};
 use crate::error::ErrorCode;
 use crate::events::CollateralPosted;
-use crate::state::{Config, MinerState, Vault};
+use crate::state::{CollateralVault, Config, MinerState};
 
-/// Miner deposits SOL collateral. Lamports move miner → vault (system CPI); the miner's
-/// `MinerState` ledger and the vault's `total_collateral` both increase. First deposit
-/// lazily creates the `MinerState` PDA (miner pays its rent).
+/// Miner deposits SOL collateral into their OWN per-miner collateral vault (system CPI). The
+/// `MinerState.collateral` ledger increases; the lamports land in `[COLLATERAL_SEED, miner]`. First
+/// deposit lazily creates both the `MinerState` and the collateral-vault PDAs (miner pays rent).
 #[derive(Accounts)]
 pub struct PostCollateral<'info> {
     #[account(mut)]
@@ -26,8 +26,15 @@ pub struct PostCollateral<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// The miner's own collateral vault — holds only this miner's collateral lamports.
+    #[account(
+        init_if_needed,
+        payer = miner,
+        space = 8 + CollateralVault::INIT_SPACE,
+        seeds = [COLLATERAL_SEED, miner.key().as_ref()],
+        bump,
+    )]
+    pub collateral_vault: Account<'info, CollateralVault>,
 
     pub system_program: Program<'info, System>,
 }
@@ -45,13 +52,13 @@ pub fn handler(ctx: Context<PostCollateral>, amount: u64) -> Result<()> {
         ErrorCode::ExceedsMaxCollateral
     );
 
-    // Move lamports miner -> vault via the system program.
+    // Move lamports miner -> the miner's own collateral vault via the system program.
     transfer(
         CpiContext::new(
             ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.miner.to_account_info(),
-                to: ctx.accounts.vault.to_account_info(),
+                to: ctx.accounts.collateral_vault.to_account_info(),
             },
         ),
         amount,
@@ -65,12 +72,7 @@ pub fn handler(ctx: Context<PostCollateral>, amount: u64) -> Result<()> {
         ms.bump = bump;
     }
     ms.collateral = new_collateral;
-
-    let vault = &mut ctx.accounts.vault;
-    vault.total_collateral = vault
-        .total_collateral
-        .checked_add(amount)
-        .ok_or(ErrorCode::Overflow)?;
+    ctx.accounts.collateral_vault.bump = ctx.bumps.collateral_vault;
 
     emit!(CollateralPosted {
         miner: miner_key,

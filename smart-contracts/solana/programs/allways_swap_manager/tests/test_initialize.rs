@@ -5,7 +5,7 @@ use {
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::state::{Config, Treasury, Vault},
+    allways_swap_manager::state::{Config, Treasury},
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -25,7 +25,6 @@ fn test_initialize_creates_config() {
     svm.airdrop(&admin_pk, 10_000_000_000).unwrap();
 
     let (config_pda, _) = Pubkey::find_program_address(&[b"config"], &program_id);
-    let (vault_pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
     let (treasury_pda, _) = Pubkey::find_program_address(&[b"treasury"], &program_id);
 
     let ix = Instruction::new_with_bytes(
@@ -43,7 +42,6 @@ fn test_initialize_creates_config() {
         allways_swap_manager::accounts::Initialize {
             admin: admin_pk,
             config: config_pda,
-            vault: vault_pda,
             treasury: treasury_pda,
             system_program: anchor_lang::solana_program::system_program::ID,
         }
@@ -65,10 +63,6 @@ fn test_initialize_creates_config() {
     assert_eq!(config.fulfillment_timeout_secs, 12_600);
     assert_eq!(config.consensus_threshold_percent, 66);
     assert!(config.validators.is_empty());
-
-    let vault_acct = svm.get_account(&vault_pda).expect("vault exists");
-    let vault = Vault::try_deserialize(&mut vault_acct.data.as_slice()).unwrap();
-    assert_eq!(vault.total_collateral, 0);
 
     let treasury_acct = svm.get_account(&treasury_pda).expect("treasury exists");
     let treasury = Treasury::try_deserialize(&mut treasury_acct.data.as_slice()).unwrap();

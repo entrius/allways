@@ -48,16 +48,14 @@ pub struct Config {
     pub bump: u8,
 }
 
-/// Singleton native-SOL collateral vault PDA (`seeds = [VAULT_SEED]`), program-owned.
+/// Per-miner native-SOL collateral vault PDA (`seeds = [COLLATERAL_SEED, miner]`), program-owned.
 ///
-/// Holds ONLY miner collateral — never subnet revenue (that lives in the separate `Treasury`). This
-/// makes collateral trustless: it leaves only via the owning miner's `withdraw_collateral` or a slash
-/// to the wronged user on a failed swap. Invariant: vault.lamports == rent_exempt + total_collateral.
+/// Each miner's collateral lives in its OWN account — trustless custody (leaves only via the owning
+/// miner's `withdraw_collateral` or a slash to the wronged user) and no shared-vault write contention.
+/// The amount is `MinerState.collateral`; invariant: lamports == rent_exempt + collateral.
 #[account]
 #[derive(InitSpace)]
-pub struct Vault {
-    /// Σ of all miners' collateral credited to the vault (lamports), excludes the rent reserve.
-    pub total_collateral: u64,
+pub struct CollateralVault {
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -81,7 +79,7 @@ pub struct Treasury {
 pub struct MinerState {
     /// The miner (hotkey-equivalent) this state belongs to.
     pub miner: Pubkey,
-    /// Collateral credited to this miner (lamports). Backed 1:1 by lamports in the Vault.
+    /// Collateral credited to this miner (lamports). Backed 1:1 by lamports in the miner's collateral vault.
     pub collateral: u64,
     /// Whether the miner is active (set via consensus).
     pub active: bool,

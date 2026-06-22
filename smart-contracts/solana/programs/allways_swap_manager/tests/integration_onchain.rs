@@ -12,7 +12,7 @@
 //
 // Requirements / caveats:
 //   * A FRESH validator each run (`solana-test-validator --reset`). `initialize` creates singleton
-//     Config/Vault PDAs; re-running against a dirty ledger will see them already present.
+//     Config/Treasury PDAs; re-running against a dirty ledger will see them already present.
 //   * Real wall-clock — the clock CANNOT be warped. So these cover the happy path and
 //     time-independent guards only. Generous TTL/timeout values are used in `initialize` so nothing
 //     expires mid-test. Reservation-expiry / swap-timeout stay in LiteSVM.
@@ -25,7 +25,7 @@ use {
         InstructionData, ToAccountMetas,
     },
     allways_swap_manager::state::{
-        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury, TxMarker, Vault,
+        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury, TxMarker,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -73,8 +73,8 @@ fn pid() -> Pubkey {
 fn config_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"config"], &pid()).0
 }
-fn vault_pda() -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], &pid()).0
+fn collateral_vault_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", m.as_ref()], &pid()).0
 }
 fn treasury_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], &pid()).0
@@ -147,16 +147,12 @@ fn read_config(rpc: &RpcClient) -> Config {
     let a = rpc.get_account(&config_pda()).expect("config account");
     Config::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
-fn read_vault(rpc: &RpcClient) -> Vault {
-    let a = rpc.get_account(&vault_pda()).expect("vault account");
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
-}
 fn read_treasury(rpc: &RpcClient) -> Treasury {
     let a = rpc.get_account(&treasury_pda()).expect("treasury account");
     Treasury::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
-fn vault_lamports(rpc: &RpcClient) -> u64 {
-    rpc.get_account(&vault_pda()).map(|a| a.lamports).unwrap_or(0)
+fn collateral_vault_lamports(rpc: &RpcClient, m: &Pubkey) -> u64 {
+    rpc.get_account(&collateral_vault_pda(m)).map(|a| a.lamports).unwrap_or(0)
 }
 fn read_miner(rpc: &RpcClient, m: &Pubkey) -> MinerState {
     let a = rpc.get_account(&miner_pda(m)).expect("miner state account");
@@ -191,7 +187,6 @@ fn init_ix(admin: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::Initialize {
             admin: *admin,
             config: config_pda(),
-            vault: vault_pda(),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -222,7 +217,7 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
             miner: *miner,
             config: config_pda(),
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -351,7 +346,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
             vote_round: vote_pda(REQ_CONFIRM, &key),
@@ -428,10 +423,10 @@ fn shared() -> &'static Shared {
             fund(&rpc, &v.pubkey(), 100 * LAMPORTS_PER_SOL);
         }
 
-        // Initialize the singleton Config + Vault iff not already present (idempotent).
+        // Initialize the singleton Config + Treasury iff not already present (idempotent).
         if !account_exists(&rpc, &config_pda()) {
             send(&rpc, init_ix(&admin.pubkey()), &admin.pubkey(), &admin)
-                .expect("initialize singleton Config/Vault (needs a FRESH --reset validator)");
+                .expect("initialize singleton Config/Treasury (needs a FRESH --reset validator)");
         }
 
         // Whitelist the 3 validators iff not already in the set (idempotent).
@@ -494,11 +489,10 @@ fn reserved_miner(rpc: &RpcClient) -> Keypair {
     miner
 }
 
-/// Collateral-vault invariant: lamports == rent_reserve + total_collateral (treasury is its own PDA).
-/// We don't know the rent reserve a priori (the vault is a shared singleton), so the caller passes
-/// it (captured once, right after the vault exists).
-fn invariant_holds(rpc: &RpcClient, rent_reserve: u64) -> bool {
-    vault_lamports(rpc) == rent_reserve + read_vault(rpc).total_collateral
+/// Per-miner collateral-vault invariant: lamports == rent_reserve + MinerState.collateral. The rent
+/// reserve isn't known a priori, so the caller captures it once (right after the vault exists).
+fn invariant_holds(rpc: &RpcClient, miner: &Pubkey, rent_reserve: u64) -> bool {
+    collateral_vault_lamports(rpc, miner) == rent_reserve + read_miner(rpc, miner).collateral
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -518,8 +512,6 @@ fn onchain_initialize_creates_config() {
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
     assert_eq!(cfg.reservation_ttl_secs, TTL_SECS);
-    // Vault exists and is a valid singleton.
-    let _ = read_vault(&rpc);
 }
 
 #[test]
@@ -565,7 +557,6 @@ fn onchain_vote_set_weights_quorum() {
 fn onchain_post_collateral() {
     let _ = shared();
     let rpc = rpc();
-    let before = read_vault(&rpc).total_collateral;
 
     let miner = funded_keypair(&rpc, 100 * LAMPORTS_PER_SOL);
     send(&rpc, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post");
@@ -575,9 +566,11 @@ fn onchain_post_collateral() {
     assert_eq!(ms.miner, miner.pubkey());
     assert_eq!(ms.collateral, COLLATERAL, "miner collateral credited");
     assert!(!ms.active, "not active yet");
-    // Vault total_collateral grew by exactly COLLATERAL (post-total semantics: the new global total
-    // equals the prior total plus this deposit).
-    assert_eq!(read_vault(&rpc).total_collateral, before + COLLATERAL, "vault post-total");
+    // The per-miner collateral vault now holds at least the deposited collateral (rent + COLLATERAL).
+    assert!(
+        collateral_vault_lamports(&rpc, &miner.pubkey()) >= COLLATERAL,
+        "collateral lamports held in the per-miner vault"
+    );
 }
 
 #[test]
@@ -751,11 +744,10 @@ fn onchain_confirm_swap_full_lifecycle() {
     let _ = shared();
     let rpc = rpc();
     let vals = validator_keypairs();
-    // Capture the vault rent reserve = lamports - collateral before our swap.
-    let rent_reserve = vault_lamports(&rpc) - read_vault(&rpc).total_collateral;
-    assert!(invariant_holds(&rpc, rent_reserve), "vault invariant pre-flow");
-
     let miner = reserved_miner(&rpc);
+    // Capture this miner's collateral-vault rent reserve = lamports - collateral, before the swap.
+    let rent_reserve = collateral_vault_lamports(&rpc, &miner.pubkey()) - read_miner(&rpc, &miner.pubkey()).collateral;
+    assert!(invariant_holds(&rpc, &miner.pubkey(), rent_reserve), "collateral-vault invariant pre-flow");
     let user = Keypair::new().pubkey();
     let tx = "srctx_confirm";
 
@@ -780,8 +772,8 @@ fn onchain_confirm_swap_full_lifecycle() {
     // Swap closed, miner freed.
     assert!(!account_exists(&rpc, &swap_pda(&swap_key(tx))), "swap account closed");
     assert!(!read_miner(&rpc, &miner.pubkey()).has_active_swap, "miner freed");
-    // Vault invariant holds after the fee move.
-    assert!(invariant_holds(&rpc, rent_reserve), "vault invariant after fee");
+    // Collateral-vault invariant holds after the fee move.
+    assert!(invariant_holds(&rpc, &miner.pubkey(), rent_reserve), "collateral-vault invariant after fee");
 }
 
 #[test]

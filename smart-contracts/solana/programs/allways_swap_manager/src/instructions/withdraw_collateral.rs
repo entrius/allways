@@ -1,13 +1,13 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, MINER_SEED, VAULT_SEED};
+use crate::constants::{COLLATERAL_SEED, CONFIG_SEED, MINER_SEED};
 use crate::error::ErrorCode;
 use crate::events::CollateralWithdrawn;
-use crate::state::{Config, MinerState, Vault};
+use crate::state::{CollateralVault, Config, MinerState};
 
-/// Miner withdraws SOL collateral back to their wallet. Guards: miner must be inactive, have no
-/// in-flight swap, and (if deactivated) be past the post-deactivation cooldown (2x fulfillment
-/// timeout). Lamports move vault -> miner via direct lamport math (the program owns the vault).
+/// Miner withdraws SOL collateral from their own collateral vault back to their wallet. Guards: miner
+/// must be inactive, have no in-flight swap, not be busy, and (if deactivated) be past the
+/// post-deactivation cooldown (2x fulfillment timeout). Lamports move vault -> miner (program-owned).
 #[derive(Accounts)]
 pub struct WithdrawCollateral<'info> {
     #[account(mut)]
@@ -24,8 +24,8 @@ pub struct WithdrawCollateral<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    #[account(mut, seeds = [COLLATERAL_SEED, miner.key().as_ref()], bump = collateral_vault.bump)]
+    pub collateral_vault: Account<'info, CollateralVault>,
 }
 
 pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
@@ -54,17 +54,12 @@ pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
         require!(now >= cooldown_end, ErrorCode::WithdrawCooldownActive);
     }
 
-    // Move lamports vault -> miner (program-owned vault → direct lamport math).
-    ctx.accounts.vault.to_account_info().sub_lamports(amount)?;
+    // Move lamports the miner's collateral vault -> miner (program-owned → direct lamport math).
+    ctx.accounts.collateral_vault.to_account_info().sub_lamports(amount)?;
     ctx.accounts.miner.to_account_info().add_lamports(amount)?;
 
-    // Update ledgers.
+    // Update ledger.
     ctx.accounts.miner_state.collateral = collateral
-        .checked_sub(amount)
-        .ok_or(ErrorCode::Overflow)?;
-    let vault = &mut ctx.accounts.vault;
-    vault.total_collateral = vault
-        .total_collateral
         .checked_sub(amount)
         .ok_or(ErrorCode::Overflow)?;
 

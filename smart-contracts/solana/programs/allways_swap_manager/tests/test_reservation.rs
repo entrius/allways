@@ -36,8 +36,8 @@ fn pid() -> Pubkey {
 fn config_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"config"], &pid()).0
 }
-fn vault_pda() -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], &pid()).0
+fn collateral_vault_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", m.as_ref()], &pid()).0
 }
 fn treasury_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], &pid()).0
@@ -88,7 +88,6 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
         allways_swap_manager::accounts::Initialize {
             admin: *admin,
             config: config_pda(),
-            vault: vault_pda(),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -111,7 +110,7 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
             miner: *miner,
             config: config_pda(),
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

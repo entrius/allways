@@ -6,7 +6,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Swap, Treasury, Vault},
+    allways_swap_manager::state::{MinerState, Swap, Treasury},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -41,8 +41,8 @@ fn pid() -> Pubkey {
 fn config_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"config"], &pid()).0
 }
-fn vault_pda() -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], &pid()).0
+fn collateral_vault_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", m.as_ref()], &pid()).0
 }
 fn treasury_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], &pid()).0
@@ -101,7 +101,6 @@ fn init_ix(admin: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::Initialize {
             admin: *admin,
             config: config_pda(),
-            vault: vault_pda(),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -124,7 +123,7 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
             miner: *miner,
             config: config_pda(),
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -269,7 +268,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
             vote_round: vote_pda(REQ_CONFIRM, &key),
@@ -288,7 +287,7 @@ fn timeout_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey, from_tx_hash: &
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            vault: vault_pda(),
+            collateral_vault: collateral_vault_pda(miner),
             user: *user,
             swap: swap_pda(&key),
             vote_round: vote_pda(REQ_TIMEOUT, &key),
@@ -302,16 +301,12 @@ fn miner_state(svm: &LiteSVM, m: &Pubkey) -> MinerState {
     let a = svm.get_account(&miner_pda(m)).unwrap();
     MinerState::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
-fn vault(svm: &LiteSVM) -> Vault {
-    let a = svm.get_account(&vault_pda()).unwrap();
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
-}
 fn treasury_total(svm: &LiteSVM) -> u64 {
     let a = svm.get_account(&treasury_pda()).unwrap();
     Treasury::try_deserialize(&mut a.data.as_slice()).unwrap().total
 }
-fn vault_lamports(svm: &LiteSVM) -> u64 {
-    svm.get_account(&vault_pda()).unwrap().lamports
+fn collateral_vault_lamports(svm: &LiteSVM, m: &Pubkey) -> u64 {
+    svm.get_account(&collateral_vault_pda(m)).unwrap().lamports
 }
 fn lamports(svm: &LiteSVM, p: &Pubkey) -> u64 {
     svm.get_account(p).map(|a| a.lamports).unwrap_or(0)
@@ -333,7 +328,6 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     let admin = Keypair::new();
     svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, init_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("init");
-    let rent_reserve = vault_lamports(&svm);
 
     let mut vals = Vec::new();
     for _ in 0..3 {
@@ -346,6 +340,8 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), collateral), &miner.pubkey(), &miner).expect("post");
+    // The per-miner collateral vault is created by the deposit above; derive its rent reserve.
+    let rent_reserve = collateral_vault_lamports(&svm, &miner.pubkey()) - collateral;
     send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
@@ -379,9 +375,9 @@ fn do_reserve(svm: &mut LiteSVM, opener: &Keypair, miner: &Pubkey) {
     send(svm, resolve_ix(&opener.pubkey(), miner), &opener.pubkey(), opener).expect("resolve");
 }
 
-fn invariant_holds(svm: &LiteSVM, rent_reserve: u64) -> bool {
-    // Collateral vault holds only collateral now; treasury revenue lives in a separate PDA.
-    vault_lamports(svm) == rent_reserve + vault(svm).total_collateral
+fn invariant_holds(svm: &LiteSVM, miner: &Pubkey, rent_reserve: u64) -> bool {
+    // Each miner's collateral vault holds only that miner's collateral; revenue is in the treasury.
+    collateral_vault_lamports(svm, miner) == rent_reserve + miner_state(svm, miner).collateral
 }
 
 #[test]
@@ -486,7 +482,7 @@ fn test_fulfill_confirm_fee_and_invariant() {
     let (mut svm, vals, miner, rent) = setup();
     let user = Keypair::new().pubkey();
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
-    assert!(invariant_holds(&svm, rent));
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent));
 
     // confirm before fulfill must fail
     assert!(confirm_only(&mut svm, &vals[0], &miner.pubkey(), "srctx1").is_err());
@@ -507,7 +503,7 @@ fn test_fulfill_confirm_fee_and_invariant() {
     );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
-    assert!(invariant_holds(&svm, rent), "vault invariant after fee");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
 }
 
 fn confirm_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, tx: &str) -> Result<(), String> {
@@ -538,7 +534,7 @@ fn test_timeout_slash_refund_and_invariant() {
     assert_eq!(lamports(&svm, &user.pubkey()), user_before + slash, "user refunded full 1.1x slash");
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
-    assert!(invariant_holds(&svm, rent), "vault invariant after slash");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after slash");
 }
 
 fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, tx: &str) -> Result<(), String> {

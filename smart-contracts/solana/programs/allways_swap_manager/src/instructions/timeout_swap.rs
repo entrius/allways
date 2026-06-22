@@ -1,14 +1,14 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_TIMEOUT, SWAP_SEED, VAULT_SEED, VOTE_SEED};
+use crate::constants::{COLLATERAL_SEED, CONFIG_SEED, MINER_SEED, REQ_TIMEOUT, SWAP_SEED, VOTE_SEED};
 use crate::error::ErrorCode;
 use crate::events::SwapTimedOut;
 use crate::penalty::apply_penalty;
-use crate::state::{Config, MinerState, Swap, SwapStatus, Vault, VoteRound};
+use crate::state::{CollateralVault, Config, MinerState, Swap, SwapStatus, VoteRound};
 
 /// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed and
-/// refunded to the user (vault -> user), the miner is freed, and the Swap account is closed.
+/// refunded to the user (collateral vault -> user), the miner is freed, and the Swap is closed.
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct TimeoutSwap<'info> {
@@ -29,8 +29,9 @@ pub struct TimeoutSwap<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// The miner's own collateral vault — the slash is debited from here.
+    #[account(mut, seeds = [COLLATERAL_SEED, miner.key().as_ref()], bump = collateral_vault.bump)]
+    pub collateral_vault: Account<'info, CollateralVault>,
 
     /// CHECK: receives the slashed refund; must equal `swap.user`.
     #[account(mut)]
@@ -92,17 +93,11 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         // clamps to available collateral as a safety net.
         let penalty = crate::constants::required_collateral(sol_amount);
 
-        let slash = apply_penalty(
-            &mut ctx.accounts.miner_state,
-            &mut ctx.accounts.vault,
-            min_collateral,
-            penalty,
-            now,
-        )?;
+        let slash = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, penalty, now)?;
 
-        // Refund the slashed collateral to the user (vault → user, native lamports).
+        // Refund the slashed collateral to the user (miner's collateral vault → user, native lamports).
         if slash > 0 {
-            ctx.accounts.vault.to_account_info().sub_lamports(slash)?;
+            ctx.accounts.collateral_vault.to_account_info().sub_lamports(slash)?;
             ctx.accounts.user.to_account_info().add_lamports(slash)?;
         }
         ctx.accounts.miner_state.has_active_swap = false;
