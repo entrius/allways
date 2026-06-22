@@ -1,10 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, CONFIG_VERSION, VAULT_SEED};
-use crate::tunables::{
-    POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+use crate::constants::{
+    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, VAULT_SEED,
+    WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
-use crate::error::ErrorCode;
 use crate::state::{Config, Vault};
 
 /// Create the singleton Config + native-SOL Vault PDAs. Records admin, collateral bounds,
@@ -47,10 +46,13 @@ pub fn handler(
     max_swap_amount: u64,
     reservation_ttl_secs: i64,
 ) -> Result<()> {
-    require!(
-        (1..=100).contains(&consensus_threshold_percent),
-        ErrorCode::InvalidThreshold
-    );
+    // Same validators the admin setters use, so init can't seed a value a setter would later reject.
+    crate::validate::consensus_threshold(consensus_threshold_percent)?;
+    crate::validate::fulfillment_timeout(fulfillment_timeout_secs)?;
+    crate::validate::reservation_ttl(reservation_ttl_secs)?;
+    crate::validate::min_swap_amount(min_swap_amount)?;
+    crate::validate::swap_bounds(min_swap_amount, max_swap_amount)?;
+    crate::validate::collateral_bounds(min_collateral, max_collateral)?;
 
     let config = &mut ctx.accounts.config;
     config.admin = ctx.accounts.admin.key();

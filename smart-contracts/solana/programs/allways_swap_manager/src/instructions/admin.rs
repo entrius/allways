@@ -50,7 +50,7 @@ pub fn set_validator_weight(ctx: Context<AdminConfig>, validator: Pubkey, weight
 }
 
 pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result<()> {
-    require!((1..=100).contains(&percent), ErrorCode::InvalidThreshold);
+    crate::validate::consensus_threshold(percent)?;
     ctx.accounts.config.consensus_threshold_percent = percent;
     msg!("consensus threshold = {}%", percent);
     Ok(())
@@ -63,42 +63,48 @@ pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
     Ok(())
 }
 
-// --- Runtime config setters ( port of ink! owner setters; 0 = "unset" where applicable) ---
+// --- Runtime config setters (port of ink! owner setters). Bounds are validated via the shared
+// `crate::validate` helpers — the SAME rules `initialize` applies, so neither path can set a value
+// the other would reject (review #8). 0 means "unbounded/disabled" where a validator allows it.
 
 pub fn set_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::collateral_bounds(amount, ctx.accounts.config.max_collateral)?;
     ctx.accounts.config.min_collateral = amount;
     msg!("min_collateral = {}", amount);
     Ok(())
 }
 
 pub fn set_max_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::collateral_bounds(ctx.accounts.config.min_collateral, amount)?;
     ctx.accounts.config.max_collateral = amount;
     msg!("max_collateral = {}", amount);
     Ok(())
 }
 
 pub fn set_fulfillment_timeout(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-    require!(secs >= 60, ErrorCode::InvalidAmount);
+    crate::validate::fulfillment_timeout(secs)?;
     ctx.accounts.config.fulfillment_timeout_secs = secs;
     msg!("fulfillment_timeout_secs = {}", secs);
     Ok(())
 }
 
 pub fn set_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
-    require!(amount == 0 || amount >= 1000, ErrorCode::InvalidAmount);
+    crate::validate::min_swap_amount(amount)?;
+    crate::validate::swap_bounds(amount, ctx.accounts.config.max_swap_amount)?;
     ctx.accounts.config.min_swap_amount = amount;
     msg!("min_swap_amount = {}", amount);
     Ok(())
 }
 
 pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::swap_bounds(ctx.accounts.config.min_swap_amount, amount)?;
     ctx.accounts.config.max_swap_amount = amount;
     msg!("max_swap_amount = {}", amount);
     Ok(())
 }
 
 pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-    require!(secs > 0, ErrorCode::InvalidAmount);
+    crate::validate::reservation_ttl(secs)?;
     ctx.accounts.config.reservation_ttl_secs = secs;
     msg!("reservation_ttl_secs = {}", secs);
     Ok(())
@@ -111,14 +117,14 @@ pub fn set_reservation_fee(ctx: Context<AdminConfig>, lamports: u64) -> Result<(
 }
 
 pub fn set_pool_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-    require!(secs > 0, ErrorCode::InvalidAmount);
+    crate::validate::pool_window(secs)?;
     ctx.accounts.config.pool_window_secs = secs;
     msg!("pool_window_secs = {}", secs);
     Ok(())
 }
 
 pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-    require!(secs >= 0, ErrorCode::InvalidAmount);
+    crate::validate::weights_update_min_interval(secs)?;
     ctx.accounts.config.weights_update_min_interval_secs = secs;
     msg!("weights_update_min_interval_secs = {}", secs);
     Ok(())

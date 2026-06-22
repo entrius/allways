@@ -1,18 +1,17 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, VAULT_SEED};
+use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, VAULT_SEED};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
 use crate::state::{MinerQuote, Vault};
-use crate::tunables::quote_update_fee;
 
 /// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: any
 /// signer may post — a quote is advertised data that can't move funds, rent self-limits spam, and
 /// the validator/UI filters to registered miners. `(from_chain, to_chain)` ordering encodes the
 /// direction, so the reverse direction is a separate quote (no `counter_rate`). First call lazily
 /// creates the PDA (miner pays rent) and is otherwise free; subsequent calls overwrite in place and
-/// pay a **decaying anti-flashing fee** (`tunables::quote_update_fee`) into the vault treasury — high
+/// pay a **decaying anti-flashing fee** (`constants::quote_update_fee`) into the vault treasury — high
 /// for rapid churn, zero once a quote has stood long enough.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
@@ -70,14 +69,15 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
-    // Anti-flashing churn fee: charged only when overwriting an existing quote (a fresh PDA has a
-    // zeroed `miner`), and decaying to zero the longer the prior quote stood. Fee → vault treasury,
-    // preserving the vault invariant (lamports == rent + total_collateral + treasury_total).
-    let fee = if ctx.accounts.quote.miner != Pubkey::default() {
-        quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
+    // Anti-flashing churn fee → vault treasury (preserves the vault invariant). Charged on BOTH
+    // create and overwrite so `remove_quote` + `set_quote` can't dodge it (review #7): a fresh/just-
+    // removed PDA is treated as elapsed=0 → top tier; a quote that has stood past the window is free.
+    let elapsed = if ctx.accounts.quote.miner != Pubkey::default() {
+        now.saturating_sub(ctx.accounts.quote.updated_at)
     } else {
         0
     };
+    let fee = quote_update_fee(elapsed);
     if fee > 0 {
         transfer(
             CpiContext::new(

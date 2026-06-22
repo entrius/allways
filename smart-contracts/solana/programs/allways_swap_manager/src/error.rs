@@ -49,6 +49,8 @@ pub enum ErrorCode {
     AmountBelowMin,
     #[msg("Swap amount is above the configured maximum")]
     AmountAboveMax,
+    #[msg("Config bounds are contradictory (min must not exceed max)")]
+    InvalidBounds,
     #[msg("Miner already has an active reservation")]
     MinerReserved,
     #[msg("No active reservation for this miner")]

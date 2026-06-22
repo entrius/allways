@@ -5,7 +5,9 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::constants::{
+        POOL_WINDOW_SECS, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, RESERVATION_FEE_LAMPORTS,
+    },
     allways_swap_manager::state::{MinerState, Swap, Vault},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
@@ -314,8 +316,8 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
     setup_with_collateral(COLLATERAL)
 }
 
-/// As `setup`, but the miner posts an arbitrary collateral amount (to exercise the
-/// over-collateralization boundary at `vote_initiate`).
+/// As `setup`, but the miner posts an arbitrary collateral amount. Must be ≥ 1.10× SOL_AMOUNT or the
+/// in-setup `open` is rejected by the over-collateralization entry gate.
 fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
@@ -399,21 +401,34 @@ fn test_initiate_creates_swap() {
 }
 
 #[test]
-fn test_initiate_rejected_below_overcollateralization() {
-    // Miner holds 2.1 SOL: ≥ min_collateral (1) and ≥ 1.0× the 2 SOL swap, but < 1.10× (2.2 SOL).
-    // Activation + reservation succeed (they only gate on min_collateral), but vote_initiate's
-    // over-collateralization guard (v2 #4) must reject it.
-    let under = SOL_AMOUNT + SOL_AMOUNT / 20; // 2.1 SOL (< 2.2)
-    let (mut svm, vals, miner, _rent) = setup_with_collateral(under);
+fn test_open_rejected_below_overcollateralization() {
+    // Miner holds 2.1 SOL: ≥ min_collateral (1) and ≥ 1.0× the 2 SOL swap, but < 1.10× (2.2 SOL). The
+    // over-collateralization gate moved to pool entry (review #1), so `open` rejects it up front —
+    // a reservation that vote_initiate could never satisfy is never created, so funds can't strand.
+    let under = SOL_AMOUNT + SOL_AMOUNT / 20; // 2.1 SOL (< 2.2 = 1.10×)
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    set_clock(&mut svm, BASE_TS);
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, init_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("init");
+    let mut vals = Vec::new();
+    for _ in 0..3 {
+        let v = Keypair::new();
+        svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+        send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add val");
+        vals.push(v);
+    }
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, post_ix(&miner.pubkey(), under), &miner.pubkey(), &miner).expect("post");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+    send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
+    send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+
     let user = Keypair::new().pubkey();
-    let res = send(
-        &mut svm,
-        initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "userSOLaddr"),
-        &vals[0].pubkey(),
-        &vals[0],
-    );
-    assert!(res.is_err(), "initiate must reject collateral below 1.1x the swap size");
-    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "no swap created");
+    let res = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]);
+    assert!(res.is_err(), "open must reject collateral below 1.1× the swap size");
 }
 
 #[test]
@@ -477,8 +492,12 @@ fn test_fulfill_confirm_fee_and_invariant() {
 
     let fee = SOL_AMOUNT / 100;
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee taken");
-    // treasury holds the setup's reservation fee plus this swap's 1% confirm fee.
-    assert_eq!(vault(&svm).treasury_total, RESERVATION_FEE_LAMPORTS + fee, "fees accrued to treasury");
+    // treasury holds the setup's quote-creation fee + reservation fee, plus this swap's 1% confirm fee.
+    assert_eq!(
+        vault(&svm).treasury_total,
+        QUOTE_UPDATE_FEE_TIER1_LAMPORTS + RESERVATION_FEE_LAMPORTS + fee,
+        "fees accrued to treasury"
+    );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, rent), "vault invariant after fee");
