@@ -7,10 +7,15 @@
 // rent refund, and that a wallet with no MinerState can still post.
 use {
     anchor_lang::{
-        prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
-        InstructionData, ToAccountMetas,
+        prelude::{Clock, Pubkey},
+        solana_program::instruction::Instruction,
+        AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::state::MinerQuote,
+    allways_swap_manager::state::{MinerQuote, Vault},
+    allways_swap_manager::tunables::{
+        QUOTE_UPDATE_FEE_TIER1_LAMPORTS, QUOTE_UPDATE_FEE_TIER1_MAX_SECS,
+        QUOTE_UPDATE_FEE_TIER2_LAMPORTS, QUOTE_UPDATE_FEE_TIER2_MAX_SECS,
+    },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -98,10 +103,22 @@ fn set_quote_ix(
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(program_id, miner, from_chain, to_chain),
+            vault: vault_pda(program_id),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
+}
+
+fn set_clock(svm: &mut LiteSVM, ts: i64) {
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = ts;
+    svm.set_sysvar::<Clock>(&clock);
+}
+
+fn treasury(svm: &LiteSVM, program_id: &Pubkey) -> u64 {
+    let a = svm.get_account(&vault_pda(program_id)).unwrap();
+    Vault::try_deserialize(&mut a.data.as_slice()).unwrap().treasury_total
 }
 
 fn remove_quote_ix(
@@ -232,6 +249,40 @@ fn test_remove_quote_closes_and_refunds() {
     let closed = svm.get_account(&quote_pda(&program_id, &m, "btc", "tao")).map(|a| a.lamports == 0).unwrap_or(true);
     assert!(closed, "quote PDA should be closed");
     assert!(after > before, "rent refunded to miner");
+}
+
+#[test]
+fn test_quote_update_fee_decays() {
+    // Creation is free; updates pay a treasury-bound fee that decays to zero the longer the quote
+    // has stood (anti-flashing). All amounts land in the vault treasury.
+    let (mut svm, program_id) = setup();
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
+    let m = miner.pubkey();
+    set_clock(&mut svm, 1_000_000); // a real (nonzero) wall clock
+
+    // 1) Creation → free.
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("create");
+    assert_eq!(treasury(&svm, &program_id), 0, "creation charges no fee");
+
+    // 2) Immediate update (elapsed 0 < 5 min) → tier-1.
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "341", 1), &m, &miner).expect("rapid update");
+    let after_t1 = treasury(&svm, &program_id);
+    assert_eq!(after_t1, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "rapid update charges tier-1");
+
+    // 3) Update just past the 5-min window → tier-2.
+    set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER1_MAX_SECS + 1);
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "342", 1), &m, &miner).expect("tier2 update");
+    let after_t2 = treasury(&svm, &program_id);
+    assert_eq!(after_t2, after_t1 + QUOTE_UPDATE_FEE_TIER2_LAMPORTS, "5–10 min update charges tier-2");
+
+    // 4) Update past the 10-min window (measured from the previous update) → free.
+    set_clock(
+        &mut svm,
+        1_000_000 + QUOTE_UPDATE_FEE_TIER1_MAX_SECS + 1 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1,
+    );
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "343", 1), &m, &miner).expect("free update");
+    assert_eq!(treasury(&svm, &program_id), after_t2, "long-standing quote updates for free");
 }
 
 #[test]

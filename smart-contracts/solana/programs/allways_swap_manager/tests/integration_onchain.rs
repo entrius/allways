@@ -24,7 +24,6 @@ use {
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::POOL_WINDOW_SECS,
     allways_swap_manager::state::{
         Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, TxMarker, Vault,
     },
@@ -55,6 +54,9 @@ const THRESHOLD: u8 = 66; // 2-of-3 quorum
 const MIN_COLLATERAL: u64 = LAMPORTS_PER_SOL; // 1 SOL
 const COLLATERAL: u64 = 10 * LAMPORTS_PER_SOL; // 10 SOL
 const SOL_AMOUNT: u64 = 2 * LAMPORTS_PER_SOL; // 2 SOL swap size
+// The deploy default pool window is 60s; the shared setup shrinks it via `set_pool_window` so the
+// real-wall-clock on-chain tests don't each sleep a full minute waiting for the window to close.
+const TEST_POOL_WINDOW_SECS: i64 = 3;
 
 // Reservation quote — must be byte-identical reserve→initiate (it's hash-bound).
 const FROM_ADDR: &str = "userBTCaddr";
@@ -196,6 +198,14 @@ fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
             .to_account_metas(None),
     )
 }
+fn set_pool_window_ix(admin: &Pubkey, secs: i64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetPoolWindow { secs }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
+            .to_account_metas(None),
+    )
+}
 fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -272,7 +282,9 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
 }
 /// Sleep just past the pool window so `resolve_pool` is callable (real wall-clock on the validator).
 fn wait_pool_window() {
-    std::thread::sleep(std::time::Duration::from_millis((POOL_WINDOW_SECS as u64) * 1000 + 1200));
+    std::thread::sleep(std::time::Duration::from_millis(
+        (TEST_POOL_WINDOW_SECS as u64) * 1000 + 1200,
+    ));
 }
 fn initiate_ix(
     validator: &Pubkey,
@@ -420,6 +432,18 @@ fn shared() -> &'static Shared {
                 send(&rpc, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin)
                     .expect("add_validator");
             }
+        }
+
+        // Shrink the pool window from the 60s deploy default to keep the wall-clock tests fast
+        // (idempotent — also exercises the #486 `set_pool_window` runtime setter).
+        if cfg.pool_window_secs != TEST_POOL_WINDOW_SECS {
+            send(
+                &rpc,
+                set_pool_window_ix(&admin.pubkey(), TEST_POOL_WINDOW_SECS),
+                &admin.pubkey(),
+                &admin,
+            )
+            .expect("set_pool_window");
         }
 
         Shared { admin, validators }
@@ -606,7 +630,7 @@ fn onchain_reservation_fee_to_treasury() {
     let before = read_vault(&rpc).treasury_total;
     send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
-    let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
+    let fee = allways_swap_manager::tunables::RESERVATION_FEE_LAMPORTS;
     assert_eq!(
         read_vault(&rpc).treasury_total,
         before + fee,
@@ -852,6 +876,7 @@ fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Ins
         allways_swap_manager::accounts::SetQuote {
             miner: *m,
             quote: quote_pda(m, from_chain, to_chain),
+            vault: vault_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

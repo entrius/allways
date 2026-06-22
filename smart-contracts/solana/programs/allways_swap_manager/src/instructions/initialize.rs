@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{
-    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, VAULT_SEED,
-    WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+use crate::constants::{CONFIG_SEED, CONFIG_VERSION, VAULT_SEED};
+use crate::tunables::{
+    POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
 use crate::error::ErrorCode;
 use crate::state::{Config, Vault};

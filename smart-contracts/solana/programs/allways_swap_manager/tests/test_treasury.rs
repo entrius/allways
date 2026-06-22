@@ -6,7 +6,7 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
     allways_swap_manager::state::Vault,
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
@@ -139,7 +139,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     // Reservation via the lottery (set quote → open → warp past window → resolve; sole entrant wins).
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::SetQuote { from_chain: "BTC".to_string(), to_chain: "SOL".to_string(), miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: "1".to_string(), liquidity: 1 }.data(),
-        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), vault: vault_pda(), system_program: SYS }.to_account_metas(None),
     ), &miner.pubkey(), &miner).expect("set_quote");
     let pool_user = Keypair::new().pubkey();
     send(&mut svm, Instruction::new_with_bytes(pid(),

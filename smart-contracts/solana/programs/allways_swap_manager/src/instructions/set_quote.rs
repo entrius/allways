@@ -1,15 +1,19 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED};
+use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, VAULT_SEED};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
-use crate::state::MinerQuote;
+use crate::state::{MinerQuote, Vault};
+use crate::tunables::quote_update_fee;
 
 /// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: any
 /// signer may post — a quote is advertised data that can't move funds, rent self-limits spam, and
 /// the validator/UI filters to registered miners. `(from_chain, to_chain)` ordering encodes the
 /// direction, so the reverse direction is a separate quote (no `counter_rate`). First call lazily
-/// creates the PDA (miner pays rent); subsequent calls overwrite in place.
+/// creates the PDA (miner pays rent) and is otherwise free; subsequent calls overwrite in place and
+/// pay a **decaying anti-flashing fee** (`tunables::quote_update_fee`) into the vault treasury — high
+/// for rapid churn, zero once a quote has stood long enough.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
 pub struct SetQuote<'info> {
@@ -24,6 +28,10 @@ pub struct SetQuote<'info> {
         bump,
     )]
     pub quote: Account<'info, MinerQuote>,
+
+    /// Treasury sink for the quote-update churn fee (native lamports accrue here).
+    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
+    pub vault: Account<'info, Vault>,
 
     pub system_program: Program<'info, System>,
 }
@@ -62,6 +70,32 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
+    // Anti-flashing churn fee: charged only when overwriting an existing quote (a fresh PDA has a
+    // zeroed `miner`), and decaying to zero the longer the prior quote stood. Fee → vault treasury,
+    // preserving the vault invariant (lamports == rent + total_collateral + treasury_total).
+    let fee = if ctx.accounts.quote.miner != Pubkey::default() {
+        quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
+    } else {
+        0
+    };
+    if fee > 0 {
+        transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.key(),
+                Transfer {
+                    from: ctx.accounts.miner.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            fee,
+        )?;
+        let vault = &mut ctx.accounts.vault;
+        vault.treasury_total = vault
+            .treasury_total
+            .checked_add(fee)
+            .ok_or(ErrorCode::Overflow)?;
+    }
+
     let quote = &mut ctx.accounts.quote;
     quote.miner = miner_key;
     quote.from_chain = from_chain.clone();
@@ -80,6 +114,7 @@ pub fn handler(
         rate,
         liquidity,
         updated_at: now,
+        update_fee: fee,
     });
     Ok(())
 }

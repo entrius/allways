@@ -87,11 +87,17 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         let miner = ctx.accounts.swap.miner;
         let min_collateral = ctx.accounts.config.min_collateral;
 
+        // v2 #4: a failed swap is penalized at the over-collateralization multiplier (1.10×), and
+        // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
+        // guard + one-swap-at-a-time invariant guarantee the miner can cover it; apply_penalty still
+        // clamps to available collateral as a safety net.
+        let penalty = crate::tunables::required_collateral(sol_amount);
+
         let slash = apply_penalty(
             &mut ctx.accounts.miner_state,
             &mut ctx.accounts.vault,
             min_collateral,
-            sol_amount,
+            penalty,
             now,
         )?;
 
