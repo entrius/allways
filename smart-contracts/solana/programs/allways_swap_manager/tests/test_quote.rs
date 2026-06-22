@@ -137,6 +137,8 @@ fn remove_quote_ix(
         allways_swap_manager::accounts::RemoveQuote {
             miner: *miner,
             quote: quote_pda(program_id, miner, from_chain, to_chain),
+            vault: vault_pda(program_id),
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -239,10 +241,13 @@ fn test_remove_quote_closes_and_refunds() {
     svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
     let m = miner.pubkey();
 
+    set_clock(&mut svm, 1_000_000);
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("set");
     let before = svm.get_account(&m).unwrap().lamports;
     assert!(svm.get_account(&quote_pda(&program_id, &m, "btc", "tao")).map(|a| a.lamports > 0).unwrap_or(false));
 
+    // Let the quote stand past the decay window so removal is fee-free — isolates the rent refund.
+    set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1);
     send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "tao"), &m, &miner).expect("remove");
     let after = svm.get_account(&m).unwrap().lamports;
     // PDA gone (zero lamports / closed) and rent refunded to miner.
@@ -283,6 +288,30 @@ fn test_quote_update_fee_decays() {
     );
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "343", 1), &m, &miner).expect("free update");
     assert_eq!(treasury(&svm, &program_id), after_t2, "long-standing quote updates for free");
+}
+
+#[test]
+fn test_remove_fresh_quote_charges_churn_fee() {
+    // Closing a fresh quote pays the same decaying fee as an in-place update, so the
+    // remove-then-recreate path can't be used to dodge the anti-flashing fee.
+    let (mut svm, program_id) = setup();
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
+    let m = miner.pubkey();
+    set_clock(&mut svm, 1_000_000);
+
+    // Create (free), then remove immediately (elapsed 0 < 5 min) → tier-1 fee to treasury.
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("create");
+    assert_eq!(treasury(&svm, &program_id), 0, "creation charges no fee");
+    send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "tao"), &m, &miner).expect("remove fresh");
+    assert_eq!(treasury(&svm, &program_id), QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "fresh remove charges tier-1");
+
+    // Recreate, let it stand past the decay window, then remove → free (symmetric with set_quote).
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "341", 1), &m, &miner).expect("recreate");
+    set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1);
+    let before = treasury(&svm, &program_id);
+    send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "tao"), &m, &miner).expect("remove stale");
+    assert_eq!(treasury(&svm, &program_id), before, "long-standing remove is free");
 }
 
 #[test]

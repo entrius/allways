@@ -891,8 +891,13 @@ fn remove_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str) -> Instruction 
             to_chain: to_chain.to_string(),
         }
         .data(),
-        allways_swap_manager::accounts::RemoveQuote { miner: *m, quote: quote_pda(m, from_chain, to_chain) }
-            .to_account_metas(None),
+        allways_swap_manager::accounts::RemoveQuote {
+            miner: *m,
+            quote: quote_pda(m, from_chain, to_chain),
+            vault: vault_pda(),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
     )
 }
 
