@@ -20,7 +20,7 @@ declare_id!("BtVm5a1hKvMrrEHQ876Ev23dYVZAkWpYkf86VZi3z1Li");
 pub mod allways_swap_manager {
     use super::*;
 
-    /// Create Config + Vault with collateral bounds, timeout, consensus threshold,
+    /// Create Config + Treasury with collateral bounds, timeout, consensus threshold,
     /// swap-size bounds, and reservation TTL.
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(

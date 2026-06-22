@@ -28,9 +28,6 @@ const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 fn config_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"config"], program_id).0
 }
-fn vault_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], program_id).0
-}
 fn treasury_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], program_id).0
 }
@@ -72,7 +69,6 @@ fn setup() -> (LiteSVM, Pubkey) {
         allways_swap_manager::accounts::Initialize {
             admin: admin.pubkey(),
             config: config_pda(&program_id),
-            vault: vault_pda(&program_id),
             treasury: treasury_pda(&program_id),
             system_program: SYSTEM_PROGRAM,
         }

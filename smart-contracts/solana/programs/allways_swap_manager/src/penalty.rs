@@ -1,18 +1,16 @@
 use anchor_lang::prelude::*;
 
 use crate::error::ErrorCode;
-use crate::state::{MinerState, Vault};
+use crate::state::MinerState;
 
-/// Deduct up to `amount` from the miner's collateral (clamped to available), shrink the vault's
-/// collateral total, and auto-deactivate the miner if the remainder falls below `min_collateral`.
-/// Returns the actual amount deducted.
+/// Deduct up to `amount` from the miner's collateral (clamped to available) and auto-deactivate the
+/// miner if the remainder falls below `min_collateral`. Returns the actual amount deducted.
 ///
-/// Lamports are NOT moved here — the caller decides where the deducted value goes (a fee moved to the
-/// treasury PDA on confirm, vs. a payout to the user on a slash), preserving the collateral-vault
-/// invariant (`lamports == rent + total_collateral`).
+/// Lamports are NOT moved here — the caller moves `actual` out of the miner's per-miner collateral
+/// vault (to the treasury on a confirm fee, or to the user on a slash), keeping that vault's
+/// invariant (`lamports == rent + collateral`).
 pub fn apply_penalty(
     miner_state: &mut Account<MinerState>,
-    vault: &mut Account<Vault>,
     min_collateral: u64,
     amount: u64,
     now: i64,
@@ -23,10 +21,6 @@ pub fn apply_penalty(
         return Ok(0);
     }
     miner_state.collateral = current.checked_sub(actual).ok_or(ErrorCode::Overflow)?;
-    vault.total_collateral = vault
-        .total_collateral
-        .checked_sub(actual)
-        .ok_or(ErrorCode::Overflow)?;
 
     if miner_state.collateral < min_collateral && miner_state.active {
         miner_state.active = false;

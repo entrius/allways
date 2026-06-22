@@ -1,11 +1,11 @@
-// Phase 1 — collateral deposit/withdraw + vault invariant (LiteSVM, in-process).
+// Phase 1 — collateral deposit/withdraw + per-miner vault invariant (LiteSVM, in-process).
 //   cargo test -p allways_swap_manager --test test_collateral
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
         InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::state::{MinerState, Vault},
+    allways_swap_manager::state::MinerState,
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -18,14 +18,14 @@ const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 fn config_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"config"], program_id).0
 }
-fn vault_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], program_id).0
-}
 fn treasury_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], program_id).0
 }
 fn miner_pda(program_id: &Pubkey, miner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", miner.as_ref()], program_id).0
+}
+fn collateral_vault_pda(program_id: &Pubkey, miner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", miner.as_ref()], program_id).0
 }
 
 fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, signer: &Keypair) -> Result<(), String> {
@@ -59,7 +59,6 @@ fn setup(max_collateral: u64) -> (LiteSVM, Pubkey) {
         allways_swap_manager::accounts::Initialize {
             admin: admin.pubkey(),
             config: config_pda(&program_id),
-            vault: vault_pda(&program_id),
             treasury: treasury_pda(&program_id),
             system_program: SYSTEM_PROGRAM,
         }
@@ -77,7 +76,7 @@ fn post_ix(program_id: &Pubkey, miner: &Pubkey, amount: u64) -> Instruction {
             miner: *miner,
             config: config_pda(program_id),
             miner_state: miner_pda(program_id, miner),
-            vault: vault_pda(program_id),
+            collateral_vault: collateral_vault_pda(program_id, miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -92,18 +91,14 @@ fn withdraw_ix(program_id: &Pubkey, miner: &Pubkey, amount: u64) -> Instruction 
             miner: *miner,
             config: config_pda(program_id),
             miner_state: miner_pda(program_id, miner),
-            vault: vault_pda(program_id),
+            collateral_vault: collateral_vault_pda(program_id, miner),
         }
         .to_account_metas(None),
     )
 }
 
-fn vault_lamports(svm: &LiteSVM, program_id: &Pubkey) -> u64 {
-    svm.get_account(&vault_pda(program_id)).unwrap().lamports
-}
-fn vault_total(svm: &LiteSVM, program_id: &Pubkey) -> u64 {
-    let a = svm.get_account(&vault_pda(program_id)).unwrap();
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap().total_collateral
+fn collateral_vault_lamports(svm: &LiteSVM, program_id: &Pubkey, miner: &Pubkey) -> u64 {
+    svm.get_account(&collateral_vault_pda(program_id, miner)).unwrap().lamports
 }
 fn miner_collateral(svm: &LiteSVM, program_id: &Pubkey, miner: &Pubkey) -> u64 {
     let a = svm.get_account(&miner_pda(program_id, miner)).unwrap();
@@ -116,27 +111,24 @@ fn test_post_and_withdraw_maintains_invariant() {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
 
-    // After init, vault holds only its rent reserve and total_collateral == 0.
-    let rent_reserve = vault_lamports(&svm, &program_id);
-    assert_eq!(vault_total(&svm, &program_id), 0);
-
     let dep1 = 2_000_000_000u64;
     send(&mut svm, post_ix(&program_id, &miner.pubkey(), dep1), &miner.pubkey(), &miner).expect("post1");
-    assert_eq!(miner_collateral(&svm, &program_id, &miner.pubkey()), dep1);
-    assert_eq!(vault_total(&svm, &program_id), dep1);
-    assert_eq!(vault_lamports(&svm, &program_id), rent_reserve + dep1, "invariant after deposit 1");
+    // First deposit lazily creates the per-miner collateral vault; derive its rent reserve.
+    let m = miner.pubkey();
+    let rent_reserve = collateral_vault_lamports(&svm, &program_id, &m) - dep1;
+    assert_eq!(miner_collateral(&svm, &program_id, &m), dep1);
+    assert_eq!(collateral_vault_lamports(&svm, &program_id, &m), rent_reserve + dep1, "invariant after deposit 1");
 
     let dep2 = 1_000_000_000u64;
-    send(&mut svm, post_ix(&program_id, &miner.pubkey(), dep2), &miner.pubkey(), &miner).expect("post2");
-    assert_eq!(vault_total(&svm, &program_id), dep1 + dep2);
-    assert_eq!(vault_lamports(&svm, &program_id), rent_reserve + dep1 + dep2, "invariant after deposit 2");
+    send(&mut svm, post_ix(&program_id, &m, dep2), &m, &miner).expect("post2");
+    assert_eq!(miner_collateral(&svm, &program_id, &m), dep1 + dep2);
+    assert_eq!(collateral_vault_lamports(&svm, &program_id, &m), rent_reserve + dep1 + dep2, "invariant after deposit 2");
 
     let wd = 1_500_000_000u64;
-    send(&mut svm, withdraw_ix(&program_id, &miner.pubkey(), wd), &miner.pubkey(), &miner).expect("withdraw");
+    send(&mut svm, withdraw_ix(&program_id, &m, wd), &m, &miner).expect("withdraw");
     let remaining = dep1 + dep2 - wd;
-    assert_eq!(miner_collateral(&svm, &program_id, &miner.pubkey()), remaining);
-    assert_eq!(vault_total(&svm, &program_id), remaining);
-    assert_eq!(vault_lamports(&svm, &program_id), rent_reserve + remaining, "invariant after withdraw");
+    assert_eq!(miner_collateral(&svm, &program_id, &m), remaining);
+    assert_eq!(collateral_vault_lamports(&svm, &program_id, &m), rent_reserve + remaining, "invariant after withdraw");
 }
 
 #[test]

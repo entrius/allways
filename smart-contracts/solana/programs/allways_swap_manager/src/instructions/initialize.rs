@@ -2,13 +2,13 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{
     CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, TREASURY_SEED,
-    VAULT_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+    WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
-use crate::state::{Config, Treasury, Vault};
+use crate::state::{Config, Treasury};
 
-/// Create the singleton Config + native-SOL Vault PDAs. Records admin, collateral bounds,
+/// Create the singleton Config + subnet-revenue Treasury PDAs. Records admin, collateral bounds,
 /// fulfillment timeout (seconds), and the consensus threshold. Validator set starts empty
-/// (populated via `add_validator`).
+/// (populated via `add_validator`). Collateral vaults are per-miner and created lazily on deposit.
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
@@ -22,15 +22,6 @@ pub struct Initialize<'info> {
         bump,
     )]
     pub config: Account<'info, Config>,
-
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + Vault::INIT_SPACE,
-        seeds = [VAULT_SEED],
-        bump,
-    )]
-    pub vault: Account<'info, Vault>,
 
     #[account(
         init,
@@ -80,10 +71,6 @@ pub fn handler(
     config.pool_window_secs = POOL_WINDOW_SECS;
     config.weights_update_min_interval_secs = WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
     config.bump = ctx.bumps.config;
-
-    let vault = &mut ctx.accounts.vault;
-    vault.total_collateral = 0;
-    vault.bump = ctx.bumps.vault;
 
     let treasury = &mut ctx.accounts.treasury;
     treasury.total = 0;

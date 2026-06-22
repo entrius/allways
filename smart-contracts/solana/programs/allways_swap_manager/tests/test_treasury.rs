@@ -7,7 +7,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{Treasury, Vault},
+    allways_swap_manager::state::Treasury,
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -27,8 +27,8 @@ fn pid() -> Pubkey {
 fn cfg() -> Pubkey {
     Pubkey::find_program_address(&[b"config"], &pid()).0
 }
-fn vault_pda() -> Pubkey {
-    Pubkey::find_program_address(&[b"vault"], &pid()).0
+fn collateral_vault_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", m.as_ref()], &pid()).0
 }
 fn treasury_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"treasury"], &pid()).0
@@ -70,10 +70,6 @@ fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, s: &Keypair) -> Resu
     let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[s]).unwrap();
     svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
 }
-fn vault(svm: &LiteSVM) -> Vault {
-    let a = svm.get_account(&vault_pda()).unwrap();
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
-}
 fn treasury(svm: &LiteSVM) -> Treasury {
     let a = svm.get_account(&treasury_pda()).unwrap();
     Treasury::try_deserialize(&mut a.data.as_slice()).unwrap()
@@ -97,8 +93,8 @@ fn withdraw_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Instruction {
 }
 
 /// Full flow that accrues treasury (one reservation fee from the lottery + the 1% confirm fee);
-/// returns (svm, admin, total_treasury, vault_rent_reserve).
-fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
+/// returns (svm, admin, total_treasury).
+fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
     set_clock(&mut svm, BASE_TS);
@@ -112,9 +108,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
             min_collateral: 1_000_000_000, max_collateral: 0, fulfillment_timeout_secs: 3_600,
             consensus_threshold_percent: 66, min_swap_amount: 0, max_swap_amount: 0, reservation_ttl_secs: 1_800,
         }.data(),
-        allways_swap_manager::accounts::Initialize { admin: admin.pubkey(), config: cfg(), vault: vault_pda(), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::Initialize { admin: admin.pubkey(), config: cfg(), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
     ), &admin.pubkey(), &admin).expect("init");
-    let rent_reserve = lam(&svm, &vault_pda());
 
     let mut vals = Vec::new();
     for _ in 0..3 {
@@ -131,7 +126,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::PostCollateral { amount: 10_000_000_000 }.data(),
-        allways_swap_manager::accounts::PostCollateral { miner: miner.pubkey(), config: cfg(), miner_state: miner_pda(&miner.pubkey()), vault: vault_pda(), system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::PostCollateral { miner: miner.pubkey(), config: cfg(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
     ), &miner.pubkey(), &miner).expect("post");
 
     let activate = |svm: &mut LiteSVM, v: &Keypair| {
@@ -178,19 +173,19 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     let confirm = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
             &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
-            allways_swap_manager::accounts::ConfirmSwap { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vault: vault_pda(), treasury: treasury_pda(), swap: swap_pda(&key), vote_round: vote_pda(6, &key), system_program: SYS }.to_account_metas(None),
+            allways_swap_manager::accounts::ConfirmSwap { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), treasury: treasury_pda(), swap: swap_pda(&key), vote_round: vote_pda(6, &key), system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("confirm");
     };
     confirm(&mut svm, &vals[0]);
     confirm(&mut svm, &vals[1]);
 
     // treasury = reservation fee + the 1% confirm fee (quote creation is free).
-    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS, rent_reserve)
+    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS)
 }
 
 #[test]
 fn test_withdraw_treasury_happy_path() {
-    let (mut svm, admin, fee, rent) = setup_with_fee();
+    let (mut svm, admin, fee) = setup_with_fee();
     assert_eq!(treasury(&svm).total, fee, "fee accrued");
 
     // Treasury-side conservation: lamports above the rent reserve always equal `total`.
@@ -202,14 +197,14 @@ fn test_withdraw_treasury_happy_path() {
 
     assert_eq!(lam(&svm, &recipient), before + fee, "recipient received fees");
     assert_eq!(treasury(&svm).total, 0, "treasury drained");
-    // both PDAs conserve lamports: vault == rent + collateral; treasury == rent + total.
-    assert_eq!(lam(&svm, &vault_pda()), rent + vault(&svm).total_collateral);
+    // Treasury conserves lamports: lamports == rent + total. (Per-miner collateral-vault conservation
+    // is covered in test_collateral / test_swap.)
     assert_eq!(lam(&svm, &treasury_pda()), treasury_rent + treasury(&svm).total, "treasury lamports == rent + total");
 }
 
 #[test]
 fn test_non_admin_cannot_withdraw() {
-    let (mut svm, _admin, fee, _rent) = setup_with_fee();
+    let (mut svm, _admin, fee) = setup_with_fee();
     let outsider = Keypair::new();
     svm.airdrop(&outsider.pubkey(), 1_000_000_000).unwrap();
     let res = send(&mut svm, withdraw_ix(&outsider.pubkey(), &outsider.pubkey(), fee), &outsider.pubkey(), &outsider);
@@ -219,7 +214,7 @@ fn test_non_admin_cannot_withdraw() {
 
 #[test]
 fn test_cannot_overdraw_treasury() {
-    let (mut svm, admin, fee, _rent) = setup_with_fee();
+    let (mut svm, admin, fee) = setup_with_fee();
     let recipient = Keypair::new().pubkey();
     let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee + 1), &admin.pubkey(), &admin);
     assert!(res.is_err(), "withdrawing more than treasury rejected");

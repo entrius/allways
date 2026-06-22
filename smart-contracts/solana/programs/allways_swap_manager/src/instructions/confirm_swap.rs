@@ -2,16 +2,16 @@ use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
 use crate::constants::{
-    CONFIG_SEED, FEE_DIVISOR, MINER_SEED, REQ_CONFIRM, SWAP_SEED, TREASURY_SEED, VAULT_SEED, VOTE_SEED,
+    COLLATERAL_SEED, CONFIG_SEED, FEE_DIVISOR, MINER_SEED, REQ_CONFIRM, SWAP_SEED, TREASURY_SEED,
+    VOTE_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::SwapCompleted;
 use crate::penalty::apply_penalty;
-use crate::state::{Config, MinerState, Swap, SwapStatus, Treasury, Vault, VoteRound};
+use crate::state::{CollateralVault, Config, MinerState, Swap, SwapStatus, Treasury, VoteRound};
 
 /// Validators confirm a fulfilled swap. On quorum the 1% fee is moved from the miner's collateral
-/// into the Treasury PDA (lamports move vault → treasury), the miner is freed, and the Swap
-/// account is closed (rent reclaimed).
+/// vault into the Treasury PDA, the miner is freed, and the Swap account is closed (rent reclaimed).
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct ConfirmSwap<'info> {
@@ -32,10 +32,11 @@ pub struct ConfirmSwap<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// The miner's own collateral vault — the 1% fee is debited from here.
+    #[account(mut, seeds = [COLLATERAL_SEED, miner.key().as_ref()], bump = collateral_vault.bump)]
+    pub collateral_vault: Account<'info, CollateralVault>,
 
-    /// Subnet treasury — the 1% fee moves here out of the miner's collateral.
+    /// Subnet treasury — the 1% fee moves here out of the miner's collateral vault.
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
 
@@ -85,17 +86,11 @@ pub fn handler(ctx: Context<ConfirmSwap>, swap_key: [u8; 32]) -> Result<()> {
         let fee = sol_amount / FEE_DIVISOR;
         let min_collateral = ctx.accounts.config.min_collateral;
 
-        let actual_fee = apply_penalty(
-            &mut ctx.accounts.miner_state,
-            &mut ctx.accounts.vault,
-            min_collateral,
-            fee,
-            now,
-        )?;
-        // Move the fee lamports out of the collateral vault and into the subnet treasury (both are
-        // program-owned PDAs → direct lamport math). apply_penalty already shrank total_collateral.
+        let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;
+        // Move the fee out of the miner's collateral vault into the subnet treasury (both are
+        // program-owned PDAs → direct lamport math). apply_penalty already shrank the ledger.
         if actual_fee > 0 {
-            ctx.accounts.vault.to_account_info().sub_lamports(actual_fee)?;
+            ctx.accounts.collateral_vault.to_account_info().sub_lamports(actual_fee)?;
             ctx.accounts.treasury.to_account_info().add_lamports(actual_fee)?;
             ctx.accounts.treasury.total = ctx
                 .accounts

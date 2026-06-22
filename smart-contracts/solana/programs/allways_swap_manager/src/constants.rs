@@ -4,9 +4,10 @@ use anchor_lang::prelude::*;
 #[constant]
 pub const CONFIG_SEED: &[u8] = b"config";
 
-/// PDA seed for the singleton native-SOL collateral vault (`seeds = [VAULT_SEED]`).
+/// PDA seed prefix for a per-miner native-SOL collateral vault (`seeds = [COLLATERAL_SEED, miner]`) —
+/// each miner's collateral in its own account: trustless custody + no shared-vault contention.
 #[constant]
-pub const VAULT_SEED: &[u8] = b"vault";
+pub const COLLATERAL_SEED: &[u8] = b"collateral";
 
 /// PDA seed prefix for per-miner state (`seeds = [MINER_SEED, miner_pubkey]`).
 #[constant]
