@@ -1,10 +1,10 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, VAULT_SEED,
-    WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+    CONFIG_SEED, CONFIG_VERSION, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, TREASURY_SEED,
+    VAULT_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
-use crate::state::{Config, Vault};
+use crate::state::{Config, Treasury, Vault};
 
 /// Create the singleton Config + native-SOL Vault PDAs. Records admin, collateral bounds,
 /// fulfillment timeout (seconds), and the consensus threshold. Validator set starts empty
@@ -31,6 +31,15 @@ pub struct Initialize<'info> {
         bump,
     )]
     pub vault: Account<'info, Vault>,
+
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + Treasury::INIT_SPACE,
+        seeds = [TREASURY_SEED],
+        bump,
+    )]
+    pub treasury: Account<'info, Treasury>,
 
     pub system_program: Program<'info, System>,
 }
@@ -74,8 +83,11 @@ pub fn handler(
 
     let vault = &mut ctx.accounts.vault;
     vault.total_collateral = 0;
-    vault.treasury_total = 0;
     vault.bump = ctx.bumps.vault;
+
+    let treasury = &mut ctx.accounts.treasury;
+    treasury.total = 0;
+    treasury.bump = ctx.bumps.treasury;
 
     msg!(
         "initialized: admin={}, threshold={}%, min_collateral={}, max_collateral={}, timeout_secs={}",

@@ -93,6 +93,9 @@ pub struct QuoteRemoved {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// Anti-flashing churn fee paid into the treasury on removal (lamports); 0 once the quote has
+    /// stood past the decay window.
+    pub remove_fee: u64,
 }
 
 // --- Phase 9: reservation lottery (pool keyed per miner) ---

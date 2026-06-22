@@ -11,7 +11,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Pool, Reservation, Vault},
+    allways_swap_manager::state::{MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -38,6 +38,9 @@ fn config_pda() -> Pubkey {
 }
 fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], &pid()).0
+}
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
 }
 fn miner_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
@@ -86,6 +89,7 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
             admin: *admin,
             config: config_pda(),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -143,7 +147,7 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(miner, f, t),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -182,7 +186,7 @@ fn open_ix(
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, f, t),
             pool: pool_pda(miner),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
@@ -227,8 +231,8 @@ fn pool(svm: &LiteSVM, miner: &Pubkey) -> Pool {
     Pool::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
 fn treasury(svm: &LiteSVM) -> u64 {
-    let a = svm.get_account(&vault_pda()).unwrap();
-    Vault::try_deserialize(&mut a.data.as_slice()).unwrap().treasury_total
+    let a = svm.get_account(&treasury_pda()).unwrap();
+    Treasury::try_deserialize(&mut a.data.as_slice()).unwrap().total
 }
 fn is_active(svm: &LiteSVM, miner: &Pubkey) -> bool {
     let a = svm.get_account(&miner_pda(miner)).unwrap();

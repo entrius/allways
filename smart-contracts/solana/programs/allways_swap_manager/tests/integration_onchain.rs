@@ -25,7 +25,7 @@ use {
         InstructionData, ToAccountMetas,
     },
     allways_swap_manager::state::{
-        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, TxMarker, Vault,
+        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury, TxMarker, Vault,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -75,6 +75,9 @@ fn config_pda() -> Pubkey {
 }
 fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], &pid()).0
+}
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
 }
 fn miner_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
@@ -148,6 +151,10 @@ fn read_vault(rpc: &RpcClient) -> Vault {
     let a = rpc.get_account(&vault_pda()).expect("vault account");
     Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
+fn read_treasury(rpc: &RpcClient) -> Treasury {
+    let a = rpc.get_account(&treasury_pda()).expect("treasury account");
+    Treasury::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
 fn vault_lamports(rpc: &RpcClient) -> u64 {
     rpc.get_account(&vault_pda()).map(|a| a.lamports).unwrap_or(0)
 }
@@ -185,6 +192,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
             admin: *admin,
             config: config_pda(),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -256,7 +264,7 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
             pool: pool_pda(miner),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
@@ -344,6 +352,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             miner: *miner,
             miner_state: miner_pda(miner),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             swap: swap_pda(&key),
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
@@ -358,7 +367,7 @@ fn withdraw_treasury_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Inst
         allways_swap_manager::accounts::WithdrawTreasury {
             admin: *admin,
             config: config_pda(),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             recipient: *recipient,
         }
         .to_account_metas(None),
@@ -485,12 +494,11 @@ fn reserved_miner(rpc: &RpcClient) -> Keypair {
     miner
 }
 
-/// Vault invariant: lamports == rent_reserve + total_collateral + treasury_total.
+/// Collateral-vault invariant: lamports == rent_reserve + total_collateral (treasury is its own PDA).
 /// We don't know the rent reserve a priori (the vault is a shared singleton), so the caller passes
 /// it (captured once, right after the vault exists).
 fn invariant_holds(rpc: &RpcClient, rent_reserve: u64) -> bool {
-    let v = read_vault(rpc);
-    vault_lamports(rpc) == rent_reserve + v.total_collateral + v.treasury_total
+    vault_lamports(rpc) == rent_reserve + read_vault(rpc).total_collateral
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -627,12 +635,12 @@ fn onchain_reservation_fee_to_treasury() {
     let user = Keypair::new().pubkey();
     send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
 
-    let before = read_vault(&rpc).treasury_total;
+    let before = read_treasury(&rpc).total;
     send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
     let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
     assert_eq!(
-        read_vault(&rpc).treasury_total,
+        read_treasury(&rpc).total,
         before + fee,
         "flat reservation fee accrued to treasury"
     );
@@ -743,11 +751,8 @@ fn onchain_confirm_swap_full_lifecycle() {
     let _ = shared();
     let rpc = rpc();
     let vals = validator_keypairs();
-    // Capture the vault rent reserve = lamports - (collateral + treasury) before our swap.
-    let rent_reserve = {
-        let v = read_vault(&rpc);
-        vault_lamports(&rpc) - v.total_collateral - v.treasury_total
-    };
+    // Capture the vault rent reserve = lamports - collateral before our swap.
+    let rent_reserve = vault_lamports(&rpc) - read_vault(&rpc).total_collateral;
     assert!(invariant_holds(&rpc, rent_reserve), "vault invariant pre-flow");
 
     let miner = reserved_miner(&rpc);
@@ -761,7 +766,7 @@ fn onchain_confirm_swap_full_lifecycle() {
     send(&rpc, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), &miner).expect("fulfill");
 
     let coll_before = read_miner(&rpc, &miner.pubkey()).collateral;
-    let treasury_before = read_vault(&rpc).treasury_total;
+    let treasury_before = read_treasury(&rpc).total;
 
     send(&rpc, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0])
         .expect("confirm v0");
@@ -771,7 +776,7 @@ fn onchain_confirm_swap_full_lifecycle() {
     let fee = SOL_AMOUNT / 100; // 1%
     // Fee taken from collateral, accrued to treasury (post-total semantics).
     assert_eq!(read_miner(&rpc, &miner.pubkey()).collateral, coll_before - fee, "1% fee from collateral");
-    assert_eq!(read_vault(&rpc).treasury_total, treasury_before + fee, "fee accrued to treasury");
+    assert_eq!(read_treasury(&rpc).total, treasury_before + fee, "fee accrued to treasury");
     // Swap closed, miner freed.
     assert!(!account_exists(&rpc, &swap_pda(&swap_key(tx))), "swap account closed");
     assert!(!read_miner(&rpc, &miner.pubkey()).has_active_swap, "miner freed");
@@ -802,7 +807,7 @@ fn onchain_withdraw_treasury_happy_path() {
         .expect("confirm v1");
 
     let fee = SOL_AMOUNT / 100;
-    let treasury_before = read_vault(&rpc).treasury_total;
+    let treasury_before = read_treasury(&rpc).total;
     assert!(treasury_before >= fee, "treasury holds at least this swap's fee");
 
     let recipient = Keypair::new().pubkey();
@@ -815,7 +820,7 @@ fn onchain_withdraw_treasury_happy_path() {
         recip_before + fee,
         "recipient received the fee"
     );
-    assert_eq!(read_vault(&rpc).treasury_total, treasury_before - fee, "treasury drained by fee");
+    assert_eq!(read_treasury(&rpc).total, treasury_before - fee, "treasury drained by fee");
 }
 
 // ─── reachable negative cases (time-independent guards) ──────────────────────────
@@ -844,11 +849,11 @@ fn onchain_non_admin_withdraw_treasury_rejected() {
     // A non-admin attempts a treasury withdrawal → rejected by the admin guard.
     let outsider = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
     let recipient = Keypair::new().pubkey();
-    let treasury_before = read_vault(&rpc).treasury_total;
+    let treasury_before = read_treasury(&rpc).total;
     let res = send(&rpc, withdraw_treasury_ix(&outsider.pubkey(), &recipient, 1),
         &outsider.pubkey(), &outsider);
     assert!(res.is_err(), "non-admin withdraw_treasury must be rejected");
-    assert_eq!(read_vault(&rpc).treasury_total, treasury_before, "treasury untouched");
+    assert_eq!(read_treasury(&rpc).total, treasury_before, "treasury untouched");
 }
 
 // ─── Phase 8: miner quotes + validator weights ───────────────────────────────────
@@ -876,7 +881,7 @@ fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Ins
         allways_swap_manager::accounts::SetQuote {
             miner: *m,
             quote: quote_pda(m, from_chain, to_chain),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -891,8 +896,13 @@ fn remove_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str) -> Instruction 
             to_chain: to_chain.to_string(),
         }
         .data(),
-        allways_swap_manager::accounts::RemoveQuote { miner: *m, quote: quote_pda(m, from_chain, to_chain) }
-            .to_account_metas(None),
+        allways_swap_manager::accounts::RemoveQuote {
+            miner: *m,
+            quote: quote_pda(m, from_chain, to_chain),
+            treasury: treasury_pda(),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
     )
 }
 

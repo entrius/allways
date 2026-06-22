@@ -5,10 +5,8 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{
-        POOL_WINDOW_SECS, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, RESERVATION_FEE_LAMPORTS,
-    },
-    allways_swap_manager::state::{MinerState, Swap, Vault},
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::state::{MinerState, Swap, Treasury, Vault},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -45,6 +43,9 @@ fn config_pda() -> Pubkey {
 }
 fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(&[b"vault"], &pid()).0
+}
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
 }
 fn miner_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
@@ -101,6 +102,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
             admin: *admin,
             config: config_pda(),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -158,7 +160,7 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -185,7 +187,7 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
             pool: pool_pda(miner),
-            vault: vault_pda(),
+            treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
@@ -268,6 +270,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             miner: *miner,
             miner_state: miner_pda(miner),
             vault: vault_pda(),
+            treasury: treasury_pda(),
             swap: swap_pda(&key),
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
@@ -302,6 +305,10 @@ fn miner_state(svm: &LiteSVM, m: &Pubkey) -> MinerState {
 fn vault(svm: &LiteSVM) -> Vault {
     let a = svm.get_account(&vault_pda()).unwrap();
     Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+fn treasury_total(svm: &LiteSVM) -> u64 {
+    let a = svm.get_account(&treasury_pda()).unwrap();
+    Treasury::try_deserialize(&mut a.data.as_slice()).unwrap().total
 }
 fn vault_lamports(svm: &LiteSVM) -> u64 {
     svm.get_account(&vault_pda()).unwrap().lamports
@@ -373,8 +380,8 @@ fn do_reserve(svm: &mut LiteSVM, opener: &Keypair, miner: &Pubkey) {
 }
 
 fn invariant_holds(svm: &LiteSVM, rent_reserve: u64) -> bool {
-    let v = vault(svm);
-    vault_lamports(svm) == rent_reserve + v.total_collateral + v.treasury_total
+    // Collateral vault holds only collateral now; treasury revenue lives in a separate PDA.
+    vault_lamports(svm) == rent_reserve + vault(svm).total_collateral
 }
 
 #[test]
@@ -492,10 +499,10 @@ fn test_fulfill_confirm_fee_and_invariant() {
 
     let fee = SOL_AMOUNT / 100;
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee taken");
-    // treasury holds the setup's quote-creation fee + reservation fee, plus this swap's 1% confirm fee.
+    // Quote creation is free; treasury holds the setup's reservation fee plus this swap's 1% confirm fee.
     assert_eq!(
-        vault(&svm).treasury_total,
-        QUOTE_UPDATE_FEE_TIER1_LAMPORTS + RESERVATION_FEE_LAMPORTS + fee,
+        treasury_total(&svm),
+        RESERVATION_FEE_LAMPORTS + fee,
         "fees accrued to treasury"
     );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);

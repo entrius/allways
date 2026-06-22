@@ -38,6 +38,11 @@ pub const QUOTE_SEED: &[u8] = b"quote";
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
 
+/// PDA seed for the singleton subnet-revenue treasury (`seeds = [TREASURY_SEED]`) — held entirely
+/// separate from the collateral vault so miner collateral is never commingled with subnet income.
+#[constant]
+pub const TREASURY_SEED: &[u8] = b"treasury";
+
 /// On-chain schema/version for upgrade tracking, bumped as phases land. v6: runtime config setters
 /// (fee/window/interval promoted to Config); see git history for the v2–v5 progression.
 pub const CONFIG_VERSION: u32 = 6;

@@ -3,11 +3,11 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::{
     CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
-    RESV_SEED, SLOT_MS, VAULT_SEED,
+    RESV_SEED, SLOT_MS, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
-use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Vault};
+use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Treasury};
 
 /// A validator opens (or joins) a per-miner reservation-lottery pool for a specific pair. The first
 /// caller opens the pool and pins the miner's on-chain quote for `(from_chain, to_chain)`; later
@@ -50,8 +50,9 @@ pub struct OpenOrRequest<'info> {
     )]
     pub pool: Account<'info, Pool>,
 
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// Subnet-revenue sink for the reservation fee (kept separate from the collateral vault).
+    #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
+    pub treasury: Account<'info, Treasury>,
 
     /// The per-miner reservation slot — created empty on first open, checked so a new contest can't be
     /// opened while a reservation is still active (it would overwrite the winner's hold). Populated by
@@ -131,22 +132,22 @@ pub fn handler(
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
     require!(!active_reservation, ErrorCode::MinerReserved);
 
-    // Flat, non-refundable anti-spam fee: validator → vault, accrued to treasury (every call).
+    // Flat, non-refundable anti-spam fee: validator → treasury (subnet revenue, every call).
     let fee = ctx.accounts.config.reservation_fee_lamports;
     transfer(
         CpiContext::new(
             ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.validator.to_account_info(),
-                to: ctx.accounts.vault.to_account_info(),
+                to: ctx.accounts.treasury.to_account_info(),
             },
         ),
         fee,
     )?;
-    ctx.accounts.vault.treasury_total = ctx
+    ctx.accounts.treasury.total = ctx
         .accounts
-        .vault
-        .treasury_total
+        .treasury
+        .total
         .checked_add(fee)
         .ok_or(ErrorCode::Overflow)?;
 

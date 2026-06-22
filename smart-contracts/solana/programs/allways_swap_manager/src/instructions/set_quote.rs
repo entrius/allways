@@ -1,10 +1,10 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, VAULT_SEED};
+use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, TREASURY_SEED};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
-use crate::state::{MinerQuote, Vault};
+use crate::state::{MinerQuote, Treasury};
 
 /// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: any
 /// signer may post — a quote is advertised data that can't move funds, rent self-limits spam, and
@@ -28,9 +28,9 @@ pub struct SetQuote<'info> {
     )]
     pub quote: Account<'info, MinerQuote>,
 
-    /// Treasury sink for the quote-update churn fee (native lamports accrue here).
-    #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
-    pub vault: Account<'info, Vault>,
+    /// Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral.
+    #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
+    pub treasury: Account<'info, Treasury>,
 
     pub system_program: Program<'info, System>,
 }
@@ -69,29 +69,28 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
-    // Anti-flashing churn fee → vault treasury (preserves the vault invariant). Charged on BOTH
-    // create and overwrite so `remove_quote` + `set_quote` can't dodge it (review #7): a fresh/just-
-    // removed PDA is treated as elapsed=0 → top tier; a quote that has stood past the window is free.
-    let elapsed = if ctx.accounts.quote.miner != Pubkey::default() {
-        now.saturating_sub(ctx.accounts.quote.updated_at)
+    // Anti-flashing churn fee on UPDATES only — creation is free (no onboarding barrier), decaying to
+    // zero the longer the prior quote stood; fee → treasury. The remove + re-create dodge is closed on
+    // the remove side (see `remove_quote`), so creation needn't be charged.
+    let fee = if ctx.accounts.quote.miner != Pubkey::default() {
+        quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
     } else {
         0
     };
-    let fee = quote_update_fee(elapsed);
     if fee > 0 {
         transfer(
             CpiContext::new(
                 ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.miner.to_account_info(),
-                    to: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
             fee,
         )?;
-        let vault = &mut ctx.accounts.vault;
-        vault.treasury_total = vault
-            .treasury_total
+        let treasury = &mut ctx.accounts.treasury;
+        treasury.total = treasury
+            .total
             .checked_add(fee)
             .ok_or(ErrorCode::Overflow)?;
     }
