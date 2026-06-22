@@ -115,6 +115,13 @@ pub fn handler(
         ctx.accounts.miner_state.collateral >= cfg.min_collateral,
         ErrorCode::InsufficientCollateral
     );
+    // Over-collateralization gate at entry: hold 1.10× THIS request's size up front. Collateral only
+    // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate
+    // can't later strand a user who has already sent source funds (review #1).
+    require!(
+        ctx.accounts.miner_state.collateral >= crate::constants::required_collateral(sol_amount),
+        ErrorCode::InsufficientCollateral
+    );
 
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;

@@ -6,7 +6,7 @@ pub mod instructions;
 pub mod lottery;
 pub mod penalty;
 pub mod state;
-pub mod tunables;
+pub mod validate;
 
 use anchor_lang::prelude::*;
 
@@ -161,6 +161,14 @@ pub mod allways_swap_manager {
     /// reservation.
     pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
         resolve_pool::handler(ctx)
+    }
+    /// Admin escape hatch: reset a stuck/abandoned open pool and free the miner's busy lock.
+    pub fn cancel_pool(ctx: Context<CancelPool>) -> Result<()> {
+        cancel_pool::handler(ctx)
+    }
+    /// Admin escape hatch: clear a miner's reservation and free the busy lock (no early-clear otherwise).
+    pub fn cancel_reservation(ctx: Context<CancelReservation>) -> Result<()> {
+        cancel_reservation::handler(ctx)
     }
 
     // --- Phase 4: swap lifecycle ---

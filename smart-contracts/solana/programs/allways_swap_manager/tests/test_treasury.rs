@@ -6,7 +6,9 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::tunables::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::constants::{
+        POOL_WINDOW_SECS, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, RESERVATION_FEE_LAMPORTS,
+    },
     allways_swap_manager::state::Vault,
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
@@ -177,7 +179,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64, u64) {
     confirm(&mut svm, &vals[0]);
     confirm(&mut svm, &vals[1]);
 
-    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS, rent_reserve)
+    // treasury = quote-creation fee (#7) + reservation fee + the 1% confirm fee.
+    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS + QUOTE_UPDATE_FEE_TIER1_LAMPORTS, rent_reserve)
 }
 
 #[test]

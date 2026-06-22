@@ -91,7 +91,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
         // guard + one-swap-at-a-time invariant guarantee the miner can cover it; apply_penalty still
         // clamps to available collateral as a safety net.
-        let penalty = crate::tunables::required_collateral(sol_amount);
+        let penalty = crate::constants::required_collateral(sol_amount);
 
         let slash = apply_penalty(
             &mut ctx.accounts.miner_state,
