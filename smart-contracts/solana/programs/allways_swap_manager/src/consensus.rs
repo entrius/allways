@@ -6,14 +6,13 @@ use crate::error::ErrorCode;
 use crate::state::{Config, ValidatorInfo, VoteRound};
 
 /// Canonical bound hash for a vote round, from (request_type, target pubkey).
-/// Later phases extend the preimage with amounts/addresses the seeds don't cover.
 pub fn request_hash(request_type: u8, target: &Pubkey) -> [u8; 32] {
     hashv(&[&[request_type], target.as_ref()]).to_bytes()
 }
 
 /// Bound hash for an initiate round — binds the user-side payout fields the seeds/reservation don't
-/// cover (closes v2 #2 / #411: `user`, `user_from_addr`, `user_to_addr`, `from_tx_block`). The
-/// miner quote + amounts come from the immutable reservation, so they need not be re-bound here.
+/// cover (`user`, `user_from_addr`, `user_to_addr`, `from_tx_block`). Miner quote + amounts come
+/// from the immutable reservation, so they need not be re-bound here.
 #[allow(clippy::too_many_arguments)]
 pub fn initiate_hash(
     miner: &Pubkey,
@@ -36,13 +35,13 @@ pub fn initiate_hash(
 }
 
 /// Bound hash for a swap-keyed round (confirm/timeout). All params live in the seeds (`swap_key`),
-/// so this is a trivial binding like activate/deactivate.
+/// so the binding is trivial.
 pub fn swap_request_hash(request_type: u8, swap_key: &[u8; 32]) -> [u8; 32] {
     hashv(&[&[request_type], swap_key]).to_bytes()
 }
 
-/// Bound hash for the validator-weight round (Phase 10): binds the full snapshot —
-/// `REQ_SET_WEIGHTS || (each validator key in config order) || (each weight LE)`. Binding the keys too
+/// Bound hash for the validator-weight round: binds the full snapshot —
+/// `REQ_SET_WEIGHTS || (each validator key in config order) || (each weight LE)`. Binding the keys
 /// means a validator-set change between voters invalidates the round (hash mismatch), so a stale
 /// vector can't be applied to a changed set. `validators` and `weights` are index-aligned.
 pub fn weights_hash(validators: &[ValidatorInfo], weights: &[u64]) -> [u8; 32] {
@@ -74,9 +73,8 @@ pub fn record_vote<'info>(
         ErrorCode::NotValidator
     );
 
-    // An empty voter list means no open round (freshly allocated, or reset after a prior
-    // round closed) — robust regardless of the clock's absolute value. A non-empty but
-    // expired round is treated as stale and reopened.
+    // Empty voter list means no open round (fresh or reset) — robust regardless of the clock's
+    // absolute value. A non-empty but expired round is stale and reopened.
     let stale =
         !round.voters.is_empty() && now.saturating_sub(round.created_at) > VOTE_ROUND_TTL_SECS;
     if round.voters.is_empty() || stale {

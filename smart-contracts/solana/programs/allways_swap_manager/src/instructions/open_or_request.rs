@@ -9,10 +9,9 @@ use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
 use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Vault};
 
-/// A validator opens (or joins) a per-miner reservation-lottery pool for a specific pair. The first
-/// caller opens the pool and pins the miner's on-chain quote for `(from_chain, to_chain)`; later
-/// in-window callers add one request each (same pinned pair). EVERY call pays a flat, non-refundable
-/// reservation fee (validator → vault treasury) — the anti-spam gate against reserving every pool.
+/// A validator opens (or joins) a per-miner reservation-lottery pool for a pair. First caller opens
+/// and pins the miner's quote; later in-window callers add one request each (same pinned pair). Every
+/// call pays a flat, non-refundable reservation fee (validator -> vault) — the anti-spam gate.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
 pub struct OpenOrRequest<'info> {
@@ -33,8 +32,7 @@ pub struct OpenOrRequest<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    /// The miner's standing quote for this pair — must exist (can't pool a pair the miner doesn't
-    /// quote). Pinned into the Pool snapshot at open.
+    /// The miner's standing quote for this pair — must exist; pinned into the Pool snapshot at open.
     #[account(
         seeds = [QUOTE_SEED, miner.key().as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
         bump = quote.bump,
@@ -53,9 +51,8 @@ pub struct OpenOrRequest<'info> {
     #[account(mut, seeds = [VAULT_SEED], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
 
-    /// The per-miner reservation slot — created empty on first open, checked so a new contest can't be
-    /// opened while a reservation is still active (it would overwrite the winner's hold). Populated by
-    /// `resolve_pool`.
+    /// The per-miner reservation slot — checked so a new contest can't be opened while a reservation
+    /// is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
     #[account(
         init_if_needed,
         payer = validator,

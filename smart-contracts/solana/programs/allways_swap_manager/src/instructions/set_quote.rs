@@ -7,13 +7,10 @@ use crate::events::QuoteSet;
 use crate::state::{MinerQuote, Vault};
 use crate::tunables::quote_update_fee;
 
-/// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: any
-/// signer may post — a quote is advertised data that can't move funds, rent self-limits spam, and
-/// the validator/UI filters to registered miners. `(from_chain, to_chain)` ordering encodes the
-/// direction, so the reverse direction is a separate quote (no `counter_rate`). First call lazily
-/// creates the PDA (miner pays rent) and is otherwise free; subsequent calls overwrite in place and
-/// pay a **decaying anti-flashing fee** (`tunables::quote_update_fee`) into the vault treasury — high
-/// for rapid churn, zero once a quote has stood long enough.
+/// Miner publishes (or overwrites) its standing quote for one pair-direction. Permissionless: a quote
+/// is advertised data that can't move funds and rent self-limits spam. First call creates the PDA
+/// (free); subsequent calls overwrite in place and pay a decaying anti-flashing fee
+/// (`tunables::quote_update_fee`) into the vault treasury — high for rapid churn, zero once stable.
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
 pub struct SetQuote<'info> {
@@ -45,8 +42,7 @@ pub fn handler(
     rate: String,
     liquidity: u128,
 ) -> Result<()> {
-    // Mechanical sanity only — chain identity/validity is the off-chain layer's call (chains are
-    // opaque bounded strings on-chain).
+    // Mechanical sanity only — chains are opaque bounded strings; validity is the off-chain layer's call.
     require!(
         !from_chain.is_empty()
             && !to_chain.is_empty()
@@ -70,9 +66,8 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
-    // Anti-flashing churn fee: charged only when overwriting an existing quote (a fresh PDA has a
-    // zeroed `miner`), and decaying to zero the longer the prior quote stood. Fee → vault treasury,
-    // preserving the vault invariant (lamports == rent + total_collateral + treasury_total).
+    // Anti-flashing churn fee: only when overwriting (fresh PDA has zeroed `miner`), decaying to zero
+    // the longer the prior quote stood. Fee -> vault treasury, preserving the vault invariant.
     let fee = if ctx.accounts.quote.miner != Pubkey::default() {
         quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
     } else {

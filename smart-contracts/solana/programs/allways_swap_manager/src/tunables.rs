@@ -1,38 +1,22 @@
-//! Hardcoded, deploy-time-tunable **economic** parameters — the knobs you change-and-redeploy.
-//!
-//! Kept in one file (not in `Config`/`state.rs`, not scattered through handlers) so every economic
-//! lever is legible in one place. These are compile-time constants: editing one requires a redeploy,
-//! and every value is **range-checked at compile time** (`const _: () = assert!(…)`) AND by a unit
-//! test below — so an out-of-range edit fails `cargo test`/the build, never production.
+//! Deploy-time economic knobs (change-and-redeploy). One file so every
+//! lever is visible; each is range-checked at compile time + a unit test.
 
-/// Basis-points denominator (10_000 bps = 1.00×). Shared by every ×-multiplier below.
 pub const BPS_DENOMINATOR: u64 = 10_000;
 
-/// Collateral a miner must hold to **back a swap**, as a fraction of the swap size, in basis points
-/// (10_000 = 1.00×, 11_000 = 1.10×). Over-collateralizing (> 1.00×) reserves a slash buffer so a
-/// failed swap can make the user whole *and* penalize the miner (v2 cleanup #4).
-///
-/// Bounds (enforced below + by `tests::collateral_requirement_within_bounds`):
-/// `COLLATERAL_REQUIREMENT_BPS_MIN` (1.00×, never under-collateralized) ≤ x ≤
-/// `COLLATERAL_REQUIREMENT_BPS_MAX` (2.00×, sanity ceiling).
-pub const COLLATERAL_REQUIREMENT_BPS: u64 = 11_000; // 1.10× — current setting
+/// Collateral a miner must hold per swap, in bps (11_000 = 1.10x). The >1x
+/// buffer lets a failed swap make the user whole and still penalize the miner.
+pub const COLLATERAL_REQUIREMENT_BPS: u64 = 11_000;
+pub const COLLATERAL_REQUIREMENT_BPS_MIN: u64 = 10_000; // floor 1.0x
+pub const COLLATERAL_REQUIREMENT_BPS_MAX: u64 = 20_000; // ceiling 2.0x
 
-/// Hard floor: a swap must always be at least fully collateralized.
-pub const COLLATERAL_REQUIREMENT_BPS_MIN: u64 = 10_000; // 1.0×
-/// Hard ceiling: more than 2× would price out honest miners with no extra safety payoff.
-pub const COLLATERAL_REQUIREMENT_BPS_MAX: u64 = 20_000; // 2.0×
-
-// Compile-time guard: the build won't compile if the setting leaves [1.0×, 2.0×].
+// Compile-time guard: the build won't compile if the setting leaves [1.0x, 2.0x].
 const _: () = assert!(
     COLLATERAL_REQUIREMENT_BPS >= COLLATERAL_REQUIREMENT_BPS_MIN
         && COLLATERAL_REQUIREMENT_BPS <= COLLATERAL_REQUIREMENT_BPS_MAX,
     "COLLATERAL_REQUIREMENT_BPS must be within [1.0x, 2.0x] (10_000..=20_000 bps)"
 );
-
-/// Collateral (lamports) required to back a swap of `sol_amount` lamports
-/// = `sol_amount × COLLATERAL_REQUIREMENT_BPS / 10_000`, rounded up so a fractional requirement is
-/// never under-met. Computed in u128 and clamped to `u64::MAX` so an extreme size can't wrap (it
-/// simply demands more than any miner could hold).
+/// Collateral (lamports) for a swap of `sol_amount`. Ceil-div so it's never under-met;
+/// u128 math clamped to u64::MAX so an extreme size can't wrap.
 pub fn required_collateral(sol_amount: u64) -> u64 {
     let numer = (sol_amount as u128).saturating_mul(COLLATERAL_REQUIREMENT_BPS as u128);
     // round up (ceil-div): require at least the exact fraction.
@@ -43,23 +27,13 @@ pub fn required_collateral(sol_amount: u64) -> u64 {
     req.min(u64::MAX as u128) as u64
 }
 
-// --- Quote-update churn fee (anti-flashing) ---
-//
-// Updating a *standing* quote too soon after its last write costs a small, treasury-bound fee that
-// **decays to zero** the longer the quote has stood. This discourages rapid quote-flashing without
-// scaring miners off the network: first-time creation is free (only rent), and a quote left to
-// stand becomes free to update again. Stepwise (not continuous exponential) — deterministic and
-// cheap on-chain, with the same "cheaper the longer you wait" intent.
-//
-// Tiers, by seconds since the previous update:
-//   elapsed < TIER1_MAX_SECS          → TIER1_LAMPORTS  (rapid churn — most expensive)
-//   TIER1_MAX ≤ elapsed < TIER2_MAX   → TIER2_LAMPORTS
-//   elapsed ≥ TIER2_MAX_SECS          → 0               (a stable quote — free)
-// All collected fees go to the vault treasury.
-pub const QUOTE_UPDATE_FEE_TIER1_LAMPORTS: u64 = 10_000_000; // 0.01 SOL — churn within 5 min
+// Quote-update churn fee (anti-flashing): updating a standing quote soon after its
+// last write costs a treasury-bound fee that decays to zero the longer it has stood.
+// Creation is free; stepwise tiers (not continuous) keep it deterministic on-chain.
+pub const QUOTE_UPDATE_FEE_TIER1_LAMPORTS: u64 = 10_000_000; // 0.01 SOL, churn within 5 min
 pub const QUOTE_UPDATE_FEE_TIER1_MAX_SECS: i64 = 300; // 5 min
-pub const QUOTE_UPDATE_FEE_TIER2_LAMPORTS: u64 = 1_000_000; // 0.001 SOL — 5–10 min
-pub const QUOTE_UPDATE_FEE_TIER2_MAX_SECS: i64 = 600; // 10 min → free thereafter
+pub const QUOTE_UPDATE_FEE_TIER2_LAMPORTS: u64 = 1_000_000; // 0.001 SOL, 5-10 min
+pub const QUOTE_UPDATE_FEE_TIER2_MAX_SECS: i64 = 600; // 10 min, free thereafter
 
 // Sanity: windows must increase and the fee must not increase as time passes (monotone decay).
 const _: () = assert!(
@@ -68,9 +42,8 @@ const _: () = assert!(
     "quote-update fee tiers must decay over increasing windows"
 );
 
-/// Fee (lamports) for updating a standing quote `elapsed_secs` after its previous write. A negative
-/// or zero elapsed (clock skew / same-second churn) falls into the most-expensive tier. Applies only
-/// to updates — the caller charges nothing on first creation.
+/// Fee (lamports) for updating a standing quote `elapsed_secs` after its previous write.
+/// Negative/zero elapsed (clock skew) falls into the most-expensive tier; creation is free.
 pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
     if elapsed_secs < QUOTE_UPDATE_FEE_TIER1_MAX_SECS {
         QUOTE_UPDATE_FEE_TIER1_LAMPORTS
@@ -82,33 +55,23 @@ pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
 }
 
 // --- Protocol fees & timing ---
-//
-// Moved here from `constants.rs` so every deploy-time economic lever lives in one file. All are
-// compile-time constants: change-and-redeploy, nothing stored in `Config`. (Structural constants —
-// PDA seeds, request-type bytes, max string lengths, `SLOT_MS` — stay in `constants.rs`.)
 
-/// Protocol fee divisor — 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`. Compile-time
-/// only (not promoted to a runtime setter).
+/// Protocol fee divisor: 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`.
 pub const FEE_DIVISOR: u64 = 100;
 
-// The next three are **initial seed defaults** — `initialize` copies them into `Config` and they are
-// runtime-tunable thereafter via the admin setters added in #486 (`set_reservation_fee`,
-// `set_pool_window`, `set_weights_update_min_interval`). Kept here so the deploy-time defaults sit
-// with the other economic levers; handlers read the live `Config` value, not these consts.
+// The next three are initial seed defaults: `initialize` copies them into `Config`, then
+// they're runtime-tunable via admin setters. Handlers read live `Config`, not these consts.
 
-/// Initial flat anti-spam fee (lamports) per reservation request (`open_or_request`), validator →
-/// vault treasury, non-refundable. Seeds `Config.reservation_fee_lamports`. 0.02 SOL — sized so a
-/// pool-open (which now busies the miner for the window + reservation TTL, #485) isn't cheap to grief.
+/// Initial flat anti-spam fee (lamports) per reservation request, non-refundable to treasury.
+/// 0.02 SOL: a pool-open busies the miner for the window + TTL, so it shouldn't be cheap to grief.
 pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 
-/// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs`. How long a
-/// pool collects contending requests before `resolve_pool` runs the stake-weighted draw — a longer
-/// window gathers more validators for a fairer draw at the cost of reservation latency. Must stay
-/// well below the reservation TTL. Paired with `constants::SLOT_MS` to pin the draw's future seed slot.
+/// Initial reservation-lottery pooling window (seconds). Longer = more validators for a fairer
+/// stake-weighted draw, at the cost of latency. Must stay well below the reservation TTL.
 pub const POOL_WINDOW_SECS: i64 = 60;
 
-/// Initial minimum seconds between successful validator-weight updates (Phase 10) — an anti-thrash
-/// floor, not a schedule. Seeds `Config.weights_update_min_interval_secs`.
+/// Initial min seconds between successful validator-weight updates: an anti-thrash floor, not
+/// a schedule. Seeds `Config.weights_update_min_interval_secs`.
 pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
 #[cfg(test)]

@@ -10,10 +10,9 @@ use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
 use crate::state::{Config, MinerState, Reservation, Swap, SwapStatus, TxMarker, VoteRound};
 
-/// A validator votes to initiate a swap against an active reservation. The miner quote
-/// (addresses/rate/amounts/chains) is sourced from the immutable Reservation — never from args
-/// (v2 #1b). The bound hash binds the user-side payout fields (v2 #2). On quorum the Swap is created,
-/// the source-tx replay marker is set, and the reservation is consumed.
+/// A validator votes to initiate a swap against an active reservation. Miner quote terms are sourced
+/// from the immutable Reservation — never from args; the bound hash binds the user-side payout fields.
+/// On quorum the Swap is created, the source-tx replay marker is set, and the reservation is consumed.
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct VoteInitiate<'info> {
@@ -98,8 +97,8 @@ pub fn handler(
             ErrorCode::NoReservation
         );
         require!(user_from_address == resv.from_addr, ErrorCode::UserMismatch);
-        // Over-collateralization gate (v2 #4): the miner must hold the swap size scaled by the
-        // tunable requirement (1.10× today), so a failed swap has a slash buffer beyond 1:1.
+        // Over-collateralization gate: miner must hold the swap size x the tunable requirement,
+        // so a failed swap has a slash buffer beyond 1:1.
         require!(
             ctx.accounts.miner_state.collateral >= crate::tunables::required_collateral(resv.sol_amount),
             ErrorCode::InsufficientCollateral
