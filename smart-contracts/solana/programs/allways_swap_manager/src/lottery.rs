@@ -1,6 +1,5 @@
-//! Reservation-lottery draw primitives (Phase 9). Pure + deterministic so the same winner is
-//! computed by everyone resolving the same pool; unit-tested standalone (LiteSVM may not populate the
-//! SlotHashes sysvar, so the on-chain seed read is integration-tested while these are unit-tested).
+//! Reservation-lottery draw primitives. Pure + deterministic so everyone resolving the same pool
+//! computes the same winner.
 
 use anchor_lang::prelude::*;
 use solana_keccak_hasher::hashv;
@@ -15,8 +14,7 @@ pub fn draw_seed(pool_key: &Pubkey, slothash: &[u8]) -> u128 {
 }
 
 /// Stake-weighted pick: cumulative-bucket over `weights`, `x = seed % total_weight`, return the index
-/// whose bucket contains `x`. If `total_weight == 0` (e.g. all entrants unweighted), fall back to a
-/// uniform pick by index. Caller guarantees `weights` is non-empty.
+/// whose bucket contains `x`. If `total_weight == 0`, fall back to uniform pick. `weights` non-empty.
 pub fn pick_weighted(seed: u128, weights: &[u64]) -> usize {
     let total: u128 = weights.iter().map(|&w| w as u128).sum();
     if total == 0 {

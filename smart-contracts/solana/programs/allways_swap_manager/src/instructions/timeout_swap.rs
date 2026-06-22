@@ -7,9 +7,8 @@ use crate::events::SwapTimedOut;
 use crate::penalty::apply_penalty;
 use crate::state::{Config, MinerState, Swap, SwapStatus, Vault, VoteRound};
 
-/// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed up
-/// to the swap size and refunded to the user (native lamports, vault → user), the miner is freed,
-/// and the Swap account is closed.
+/// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed and
+/// refunded to the user (vault -> user), the miner is freed, and the Swap account is closed.
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct TimeoutSwap<'info> {
@@ -87,10 +86,9 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         let miner = ctx.accounts.swap.miner;
         let min_collateral = ctx.accounts.config.min_collateral;
 
-        // v2 #4: a failed swap is penalized at the over-collateralization multiplier (1.10×), and
-        // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
-        // guard + one-swap-at-a-time invariant guarantee the miner can cover it; apply_penalty still
-        // clamps to available collateral as a safety net.
+        // Penalize at the over-collateralization multiplier and refund the whole slash to the user.
+        // The initiate-time gate + one-swap-at-a-time invariant guarantee the miner can cover it;
+        // apply_penalty still clamps to available collateral as a safety net.
         let penalty = crate::tunables::required_collateral(sol_amount);
 
         let slash = apply_penalty(
