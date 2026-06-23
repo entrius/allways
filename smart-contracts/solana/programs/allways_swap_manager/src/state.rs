@@ -90,6 +90,12 @@ pub struct MinerState {
     pub busy_until: i64,
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
+    /// Lifetime swaps completed (confirm_swap quorum). Monotonic. Off-chain emissions warm-up gate:
+    /// a miner earns nothing until `successful_swaps >= 2`.
+    pub successful_swaps: u32,
+    /// Lifetime swaps failed (timeout_swap quorum). Monotonic, never resets. Off-chain strike-out gate:
+    /// `failed_swaps > 2` => no emissions (recover by re-registering).
+    pub failed_swaps: u32,
     /// Stored PDA bump.
     pub bump: u8,
 }

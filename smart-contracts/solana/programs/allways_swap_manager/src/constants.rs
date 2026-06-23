@@ -44,9 +44,9 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v6: runtime config setters
-/// (fee/window/interval promoted to Config); see git history for the v2–v5 progression.
-pub const CONFIG_VERSION: u32 = 6;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v7: scoring read-surface
+/// (MinerState success/fail counters; volume/VWAP + claims to follow); see git history for v2–v6.
+pub const CONFIG_VERSION: u32 = 7;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;

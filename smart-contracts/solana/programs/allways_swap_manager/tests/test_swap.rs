@@ -490,6 +490,7 @@ fn test_fulfill_confirm_fee_and_invariant() {
     send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
 
     let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 0, "no success credit before confirm quorum");
     send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
@@ -502,6 +503,8 @@ fn test_fulfill_confirm_fee_and_invariant() {
         "fees accrued to treasury"
     );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "success counter bumped on confirm quorum");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 0, "no failure on a completed swap");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
 }
@@ -533,6 +536,8 @@ fn test_timeout_slash_refund_and_invariant() {
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - slash, "collateral slashed 1.1x");
     assert_eq!(lamports(&svm, &user.pubkey()), user_before + slash, "user refunded full 1.1x slash");
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 1, "failure counter bumped on timeout quorum");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 0, "no success on a timed-out swap");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after slash");
 }

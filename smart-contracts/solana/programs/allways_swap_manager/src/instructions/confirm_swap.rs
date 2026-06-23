@@ -101,6 +101,8 @@ pub fn handler(ctx: Context<ConfirmSwap>, swap_key: [u8; 32]) -> Result<()> {
         }
         ctx.accounts.miner_state.has_active_swap = false;
         ctx.accounts.miner_state.busy_until = 0;
+        ctx.accounts.miner_state.successful_swaps =
+            ctx.accounts.miner_state.successful_swaps.saturating_add(1);
 
         reset_round(&mut ctx.accounts.vote_round);
         ctx.accounts.swap.close(ctx.accounts.validator.to_account_info())?;
