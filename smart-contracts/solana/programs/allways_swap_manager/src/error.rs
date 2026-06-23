@@ -69,6 +69,10 @@ pub enum ErrorCode {
     InvalidStatus,
     #[msg("Swap has not reached its timeout yet")]
     NotTimedOut,
+    #[msg("Extension target must be later than the current deadline")]
+    ExtensionNotLater,
+    #[msg("Extension target exceeds the deadline's absolute ceiling")]
+    ExtensionExceedsCeiling,
 
     // --- Phase 6: treasury ---
     #[msg("Withdrawal exceeds the accrued treasury balance")]

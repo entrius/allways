@@ -99,6 +99,9 @@ pub mod allways_swap_manager {
     pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_weights_update_min_interval(ctx, secs)
     }
+    pub fn set_max_total_extension(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_max_total_extension(ctx, secs)
+    }
     /// Set a validator's draw weight (admin bootstrap/fallback; superseded for routine use
     /// by the consensus path below).
     pub fn set_validator_weight(
@@ -200,6 +203,22 @@ pub mod allways_swap_manager {
     /// Validators time out an overdue swap (slash → user refund; swap closed) on quorum.
     pub fn timeout_swap(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         timeout_swap::handler(ctx, swap_key)
+    }
+
+    // --- Deadline extensions (single validator, no quorum; bounded by a frozen ceiling) ---
+    /// A validator slides a reservation's deadline forward while it waits on slow source-chain
+    /// confirmation. Bounded by the per-reservation ceiling frozen at creation.
+    pub fn extend_reservation(ctx: Context<ExtendReservation>, target_at: i64) -> Result<()> {
+        extend_reservation::handler(ctx, target_at)
+    }
+    /// A validator slides a swap's fulfillment timeout forward while it waits on slow destination-chain
+    /// confirmation. Bounded by the per-swap ceiling frozen at creation.
+    pub fn extend_timeout(
+        ctx: Context<ExtendTimeout>,
+        swap_key: [u8; 32],
+        target_at: i64,
+    ) -> Result<()> {
+        extend_timeout::handler(ctx, swap_key, target_at)
     }
 
     // --- Treasury ---

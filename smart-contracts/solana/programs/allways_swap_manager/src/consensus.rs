@@ -57,6 +57,16 @@ pub fn weights_hash(validators: &[ValidatorInfo], weights: &[u64]) -> [u8; 32] {
     hashv(&refs).to_bytes()
 }
 
+/// Assert `validator` is whitelisted — for consensus-free validator actions (deadline extensions)
+/// that gate on membership but open no vote round.
+pub fn ensure_validator(config: &Config, validator: &Pubkey) -> Result<()> {
+    require!(
+        config.validators.iter().any(|v| &v.key == validator),
+        ErrorCode::NotValidator
+    );
+    Ok(())
+}
+
 /// Record a validator's vote into `round`; returns true iff quorum is now reached.
 /// (Re)initializes a fresh or stale round, binds params via `bound_hash`, and dedupes voters.
 pub fn record_vote<'info>(
