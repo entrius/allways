@@ -35,6 +35,11 @@ pub const TX_SEED: &[u8] = b"tx";
 #[constant]
 pub const QUOTE_SEED: &[u8] = b"quote";
 
+/// PDA seed prefix for a miner's realized per-direction stats
+/// (`seeds = [STATS_SEED, miner_pubkey, from_chain, to_chain]`).
+#[constant]
+pub const STATS_SEED: &[u8] = b"stats";
+
 /// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";

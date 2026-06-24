@@ -50,6 +50,13 @@ pub struct SwapCompleted {
     pub sol_amount: u64,
     /// Protocol fee taken from collateral into the treasury (lamports).
     pub fee: u64,
+    /// Direction + realized leg amounts + executed rate, for off-chain per-swap history (so indexers
+    /// don't re-read the now-closed Swap). Feeds the realized volume/VWAP track record (A2).
+    pub from_chain: String,
+    pub to_chain: String,
+    pub from_amount: u128,
+    pub to_amount: u128,
+    pub rate: String,
 }
 
 #[event]

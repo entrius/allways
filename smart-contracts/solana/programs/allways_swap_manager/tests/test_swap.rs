@@ -6,7 +6,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Swap, Treasury},
+    allways_swap_manager::state::{MinerDirectionStats, MinerState, Swap, Treasury},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -26,6 +26,8 @@ const TTL: i64 = 1_800;
 const TIMEOUT_SECS: i64 = 3_600;
 const COLLATERAL: u64 = 10_000_000_000; // 10 SOL
 const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL swap size
+const FROM_AMOUNT: u128 = 100_000; // source leg (asset-native units)
+const TO_AMOUNT: u128 = 150_000; // dest leg → realized VWAP = to/from = 1.5 (matches RATE)
 
 // reservation quote (must be consistent reserve→initiate)
 const FROM_ADDR: &str = "userBTCaddr";
@@ -58,6 +60,9 @@ fn resv_pda(m: &Pubkey) -> Pubkey {
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
     Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
+fn stats_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"stats", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
@@ -175,8 +180,8 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             user_from_addr: FROM_ADDR.to_string(),
             user_to_addr: "userSOLaddr".to_string(),
             sol_amount: SOL_AMOUNT,
-            from_amount: 100_000,
-            to_amount: 0,
+            from_amount: FROM_AMOUNT,
+            to_amount: TO_AMOUNT,
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -262,7 +267,12 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
+        &allways_swap_manager::instruction::ConfirmSwap {
+            swap_key: key,
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+        }
+        .data(),
         allways_swap_manager::accounts::ConfirmSwap {
             validator: *validator,
             config: config_pda(),
@@ -271,6 +281,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
+            direction_stats: stats_pda(miner, FROM_CHAIN, TO_CHAIN),
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -300,6 +311,10 @@ fn timeout_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey, from_tx_hash: &
 fn miner_state(svm: &LiteSVM, m: &Pubkey) -> MinerState {
     let a = svm.get_account(&miner_pda(m)).unwrap();
     MinerState::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+fn direction_stats(svm: &LiteSVM, m: &Pubkey, f: &str, t: &str) -> MinerDirectionStats {
+    let a = svm.get_account(&stats_pda(m, f, t)).unwrap();
+    MinerDirectionStats::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
 fn treasury_total(svm: &LiteSVM) -> u64 {
     let a = svm.get_account(&treasury_pda()).unwrap();
@@ -505,6 +520,17 @@ fn test_fulfill_confirm_fee_and_invariant() {
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "success counter bumped on confirm quorum");
     assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 0, "no failure on a completed swap");
+    // realized per-direction stats accrued on the completed swap
+    let st = direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN);
+    assert_eq!(st.miner, miner.pubkey());
+    assert_eq!(st.from_chain, FROM_CHAIN);
+    assert_eq!(st.to_chain, TO_CHAIN);
+    assert_eq!(st.completed, 1, "one completed swap");
+    assert_eq!(st.total_sol_amount, SOL_AMOUNT as u128);
+    assert_eq!(st.total_from_amount, FROM_AMOUNT);
+    assert_eq!(st.total_to_amount, TO_AMOUNT);
+    // realized VWAP = to/from = 1.5
+    assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP 1.5");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
 }
@@ -538,6 +564,8 @@ fn test_timeout_slash_refund_and_invariant() {
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
     assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 1, "failure counter bumped on timeout quorum");
     assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 0, "no success on a timed-out swap");
+    // a timed-out swap accrues NO direction stats (timeout_swap has no stats account)
+    assert!(svm.get_account(&stats_pda(&miner.pubkey(), FROM_CHAIN, TO_CHAIN)).is_none(), "no stats on timeout");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after slash");
 }
@@ -559,4 +587,47 @@ fn test_replay_guard_survives_completion() {
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     let replay = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "userSOLaddr"), &vals[0].pubkey(), &vals[0]);
     assert!(replay.is_err(), "reused source tx must be rejected even after the swap closed");
+}
+
+fn run_full_swap(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, tx: &str, user: &Pubkey) {
+    do_initiate(svm, vals, &miner.pubkey(), tx, user);
+    send(svm, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), miner).expect("fulfill");
+    send(svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("c0");
+    send(svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), tx), &vals[1].pubkey(), &vals[1]).expect("c1");
+}
+
+#[test]
+fn test_stats_accumulate_same_direction() {
+    let (mut svm, vals, miner, _rent) = setup();
+    let user = Keypair::new().pubkey();
+
+    run_full_swap(&mut svm, &vals, &miner, "srctx1", &user);
+    assert_eq!(direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN).completed, 1);
+
+    // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction
+    do_reserve(&mut svm, &vals[0], &miner.pubkey());
+    run_full_swap(&mut svm, &vals, &miner, "srctx2", &user);
+
+    // same PDA, accumulated across both swaps
+    let st = direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN);
+    assert_eq!(st.completed, 2, "two completed swaps accumulate");
+    assert_eq!(st.total_sol_amount, 2 * SOL_AMOUNT as u128);
+    assert_eq!(st.total_from_amount, 2 * FROM_AMOUNT);
+    assert_eq!(st.total_to_amount, 2 * TO_AMOUNT);
+    assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP still 1.5");
+}
+
+#[test]
+fn test_stats_separate_per_direction() {
+    let (mut svm, vals, miner, _rent) = setup();
+    let user = Keypair::new().pubkey();
+    run_full_swap(&mut svm, &vals, &miner, "srctx1", &user);
+
+    // the forward (BTC→SOL) direction accrued; the reverse-direction PDA was never created — directions
+    // do not collide into one stats account.
+    assert_eq!(direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN).completed, 1);
+    assert!(
+        svm.get_account(&stats_pda(&miner.pubkey(), TO_CHAIN, FROM_CHAIN)).is_none(),
+        "reverse-direction stats PDA not created"
+    );
 }

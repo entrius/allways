@@ -340,7 +340,12 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
+        &allways_swap_manager::instruction::ConfirmSwap {
+            swap_key: key,
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+        }
+        .data(),
         allways_swap_manager::accounts::ConfirmSwap {
             validator: *validator,
             config: config_pda(),
@@ -349,6 +354,11 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
+            direction_stats: Pubkey::find_program_address(
+                &[b"stats", miner.as_ref(), FROM_CHAIN.as_bytes(), TO_CHAIN.as_bytes()],
+                &pid(),
+            )
+            .0,
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -507,7 +517,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 6, "schema version");
+    assert_eq!(cfg.version, 7, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);

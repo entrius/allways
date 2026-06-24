@@ -69,6 +69,8 @@ pub enum ErrorCode {
     InvalidStatus,
     #[msg("Swap has not reached its timeout yet")]
     NotTimedOut,
+    #[msg("from_chain/to_chain args do not match the swap")]
+    ChainMismatch,
 
     // --- Phase 6: treasury ---
     #[msg("Withdrawal exceeds the accrued treasury balance")]

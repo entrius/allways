@@ -194,8 +194,13 @@ pub mod allways_swap_manager {
         mark_fulfilled::handler(ctx, swap_key, to_tx_hash, to_tx_block)
     }
     /// Validators confirm a fulfilled swap (1% fee → treasury; swap closed) on quorum.
-    pub fn confirm_swap(ctx: Context<ConfirmSwap>, swap_key: [u8; 32]) -> Result<()> {
-        confirm_swap::handler(ctx, swap_key)
+    pub fn confirm_swap(
+        ctx: Context<ConfirmSwap>,
+        swap_key: [u8; 32],
+        from_chain: String,
+        to_chain: String,
+    ) -> Result<()> {
+        confirm_swap::handler(ctx, swap_key, from_chain, to_chain)
     }
     /// Validators time out an overdue swap (slash → user refund; swap closed) on quorum.
     pub fn timeout_swap(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {

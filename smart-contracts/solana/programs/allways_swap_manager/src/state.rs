@@ -243,6 +243,32 @@ pub struct MinerQuote {
     pub bump: u8,
 }
 
+/// A miner's realized per-direction track record (`seeds = [STATS_SEED, miner, from_chain, to_chain]`).
+///
+/// Accrued by `confirm_swap` on quorum (one row per (miner, from_chain, to_chain)); never closed. Lets
+/// the off-chain validator read realized volume + the executed rate via `getProgramAccounts` instead of
+/// a local ledger. Realized VWAP for the direction = `total_to_amount / total_from_amount` (exact
+/// integer math, no on-chain rate-string parse). `total_sol_amount` is the collateral-backed SOL volume
+/// (normalized, cross-direction-comparable); the from/to amounts are the off-chain legs in their own units.
+#[account]
+#[derive(InitSpace)]
+pub struct MinerDirectionStats {
+    pub miner: Pubkey,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    /// Count of completed (confirmed) swaps in this direction.
+    pub completed: u32,
+    /// Sum of the collateral-backed SOL size over completed swaps (lamports).
+    pub total_sol_amount: u128,
+    /// Sum of the source/destination leg amounts over completed swaps (asset-native units).
+    pub total_from_amount: u128,
+    pub total_to_amount: u128,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
 /// One validator's entry into a reservation lottery `Pool`. Carries only the taker-side intent;
 /// the miner quote is the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]

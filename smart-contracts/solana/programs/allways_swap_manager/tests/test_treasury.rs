@@ -172,8 +172,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
 
     let confirm = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
-            &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
-            allways_swap_manager::accounts::ConfirmSwap { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), treasury: treasury_pda(), swap: swap_pda(&key), vote_round: vote_pda(6, &key), system_program: SYS }.to_account_metas(None),
+            &allways_swap_manager::instruction::ConfirmSwap { swap_key: key, from_chain: "BTC".to_string(), to_chain: "SOL".to_string() }.data(),
+            allways_swap_manager::accounts::ConfirmSwap { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), treasury: treasury_pda(), swap: swap_pda(&key), direction_stats: Pubkey::find_program_address(&[b"stats", miner.pubkey().as_ref(), "BTC".as_bytes(), "SOL".as_bytes()], &pid()).0, vote_round: vote_pda(6, &key), system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("confirm");
     };
     confirm(&mut svm, &vals[0]);
