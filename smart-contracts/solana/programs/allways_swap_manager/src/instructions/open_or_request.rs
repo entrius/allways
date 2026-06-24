@@ -9,14 +9,18 @@ use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
 use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Treasury};
 
-/// A validator opens (or joins) a per-miner reservation-lottery pool for a pair. First caller opens
-/// and pins the miner's quote; later in-window callers add one request each (same pinned pair). Every
-/// call pays a flat, non-refundable reservation fee (validator -> vault) — the anti-spam gate.
+/// Any account (validator OR plain user — entry is permissionless) opens or joins a per-miner
+/// reservation-lottery pool for a pair. First caller opens and pins the miner's quote; later in-window
+/// callers add one request each (same pinned pair). Every fresh entry pays a flat, non-refundable
+/// reservation fee (router -> treasury) — the anti-spam gate. A non-validator router gets lottery
+/// weight 0 (loses to validators / uniform among users) and, if it wins, flags down a validator to
+/// claim + attest (those are validator-gated).
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String)]
 pub struct OpenOrRequest<'info> {
+    /// The router of this request — a whitelisted validator OR a plain user (entry is permissionless).
     #[account(mut)]
-    pub validator: Signer<'info>,
+    pub router: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
@@ -41,7 +45,7 @@ pub struct OpenOrRequest<'info> {
 
     #[account(
         init_if_needed,
-        payer = validator,
+        payer = router,
         space = 8 + Pool::INIT_SPACE,
         seeds = [POOL_SEED, miner.key().as_ref()],
         bump,
@@ -56,7 +60,7 @@ pub struct OpenOrRequest<'info> {
     /// is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
     #[account(
         init_if_needed,
-        payer = validator,
+        payer = router,
         space = 8 + Reservation::INIT_SPACE,
         seeds = [RESV_SEED, miner.key().as_ref()],
         bump,
@@ -129,8 +133,8 @@ pub fn handler(
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
     require!(!active_reservation, ErrorCode::MinerReserved);
 
-    // Flat, non-refundable anti-spam fee: validator → treasury (subnet revenue). Charged only on a
-    // fresh entry (open or first join) — a same-validator in-window bid UPDATE is free, so refining a
+    // Flat, non-refundable anti-spam fee: router → treasury (subnet revenue). Charged only on a
+    // fresh entry (open or first join) — a same-router in-window bid UPDATE is free, so refining a
     // bid against the pinned rate isn't taxed.
     let is_update = ctx.accounts.pool.opened_at != 0
         && ctx
@@ -138,14 +142,14 @@ pub fn handler(
             .pool
             .requests
             .iter()
-            .any(|r| r.validator == ctx.accounts.validator.key());
+            .any(|r| r.router == ctx.accounts.router.key());
     if !is_update {
         let fee = ctx.accounts.config.reservation_fee_lamports;
         transfer(
             CpiContext::new(
                 ctx.accounts.system_program.key(),
                 Transfer {
-                    from: ctx.accounts.validator.to_account_info(),
+                    from: ctx.accounts.router.to_account_info(),
                     to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
@@ -160,9 +164,9 @@ pub fn handler(
     }
 
     let miner_key = ctx.accounts.miner.key();
-    let validator_key = ctx.accounts.validator.key();
+    let router_key = ctx.accounts.router.key();
     let req = Request {
-        validator: validator_key,
+        router: router_key,
         user,
         user_from_addr,
         user_to_addr,
@@ -206,7 +210,7 @@ pub fn handler(
 
         emit!(PoolOpened {
             miner: miner_key,
-            opener: validator_key,
+            opener: router_key,
             from_chain,
             to_chain,
             closes_at,
@@ -220,9 +224,9 @@ pub fn handler(
             pool.from_chain == from_chain && pool.to_chain == to_chain,
             ErrorCode::MinerBusyDifferentPair
         );
-        // Upsert: a repeat call from the same validator updates its bid in place (dynamic bidding
-        // while the window is open); a new validator is appended, subject to the set cap.
-        if let Some(existing) = pool.requests.iter_mut().find(|r| r.validator == validator_key) {
+        // Upsert: a repeat call from the same router updates its bid in place (dynamic bidding
+        // while the window is open); a new router is appended, subject to the set cap.
+        if let Some(existing) = pool.requests.iter_mut().find(|r| r.router == router_key) {
             *existing = req;
         } else {
             require!(pool.requests.len() < MAX_VALIDATORS, ErrorCode::ValidatorSetFull);
@@ -231,7 +235,7 @@ pub fn handler(
 
         emit!(ReservationRequested {
             miner: miner_key,
-            validator: validator_key,
+            router: router_key,
             user,
             requests: pool.requests.len() as u8,
         });

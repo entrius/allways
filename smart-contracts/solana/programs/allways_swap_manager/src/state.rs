@@ -305,12 +305,13 @@ pub struct Binding {
     pub bump: u8,
 }
 
-/// One validator's entry into a reservation lottery `Pool`. Carries only the taker-side intent;
+/// One entry into a reservation lottery `Pool`. Carries only the taker-side intent;
 /// the miner quote is the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct Request {
-    /// The validator that routed this request (also the lottery weight key + dedup key).
-    pub validator: Pubkey,
+    /// The account that routed this request — a whitelisted validator OR a plain user (entry is
+    /// permissionless). Also the lottery weight key (0 if not whitelisted) and the dedup key.
+    pub router: Pubkey,
     /// The taker.
     pub user: Pubkey,
     #[max_len(MAX_ADDR_LEN)]
@@ -325,7 +326,7 @@ pub struct Request {
 
 /// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`).
 ///
-/// Opened by the first validator to route a request (pinning the miner's quote for the chosen pair);
+/// Opened by the first router to route a request (pinning the miner's quote for the chosen pair);
 /// later in-window requests must match that pair. `resolve_pool` runs a stake-weighted draw after
 /// `closes_at` and creates the winner's `Reservation`. Keyed per-miner; the account is reused across
 /// contests (`opened_at == 0` = available), reset rather than closed by `resolve_pool`.
@@ -350,7 +351,7 @@ pub struct Pool {
     pub closes_at: i64,
     /// Future slot whose SlotHash seeds the draw (pinned at open).
     pub seed_slot: u64,
-    /// Requests this contest (deduped by validator), capped at MAX_VALIDATORS.
+    /// Requests this contest (deduped by router), capped at MAX_VALIDATORS.
     #[max_len(MAX_VALIDATORS)]
     pub requests: Vec<Request>,
     /// Stored PDA bump.

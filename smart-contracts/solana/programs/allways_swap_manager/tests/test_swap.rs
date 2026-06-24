@@ -185,7 +185,7 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            validator: *validator,
+            router: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),

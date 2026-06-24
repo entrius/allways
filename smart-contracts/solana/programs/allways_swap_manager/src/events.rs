@@ -163,7 +163,7 @@ pub struct PoolOpened {
 #[event]
 pub struct ReservationRequested {
     pub miner: Pubkey,
-    pub validator: Pubkey,
+    pub router: Pubkey,
     pub user: Pubkey,
     /// Number of requests in the pool after this one.
     pub requests: u8,
@@ -172,7 +172,7 @@ pub struct ReservationRequested {
 #[event]
 pub struct PoolResolved {
     pub miner: Pubkey,
-    /// The validator whose request won the draw.
+    /// The winning router (a validator or a plain user).
     pub winner: Pubkey,
     pub user: Pubkey,
     /// How many requests contended.

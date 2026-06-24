@@ -101,8 +101,8 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         None => draw_seed(&pool_key, &seed_slot.to_le_bytes()),
     };
 
-    // Weight per request = its validator's config weight (0 if removed). pick_weighted falls back to
-    // uniform if every weight is 0.
+    // Weight per request = its router's config weight (0 if the router isn't a whitelisted validator —
+    // e.g. a plain user). pick_weighted falls back to uniform if every weight is 0.
     let weights: Vec<u64> = ctx
         .accounts
         .pool
@@ -113,7 +113,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
                 .config
                 .validators
                 .iter()
-                .find(|v| v.key == r.validator)
+                .find(|v| v.key == r.router)
                 .map(|v| v.weight)
                 .unwrap_or(0)
         })
@@ -167,7 +167,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
 
     emit!(PoolResolved {
         miner: miner_key,
-        winner: winner.validator,
+        winner: winner.router,
         user: winner.user,
         requests: req_count,
     });
