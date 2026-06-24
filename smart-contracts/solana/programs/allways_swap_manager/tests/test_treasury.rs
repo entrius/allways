@@ -155,7 +155,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     // claim the source tx on-chain (PendingAttestation), then attest it to quorum
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::SubmitSwapClaim { swap_key: key, from_tx_hash: "tx1".to_string(), from_tx_block: 1 }.data(),
-        allways_swap_manager::accounts::SubmitSwapClaim { caller: vals[0].pubkey(), miner: miner.pubkey(), reservation: resv_pda(&miner.pubkey()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::SubmitSwapClaim { caller: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), reservation: resv_pda(&miner.pubkey()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("claim");
     let initiate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),

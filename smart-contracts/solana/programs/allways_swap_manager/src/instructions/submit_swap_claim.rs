@@ -1,21 +1,27 @@
 use anchor_lang::prelude::*;
 use solana_keccak_hasher::hashv;
 
-use crate::constants::{MAX_TX_LEN, RESV_SEED, SWAP_SEED};
+use crate::consensus::ensure_validator;
+use crate::constants::{CONFIG_SEED, MAX_TX_LEN, RESV_SEED, SWAP_SEED};
 use crate::error::ErrorCode;
 use crate::events::SwapClaimed;
-use crate::state::{Reservation, Swap, SwapStatus};
+use crate::state::{Config, Reservation, Swap, SwapStatus};
 
-/// Permissionless: the reservation holder records their source-tx hash on-chain, creating the Swap in
-/// `PendingAttestation`. All terms (incl. the pinned user/payout) are copied from the immutable
-/// Reservation — never from args — so a front-runner can't redirect the payout. Sets NO miner
-/// obligation (no `timeout_at`, no `miner_state` write); validators attest via `vote_initiate`. One
-/// live claim per reservation, enforced by `Reservation.claimed_swap_key`.
+/// Validator-relayed: a whitelisted validator records the winner's source-tx hash on-chain (the user
+/// flags one down with their deposit; only validators can settle anyway, as the BTC oracle), creating
+/// the Swap in `PendingAttestation`. Gating the caller to validators removes the front-run/squat surface
+/// of a permissionless claim — an anonymous attacker has no instruction to spam. All terms (incl. the
+/// pinned user/payout) are still copied from the immutable Reservation, never from args. Sets NO miner
+/// obligation; validators attest via `vote_initiate`. One live claim per reservation
+/// (`Reservation.claimed_swap_key`).
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct SubmitSwapClaim<'info> {
     #[account(mut)]
     pub caller: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
 
     /// CHECK: bound via the reservation/swap PDA seeds.
     pub miner: UncheckedAccount<'info>,
@@ -42,6 +48,11 @@ pub fn handler(
     from_tx_hash: String,
     from_tx_block: u32,
 ) -> Result<()> {
+    // Validator-relay gate: only a whitelisted validator may put a deposit on-chain (no anonymous
+    // claim to squat / make others RPC-chase). Participation stays open — anyone wins the pool draw;
+    // the winner just flags down a validator to relay + attest.
+    ensure_validator(&ctx.accounts.config, &ctx.accounts.caller.key())?;
+
     require!(from_tx_hash.len() <= MAX_TX_LEN, ErrorCode::StringTooLong);
     require!(
         swap_key == hashv(&[from_tx_hash.as_bytes()]).to_bytes(),

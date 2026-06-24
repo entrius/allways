@@ -300,6 +300,7 @@ fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction 
         .data(),
         allways_swap_manager::accounts::SubmitSwapClaim {
             caller: *caller,
+            config: config_pda(),
             miner: *miner,
             reservation: resv_pda(miner),
             swap: swap_pda(&key),

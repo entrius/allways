@@ -227,6 +227,7 @@ fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction 
         .data(),
         allways_swap_manager::accounts::SubmitSwapClaim {
             caller: *caller,
+            config: config_pda(),
             miner: *miner,
             reservation: resv_pda(miner),
             swap: swap_pda(&key),
@@ -485,6 +486,18 @@ fn test_claim_creates_pending() {
     assert_ne!(r.reserved_until, 0, "reservation still live");
     assert_eq!(r.claimed_swap_key, key, "claim slot taken");
     assert!(r.created_at > 0, "resolve_pool stamped created_at (the source-freshness bound)");
+}
+
+#[test]
+fn test_claim_requires_validator() {
+    // The claim is validator-relayed: a non-validator caller is rejected, so there's no anonymous claim
+    // to squat the slot / make validators RPC-chase. Participation stays open via the pool draw; only
+    // the on-chain relay of the deposit is gated to validators.
+    let (mut svm, _vals, miner, _rent) = setup();
+    let attacker = Keypair::new();
+    svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let res = send(&mut svm, claim_ix(&attacker.pubkey(), &miner.pubkey(), "srctx1"), &attacker.pubkey(), &attacker);
+    assert!(res.is_err(), "non-validator claim must be rejected (validator-relay gate)");
 }
 
 #[test]
