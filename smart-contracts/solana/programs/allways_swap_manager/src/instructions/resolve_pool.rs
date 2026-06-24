@@ -142,6 +142,8 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     let r = &mut ctx.accounts.reservation;
     r.bound_hash = [0u8; 32]; // unused post-lottery (no consensus binding); reserved_until is the sentinel
     r.from_addr = winner.user_from_addr;
+    r.user = winner.user; // pin taker + payout so a permissionless claim can't redirect it
+    r.user_to_addr = winner.user_to_addr;
     r.from_chain = from_chain;
     r.to_chain = to_chain;
     r.sol_amount = winner.sol_amount;
@@ -152,6 +154,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.rate = rate;
     r.reserved_until = now.saturating_add(ttl);
     r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
+    r.claimed_swap_key = [0u8; 32]; // fresh contest → no live claim (clears any stale prior key)
     r.bump = reservation_bump;
 
     // Lock the miner busy for the reservation's life (read by deactivate/withdraw, non-bypassable).

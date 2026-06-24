@@ -134,6 +134,11 @@ pub struct Reservation {
     /// User's source-chain address (the reserver).
     #[max_len(MAX_ADDR_LEN)]
     pub from_addr: String,
+    /// Pinned taker + payout address (from the winning lottery Request) — copied to the Swap at claim
+    /// so a permissionless `submit_swap_claim` can't redirect the payout (front-run defense).
+    pub user: Pubkey,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_to_addr: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
@@ -156,16 +161,22 @@ pub struct Reservation {
     /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
     /// initial deadline + the Config budget then, so a later retune can't move an in-flight ceiling.
     pub max_extend_at: i64,
+    /// The one live claim's swap_key (`[0;32]` = none). Enforces one pending claim per reservation:
+    /// set by `submit_swap_claim`, cleared on `vote_initiate` consume / `close_stale_claim` / a new
+    /// `resolve_pool`.
+    pub claimed_swap_key: [u8; 32],
     /// Stored PDA bump.
     pub bump: u8,
 }
 
-/// Swap lifecycle status. Terminal states (Completed/TimedOut) are not stored — the Swap PDA is
-/// closed on confirm/timeout — so only the two live states exist here.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+/// Swap lifecycle status. `PendingAttestation` = source-tx claim recorded, not yet attested (no miner
+/// obligation). Terminal states (Completed/TimedOut) aren't stored — the Swap PDA is closed on
+/// confirm/timeout. New variant appended last to keep Active/Fulfilled discriminants stable.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum SwapStatus {
     Active,
     Fulfilled,
+    PendingAttestation,
 }
 
 /// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).

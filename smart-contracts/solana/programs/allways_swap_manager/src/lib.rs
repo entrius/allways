@@ -167,25 +167,25 @@ pub mod allways_swap_manager {
     }
 
     // --- Swap lifecycle ---
-    /// A validator votes to initiate a swap against an active reservation (created on quorum).
-    pub fn vote_initiate(
-        ctx: Context<VoteInitiate>,
+    /// Permissionless: the reservation holder records their source-tx hash on-chain, creating the swap
+    /// in `PendingAttestation` (all terms copied from the immutable reservation; no miner obligation).
+    pub fn submit_swap_claim(
+        ctx: Context<SubmitSwapClaim>,
         swap_key: [u8; 32],
         from_tx_hash: String,
         from_tx_block: u32,
-        user: Pubkey,
-        user_from_address: String,
-        user_to_address: String,
     ) -> Result<()> {
-        vote_initiate::handler(
-            ctx,
-            swap_key,
-            from_tx_hash,
-            from_tx_block,
-            user,
-            user_from_address,
-            user_to_address,
-        )
+        submit_swap_claim::handler(ctx, swap_key, from_tx_hash, from_tx_block)
+    }
+    /// Validators attest a pending claim (`PendingAttestation` → `Active` on quorum); the miner's
+    /// obligation deadline starts here.
+    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
+        vote_initiate::handler(ctx, swap_key)
+    }
+    /// Permissionless: reap an orphaned `PendingAttestation` claim whose reservation expired (rent →
+    /// caller; frees the reservation's claim slot).
+    pub fn close_stale_claim(ctx: Context<CloseStaleClaim>, swap_key: [u8; 32]) -> Result<()> {
+        close_stale_claim::handler(ctx, swap_key)
     }
     /// Miner records destination fulfillment (tx hash/block); Active → Fulfilled.
     pub fn mark_fulfilled(

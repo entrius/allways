@@ -71,6 +71,12 @@ pub enum ErrorCode {
     NotTimedOut,
     #[msg("from_chain/to_chain args do not match the swap")]
     ChainMismatch,
+    #[msg("Swap is not in PendingAttestation status")]
+    NotPending,
+    #[msg("Reservation already has a live claim")]
+    ClaimAlreadyExists,
+    #[msg("Claim's reservation has not expired; cannot reap")]
+    ClaimNotExpired,
     #[msg("Extension target must be later than the current deadline")]
     ExtensionNotLater,
     #[msg("Extension target exceeds the deadline's absolute ceiling")]

@@ -23,6 +23,24 @@ pub struct CollateralWithdrawn {
 
 // --- Phase 4: swap lifecycle (keyed by swap_key = keccak(from_tx_hash)) ---
 
+/// A reservation holder recorded their source-tx hash on-chain (PendingAttestation). No miner
+/// obligation yet — validators attest it via `vote_initiate`.
+#[event]
+pub struct SwapClaimed {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub user: Pubkey,
+    pub from_tx_hash: String,
+    pub from_tx_block: u32,
+}
+
+/// A stale (never-attested, reservation-expired) PendingAttestation claim was reaped.
+#[event]
+pub struct StaleClaimClosed {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+}
+
 #[event]
 pub struct SwapInitiated {
     pub swap_key: [u8; 32],
