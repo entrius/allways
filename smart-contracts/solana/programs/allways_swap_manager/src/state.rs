@@ -129,13 +129,11 @@ pub struct VoteRound {
 #[account]
 #[derive(InitSpace)]
 pub struct Reservation {
-    /// keccak-256 binding (miner, from_addr, chains, amounts) — same preimage validators voted on.
-    pub bound_hash: [u8; 32],
     /// User's source-chain address (the reserver).
     #[max_len(MAX_ADDR_LEN)]
     pub from_addr: String,
     /// Pinned taker + payout address (from the winning lottery Request) — copied to the Swap at claim
-    /// so a permissionless `submit_swap_claim` can't redirect the payout (front-run defense).
+    /// so the validator-relayed `submit_swap_claim` can't redirect the payout (front-run defense).
     pub user: Pubkey,
     #[max_len(MAX_ADDR_LEN)]
     pub user_to_addr: String,

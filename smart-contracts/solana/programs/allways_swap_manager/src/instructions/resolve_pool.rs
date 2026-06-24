@@ -134,15 +134,13 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         )
     };
 
-    // Create the Reservation for the winner — same shape vote_reserve produced, so everything
-    // downstream is unchanged.
+    // Create the Reservation for the winner (lottery is the only path to a reservation).
     let ttl = ctx.accounts.config.reservation_ttl_secs;
     let extension_budget = ctx.accounts.config.max_total_extension_secs;
     let reservation_bump = ctx.bumps.reservation;
     let r = &mut ctx.accounts.reservation;
-    r.bound_hash = [0u8; 32]; // unused post-lottery (no consensus binding); reserved_until is the sentinel
     r.from_addr = winner.user_from_addr;
-    r.user = winner.user; // pin taker + payout so a permissionless claim can't redirect it
+    r.user = winner.user; // pin taker + payout so the validator-relayed claim can't redirect it
     r.user_to_addr = winner.user_to_addr;
     r.from_chain = from_chain;
     r.to_chain = to_chain;
