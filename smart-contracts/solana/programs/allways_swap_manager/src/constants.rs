@@ -40,6 +40,10 @@ pub const QUOTE_SEED: &[u8] = b"quote";
 #[constant]
 pub const STATS_SEED: &[u8] = b"stats";
 
+/// PDA seed prefix for a miner's hotkey↔pubkey identity binding (`seeds = [BIND_SEED, miner_pubkey]`).
+#[constant]
+pub const BIND_SEED: &[u8] = b"bind";
+
 /// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
@@ -49,10 +53,10 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v8: merges the scoring
-/// read-surface (MinerState success/fail counters + MinerDirectionStats volume/VWAP) with #493's
-/// deadline extensions (max_total_extension_secs in Config); see git history for v2–v7.
-pub const CONFIG_VERSION: u32 = 8;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v9: A5 hotkey↔pubkey identity
+/// binding (`Binding` PDA + `bind_hotkey`). v8 merged the scoring read-surface (A1/A2) with #493's
+/// deadline extensions; see git history for v2–v8.
+pub const CONFIG_VERSION: u32 = 9;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;

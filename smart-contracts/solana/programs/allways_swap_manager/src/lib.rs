@@ -262,4 +262,15 @@ pub mod allways_swap_manager {
     ) -> Result<()> {
         remove_quote::handler(ctx, from_chain, to_chain)
     }
+
+    // --- Identity binding ---
+    /// A miner links its Solana pubkey to its Bittensor hotkey (stores the hotkey + an sr25519 sig the
+    /// validator verifies off-chain). Overwrites in place on re-bind.
+    pub fn bind_hotkey(
+        ctx: Context<BindHotkey>,
+        hotkey: [u8; 32],
+        hotkey_sig: [u8; 64],
+    ) -> Result<()> {
+        bind_hotkey::handler(ctx, hotkey, hotkey_sig)
+    }
 }

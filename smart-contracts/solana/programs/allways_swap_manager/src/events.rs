@@ -139,6 +139,15 @@ pub struct QuoteRemoved {
     pub remove_fee: u64,
 }
 
+/// A miner (re)bound its Bittensor hotkey to its Solana pubkey (A5). The sr25519 signature lives on the
+/// `Binding` PDA; the validator verifies it off-chain.
+#[event]
+pub struct HotkeyBound {
+    pub miner: Pubkey,
+    pub hotkey: [u8; 32],
+    pub bound_at: i64,
+}
+
 // --- Phase 9: reservation lottery (pool keyed per miner) ---
 
 #[event]

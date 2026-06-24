@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod bind_hotkey;
 pub mod close_stale_claim;
 pub mod confirm_swap;
 pub mod deactivate;
@@ -24,6 +25,7 @@ pub mod withdraw_treasury;
 // (Emits a benign "ambiguous glob re-exports" warning for the shared `handler` name;
 // handlers are always called fully-qualified, e.g. `initialize::handler`.)
 pub use admin::*;
+pub use bind_hotkey::*;
 pub use close_stale_claim::*;
 pub use confirm_swap::*;
 pub use deactivate::*;

@@ -25,7 +25,8 @@ use {
         InstructionData, ToAccountMetas,
     },
     allways_swap_manager::state::{
-        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury, TxMarker,
+        Binding, Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury,
+        TxMarker,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -524,7 +525,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 8, "schema version");
+    assert_eq!(cfg.version, 9, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -874,6 +875,21 @@ fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
     )
     .0
 }
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
+fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::BindHotkey { hotkey, hotkey_sig }.data(),
+        allways_swap_manager::accounts::BindHotkey {
+            miner: *miner,
+            binding: bind_pda(miner),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
 
 fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Instruction {
     Instruction::new_with_bytes(
@@ -955,6 +971,25 @@ fn onchain_remove_quote_closes_pda() {
 
     send(&rpc, remove_quote_ix(&miner.pubkey(), "BTC", "SOL"), &miner.pubkey(), &miner).expect("remove");
     assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote closed after remove");
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_bind_hotkey() {
+    let _ = shared();
+    let rpc = rpc();
+    let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
+    let hotkey = [9u8; 32];
+    let sig = [3u8; 64];
+
+    send(&rpc, bind_ix(&miner.pubkey(), hotkey, sig), &miner.pubkey(), &miner).expect("bind_hotkey");
+
+    let a = rpc.get_account(&bind_pda(&miner.pubkey())).expect("binding account");
+    let b = Binding::try_deserialize(&mut a.data.as_slice()).unwrap();
+    assert_eq!(b.miner, miner.pubkey());
+    assert_eq!(b.hotkey, hotkey);
+    assert_eq!(b.hotkey_sig, sig);
+    assert!(b.bound_at > 0, "bound_at set from on-chain clock");
 }
 
 #[test]

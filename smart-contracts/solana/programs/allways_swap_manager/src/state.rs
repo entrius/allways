@@ -289,6 +289,25 @@ pub struct MinerDirectionStats {
     pub bump: u8,
 }
 
+/// Per-miner identity binding (`seeds = [BIND_SEED, miner]`): links a miner's Solana pubkey to its
+/// Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;
+/// the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it
+/// off-chain and enforces 1:1 + first-seen pinning. Overwritable in place (the validator pins policy).
+#[account]
+#[derive(InitSpace)]
+pub struct Binding {
+    /// The miner's Solana pubkey (== seed; stored for `getProgramAccounts` convenience).
+    pub miner: Pubkey,
+    /// Bittensor hotkey (sr25519 public key).
+    pub hotkey: [u8; 32],
+    /// sr25519 signature by `hotkey` over the miner pubkey — validator-verified off-chain.
+    pub hotkey_sig: [u8; 64],
+    /// Unix timestamp of the last (re)bind (staleness signal for off-chain consumers).
+    pub bound_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
 /// One validator's entry into a reservation lottery `Pool`. Carries only the taker-side intent;
 /// the miner quote is the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
