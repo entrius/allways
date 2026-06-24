@@ -137,6 +137,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     // Create the Reservation for the winner — same shape vote_reserve produced, so everything
     // downstream is unchanged.
     let ttl = ctx.accounts.config.reservation_ttl_secs;
+    let extension_budget = ctx.accounts.config.max_total_extension_secs;
     let reservation_bump = ctx.bumps.reservation;
     let r = &mut ctx.accounts.reservation;
     r.bound_hash = [0u8; 32]; // unused post-lottery (no consensus binding); reserved_until is the sentinel
@@ -150,6 +151,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
     r.reserved_until = now.saturating_add(ttl);
+    r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
     r.bump = reservation_bump;
 
     // Lock the miner busy for the reservation's life (read by deactivate/withdraw, non-bypassable).

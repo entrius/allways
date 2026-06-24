@@ -49,9 +49,10 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v7: scoring read-surface
-/// (MinerState success/fail counters; volume/VWAP + claims to follow); see git history for v2–v6.
-pub const CONFIG_VERSION: u32 = 7;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v8: merges the scoring
+/// read-surface (MinerState success/fail counters + MinerDirectionStats volume/VWAP) with #493's
+/// deadline extensions (max_total_extension_secs in Config); see git history for v2–v7.
+pub const CONFIG_VERSION: u32 = 8;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -161,10 +162,28 @@ pub const POOL_WINDOW_SECS: i64 = 60;
 /// floor, not a schedule. Seeds `Config.weights_update_min_interval_secs`.
 pub const WEIGHTS_UPDATE_MIN_INTERVAL_SECS: i64 = 3600;
 
-/// Canonical deploy value for `fulfillment_timeout_secs` — 4h. Sized so the slowest chain (BTC
-/// confirmations) plus validator confirm fits before timeout fires, avoiding over-slashing an
-/// honest-but-unconfirmed miner. Pass at `initialize` (or `set_fulfillment_timeout`); not per-chain yet.
-pub const DEFAULT_FULFILLMENT_TIMEOUT_SECS: i64 = 14_400;
+/// Canonical deploy value for `fulfillment_timeout_secs` — 10 min (mirrors ink!'s 50-block default).
+/// Deliberately tight: the miner must broadcast within it, then validators extend the deadline as the
+/// destination tx confirms (see the extension system). Pass at `initialize` / `set_fulfillment_timeout`.
+pub const DEFAULT_FULFILLMENT_TIMEOUT_SECS: i64 = 600; // 10 min
+
+/// Canonical deploy value for `reservation_ttl_secs` — 10 min (mirrors ink!). Same model as the
+/// fulfillment timeout: a tight base, extended while the source tx confirms.
+pub const DEFAULT_RESERVATION_TTL_SECS: i64 = 600; // 10 min
+
+/// Total seconds a reservation/swap deadline may be slid forward across all extensions, frozen into
+/// each at creation as `deadline + this`. Seeds `Config.max_total_extension_secs`; runtime-tunable
+/// within [MIN, MAX]. 90 min covers two slow BTC blocks (the slowest chain) without back-to-back
+/// outliers stranding a correct miner; the ceiling is the only bound on how long a miner is held.
+pub const MAX_TOTAL_EXTENSION_SECS: i64 = 5_400; // 90 min
+pub const MAX_TOTAL_EXTENSION_SECS_MIN: i64 = 1_800; // 30 min — two 15-min BTC blocks
+pub const MAX_TOTAL_EXTENSION_SECS_MAX: i64 = 7_200; // 120 min — hard lid
+
+const _: () = assert!(
+    MAX_TOTAL_EXTENSION_SECS >= MAX_TOTAL_EXTENSION_SECS_MIN
+        && MAX_TOTAL_EXTENSION_SECS <= MAX_TOTAL_EXTENSION_SECS_MAX,
+    "MAX_TOTAL_EXTENSION_SECS must be within [30 min, 120 min]"
+);
 
 #[cfg(test)]
 mod tests {
@@ -183,6 +202,18 @@ mod tests {
         assert_eq!(quote_update_fee(86_400), 0);
         // Clock skew (negative elapsed) → most-expensive tier, never free.
         assert_eq!(quote_update_fee(-100), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+    }
+
+    #[test]
+    fn total_extension_default_within_bounds() {
+        assert!(
+            (MAX_TOTAL_EXTENSION_SECS_MIN..=MAX_TOTAL_EXTENSION_SECS_MAX)
+                .contains(&MAX_TOTAL_EXTENSION_SECS),
+            "MAX_TOTAL_EXTENSION_SECS {} outside [{}, {}]",
+            MAX_TOTAL_EXTENSION_SECS,
+            MAX_TOTAL_EXTENSION_SECS_MIN,
+            MAX_TOTAL_EXTENSION_SECS_MAX,
+        );
     }
 
     #[test]

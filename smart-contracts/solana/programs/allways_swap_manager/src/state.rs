@@ -44,6 +44,9 @@ pub struct Config {
     pub pool_window_secs: i64,
     /// Minimum seconds between consensus weight updates (runtime-tunable anti-thrash floor).
     pub weights_update_min_interval_secs: i64,
+    /// Total seconds a reservation/swap deadline may be slid forward, frozen into each at creation as
+    /// its `max_extend_at` ceiling. Runtime-tunable within [MIN, MAX] (see constants.rs).
+    pub max_total_extension_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -150,6 +153,9 @@ pub struct Reservation {
     pub rate: String,
     /// Expiry, unix seconds (0 = empty).
     pub reserved_until: i64,
+    /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
+    /// initial deadline + the Config budget then, so a later retune can't move an in-flight ceiling.
+    pub max_extend_at: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -197,6 +203,9 @@ pub struct Swap {
     pub status: SwapStatus,
     pub initiated_at: i64,
     pub timeout_at: i64,
+    /// Absolute ceiling `timeout_at` may be extended to (unix seconds). Frozen at creation =
+    /// initial timeout + the Config budget then, so a later retune can't move an in-flight ceiling.
+    pub max_extend_at: i64,
     pub fulfilled_at: i64,
     pub bump: u8,
 }

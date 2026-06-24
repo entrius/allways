@@ -68,6 +68,23 @@ pub struct SwapTimedOut {
     pub slash: u64,
 }
 
+/// A validator slid a reservation/swap deadline forward (single-validator, no quorum). Carries the
+/// new deadline (post-value) so consumers set an absolute, not a delta.
+#[event]
+pub struct ReservationExtended {
+    pub miner: Pubkey,
+    pub validator: Pubkey,
+    pub reserved_until: i64,
+}
+
+#[event]
+pub struct SwapTimeoutExtended {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub validator: Pubkey,
+    pub timeout_at: i64,
+}
+
 // --- Phase 6: treasury ---
 
 #[event]

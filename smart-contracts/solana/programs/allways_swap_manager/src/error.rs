@@ -71,6 +71,10 @@ pub enum ErrorCode {
     NotTimedOut,
     #[msg("from_chain/to_chain args do not match the swap")]
     ChainMismatch,
+    #[msg("Extension target must be later than the current deadline")]
+    ExtensionNotLater,
+    #[msg("Extension target exceeds the deadline's absolute ceiling")]
+    ExtensionExceedsCeiling,
 
     // --- Phase 6: treasury ---
     #[msg("Withdrawal exceeds the accrued treasury balance")]

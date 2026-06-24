@@ -50,10 +50,11 @@ pub struct ConfirmSwap<'info> {
         constraint = swap.from_chain == from_chain @ ErrorCode::ChainMismatch,
         constraint = swap.to_chain == to_chain @ ErrorCode::ChainMismatch,
     )]
-    pub swap: Account<'info, Swap>,
+    pub swap: Box<Account<'info, Swap>>,
 
     /// Realized per-direction stats, keyed by the (constrained-to-swap) chain args. Created on the first
     /// completed swap in this direction (validator-funded), reused + accrued thereafter.
+    /// Boxed (with `swap`) to keep these String-heavy accounts off the BPF stack.
     #[account(
         init_if_needed,
         payer = validator,
@@ -61,7 +62,7 @@ pub struct ConfirmSwap<'info> {
         seeds = [STATS_SEED, miner.key().as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
         bump,
     )]
-    pub direction_stats: Account<'info, MinerDirectionStats>,
+    pub direction_stats: Box<Account<'info, MinerDirectionStats>>,
 
     #[account(
         init_if_needed,

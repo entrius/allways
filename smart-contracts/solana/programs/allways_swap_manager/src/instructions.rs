@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod confirm_swap;
 pub mod deactivate;
+pub mod extend_reservation;
+pub mod extend_timeout;
 pub mod initialize;
 pub mod mark_fulfilled;
 pub mod open_or_request;
@@ -22,6 +24,8 @@ pub mod withdraw_treasury;
 pub use admin::*;
 pub use confirm_swap::*;
 pub use deactivate::*;
+pub use extend_reservation::*;
+pub use extend_timeout::*;
 pub use initialize::*;
 pub use mark_fulfilled::*;
 pub use open_or_request::*;

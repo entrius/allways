@@ -129,3 +129,10 @@ pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> 
     msg!("weights_update_min_interval_secs = {}", secs);
     Ok(())
 }
+
+pub fn set_max_total_extension(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    crate::validate::max_total_extension(secs)?;
+    ctx.accounts.config.max_total_extension_secs = secs;
+    msg!("max_total_extension_secs = {}", secs);
+    Ok(())
+}
