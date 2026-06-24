@@ -507,7 +507,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 6, "schema version");
+    assert_eq!(cfg.version, 7, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);

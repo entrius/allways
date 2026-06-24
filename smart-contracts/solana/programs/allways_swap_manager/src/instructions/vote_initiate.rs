@@ -131,6 +131,7 @@ pub fn handler(
 
     if quorum {
         let timeout_at = now.saturating_add(ctx.accounts.config.fulfillment_timeout_secs);
+        let max_extend_at = timeout_at.saturating_add(ctx.accounts.config.max_total_extension_secs);
         let tx_marker_bump = ctx.bumps.tx_marker;
         let swap_bump = ctx.bumps.swap;
 
@@ -169,6 +170,7 @@ pub fn handler(
         swap.status = SwapStatus::Active;
         swap.initiated_at = now;
         swap.timeout_at = timeout_at;
+        swap.max_extend_at = max_extend_at;
         swap.fulfilled_at = 0;
         swap.bump = swap_bump;
 
