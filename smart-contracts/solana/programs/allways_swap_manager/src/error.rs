@@ -61,6 +61,8 @@ pub enum ErrorCode {
     // --- Phase 4: swap lifecycle ---
     #[msg("swap_key does not match keccak(from_tx_hash)")]
     SwapKeyMismatch,
+    /// Retained (unused) to avoid shifting later error-code indices — A4 removed the `TxMarker`;
+    /// source replay is now blocked by the validator freshness check, not this error.
     #[msg("Source transaction has already been used")]
     DuplicateSourceTx,
     #[msg("user_from_address does not match the reservation")]

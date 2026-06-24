@@ -152,6 +152,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
+    r.created_at = now; // source-freshness lower bound: the deposit must be mined after this
     r.reserved_until = now.saturating_add(ttl);
     r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
     r.claimed_swap_key = [0u8; 32]; // fresh contest → no live claim (clears any stale prior key)

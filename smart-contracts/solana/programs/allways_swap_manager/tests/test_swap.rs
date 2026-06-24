@@ -73,9 +73,6 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
-fn tx_pda(key: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"tx", key], &pid()).0
-}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -250,7 +247,6 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
-            tx_marker: tx_pda(&key),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -437,7 +433,6 @@ fn test_initiate_creates_swap() {
     assert_eq!(s.timeout_at, BASE_TS + TIMEOUT_SECS);
     // side effects
     assert!(miner_state(&svm, &miner.pubkey()).has_active_swap);
-    assert!(svm.get_account(&tx_pda(&key)).is_some());
 }
 
 #[test]
@@ -489,6 +484,7 @@ fn test_claim_creates_pending() {
     let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
     assert_ne!(r.reserved_until, 0, "reservation still live");
     assert_eq!(r.claimed_swap_key, key, "claim slot taken");
+    assert!(r.created_at > 0, "resolve_pool stamped created_at (the source-freshness bound)");
 }
 
 #[test]
@@ -607,19 +603,23 @@ fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, t
 }
 
 #[test]
-fn test_replay_guard_survives_completion() {
+fn test_contract_no_longer_blocks_reused_tx() {
+    // A4: the permanent on-chain TxMarker is gone, so the CONTRACT no longer blocks a reused
+    // from_tx_hash after the swap closes. Source-replay defense moved to the validator freshness check
+    // (the deposit must be mined after Reservation.created_at — an old replayed deposit predates any
+    // later reservation), which is off-chain and tested in the validator (Phase B). Here we just prove
+    // the marker is truly gone: the re-claim + re-attest now succeeds at the contract level.
     let (mut svm, vals, miner, _rent) = setup();
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
     send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
-    // miner freed → re-reserve, re-claim the SAME from_tx_hash (Swap PDA was closed) — the claim
-    // succeeds but attestation is rejected by the permanent TxMarker.
+    // miner freed → re-reserve, re-claim + re-attest the SAME from_tx_hash → now permitted on-chain.
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
-    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("re-claim");
-    let replay = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]);
-    assert!(replay.is_err(), "reused source tx must be rejected even after the swap closed");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice()).unwrap();
+    assert_eq!(s.status, SwapStatus::Active, "contract permits re-attest after close (replay defense now off-chain)");
 }
 
 fn run_full_swap(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, tx: &str) {

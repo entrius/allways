@@ -26,7 +26,6 @@ use {
     },
     allways_swap_manager::state::{
         Binding, Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury,
-        TxMarker,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -99,9 +98,6 @@ fn weights_round_pda() -> Pubkey {
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
-}
-fn tx_pda(key: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"tx", key], &pid()).0
 }
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
@@ -324,7 +320,6 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
-            tx_marker: tx_pda(&key),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -525,7 +520,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 9, "schema version");
+    assert_eq!(cfg.version, 10, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -720,10 +715,7 @@ fn onchain_vote_initiate_creates_swap() {
     assert_eq!(s.user_to_addr, "userSOLaddr");
     assert!(s.status == SwapStatus::Active, "swap starts Active");
 
-    // TxMarker.used set (permanent replay guard).
-    let tm = rpc.get_account(&tx_pda(&key)).expect("tx_marker");
-    let marker = TxMarker::try_deserialize(&mut tm.data.as_slice()).unwrap();
-    assert!(marker.used, "tx marker used");
+    // (A4: no TxMarker — source replay is now a validator freshness check, not an on-chain marker.)
 
     // miner now has an in-flight swap.
     assert!(read_miner(&rpc, &miner.pubkey()).has_active_swap, "miner has_active_swap");

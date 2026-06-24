@@ -1,12 +1,10 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{
-    CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, TX_SEED, VOTE_SEED,
-};
+use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED};
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
-use crate::state::{Config, MinerState, Reservation, Swap, SwapStatus, TxMarker, VoteRound};
+use crate::state::{Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
 /// quorum, promote the swap to `Active` — where the miner's obligation (`timeout_at`) begins. All terms
@@ -44,15 +42,6 @@ pub struct VoteInitiate<'info> {
     )]
     pub vote_round: Account<'info, VoteRound>,
 
-    #[account(
-        init_if_needed,
-        payer = validator,
-        space = 8 + TxMarker::INIT_SPACE,
-        seeds = [TX_SEED, swap_key.as_ref()],
-        bump,
-    )]
-    pub tx_marker: Account<'info, TxMarker>,
-
     /// The claim-created swap (must be `PendingAttestation`). Boxed (String-heavy) off the BPF stack.
     #[account(
         mut,
@@ -70,8 +59,8 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         ctx.accounts.swap.status == SwapStatus::PendingAttestation,
         ErrorCode::NotPending
     );
-    // Permanent replay guard: a from_tx_hash can be attested into at most one swap, ever.
-    require!(!ctx.accounts.tx_marker.used, ErrorCode::DuplicateSourceTx);
+    // Source-replay defense is now a validator freshness check (deposit must be mined after
+    // `Reservation.created_at`), not an on-chain marker — see SOLANA_VALIDATOR_OFFLOAD.md.
 
     let now = Clock::get()?.unix_timestamp;
 
@@ -108,7 +97,6 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
     if quorum {
         let timeout_at = now.saturating_add(ctx.accounts.config.fulfillment_timeout_secs);
         let max_extend_at = timeout_at.saturating_add(ctx.accounts.config.max_total_extension_secs);
-        let tx_marker_bump = ctx.bumps.tx_marker;
 
         // Event values (read before the mutable borrow below).
         let user = ctx.accounts.swap.user;
@@ -123,8 +111,6 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         swap.timeout_at = timeout_at;
         swap.max_extend_at = max_extend_at;
 
-        ctx.accounts.tx_marker.used = true;
-        ctx.accounts.tx_marker.bump = tx_marker_bump;
         ctx.accounts.miner_state.has_active_swap = true;
         ctx.accounts.miner_state.busy_until = timeout_at; // stay busy through the swap deadline
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation

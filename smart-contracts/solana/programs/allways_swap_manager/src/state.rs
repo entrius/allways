@@ -156,6 +156,10 @@ pub struct Reservation {
     pub miner_to_addr: String,
     #[max_len(MAX_RATE_LEN)]
     pub rate: String,
+    /// Reservation creation time, unix seconds. The **source-freshness lower bound**: the user's
+    /// deposit must be mined after this (a replayed prior-swap deposit predates it → rejected by the
+    /// validator's freshness check, which replaces the source `TxMarker`).
+    pub created_at: i64,
     /// Expiry, unix seconds (0 = empty).
     pub reserved_until: i64,
     /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
@@ -221,14 +225,9 @@ pub struct Swap {
     pub bump: u8,
 }
 
-/// Permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`). Set `used` on initiate quorum
-/// and never closed, so it outlives the Swap: a from_tx_hash can initiate at most one swap, ever.
-#[account]
-#[derive(InitSpace)]
-pub struct TxMarker {
-    pub used: bool,
-    pub bump: u8,
-}
+// (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
+// validator freshness check: a deposit must be mined after `Reservation.created_at`; an old (replayed)
+// deposit predates any later reservation. See SOLANA_VALIDATOR_OFFLOAD.md "Tx-hash replay protection".)
 
 /// A miner's standing on-chain quote for one pair-direction
 /// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain]`).

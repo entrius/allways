@@ -26,9 +26,6 @@ pub const RESV_SEED: &[u8] = b"resv";
 #[constant]
 pub const SWAP_SEED: &[u8] = b"swap";
 
-/// PDA seed prefix for the permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`).
-#[constant]
-pub const TX_SEED: &[u8] = b"tx";
 
 /// PDA seed prefix for a miner's standing per-pair quote
 /// (`seeds = [QUOTE_SEED, miner_pubkey, from_chain, to_chain]`).
@@ -53,10 +50,10 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v9: A5 hotkey↔pubkey identity
-/// binding (`Binding` PDA + `bind_hotkey`). v8 merged the scoring read-surface (A1/A2) with #493's
-/// deadline extensions; see git history for v2–v8.
-pub const CONFIG_VERSION: u32 = 9;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v10: A4 source-replay via
+/// freshness — removed the permanent `TxMarker`, added `Reservation.created_at` as the source bound.
+/// v9 = A5 binding; v8 = scoring read-surface + #493 extensions; see git history for v2–v9.
+pub const CONFIG_VERSION: u32 = 10;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
