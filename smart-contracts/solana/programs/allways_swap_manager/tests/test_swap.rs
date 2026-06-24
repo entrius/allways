@@ -567,7 +567,6 @@ fn test_fulfill_confirm_fee_and_invariant() {
     assert_eq!(st.from_chain, FROM_CHAIN);
     assert_eq!(st.to_chain, TO_CHAIN);
     assert_eq!(st.completed, 1, "one completed swap");
-    assert_eq!(st.total_sol_amount, SOL_AMOUNT as u128);
     assert_eq!(st.total_from_amount, FROM_AMOUNT);
     assert_eq!(st.total_to_amount, TO_AMOUNT);
     // realized VWAP = to/from = 1.5
@@ -656,7 +655,6 @@ fn test_stats_accumulate_same_direction() {
     // same PDA, accumulated across both swaps
     let st = direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN);
     assert_eq!(st.completed, 2, "two completed swaps accumulate");
-    assert_eq!(st.total_sol_amount, 2 * SOL_AMOUNT as u128);
     assert_eq!(st.total_from_amount, 2 * FROM_AMOUNT);
     assert_eq!(st.total_to_amount, 2 * TO_AMOUNT);
     assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP still 1.5");

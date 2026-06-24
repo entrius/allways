@@ -265,8 +265,10 @@ pub struct MinerQuote {
 /// Accrued by `confirm_swap` on quorum (one row per (miner, from_chain, to_chain)); never closed. Lets
 /// the off-chain validator read realized volume + the executed rate via `getProgramAccounts` instead of
 /// a local ledger. Realized VWAP for the direction = `total_to_amount / total_from_amount` (exact
-/// integer math, no on-chain rate-string parse). `total_sol_amount` is the collateral-backed SOL volume
-/// (normalized, cross-direction-comparable); the from/to amounts are the off-chain legs in their own units.
+/// integer math, no on-chain rate-string parse). Both fields are **asset-pure** (from/to in their own
+/// chain's units) — kept deliberately asset-agnostic so the PDA survives split-collateral; the validator
+/// derives any common-unit (SOL-notional) volume off-chain from its price feed, and the at-time notional
+/// stays in the `SwapCompleted` event.
 #[account]
 #[derive(InitSpace)]
 pub struct MinerDirectionStats {
@@ -277,8 +279,6 @@ pub struct MinerDirectionStats {
     pub to_chain: String,
     /// Count of completed (confirmed) swaps in this direction.
     pub completed: u32,
-    /// Sum of the collateral-backed SOL size over completed swaps (lamports).
-    pub total_sol_amount: u128,
     /// Sum of the source/destination leg amounts over completed swaps (asset-native units).
     pub total_from_amount: u128,
     pub total_to_amount: u128,
@@ -289,7 +289,8 @@ pub struct MinerDirectionStats {
 /// Per-miner identity binding (`seeds = [BIND_SEED, miner]`): links a miner's Solana pubkey to its
 /// Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;
 /// the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it
-/// off-chain and enforces 1:1 + first-seen pinning. Overwritable in place (the validator pins policy).
+/// off-chain. This PDA enforces pubkey→≤1 hotkey structurally; the reverse (hotkey→≤1 pubkey) is enforced
+/// by the `HotkeyBinding` marker below. The miner may re-bind in place (refresh sig / change hotkey).
 #[account]
 #[derive(InitSpace)]
 pub struct Binding {
@@ -301,6 +302,20 @@ pub struct Binding {
     pub hotkey_sig: [u8; 64],
     /// Unix timestamp of the last (re)bind (staleness signal for off-chain consumers).
     pub bound_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Set-once hotkey→pubkey reverse marker (`seeds = [HOTKEY_BIND_SEED, hotkey]`): the first pubkey to bind
+/// a hotkey claims it permanently. A second, different pubkey trying the same hotkey is rejected, so the
+/// strike-dodge (struck pubkey rotates to a fresh one and re-binds the same hotkey) is closed on-chain
+/// rather than relying on every validator's off-chain first-seen pin. Never closed — one tiny rent-funded
+/// marker per identity (bounded by hotkey churn, not per-event).
+#[account]
+#[derive(InitSpace)]
+pub struct HotkeyBinding {
+    /// The pubkey that first claimed this hotkey (== the `Binding.miner`); also a reverse lookup.
+    pub miner: Pubkey,
     /// Stored PDA bump.
     pub bump: u8,
 }

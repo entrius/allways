@@ -144,10 +144,6 @@ pub fn handler(
             stats.bump = stats_bump;
         }
         stats.completed = stats.completed.saturating_add(1);
-        stats.total_sol_amount = stats
-            .total_sol_amount
-            .checked_add(sol_amount as u128)
-            .ok_or(ErrorCode::Overflow)?;
         stats.total_from_amount = stats
             .total_from_amount
             .checked_add(from_amount)

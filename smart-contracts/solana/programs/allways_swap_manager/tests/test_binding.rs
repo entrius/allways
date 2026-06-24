@@ -25,6 +25,9 @@ fn pid() -> Pubkey {
 fn bind_pda(miner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", miner.as_ref()], &pid()).0
 }
+fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0
+}
 fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, signer: &Keypair) -> Result<(), String> {
     let blockhash = svm.latest_blockhash();
     let msg = Message::new_with_blockhash(&[ix], Some(payer), &blockhash);
@@ -38,6 +41,7 @@ fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instructio
         allways_swap_manager::accounts::BindHotkey {
             miner: *miner,
             binding: bind_pda(miner),
+            hotkey_binding: hkbind_pda(&hotkey),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -82,4 +86,22 @@ fn test_rebind_overwrites_in_place() {
     assert_eq!(b.hotkey, hotkey2, "hotkey overwritten");
     assert_eq!(b.hotkey_sig, sig2, "sig overwritten");
     assert_eq!(b.miner, miner.pubkey(), "miner identity stable");
+}
+
+#[test]
+fn test_hotkey_pinned_to_first_pubkey() {
+    // Set-once reverse marker: a second, different pubkey can't claim a hotkey already bound — closes
+    // the strike-dodge (rotate to a fresh pubkey + re-bind the same hotkey). The owner can still re-bind.
+    let (mut svm, miner_a) = setup();
+    let hotkey = [7u8; 32];
+    send(&mut svm, bind_ix(&miner_a.pubkey(), hotkey, [1u8; 64]), &miner_a.pubkey(), &miner_a).expect("A binds");
+
+    let miner_b = Keypair::new();
+    svm.airdrop(&miner_b.pubkey(), 10_000_000_000).unwrap();
+    let res = send(&mut svm, bind_ix(&miner_b.pubkey(), hotkey, [2u8; 64]), &miner_b.pubkey(), &miner_b);
+    assert!(res.is_err(), "a different pubkey must not claim an already-bound hotkey");
+
+    // The owner CAN still re-bind the same hotkey (refresh sig).
+    send(&mut svm, bind_ix(&miner_a.pubkey(), hotkey, [9u8; 64]), &miner_a.pubkey(), &miner_a).expect("A re-binds");
+    assert_eq!(read_binding(&svm, &miner_a.pubkey()).hotkey_sig, [9u8; 64], "owner refreshed its own sig");
 }

@@ -871,6 +871,9 @@ fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
 fn bind_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
 }
+fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0
+}
 fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -878,6 +881,7 @@ fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instructio
         allways_swap_manager::accounts::BindHotkey {
             miner: *miner,
             binding: bind_pda(miner),
+            hotkey_binding: hkbind_pda(&hotkey),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

@@ -113,4 +113,8 @@ pub enum ErrorCode {
     InvalidWeightsVector,
     #[msg("Minimum interval between weight updates has not elapsed")]
     WeightsUpdateTooSoon,
+
+    // --- A5: hotkey binding ---
+    #[msg("This hotkey is already bound to a different pubkey (set-once)")]
+    HotkeyAlreadyBound,
 }

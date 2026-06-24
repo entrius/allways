@@ -41,6 +41,12 @@ pub const STATS_SEED: &[u8] = b"stats";
 #[constant]
 pub const BIND_SEED: &[u8] = b"bind";
 
+/// PDA seed prefix for the set-once hotkey→pubkey reverse marker (`seeds = [HOTKEY_BIND_SEED, hotkey]`).
+/// Enforces hotkey→≤1 pubkey on-chain: a hotkey can be claimed by exactly one pubkey, ever, so a struck
+/// pubkey can't rotate to a fresh one and re-bind the same hotkey to dodge strikes.
+#[constant]
+pub const HOTKEY_BIND_SEED: &[u8] = b"hkbind";
+
 /// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
