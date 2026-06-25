@@ -152,7 +152,59 @@ def test_run_once_discovers_and_decides_mix():
         get_swaps=lambda: swaps,
         get_reservation=lambda miner: SimpleNamespace(created_at=RESV_CREATED_AT),
     )
-    loop = SolanaSwapLoop(client, providers, fee_divisor=100)
+    loop = SolanaSwapLoop(client, providers, fee_divisor=100, read_only=True)
     out = dict(loop.run_once(now=1500))
     assert out[(b'\x01' * 32).hex()] == SwapDecision.TIMEOUT
     assert out[(b'\x02' * 32).hex()] == SwapDecision.CONFIRM
+
+
+class VoteRecordingClient:
+    """Fake solana client capturing vote calls; has_voted toggles per (req_type) to test the skip guard."""
+
+    def __init__(self, swaps, already_voted=False):
+        self._swaps = swaps
+        self.already_voted = already_voted
+        self.calls = []
+        self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
+
+    def get_swaps(self):
+        return self._swaps
+
+    def get_reservation(self, miner):
+        return SimpleNamespace(created_at=RESV_CREATED_AT)
+
+    def has_voted(self, req_type, target, voter):
+        return self.already_voted
+
+    def vote_initiate(self, swap_key, miner):
+        self.calls.append(('vote_initiate', swap_key, miner))
+
+    def confirm_swap(self, swap_key, miner, from_chain, to_chain):
+        self.calls.append(('confirm_swap', swap_key, miner, from_chain, to_chain))
+
+    def timeout_swap(self, swap_key, miner, user):
+        self.calls.append(('timeout_swap', swap_key, miner, user))
+
+
+def test_run_once_casts_votes_per_decision():
+    swaps = [
+        ('pk1', make_swap(status='PendingAttestation', key=b'\x01' * 32)),
+        ('pk2', make_swap(status='Active', timeout_at=1000, key=b'\x02' * 32)),
+        ('pk3', make_swap(status='Fulfilled', key=b'\x03' * 32)),
+    ]
+    swaps[1][1].user = 'USERPK'  # timeout vote needs the user pubkey
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
+    client = VoteRecordingClient(swaps)
+    loop = SolanaSwapLoop(client, providers, fee_divisor=100)
+    loop.run_once(now=1500)
+    kinds = [c[0] for c in client.calls]
+    assert kinds == ['vote_initiate', 'timeout_swap', 'confirm_swap']
+
+
+def test_run_once_skips_already_voted():
+    swaps = [('pk1', make_swap(status='Fulfilled', key=b'\x05' * 32))]
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
+    client = VoteRecordingClient(swaps, already_voted=True)
+    loop = SolanaSwapLoop(client, providers, fee_divisor=100)
+    loop.run_once(now=1500)
+    assert client.calls == []  # has_voted → no re-submission

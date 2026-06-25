@@ -1,9 +1,9 @@
-"""B1 — read-only contract-driven swap loop.
+"""Contract-driven swap loop (B1 read path + B2 voting + freshness).
 
 Discovers live swaps from the Solana contract (getProgramAccounts), decides per status, verifies via the
-(unchanged) chain providers, and LOGS the decision — no on-chain votes (B2 un-stubs voting + adds
-freshness). Decoupled from the old SwapVerifier so it can be unit-tested in isolation; reuses only the
-chain-provider primitive (`verify_transaction`) + the fee math (`apply_fee_deduction`).
+(unchanged) chain providers with replay-freshness gates, and casts the on-chain consensus vote
+(vote_initiate / confirm_swap / timeout_swap). Set `read_only=True` for a dry run (logs "WOULD …", no
+votes). Decoupled from the old SwapVerifier so it can be unit-tested in isolation.
 
 Fee model = Option A (decided 2026-06-25): the user receives 99% of the on-chain `to_amount` (ink!-style
 delivery haircut); the protocol's 1% is skimmed from the miner's SOL collateral by `confirm_swap`. So the
@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import bittensor as bt
 
 from allways.chain_providers.base import ProviderUnreachableError
+from allways.solana import pdas
+from allways.solana.client import swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction
 
 
@@ -38,17 +40,28 @@ def _swap_key_hex(key: Any) -> str:
 
 
 class SolanaSwapLoop:
-    def __init__(self, solana_client: Any, chain_providers: Dict[str, Any], fee_divisor: int = 100):
+    def __init__(
+        self,
+        solana_client: Any,
+        chain_providers: Dict[str, Any],
+        fee_divisor: int = 100,
+        read_only: bool = False,
+    ):
         self.client = solana_client
         self.providers = chain_providers
         self.fee_divisor = fee_divisor
+        self.read_only = read_only
 
     def expected_user_receives(self, swap: Any) -> int:
         """Dest amount the miner must deliver = 99% of the pinned to_amount (Option A)."""
         return apply_fee_deduction(int(swap.to_amount), self.fee_divisor)
 
     def _label(self, swap: Any) -> str:
-        return f'swap {_swap_key_hex(getattr(swap, "swap_key", "?"))[:16]} [{swap.from_chain}->{swap.to_chain}]'
+        try:
+            sk = swap_key_from_tx_hash(swap.from_tx_hash).hex()[:16]
+        except Exception:
+            sk = '?'
+        return f'swap {sk} [{swap.from_chain}->{swap.to_chain}]'
 
     def _fetch_leg(
         self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: str = ''
@@ -165,8 +178,37 @@ class SolanaSwapLoop:
             return SwapDecision.CONFIRM if ok else SwapDecision.WAIT
         return SwapDecision.WAIT
 
+    def _cast_vote(self, swap: Any, decision: SwapDecision) -> bool:
+        """Submit the on-chain consensus vote for an actionable decision. Pre-checks the VoteRound so we
+        don't re-submit a vote already cast; treats a lost race (swap already closed) as a no-op. Never
+        raises — one bad swap must not break the pass."""
+        swap_key = swap_key_from_tx_hash(swap.from_tx_hash)
+        voter = self.client.keypair.pubkey()
+        label = self._label(swap)
+        try:
+            if decision == SwapDecision.ATTEST:
+                if self.client.has_voted(pdas.REQ_INITIATE, swap.miner, voter):
+                    return False
+                self.client.vote_initiate(swap_key, swap.miner)
+            elif decision == SwapDecision.CONFIRM:
+                if self.client.has_voted(pdas.REQ_CONFIRM, swap_key, voter):
+                    return False
+                self.client.confirm_swap(swap_key, swap.miner, swap.from_chain, swap.to_chain)
+            elif decision == SwapDecision.TIMEOUT:
+                if self.client.has_voted(pdas.REQ_TIMEOUT, swap_key, voter):
+                    return False
+                self.client.timeout_swap(swap_key, swap.miner, swap.user)
+            else:
+                return False
+        except Exception as e:
+            bt.logging.error(f'{label}: {decision.value} vote failed: {e}')
+            return False
+        bt.logging.success(f'{label}: {decision.value} vote submitted')
+        return True
+
     def run_once(self, now: int) -> List[Tuple[str, SwapDecision]]:
-        """One read-only pass: discover live swaps, decide each, LOG (no votes). Returns the decisions."""
+        """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
+        Returns the per-swap decisions for observability."""
         out: List[Tuple[str, SwapDecision]] = []
         for pubkey, swap in self.client.get_swaps():
             key = _swap_key_hex(getattr(swap, 'swap_key', pubkey))
@@ -176,6 +218,9 @@ class SolanaSwapLoop:
                 bt.logging.error(f'swap {key}: decide failed: {e}')
                 continue
             if decision in (SwapDecision.ATTEST, SwapDecision.CONFIRM, SwapDecision.TIMEOUT):
-                bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {decision.value} (read-only B1)')
+                if self.read_only:
+                    bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {decision.value} (read-only)')
+                else:
+                    self._cast_vote(swap, decision)
             out.append((key, decision))
         return out

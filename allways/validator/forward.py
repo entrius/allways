@@ -41,24 +41,25 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step.
 
-    B1: the swap lifecycle is driven read-only by ``SolanaSwapLoop.run_once`` —
-    discover live Solana swaps off the contract, decide per status, and LOG
-    "WOULD …" (no on-chain votes). The old substrate phases (event replay,
-    pending-confirm drain, reservation/timeout extensions, scoring, crown
-    snapshot) are skipped here; their components stay constructed so axon +
-    scoring code keep compiling. B2 un-stubs voting + freshness; B3 re-sources
-    scoring + the crown snapshot off the contract.
+    The swap lifecycle is driven by ``SolanaSwapLoop.run_once`` — discover live
+    Solana swaps off the contract, decide per status (with replay-freshness
+    gates), and cast the on-chain consensus vote (vote_initiate / confirm_swap /
+    timeout_swap). The old substrate phases (event replay, pending-confirm drain,
+    reservation/timeout extensions, scoring, crown snapshot) are skipped here;
+    their components stay constructed so axon + scoring code keep compiling. B3
+    re-sources scoring + the crown snapshot off the contract.
     """
     self.check_block_progress(self.reconnect_and_propagate)
 
     clear_provider_caches(self)
 
-    # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks.
+    # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks. run_once now casts
+    # on-chain votes (network I/O), so run it off the event loop.
     now = int(time.time())
-    decisions = self.solana_swap_loop.run_once(now)
+    decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: '
-        f'solana swap loop decided {len(decisions)} live swap(s) (read-only B1)'
+        f'solana swap loop processed {len(decisions)} live swap(s)'
     )
 
     # --- Skipped in B1 (read-only / deferred) ---

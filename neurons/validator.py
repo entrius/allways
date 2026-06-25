@@ -110,9 +110,11 @@ class Validator(BaseValidatorNeuron):
         # on-chain votes yet (B2 un-stubs voting + adds freshness checks). This
         # subsumes the old swap_tracker discovery + SwapVerifier orchestration.
         solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        # Safety hatch for staged rollout: SOLANA_VALIDATOR_READONLY=1 logs "WOULD …" without voting.
+        solana_read_only = os.environ.get('SOLANA_VALIDATOR_READONLY', '0') == '1'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         self.solana_swap_loop = SolanaSwapLoop(
-            self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor
+            self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only
         )
 
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
