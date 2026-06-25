@@ -36,6 +36,8 @@ dependencies = [
     "pycryptodome",
     "numpy",
     "psycopg[binary]==3.3.4",
+    "solders",
+    "borsh-construct",
 ]
 
 [project.scripts]
@@ -51,6 +53,10 @@ dev = [
 # bitcoin-message-tool incorrectly lists pytest as a runtime dependency
 [tool.uv]
 override-dependencies = ["pytest>=9.0.0"]
+
+[tool.pytest.ini_options]
+markers = ["integration: requires a local solana-test-validator (not run by default)"]
+addopts = "-m 'not integration'"
 
 [build-system]
 requires = ["hatchling"]
