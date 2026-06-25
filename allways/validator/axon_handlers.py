@@ -9,17 +9,20 @@ These are attached to the validator's axon via functools.partial
 to inject the validator context.
 """
 
+import time
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import bittensor as bt
 from bittensor import Keypair
 from Crypto.Hash import keccak
 
+from allways.chain_providers.base import ProviderUnreachableError
 from allways.chains import canonical_pair, get_chain
 from allways.classes import MinerPair
 from allways.commitments import read_miner_commitment
 from allways.constants import RESERVATION_COOLDOWN_BLOCKS, RESERVE_SLIPPAGE_MAX_BPS
 from allways.contract_client import AllwaysContractClient, ContractError
+from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
 from allways.utils.proofs import reserve_proof_message, swap_proof_message
@@ -30,15 +33,28 @@ from allways.utils.rate import (
     quote_within_slippage,
 )
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
+from allways.validator.solana_swap_loop import is_tx_fresh
 from allways.validator.state_store import PendingConfirm, ReservationPin
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
 
+EMPTY_SWAP_KEY = b'\x00' * 32
+
 
 def keccak256(data: bytes) -> bytes:
     """Compute Keccak-256 hash (matches ink::env::hash::Keccak256)."""
     return keccak.new(data=data, digest_bits=256).digest()
+
+
+def resolve_miner_pubkey(validator: 'Validator', miner_hotkey: str):
+    """Map a Bittensor hotkey (ss58) → the miner's bound Solana pubkey via the HotkeyBinding PDA (A5).
+
+    Returns None if the miner hasn't bound a hotkey yet. PDAs (reservation / miner_state) are keyed by the
+    Solana pubkey, so every Solana-side action from an axon handler goes through this binding."""
+    hotkey_bytes = bytes.fromhex(Keypair(ss58_address=miner_hotkey).public_key.hex())
+    binding = validator.solana_client.get_hotkey_binding(hotkey_bytes)
+    return binding.miner if binding is not None else None
 
 
 def scale_encode_reserve_hash_input(
@@ -210,48 +226,50 @@ async def handle_miner_activate(
     validator: 'Validator',
     synapse: MinerActivateSynapse,
 ) -> MinerActivateSynapse:
-    """Process miner activation: verify commitment + vote on contract."""
+    """Process miner activation: confirm on-chain eligibility + vote_activate on the Solana contract.
+
+    The miner flags down a validator; the validator resolves its bound Solana pubkey (A5 HotkeyBinding),
+    checks MinerState (not already active, collateral >= Config.min_collateral — the contract re-checks
+    both at quorum), and submits vote_activate. The old commitment/quote gate is a Phase-8 concern; the
+    contract's vote_activate requires no quote, so it's dropped here."""
     miner_hotkey = synapse.dendrite.hotkey
-    contract: AllwaysContractClient = validator.axon_contract_client
+    client = validator.solana_client
     label = miner_label(validator, miner_hotkey)
     ctx = f'[{label}] MinerActivate'
     bt.logging.info(f'{ctx}: REQUEST received (full hotkey={miner_hotkey})')
 
     try:
+        # Fresh registration check (cached metagraph can be stale) — substrate read, hold axon_lock.
         with validator.axon_lock:
-            # Fresh registration check (cached metagraph can be stale)
-            if not validator.axon_subtensor.is_hotkey_registered(
+            registered = validator.axon_subtensor.is_hotkey_registered(
                 netuid=validator.config.netuid,
                 hotkey_ss58=miner_hotkey,
-            ):
-                reject_synapse(synapse, 'Hotkey not registered on subnet', ctx)
-                return synapse
-
-            commitment = read_miner_commitment(
-                subtensor=validator.axon_subtensor,
-                netuid=validator.config.netuid,
-                hotkey=miner_hotkey,
-                metagraph=validator.metagraph,
-                min_swap_rao=validator.bounds_cache.min_swap_amount(),
-                max_swap_rao=validator.bounds_cache.max_swap_amount(),
             )
-            if commitment is None:
-                reject_synapse(synapse, 'No valid commitment (missing, malformed, or rate not executable)', ctx)
-                return synapse
+        if not registered:
+            reject_synapse(synapse, 'Hotkey not registered on subnet', ctx)
+            return synapse
 
-            collateral, active, _, _, _ = contract.get_miner_snapshot(miner_hotkey)
-            if active:
-                reject_synapse(synapse, 'Miner is already active', ctx)
-                return synapse
+        miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
+        if miner_pk is None:
+            reject_synapse(synapse, 'Hotkey not bound to a Solana miner (call bind_hotkey first)', ctx)
+            return synapse
 
-            min_collateral = validator.bounds_cache.min_collateral()
-            if collateral < min_collateral:
-                reject_synapse(synapse, f'Insufficient collateral: {collateral} < {min_collateral}', ctx)
-                return synapse
+        miner_state = client.get_miner_state(miner_pk)
+        if miner_state is None:
+            reject_synapse(synapse, 'Miner has no on-chain state yet (post collateral first)', ctx)
+            return synapse
+        if miner_state.active:
+            reject_synapse(synapse, 'Miner is already active', ctx)
+            return synapse
 
-            contract.vote_activate(wallet=validator.wallet, miner_hotkey=miner_hotkey)
-            synapse.accepted = True
-            bt.logging.info(f'{ctx}: ACTIVATED — vote_activate submitted')
+        min_collateral = client.get_config().min_collateral
+        if miner_state.collateral < min_collateral:
+            reject_synapse(synapse, f'Insufficient collateral: {miner_state.collateral} < {min_collateral}', ctx)
+            return synapse
+
+        client.vote_activate(miner_pk)
+        synapse.accepted = True
+        bt.logging.info(f'{ctx}: ACTIVATED — vote_activate submitted')
 
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
@@ -555,222 +573,87 @@ async def handle_swap_confirm(
     validator: 'Validator',
     synapse: SwapConfirmSynapse,
 ) -> SwapConfirmSynapse:
-    """Verify source transaction and vote to initiate swap."""
-    contract: AllwaysContractClient = validator.axon_contract_client
-    miner = synapse.reservation_id  # reservation_id is miner_hotkey (reservation keyed by miner)
-    label = miner_label(validator, miner)
-    direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
-    ctx = f'[{label}] SwapConfirm {direction}'
+    """Claim relay: the user flags down a validator with their source-tx hash; the validator verifies the
+    deposit against the pinned on-chain Reservation and relays submit_swap_claim, creating the Swap in
+    PendingAttestation. Validators then attest (vote_initiate) via the swap loop.
+
+    All swap terms (amounts, addresses, payout) are pinned in the immutable Reservation — submit_swap_claim
+    copies them on-chain, so the relay only needs the source-tx hash + block. We still verify the deposit
+    here (recipient/amount/sender against the reservation, plus replay-freshness) to avoid relaying a junk
+    claim that would only need close_stale_claim later. If the tx isn't visible/confirmed yet, reject so
+    the user resends once it confirms (no pending-confirm queue)."""
+    miner_hotkey = synapse.reservation_id  # reservation_id is the miner hotkey (reservation keyed by miner)
+    client = validator.solana_client
+    label = miner_label(validator, miner_hotkey)
+    ctx = f'[{label}] SwapConfirm'
     bt.logging.info(
-        f'{ctx}: REQUEST received (post-reserve, user claims source tx sent) — '
-        f'from_tx={synapse.from_tx_hash} user_from_address={synapse.from_address} '
-        f'user_to_address={synapse.to_address} from_tx_block_hint={synapse.from_tx_block}'
+        f'{ctx}: REQUEST received (user claims source tx sent) — '
+        f'from_tx={synapse.from_tx_hash} from_tx_block_hint={synapse.from_tx_block}'
     )
 
     try:
-        if not synapse.from_address or not synapse.from_tx_proof:
-            reject_synapse(synapse, 'Missing source address or proof', ctx)
-            return synapse
-        if not synapse.to_address:
-            reject_synapse(synapse, 'Missing destination address', ctx)
+        if not synapse.from_tx_hash:
+            reject_synapse(synapse, 'Missing source tx hash', ctx)
             return synapse
 
-        with validator.axon_lock:
-            reserved_until = contract.get_miner_reserved_until(miner)
-            # Read the current block via axon_subtensor — see handle_swap_reserve.
-            if reserved_until < validator.axon_subtensor.get_current_block():
-                reject_synapse(synapse, 'No active reservation for this miner', ctx)
-                return synapse
+        miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
+        if miner_pk is None:
+            reject_synapse(synapse, 'Hotkey not bound to a Solana miner', ctx)
+            return synapse
 
-            res_data = contract.get_reservation_data(miner)
-            if res_data is None:
-                reject_synapse(synapse, 'Reservation data not found', ctx)
-                return synapse
+        reservation = client.get_reservation(miner_pk)
+        if reservation is None:
+            reject_synapse(synapse, 'No reservation for this miner', ctx)
+            return synapse
+        now = int(time.time())
+        if reservation.reserved_until == 0 or reservation.reserved_until < now:
+            reject_synapse(synapse, 'Reservation is not active', ctx)
+            return synapse
+        if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
+            reject_synapse(synapse, 'Reservation already has a claimed swap', ctx)
+            return synapse
 
-            res_tao_amount, res_source_amount, res_dest_amount = res_data
+        provider = validator.axon_chain_providers.get(reservation.from_chain)
+        if provider is None:
+            reject_synapse(synapse, f'Unsupported source chain: {reservation.from_chain}', ctx)
+            return synapse
 
-            reservation = contract.get_reservation(miner)
-            if reservation is None:
-                reject_synapse(synapse, 'Reservation record not found', ctx)
-                return synapse
-            if reservation.from_addr != synapse.from_address:
-                reject_synapse(synapse, 'Source address does not match active reservation', ctx)
-                return synapse
-
-            # Prefer the commitment snapshot pinned when the user reserved.
-            # A miner moving its rate or deposit address after the reservation
-            # cannot then shortchange or rob the user — the swap settles
-            # against the commitment as it was at reserve time. A reservation
-            # made before this index existed has no pin; fall back to the live
-            # commitment so in-flight swaps still complete.
-            pin = validator.state_store.get_reservation_pin(miner)
-            if pin is not None:
-                commitment = MinerPair(
-                    uid=0,
-                    hotkey=miner,
-                    from_chain=pin.from_chain,
-                    from_address=pin.miner_from_address,
-                    to_chain=pin.to_chain,
-                    to_address=pin.miner_to_address,
-                    rate=float(pin.rate_str) if pin.rate_str else 0.0,
-                    rate_str=pin.rate_str,
-                    counter_rate=float(pin.counter_rate_str) if pin.counter_rate_str else 0.0,
-                    counter_rate_str=pin.counter_rate_str,
-                )
-                bt.logging.info(f'{ctx}: using pinned commitment from reservation block {pin.reserve_block}')
-            else:
-                commitment = load_swap_commitment(validator, miner)
-                if commitment is None:
-                    reject_synapse(synapse, 'No valid commitment', ctx)
-                    return synapse
-                bt.logging.info(f'{ctx}: no reservation pin, falling back to live commitment')
-
-            direction = resolve_swap_direction(commitment, synapse.from_chain, synapse.to_chain)
-            if direction is None:
-                reject_synapse(synapse, 'Miner does not support this swap direction', ctx)
-                return synapse
-            (
-                swap_from_chain,
-                swap_to_chain,
-                miner_from_address,
-                miner_fulfillment_address,
-                _,
-                selected_rate_str,
-            ) = direction
-
-            provider = validator.axon_chain_providers.get(swap_from_chain)
-            if provider is None:
-                reject_synapse(synapse, f'Unsupported chain: {swap_from_chain}', ctx)
-                return synapse
-
-            # Prove the caller controls from_address by verifying a signature over
-            # the tx hash. Without this, anyone observing a user's on-chain source
-            # tx could submit a confirm with their own to_address and redirect the
-            # miner's fulfillment — the on-chain sender check alone doesn't bind
-            # the confirm caller to the source address.
-            proof_message = swap_proof_message(synapse.from_tx_hash)
-            if not provider.verify_from_proof(synapse.from_address, proof_message, synapse.from_tx_proof):
-                reject_synapse(synapse, 'Invalid source tx proof', ctx)
-                return synapse
-
-            # Validate destination address format — prevents a user from locking a
-            # miner's reservation with an unfulfillable to_address that only fails
-            # once the miner attempts to send (or silently accepts garbage on-chain).
-            to_provider = validator.axon_chain_providers.get(swap_to_chain)
-            if to_provider is None:
-                reject_synapse(synapse, f'Unsupported destination chain: {swap_to_chain}', ctx)
-                return synapse
-            if not to_provider.is_valid_address(synapse.to_address):
-                reject_synapse(synapse, 'Invalid destination address format', ctx)
-                return synapse
-
-            # Reject self-transfer legs (A->A): a user address equal to the miner's
-            # deposit or payout address delivers nothing. verify_transaction also
-            # guards this on-chain; failing here avoids creating the swap at all.
-            if synapse.from_address == miner_from_address or synapse.to_address == miner_fulfillment_address:
-                reject_synapse(
-                    synapse, 'User address matches the miner commitment — self-transfers are not valid swaps', ctx
-                )
-                return synapse
-
-            # Defend against user-snipes-miner by passing expected_sender: a user
-            # could otherwise reserve a miner and claim any third-party tx of the
-            # right amount to the miner's address. The base provider wraps this
-            # check; the specific rejection reason is logged there at warning level.
+        # Verify the user's deposit against the pinned reservation terms. expected_sender =
+        # reservation.from_addr defends user-snipes-miner (claiming a third-party tx of the right amount).
+        try:
             tx_info = provider.verify_transaction(
                 tx_hash=synapse.from_tx_hash,
-                expected_recipient=miner_from_address,
-                expected_amount=res_source_amount,
+                expected_recipient=reservation.miner_from_addr,
+                expected_amount=int(reservation.from_amount),
                 block_hint=synapse.from_tx_block,
-                expected_sender=synapse.from_address,
+                expected_sender=reservation.from_addr,
             )
+        except ProviderUnreachableError:
+            reject_synapse(synapse, 'Source-chain provider unreachable; resend shortly', ctx)
+            return synapse
 
-            # tx_info=None means we couldn't see the tx (propagation lag) or
-            # amount/sender didn't match — queue both rather than rejecting,
-            # so the drain re-verifies until the reservation expires (purge
-            # bounds the bogus case). Rejecting here races freshly-broadcast txs.
-            if tx_info is None or not tx_info.confirmed:
-                found_tx_block = (tx_info.block_number if tx_info else 0) or synapse.from_tx_block
-                pending = PendingConfirm(
-                    miner_hotkey=miner,
-                    from_tx_hash=synapse.from_tx_hash,
-                    from_chain=swap_from_chain,
-                    to_chain=swap_to_chain,
-                    from_address=synapse.from_address,
-                    to_address=synapse.to_address,
-                    tao_amount=res_tao_amount,
-                    from_amount=res_source_amount,
-                    to_amount=res_dest_amount,
-                    miner_from_address=miner_from_address,
-                    miner_to_address=miner_fulfillment_address,
-                    rate_str=selected_rate_str,
-                    reserved_until=reserved_until,
-                    from_tx_block=found_tx_block,
-                )
-                validator.state_store.enqueue(pending)
-                synapse.accepted = True
-                if tx_info is None:
-                    synapse.rejection_reason = (
-                        'Queued — source tx not yet visible to validators (propagation lag '
-                        'or pending re-verify). Validator will auto-initiate once seen and confirmed.'
-                    )
-                    bt.logging.info(f'{ctx} queued: source tx not yet visible')
-                else:
-                    chain_def = provider.get_chain()
-                    synapse.rejection_reason = (
-                        f'Queued — {tx_info.confirmations}/{chain_def.min_confirmations} confirmations. '
-                        f'Validator will auto-initiate when confirmed.'
-                    )
-                    bt.logging.info(
-                        f'{ctx} queued: {tx_info.confirmations}/{chain_def.min_confirmations} confirmations'
-                    )
-                return synapse
-
-            miner_bytes = bytes.fromhex(Keypair(ss58_address=miner).public_key.hex())
-            request_hash = keccak256(
-                scale_encode_initiate_hash_input(
-                    miner_bytes,
-                    synapse.from_tx_hash,
-                    swap_from_chain,
-                    swap_to_chain,
-                    miner_from_address,
-                    miner_fulfillment_address,
-                    selected_rate_str,
-                    res_tao_amount,
-                    res_source_amount,
-                    res_dest_amount,
-                )
+        if tx_info is None or not tx_info.confirmed:
+            reject_synapse(
+                synapse,
+                'Source tx not yet visible/confirmed — resend once it has enough confirmations',
+                ctx,
             )
+            return synapse
 
-            # user_hotkey must be SS58 (TAO address): to_address for BTC→TAO, from_address for TAO→BTC
-            user_tao_address = synapse.to_address if swap_to_chain == 'tao' else synapse.from_address
-            contract.vote_initiate(
-                wallet=validator.wallet,
-                request_hash=request_hash,
-                user_hotkey=user_tao_address,
-                miner_hotkey=miner,
-                from_chain=swap_from_chain,
-                to_chain=swap_to_chain,
-                from_amount=res_source_amount,
-                tao_amount=res_tao_amount,
-                user_from_address=synapse.from_address,
-                user_to_address=synapse.to_address,
-                from_tx_hash=synapse.from_tx_hash,
-                from_tx_block=tx_info.block_number or 0,
-                to_amount=res_dest_amount,
-                miner_from_address=miner_from_address,
-                miner_to_address=miner_fulfillment_address,
-                rate=selected_rate_str,
-            )
-            synapse.accepted = True
-            bt.logging.info(
-                f'{ctx}: INITIATED — vote_initiate submitted (tx={synapse.from_tx_hash[:16]}..., '
-                f'tao={res_tao_amount}, rate={selected_rate_str})'
-            )
+        # Source freshness: the deposit must be mined after the reservation was created (replay defense).
+        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
+        if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
+            reject_synapse(synapse, 'Source tx fails freshness — stale/replayed deposit', ctx)
+            return synapse
 
-    except ContractError as e:
-        bt.logging.error(f'{ctx} failed: {e}')
-        reject_synapse(synapse, str(e))
+        swap_key = swap_key_from_tx_hash(synapse.from_tx_hash)
+        client.submit_swap_claim(miner_pk, swap_key, synapse.from_tx_hash, tx_info.block_number or 0)
+        synapse.accepted = True
+        bt.logging.info(
+            f'{ctx}: CLAIM relayed (swap_key={swap_key.hex()[:16]}..., tx={synapse.from_tx_hash[:16]}...); '
+            f'validators will attest'
+        )
+
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))

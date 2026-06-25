@@ -39,6 +39,18 @@ def _swap_key_hex(key: Any) -> str:
     return key.hex() if isinstance(key, (bytes, bytearray)) else str(key)
 
 
+def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
+    """Replay defense: the tx must be mined AFTER the on-chain floor (unix seconds).
+
+    Fresh iff block_time > floor - grace. Compares block_time, NOT block height (the floor is unix
+    seconds). Fails closed when block_time is missing. Shared by the loop's CONFIRM/ATTEST gates and the
+    axon claim relay so they agree."""
+    block_time = getattr(info, 'block_time', None)
+    if block_time is None:
+        return False
+    return block_time > floor_unix - grace
+
+
 class SolanaSwapLoop:
     def __init__(
         self,
@@ -94,15 +106,12 @@ class SolanaSwapLoop:
         Compares block_time, NOT block height (the floor is unix seconds, so a height-vs-seconds compare
         would silently always-pass). Fresh iff block_time > floor - grace; a per-chain GRACE (default 0)
         absorbs honest clock skew. Fails closed if block_time is missing."""
-        if getattr(info, 'block_time', None) is None:
-            bt.logging.warning(f'{label}: {chain} tx has no block_time — cannot prove freshness, rejecting')
-            return False
         provider = self.providers.get(chain)
         grace = getattr(provider.get_chain(), 'replay_grace_secs', 0) if provider else 0
-        if info.block_time <= floor_unix - grace:
+        if not is_tx_fresh(info, floor_unix, grace):
             bt.logging.warning(
-                f'{label}: {chain} tx block_time {info.block_time} <= floor {floor_unix} '
-                f'(grace {grace}s) — replay/stale, rejecting'
+                f'{label}: {chain} tx block_time {getattr(info, "block_time", None)} not after floor '
+                f'{floor_unix} (grace {grace}s) — replay/stale, rejecting'
             )
             return False
         return True
