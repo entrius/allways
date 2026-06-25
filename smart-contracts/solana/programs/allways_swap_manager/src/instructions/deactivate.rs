@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::constants::MINER_SEED;
 use crate::error::ErrorCode;
+use crate::events::MinerDeactivated;
 use crate::state::MinerState;
 
 /// Miner self-deactivation (no consensus). Guards read entirely from `MinerState` (the mandatory
@@ -30,6 +31,7 @@ pub fn handler(ctx: Context<Deactivate>) -> Result<()> {
 
     ms.active = false;
     ms.deactivation_at = now;
+    emit!(MinerDeactivated { miner: ctx.accounts.miner.key(), at: now });
     msg!("miner self-deactivated: {}", ctx.accounts.miner.key());
     Ok(())
 }

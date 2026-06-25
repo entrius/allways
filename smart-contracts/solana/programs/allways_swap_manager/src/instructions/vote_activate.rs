@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 use crate::consensus::{record_vote, request_hash, reset_round};
 use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_ACTIVATE, VOTE_SEED};
 use crate::error::ErrorCode;
+use crate::events::MinerActivated;
 use crate::state::{Config, MinerState, VoteRound};
 
 /// A validator votes to activate a miner. On quorum the miner becomes active.
@@ -65,6 +66,7 @@ pub fn handler(ctx: Context<VoteActivate>) -> Result<()> {
         ctx.accounts.miner_state.active = true;
         ctx.accounts.miner_state.deactivation_at = 0;
         reset_round(&mut ctx.accounts.vote_round);
+        emit!(MinerActivated { miner: miner_key, at: now });
         msg!("miner activated via consensus: {}", miner_key);
     }
     Ok(())
