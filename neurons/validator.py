@@ -30,6 +30,8 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
 )
 from allways.contract_client import AllwaysContractClient
+from allways.solana import keys
+from allways.solana.client import AllwaysSolanaClient
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -46,6 +48,7 @@ from allways.validator.chain_verification import SwapVerifier
 from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.forward import forward
 from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
+from allways.validator.solana_swap_loop import SolanaSwapLoop
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.storage import DatabaseStorage
 from allways.validator.swap_tracker import SwapTracker
@@ -101,6 +104,17 @@ class Validator(BaseValidatorNeuron):
         # path's storage tee is a no-op — zero overhead for validators that
         # don't write to the dashboard DB.
         self.database_storage = DatabaseStorage()
+
+        # B1: read-only Solana swap loop. Discovers live swaps off the contract
+        # (getProgramAccounts), decides per status, and logs "WOULD …" — no
+        # on-chain votes yet (B2 un-stubs voting + adds freshness checks). This
+        # subsumes the old swap_tracker discovery + SwapVerifier orchestration.
+        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        self.solana_swap_loop = SolanaSwapLoop(
+            self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor
+        )
+
         self.last_known_rates: dict[tuple[str, str, str], float] = {}
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
