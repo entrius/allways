@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Set
 
 import bittensor as bt
@@ -38,110 +39,38 @@ if TYPE_CHECKING:
 
 
 async def forward(self: Validator) -> None:
-    """One validator forward step. Phase order matters — each phase may depend
-    on state mutated by the previous one."""
-    tracker: SwapTracker = self.swap_tracker
-    verifier: SwapVerifier = self.swap_verifier
+    """One validator forward step.
 
+    B1: the swap lifecycle is driven read-only by ``SolanaSwapLoop.run_once`` —
+    discover live Solana swaps off the contract, decide per status, and LOG
+    "WOULD …" (no on-chain votes). The old substrate phases (event replay,
+    pending-confirm drain, reservation/timeout extensions, scoring, crown
+    snapshot) are skipped here; their components stay constructed so axon +
+    scoring code keep compiling. B2 un-stubs voting + freshness; B3 re-sources
+    scoring + the crown snapshot off the contract.
+    """
     self.check_block_progress(self.reconnect_and_propagate)
-
-    pending_count = len(self.state_store.get_all())
-    active_count = len(tracker.active)
-    near_timeout = len(tracker.get_near_timeout_fulfilled(self.block))
-    bt.logging.info(
-        f'forward step #{self.step} @ block {self.block}: '
-        f'pending_confirms={pending_count} active_swaps={active_count} '
-        f'near_timeout_fulfilled={near_timeout}'
-    )
 
     clear_provider_caches(self)
 
-    # Sync events first so ReservationExtensionFinalized writes from the
-    # previous block reach state_store before the per-row finalize/init loop
-    # reads them.
-    try:
-        self.event_watcher.sync_to(self.block)
-        bt.logging.info('forward: events synced')
-    except Exception as e:
-        bt.logging.warning(f'Event watcher sync failed: {e}')
+    # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks.
+    now = int(time.time())
+    decisions = self.solana_swap_loop.run_once(now)
+    bt.logging.info(
+        f'forward step #{self.step} @ block {self.block}: '
+        f'solana swap loop decided {len(decisions)} live swap(s) (read-only B1)'
+    )
 
-    # Init runs *before* purge so maybe_finalize_reservation gets a chance to
-    # fire on rows whose original reserved_until has just lapsed. A successful
-    # finalize bumps state_store.reserved_until in-line (see
-    # try_extend_reservation), so the subsequent purge sees the fresh deadline
-    # and leaves the row alone. Without this ordering, any propose whose
-    # finalize-eligible step lands at-or-after the original reserved_until
-    # would be silently lost to the purge before init ever sees the row.
-    initialize_pending_user_reservations(self)
-
-    purged = self.state_store.purge_expired_pending_confirms()
-    if purged:
-        bt.logging.info(
-            f'forward: purged {purged} expired pending_confirms (reservations elapsed without tx confirmation)'
-        )
-
-    # Emits crown pin-end events for expired reservations *before* purging, so a
-    # reservation that lapses without a swap can't keep earning crown at its
-    # pinned rate. Runs before scoring in this same forward pass.
-    purged_pins = self.event_watcher.expire_stale_reservation_pins()
-    if purged_pins:
-        bt.logging.info(f'forward: purged {purged_pins} expired reservation_pins (reservations elapsed without a swap)')
-
-    poll_commitments(self)
-
-    # Pull newly-initiated and resolved swaps off the contract.
-    await tracker.poll()
-    bt.logging.info('forward: tracker polled')
-
-    # Snapshot dest-chain tip on first sighting for the dest-tx replay defense.
-    for swap in tracker.active.values():
-        verifier.observe_initiation(swap, self.block)
-    verifier.prune_to_active(set(tracker.active.keys()))
-
-    # Verify FULFILLED swaps end-to-end and vote confirm_swap. The returned
-    # set is swap IDs where the provider was unreachable this cycle, so the
-    # timeout phase knows to skip them (transient outage shouldn't slash).
-    uncertain_swaps = await confirm_miner_fulfillments(self, tracker, verifier, self.block)
-    bt.logging.info('forward: fulfillments verified')
-
-    extend_fulfilled_near_timeout(self)
-    enforce_swap_timeouts(self, tracker, uncertain_swaps)
-
-    if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
-        # Resync active miners' collateral to on-chain truth before scoring so
-        # a drifted/absent baseline can't drop an active miner from crown via
-        # the capacity / can_fund gate. Writes at the current block only, so it
-        # never retroactively rescales capacity already earned in this window.
-        try:
-            self.event_watcher.reconcile_collateral_from_contract(
-                self.block, list(self.metagraph.hotkeys), self.contract_client
-            )
-        except Exception as e:
-            bt.logging.warning(f'forward: collateral reconcile failed: {e}')
-        score_and_reward_miners(self)
-        self.initial_scoring_done = True
-        bt.logging.info('forward: scoring done')
-
-    # Live current-crown snapshot — runs after every other phase so DB
-    # latency here can't push vote_initiate, finalize, or timeout-extension
-    # RPC past their block deadlines. Sub-ms in-memory compute plus a small
-    # bounded write; the write is gated by STORE_DB_RESULTS and wrapped so
-    # DB outages never propagate into the forward loop. The compute runs
-    # unconditionally so the per-step crown log line below works for
-    # validators that haven't opted into DB writes. No halt check here —
-    # that RPC is the expensive one; halt-aware clearing happens once per
-    # scoring round inside _flush_halt_window. Worst case the live table
-    # shows the actual best-rate holder during halt for up to one
-    # SCORING_WINDOW_BLOCKS (~1h) until the next round clears it; the
-    # HaltBanner + top-right "paused" indicator (both fed by /halt off
-    # contract_events) signal the recycle state to users in the meantime.
-    crown_snapshot = snapshot_current_crown_holders(self)
-    log_crown_winners(self.metagraph, self.block, crown_snapshot)
-    if self.database_storage.is_enabled():
-        try:
-            self.database_storage.upsert_current_crown_snapshot(crown_snapshot)
-        except Exception as e:
-            bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
+    # --- Skipped in B1 (read-only / deferred) ---
+    # event_watcher.sync_to, initialize_pending_user_reservations +
+    # purge_expired_pending_confirms, expire_stale_reservation_pins,
+    # observe_initiation/prune_to_active: superseded by run_once or moved to B2.
+    #
+    # B3: poll_commitments / refresh_miner_rates (rate history), the
+    # due_for_scoring block (reconcile_collateral_from_contract +
+    # score_and_reward_miners), and the live crown snapshot all depend on the
+    # event-replay history that B1 stops populating, so they stay off until B3
+    # re-sources them off the contract.
 
 
 def clear_provider_caches(self: Validator) -> None:
