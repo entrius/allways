@@ -8,12 +8,13 @@ import numpy as np
 
 from allways.constants import (
     DIRECTION_POOLS,
-    MAX_SCORING_BACKFILL_BLOCKS,
+    MAX_SCORING_BACKFILL_SECS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SUCCESS_EXPONENT,
 )
 from allways.utils.rate import is_executable_rate, min_executable_tao_leg
+from allways.validator.event_index import SolanaEventIndex
 from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
     calculate_miner_rewards,
@@ -27,7 +28,7 @@ from allways.validator.scoring import (
     snapshot_current_crown_holders,
     success_rate,
 )
-from allways.validator.state_store import ReservationPin, ValidatorStateStore
+from allways.validator.state_store import ValidatorStateStore
 
 # Mirror production pool shares so these stay in sync if DIRECTION_POOLS changes.
 POOL_TAO_BTC = DIRECTION_POOLS[('tao', 'btc')]
@@ -60,9 +61,10 @@ def make_watcher(store: ValidatorStateStore, active: set[str]) -> ContractEventW
 
 
 def seed_active(watcher: ContractEventWatcher, hotkey: str, active: bool, block: int) -> None:
-    """Insert an active-flag event directly into the watcher's in-memory state.
-    Bypasses ``record_active_transition``'s no-op-on-same-state guard so tests
-    can seed pre-window anchors (including re-seeding after a reset)."""
+    """Insert an active-flag event into the watcher's in-memory state *and* mirror
+    it to the state-store ``active_events`` table. The B3.4 crown reads active state
+    through ``SolanaEventIndex`` (the DB tables), so a pre-window anchor that lived
+    only in watcher memory would be invisible to scoring — write both."""
     event = ActiveEvent(hotkey=hotkey, active=active, block=block)
     watcher.active_events.append(event)
     watcher.active_events_by_hotkey.setdefault(hotkey, []).append(event)
@@ -72,17 +74,19 @@ def seed_active(watcher: ContractEventWatcher, hotkey: str, active: bool, block:
         watcher.active_miners.add(hotkey)
     else:
         watcher.active_miners.discard(hotkey)
+    watcher.state_store.insert_active_event(block, hotkey, active)
 
 
 def seed_collateral(watcher: ContractEventWatcher, hotkey: str, collateral_rao: int, block: int) -> None:
-    """Insert a collateral event directly into the watcher's in-memory state.
-    Mirrors the cold-bootstrap anchor that ``ContractEventWatcher`` writes
-    when it first sees a miner with a positive contract collateral position."""
+    """Insert a collateral event into the watcher's in-memory state *and* mirror it
+    to the state-store ``collateral_events`` table, so the B3.4 ``SolanaEventIndex``
+    crown read sees the anchor (see ``seed_active``)."""
     event = CollateralEvent(hotkey=hotkey, collateral_rao=int(collateral_rao), block=block)
     watcher.collateral_events.append(event)
     watcher.collateral_events_by_hotkey.setdefault(hotkey, []).append(event)
     watcher.collateral_events.sort(key=lambda ev: ev.block)
     watcher.collateral_events_by_hotkey[hotkey].sort(key=lambda ev: ev.block)
+    watcher.state_store.insert_collateral_event(block, hotkey, int(collateral_rao))
 
 
 def make_validator(
@@ -142,7 +146,11 @@ def make_validator(
         last_scored_block=max(0, block - SCORING_WINDOW_BLOCKS),
         metagraph=make_metagraph(hotkeys),
         state_store=store,
+        # ``event_watcher`` is kept purely as a convenient DB writer for the
+        # crown event tables (its apply_event/seed_* persist to state_store);
+        # scoring reads those tables back through ``event_index`` (B3.4).
         event_watcher=watcher,
+        event_index=SolanaEventIndex(store),
         bounds_cache=bounds_cache,
         contract_client=contract_client,
         database_storage=database_storage,
@@ -256,7 +264,7 @@ class TestCrownHoldersHelper:
 class TestReplayCrownTime:
     def test_single_miner_holds_full_window(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a'})
+        make_watcher(store, active={'hk_a'})
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -266,7 +274,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -278,7 +286,7 @@ class TestReplayCrownTime:
 
     def test_two_miners_alternate_rate_leadership(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
             ('hk_a', 'btc', 'tao', 100.0, 0),
@@ -297,7 +305,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -331,7 +339,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -360,7 +368,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -392,7 +400,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -419,7 +427,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -447,7 +455,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -475,7 +483,7 @@ class TestReplayCrownTime:
         does not, and the permissive replay's result is unchanged.
         """
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a'})
+        make_watcher(store, active={'hk_a'})
         conn = store.require_connection()
         # A rate that lands in [min, max] = [0, very-large] but is unexecutable
         # once max is tightened to a small value: 1e10 TAO/BTC has no fundable
@@ -489,7 +497,7 @@ class TestReplayCrownTime:
         # Round N — permissive bounds, full window credited.
         permissive = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -502,7 +510,7 @@ class TestReplayCrownTime:
         # the miner, but the prior result must still be exactly what it was.
         strict = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=1100,
@@ -517,7 +525,7 @@ class TestReplayCrownTime:
         # did not mutate state in a way that retroactively wipes earlier credit.
         permissive_replay = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -532,7 +540,7 @@ class TestReplayCrownTime:
         — preserves legacy behavior on chains/networks that haven't yet
         set ``min_swap_amount`` / ``max_swap_amount``."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_sentinel', 'hk_sane'})
+        make_watcher(store, active={'hk_sentinel', 'hk_sane'})
         conn = store.require_connection()
         for row in (
             ('hk_sentinel', 'btc', 'tao', 1e10, 0),
@@ -546,7 +554,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -562,7 +570,7 @@ class TestReplayCrownTime:
         is still offering the direction — instead of the stale positive rate
         holding the crown for the whole window."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
             ('hk_a', 'btc', 'tao', 200.0, 0),
@@ -578,7 +586,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -591,7 +599,7 @@ class TestReplayCrownTime:
 
     def test_tie_splits_credit_evenly(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
+        make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
@@ -602,7 +610,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -615,7 +623,7 @@ class TestReplayCrownTime:
     def test_window_start_state_reconstruction_from_pre_window_events(self, tmp_path: Path):
         """A miner posted before window_start and never updated — replay reads initial state."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a'})
+        make_watcher(store, active={'hk_a'})
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -625,7 +633,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=10_000,
@@ -657,7 +665,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -686,7 +694,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -721,7 +729,7 @@ class TestReplayCrownTime:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -816,7 +824,7 @@ class TestLedgerSnapshotAgreement:
         snapshot_holders = [row[2] for row in snapshot_current_crown_holders(v)[('btc', 'tao')]]
         ledger = replay_crown_time_window(
             store=v.state_store,
-            event_watcher=v.event_watcher,
+            event_index=v.event_index,
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -831,312 +839,6 @@ class TestLedgerSnapshotAgreement:
         # The whole point: live view and rewarded ledger name the same holder.
         assert snapshot_holders == list(ledger.keys())
         v.state_store.close()
-
-
-class TestPinnedRateDuringReservation:
-    """Crown calculation must use the pinned rate during the reserved-not-busy
-    window, not the live rate. Closes the bump-after-pin loophole."""
-
-    def test_live_rate_bump_after_pin_does_not_earn_crown(self, tmp_path: Path):
-        """A reserved miner who bumps their live rate to an outlier value
-        earns crown at the pinned rate they had at reservation time, not the
-        post-pin live rate."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        # Pre-window rates: A and B both at 200.
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', 200.0, 0),
-            )
-        conn.commit()
-
-        # A is reserved at block 300 — pin captures the live rate (200).
-        watcher._record_reservation_pin_event(
-            block_num=300,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='start',
-            rate=200.0,
-        )
-        # A bumps live rate to 25004 at block 400 — would normally dominate
-        # the crown ranking. With the pinned-rate overlay, this update is
-        # ignored for crown purposes until the reservation ends.
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 25004.0, 400),
-        )
-        conn.commit()
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='btc',
-            to_chain='tao',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # Without the fix, A's 25004 live rate would dominate from block 400
-        # and A would earn ~600 blocks of crown. With the fix, A's effective
-        # rate stays pinned at 200, tying with B. Both earn half of the
-        # 1000-block window.
-        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
-        store.close()
-
-    def test_pin_end_lets_live_rate_take_over(self, tmp_path: Path):
-        """Once the reservation ends (RESERVED_END), the live rate updates
-        that happened during the pin take effect for crown ranking."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', 200.0, 0),
-            )
-        # A bumps to 300 at block 400 — buffered behind the pin.
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 300.0, 400),
-        )
-        conn.commit()
-
-        watcher._record_reservation_pin_event(
-            block_num=300,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='start',
-            rate=200.0,
-        )
-        # Reservation ends at block 600 — A's live rate of 300 takes over.
-        watcher._record_reservation_pin_event(
-            block_num=600,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='end',
-            rate=0.0,
-        )
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='btc',
-            to_chain='tao',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # (100, 600]: A pinned at 200, B at 200 — tie, each earns 250.
-        # (600, 1100]: A live at 300, B still 200 — A wins 500.
-        assert crown == {'hk_a': 750.0, 'hk_b': 250.0}
-        store.close()
-
-    def test_expired_reservation_pin_stops_earning_crown(self, tmp_path: Path):
-        """End-to-end: a reservation that lapses without a swap must stop
-        earning crown at the pinned rate. ``expire_stale_reservation_pins``
-        emits the missing pin-end at reserved_until + 1, so once the live rate
-        reverts to junk after expiry the miner can no longer crown-squat on the
-        stale pinned rate."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', 200.0, 0),
-            )
-        # A bumps its live rate to junk at block 700 — only the stale pin would
-        # keep it winning crown at 200 past expiry.
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 25000.0, 700),
-        )
-        conn.commit()
-
-        # A is reserved at block 300, TTL through 600, and never swaps — the
-        # synchronous pin row + the scoring 'start' both land, but no terminal
-        # event ever closes the pin.
-        store.upsert_reservation_pin(
-            ReservationPin(
-                miner_hotkey='hk_a',
-                reserve_block=300,
-                from_chain='btc',
-                to_chain='tao',
-                rate_str='200',
-                counter_rate_str='0',
-                miner_from_address='bc1-a',
-                miner_to_address='5a',
-                reserved_until=600,
-                created_at=1.0,
-            )
-        )
-        watcher._record_reservation_pin_event(
-            block_num=300, hotkey='hk_a', from_chain='btc', to_chain='tao', kind='start', rate=200.0
-        )
-
-        # The forward loop's expiry sweep fires once the block passes the TTL.
-        store.current_block_fn = lambda: 601
-        watcher.expire_stale_reservation_pins()
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='btc',
-            to_chain='tao',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # (100, 601]: A pinned at 200, tie with B → 250.5 each.
-        # (601, 700]: pin closed, A live at 200, tie with B → 49.5 each.
-        # (700, 1100]: A live at junk 25000 — wins the rate sort, earns 400.
-        assert crown == {'hk_a': 700.0, 'hk_b': 300.0}
-        store.close()
-
-    def test_pin_only_applies_to_pinned_direction(self, tmp_path: Path):
-        """A reservation pin is direction-specific — pinning btc→tao must not
-        affect crown ranking in the tao→btc direction."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        # Pre-window: both miners quote tao→btc at 0.005.
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', 0.005, 0),
-            )
-        # Mid-window: A improves their tao→btc rate (lower wins).
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.003, 400),
-        )
-        conn.commit()
-
-        # Pin A in the btc→tao direction only — should not affect tao→btc
-        # crown ranking.
-        watcher._record_reservation_pin_event(
-            block_num=300,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='start',
-            rate=200.0,
-        )
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='tao',
-            to_chain='btc',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # In tao→btc the pin is invisible. (100, 400]: tied at 0.005 → split.
-        # (400, 1100]: A wins at 0.003 (lower) → 700 to A.
-        assert crown == {'hk_a': 150.0 + 700.0, 'hk_b': 150.0}
-        store.close()
-
-    def test_pin_active_at_window_start_is_reconstructed(self, tmp_path: Path):
-        """A pin laid down before window_start must overlay the live rate from
-        the first interval — same anchor-reconstruction guarantee that
-        rates/busy/active have."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', 200.0, 0),
-            )
-        # A bumps to 25004 BEFORE the window opens (block 50). Without the
-        # pin, A would dominate from window_start.
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 25004.0, 50),
-        )
-        conn.commit()
-
-        # Pin laid down at block 30 (also before window_start) captures
-        # the rate as of that block: 200. Pin remains open at window_start.
-        watcher._record_reservation_pin_event(
-            block_num=30,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='start',
-            rate=200.0,
-        )
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='btc',
-            to_chain='tao',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # A's effective rate stays pinned at 200 across the entire window;
-        # B is also at 200. They tie, each earns half.
-        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
-        store.close()
-
-    def test_busy_still_excludes_pinned_miner_from_crown(self, tmp_path: Path):
-        """The pinned-rate overlay does not override the busy gate — a pinned
-        miner whose SwapInitiated fires earns no crown while busy. Sanity
-        check that pinning and busy compose correctly."""
-        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        watcher = make_watcher(store, active={'hk_a', 'hk_b'})
-        conn = store.require_connection()
-        for hk in ('hk_a', 'hk_b'):
-            conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', 200.0, 0),
-            )
-        conn.commit()
-
-        # A pinned at 200 at block 300. Then SwapInitiated at 500 → busy.
-        # Pin should end at SwapInitiated (event_watcher emits the 'end' in
-        # production); we simulate that here.
-        watcher._record_reservation_pin_event(
-            block_num=300,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='start',
-            rate=200.0,
-        )
-        watcher._record_reservation_pin_event(
-            block_num=500,
-            hotkey='hk_a',
-            from_chain='btc',
-            to_chain='tao',
-            kind='end',
-            rate=0.0,
-        )
-        watcher.apply_busy_delta(500, 'hk_a', +1)
-        watcher.apply_busy_delta(900, 'hk_a', -1)
-
-        crown = replay_crown_time_window(
-            store=store,
-            event_watcher=watcher,
-            from_chain='btc',
-            to_chain='tao',
-            window_start=100,
-            window_end=1100,
-            rewardable_hotkeys={'hk_a', 'hk_b'},
-        )
-        # (100, 500]: A pinned, both at 200, tie → 200 each.
-        # (500, 900]: A busy → B alone → 400.
-        # (900, 1100]: A back at live 200, tie → 100 each.
-        assert crown == {'hk_a': 200.0 + 100.0, 'hk_b': 200.0 + 400.0 + 100.0}
-        store.close()
 
 
 class TestCalculateMinerRewards:
@@ -1197,8 +899,9 @@ class TestCalculateMinerRewards:
         # hk_a was the best rate miner but is no longer in the metagraph
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_b'])
         v = make_validator(tmp_path, hotkeys=hotkeys)
-        # Ensure hk_a is still marked active on the watcher even if out of metagraph
-        v.event_watcher.active_miners.add('hk_a')
+        # hk_a is active + best-rate in the index series but out of the metagraph
+        # (dereg'd), so it must forfeit credit to hk_b.
+        seed_active(v.event_watcher, 'hk_a', active=True, block=0)
         conn = v.state_store.require_connection()
         for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
@@ -1235,13 +938,12 @@ class TestCalculateMinerRewards:
         history earns nothing — the historical active flag is the tell-all."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys)
-        # Wipe the bootstrap active seed — hk_a has never been activated
-        # on-chain. This mirrors a miner that registered but never called
-        # set_active(true).
-        v.event_watcher.active_miners.discard('hk_a')
-        v.event_watcher.active_events.clear()
-        v.event_watcher.active_events_by_hotkey.clear()
+        # Wipe the bootstrap active seed from the index series — hk_a has never
+        # been activated on-chain. Mirrors a miner that registered but never
+        # called set_active(true).
         conn = v.state_store.require_connection()
+        conn.execute("DELETE FROM active_events WHERE hotkey = 'hk_a'")
+        conn.commit()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
             ('hk_a', 'tao', 'btc', 0.00020, 0),
@@ -1292,7 +994,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -1317,7 +1019,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -1364,7 +1066,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -1390,7 +1092,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -1441,7 +1143,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -1466,7 +1168,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='tao',
             to_chain='btc',
             window_start=100,
@@ -1499,7 +1201,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -1554,7 +1256,7 @@ class TestHistoricalActiveState:
 
         crown = replay_crown_time_window(
             store=store,
-            event_watcher=watcher,
+            event_index=SolanaEventIndex(store),
             from_chain='btc',
             to_chain='tao',
             window_start=100,
@@ -2888,35 +2590,35 @@ class TestScoringCadenceAndWindow:
 
     def test_consecutive_windows_tile_with_no_gap(self):
         # Round N's window_end must equal round N+1's window_start so every
-        # block is covered exactly once.
-        start1, end1 = scoring_window_bounds(current_block=1000, last_scored_block=400)
+        # second of the unix-time crown axis is covered exactly once.
+        start1, end1 = scoring_window_bounds(1000, 400)
         assert (start1, end1) == (400, 1000)
         # Cursor advances to end1; next round fires a window later.
-        start2, end2 = scoring_window_bounds(current_block=1600, last_scored_block=end1)
+        start2, end2 = scoring_window_bounds(1600, end1)
         assert start2 == end1  # tiles — no gap
         assert (start2, end2) == (1000, 1600)
 
     def test_overshoot_does_not_open_a_gap(self):
         # Forward straddled the boundary: fires at last+window+5. window_start
-        # stays anchored to last_scored, so the 5 extra blocks are still scored.
+        # stays anchored to last_scored, so the extra time is still scored.
         last = 1000
-        start, end = scoring_window_bounds(current_block=last + SCORING_WINDOW_BLOCKS + 5, last_scored_block=last)
+        start, end = scoring_window_bounds(last + SCORING_WINDOW_BLOCKS + 5, last)
         assert start == last  # no gap despite the overshoot
 
     def test_backfill_is_capped_after_a_stall(self):
         # last_scored far behind (long outage) → window_start clamps to the
         # cap, not the stale cursor, so one round can't replay an unbounded span.
-        start, end = scoring_window_bounds(current_block=100_000, last_scored_block=0)
-        assert start == 100_000 - MAX_SCORING_BACKFILL_BLOCKS
-        assert end == 100_000
+        start, end = scoring_window_bounds(1_000_000, 0)
+        assert start == 1_000_000 - MAX_SCORING_BACKFILL_SECS
+        assert end == 1_000_000
 
     def test_fresh_seed_scores_one_trailing_window(self):
-        # Seed = block - SCORING_WINDOW_BLOCKS (validator __init__) → first
-        # round covers exactly one trailing window, like the old behavior.
-        block = 50_000
-        seed = max(0, block - SCORING_WINDOW_BLOCKS)
-        start, end = scoring_window_bounds(current_block=block, last_scored_block=seed)
-        assert (start, end) == (block - SCORING_WINDOW_BLOCKS, block)
+        # Seed = time - SCORING_WINDOW_BLOCKS (a within-cap trailing window) →
+        # first round covers exactly that trailing window.
+        now = 5_000_000
+        seed = max(0, now - SCORING_WINDOW_BLOCKS)
+        start, end = scoring_window_bounds(now, seed)
+        assert (start, end) == (now - SCORING_WINDOW_BLOCKS, now)
 
 
 class TestCrownPredicateParity:

@@ -631,6 +631,113 @@ class ValidatorStateStore:
             for r in rows
         ]
 
+    # ─── crown read interface (B3.4 SolanaEventIndex) ───────────────────
+    #
+    # At-time + in-range queries over the active/busy/collateral event tables,
+    # the SQL twins of the rate_events readers above. ``block_num`` here is a
+    # unix ``blockTime`` (seconds), not a substrate block — the Solana crown
+    # axis. ``SolanaEventIndex`` wraps these into the read interface scoring's
+    # crown replay consumes.
+
+    def get_active_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+        """Active-flag transitions in ``(start_time, end_time]``, oldest first."""
+        rows = self._fetchall(
+            """
+            SELECT id, block_num, hotkey, active FROM active_events
+            WHERE block_num > ? AND block_num <= ?
+            ORDER BY block_num ASC, id ASC
+            """,
+            (start_time, end_time),
+        )
+        return [{'hotkey': r['hotkey'], 'active': bool(r['active']), 'block': r['block_num']} for r in rows]
+
+    def get_active_state_at(self, at_time: int) -> Set[str]:
+        """Active set at ``at_time`` — latest transition per hotkey at-or-before
+        ``at_time``, keeping those whose latest flag is True."""
+        rows = self._fetchall(
+            """
+            SELECT hotkey, active FROM (
+                SELECT hotkey, active,
+                       ROW_NUMBER() OVER (PARTITION BY hotkey ORDER BY block_num DESC, id DESC) AS rn
+                FROM active_events WHERE block_num <= ?
+            ) WHERE rn = 1
+            """,
+            (at_time,),
+        )
+        return {r['hotkey'] for r in rows if r['active']}
+
+    def get_busy_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+        """Busy ±1 deltas in ``(start_time, end_time]``, oldest first."""
+        rows = self._fetchall(
+            """
+            SELECT id, block_num, hotkey, delta FROM busy_events
+            WHERE block_num > ? AND block_num <= ?
+            ORDER BY block_num ASC, id ASC
+            """,
+            (start_time, end_time),
+        )
+        return [{'hotkey': r['hotkey'], 'delta': r['delta'], 'block': r['block_num']} for r in rows]
+
+    def get_busy_counts_at(self, at_time: int) -> Dict[str, int]:
+        """Per-hotkey open-swap count at ``at_time`` (running sum of deltas),
+        keeping only hotkeys still busy (sum > 0)."""
+        rows = self._fetchall(
+            """
+            SELECT hotkey, SUM(delta) AS total FROM busy_events
+            WHERE block_num <= ?
+            GROUP BY hotkey HAVING total > 0
+            """,
+            (at_time,),
+        )
+        return {r['hotkey']: int(r['total']) for r in rows}
+
+    def get_collateral_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+        """Collateral transitions in ``(start_time, end_time]``, oldest first.
+        ``collateral_rao`` is the post-event total."""
+        rows = self._fetchall(
+            """
+            SELECT id, block_num, hotkey, collateral_rao FROM collateral_events
+            WHERE block_num > ? AND block_num <= ?
+            ORDER BY block_num ASC, id ASC
+            """,
+            (start_time, end_time),
+        )
+        return [
+            {'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao']), 'block': r['block_num']}
+            for r in rows
+        ]
+
+    def get_collaterals_at(self, at_time: int) -> Dict[str, int]:
+        """Per-hotkey posted collateral at ``at_time`` — latest transition
+        at-or-before ``at_time``. Hotkeys with no event are absent (caller
+        treats as unknown, not zero)."""
+        rows = self._fetchall(
+            """
+            SELECT hotkey, collateral_rao FROM (
+                SELECT hotkey, collateral_rao,
+                       ROW_NUMBER() OVER (PARTITION BY hotkey ORDER BY block_num DESC, id DESC) AS rn
+                FROM collateral_events WHERE block_num <= ?
+            ) WHERE rn = 1
+            """,
+            (at_time,),
+        )
+        return {r['hotkey']: int(r['collateral_rao']) for r in rows}
+
+    def get_solana_event_cursor(self) -> Optional[str]:
+        """Last ingested Solana tx signature (the SolanaEventIngest cursor).
+        ``None`` on a fresh DB so the first poll starts from the prune horizon."""
+        row = self._fetchone('SELECT value FROM solana_event_meta WHERE key = ?', ('cursor',))
+        return row['value'] if row is not None else None
+
+    def set_solana_event_cursor(self, signature: str) -> None:
+        self._execute(
+            """
+            INSERT INTO solana_event_meta (key, value) VALUES ('cursor', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (signature,),
+        )
+
     def get_event_cursor(self) -> Optional[int]:
         row = self._fetchone('SELECT value FROM event_watcher_meta WHERE key = ?', ('cursor',))
         return int(row['value']) if row is not None else None
@@ -960,6 +1067,11 @@ class ValidatorStateStore:
                 CREATE TABLE IF NOT EXISTS event_watcher_meta (
                     key     TEXT PRIMARY KEY,
                     value   INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS solana_event_meta (
+                    key     TEXT PRIMARY KEY,
+                    value   TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS bootstrapped_swaps (

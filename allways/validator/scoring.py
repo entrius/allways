@@ -22,18 +22,19 @@ from allways.constants import (
     CREDIBILITY_RAMP_OBSERVATIONS,
     CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
-    MAX_SCORING_BACKFILL_BLOCKS,
+    MAX_SCORING_BACKFILL_SECS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
+    SCORING_WINDOW_SECS,
     SUCCESS_EXPONENT,
     VOLUME_WEIGHT_ALPHA,
 )
 from allways.utils.rate import is_executable_rate, min_executable_tao_leg
-from allways.validator.event_watcher import ContractEventWatcher
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
+    from allways.validator.event_index import SolanaEventIndex
     from neurons.validator import Validator
 
 
@@ -53,12 +54,13 @@ def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_
     return not initial_scoring_done or (current_block - last_scored_block) >= SCORING_WINDOW_BLOCKS
 
 
-def scoring_window_bounds(current_block: int, last_scored_block: int) -> Tuple[int, int]:
-    """``(window_start, window_end)`` for a scoring round. Anchors window_start
-    to the last-scored block so consecutive rounds tile gap-free, capped at
-    ``MAX_SCORING_BACKFILL_BLOCKS`` for the catch-up case after a stall."""
-    window_end = current_block
-    window_start = max(0, window_end - MAX_SCORING_BACKFILL_BLOCKS, last_scored_block)
+def scoring_window_bounds(current_time: int, last_scored_time: int) -> Tuple[int, int]:
+    """``(window_start, window_end)`` for a scoring round, on the unix-second
+    crown axis (``blockTime``). Anchors window_start to the last-scored time so
+    consecutive rounds tile gap-free, capped at ``MAX_SCORING_BACKFILL_SECS``
+    for the catch-up case after a stall."""
+    window_end = current_time
+    window_start = max(0, window_end - MAX_SCORING_BACKFILL_SECS, last_scored_time)
     return window_start, window_end
 
 
@@ -92,7 +94,7 @@ def _flush_halt_window(self: Validator) -> None:
     if not self.database_storage.is_enabled():
         return
     window_end = self.block
-    window_start = max(0, window_end - SCORING_WINDOW_BLOCKS)
+    window_start = max(0, window_end - SCORING_WINDOW_SECS)
     if window_end <= 0:
         return
     directions = list(DIRECTION_POOLS.keys())
@@ -134,7 +136,7 @@ def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
 
 def prune_rate_events(self: Validator) -> None:
-    cutoff = self.block - SCORING_WINDOW_BLOCKS
+    cutoff = self.block - SCORING_WINDOW_SECS
     if cutoff > 0:
         self.state_store.prune_events_older_than(cutoff)
 
@@ -206,7 +208,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             intervals_by_dir[(from_chain, to_chain)] = intervals
         crown_blocks = replay_crown_time_window(
             store=self.state_store,
-            event_watcher=self.event_watcher,
+            event_index=self.event_index,
             from_chain=from_chain,
             to_chain=to_chain,
             window_start=window_start,
@@ -404,30 +406,24 @@ def credibility_ramp(stats: Optional[Tuple[int, int]]) -> float:
 
 
 class EventKind(IntEnum):
-    """Ordering of coincident-block transitions in the crown-time replay.
+    """Ordering of coincident-instant transitions in the crown-time replay.
 
     ACTIVE applies first because the on-chain active flag is the per-miner
-    tell-all. Then BUSY (busy ends crown for that miner). RESERVED_END is
-    next — once a reservation terminates, the pin overlay drops so the
-    miner's live rate takes effect again. RATE comes after that so a
-    same-block rate update lands cleanly on the now-unpinned series.
-    RESERVED_START is last so the pin captures whatever value RATE just
-    wrote: a miner who posts a rate change in the same block they get
-    reserved has the post-update value pinned, matching the contract's
-    block-end commitment read.
+    tell-all. Then BUSY (busy ends crown for that miner). RATE comes after so
+    a same-instant rate update lands once the qualification gates are set.
+    COLLATERAL is last — it's independent of qualification, only scaling an
+    interval's credit, so a same-instant post is observable as soon as it
+    lands.
 
-    COLLATERAL is independent of qualification — it only scales the credit
-    of an interval. Ordered between RATE and RESERVED_START so that a same-
-    block post lands before any reservation pin captures, matching the
-    intuition that capacity is observable as soon as it's posted.
+    Reservation pins are gone in the Solana model (the swap rate is pinned
+    on-chain and a reserved miner is busy-gated out of the crown), so there
+    are no RESERVED transitions.
     """
 
     ACTIVE = 0
     BUSY = 1
-    RESERVED_END = 2
-    RATE = 3
-    COLLATERAL = 4
-    RESERVED_START = 5
+    RATE = 2
+    COLLATERAL = 3
 
 
 @dataclass
@@ -448,61 +444,51 @@ class ReplayEvent:
 
 def reconstruct_window_start_state(
     store: ValidatorStateStore,
-    event_watcher: ContractEventWatcher,
+    event_index: SolanaEventIndex,
     from_chain: str,
     to_chain: str,
     window_start: int,
     rewardable_hotkeys: Set[str],
-) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, float], Dict[str, int]]:
-    """Snapshot rates, busy counts, active set, reservation-pin overlay, and
-    posted collateral as they stood at window_start. Rate read is one batched
-    query per direction (N rewardable hotkeys would otherwise be N point
-    lookups, runs every forward step from snapshot_current_crown_holders)."""
-    busy_count: Dict[str, int] = dict(event_watcher.get_busy_miners_at(window_start))
-    active_set: Set[str] = set(event_watcher.get_active_miners_at(window_start))
+) -> Tuple[Dict[str, float], Dict[str, int], Set[str], Dict[str, int]]:
+    """Snapshot rates, busy counts, active set, and posted collateral as they
+    stood at window_start. Rate read is one batched query per direction (N
+    rewardable hotkeys would otherwise be N point lookups, runs every forward
+    step from snapshot_current_crown_holders)."""
+    busy_count: Dict[str, int] = dict(event_index.get_busy_miners_at(window_start))
+    active_set: Set[str] = set(event_index.get_active_miners_at(window_start))
 
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
     rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
-    pinned_rates: Dict[str, float] = {
-        hk: rate
-        for hk, rate in event_watcher.get_reservation_pins_at(window_start, from_chain, to_chain).items()
-        if hk in rewardable_hotkeys and rate > 0
-    }
+    collaterals: Dict[str, int] = dict(event_index.get_miner_collaterals_at(window_start))
 
-    collaterals: Dict[str, int] = dict(event_watcher.get_miner_collaterals_at(window_start))
-
-    return rates, busy_count, active_set, pinned_rates, collaterals
+    return rates, busy_count, active_set, collaterals
 
 
 def merge_replay_events(
     store: ValidatorStateStore,
-    event_watcher: ContractEventWatcher,
+    event_index: SolanaEventIndex,
     from_chain: str,
     to_chain: str,
     window_start: int,
     window_end: int,
 ) -> List[ReplayEvent]:
-    """Merge in-window active, busy, rate, and reservation-pin transitions
-    into one chronologically-sorted stream."""
+    """Merge in-window active, busy, rate, and collateral transitions into one
+    chronologically-sorted stream."""
     events: List[ReplayEvent] = []
 
-    for e in event_watcher.get_active_events_in_range(window_start, window_end):
+    for e in event_index.get_active_events_in_range(window_start, window_end):
         events.append(
             ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.ACTIVE, value=1.0 if e['active'] else 0.0)
         )
 
-    for e in event_watcher.get_busy_events_in_range(window_start, window_end):
+    for e in event_index.get_busy_events_in_range(window_start, window_end):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.BUSY, value=float(e['delta'])))
 
     for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.RATE, value=float(e['rate'])))
 
-    for e in event_watcher.get_reservation_pin_events_in_range(window_start, window_end, from_chain, to_chain):
-        kind = EventKind.RESERVED_START if e['kind'] == 'start' else EventKind.RESERVED_END
-        events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=kind, value=float(e['rate'])))
-
-    for e in event_watcher.get_collateral_events_in_range(window_start, window_end):
+    for e in event_index.get_collateral_events_in_range(window_start, window_end):
         events.append(
             ReplayEvent(
                 block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
@@ -548,7 +534,7 @@ def make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, coll
 
 def replay_crown_time_window(
     store: ValidatorStateStore,
-    event_watcher: ContractEventWatcher,
+    event_index: SolanaEventIndex,
     from_chain: str,
     to_chain: str,
     window_start: int,
@@ -578,10 +564,10 @@ def replay_crown_time_window(
     interval's split by ``capacity_factor(collateral_at_block, max_swap_rao)``
     so a post-window collateral boost cannot retroactively scale credit
     already earned (closes #409)."""
-    rates, busy_count, active_set, pinned_rates, collaterals = reconstruct_window_start_state(
-        store, event_watcher, from_chain, to_chain, window_start, rewardable_hotkeys
+    rates, busy_count, active_set, collaterals = reconstruct_window_start_state(
+        store, event_index, from_chain, to_chain, window_start, rewardable_hotkeys
     )
-    replay_events = merge_replay_events(store, event_watcher, from_chain, to_chain, window_start, window_end)
+    replay_events = merge_replay_events(store, event_index, from_chain, to_chain, window_start, window_end)
 
     # Rates are stored as canonical_dest per canonical_source (TAO per BTC).
     # In the canonical direction (btc→tao) higher = better; in the reverse
@@ -595,17 +581,6 @@ def replay_crown_time_window(
     cap_weighted_blocks: Dict[str, float] = {}
     prev_block = window_start
 
-    def effective_rates() -> Dict[str, float]:
-        """Live rates with pinned-during-reservation values overlaid. A miner
-        in ``pinned_rates`` earns crown at the value captured when they were
-        reserved, ignoring any subsequent live-rate updates until the
-        reservation terminates. Closes the bump-after-pin loophole."""
-        if not pinned_rates:
-            return rates
-        merged = dict(rates)
-        merged.update(pinned_rates)
-        return merged
-
     bounds_set = min_swap_rao > 0 or max_swap_rao > 0
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
@@ -613,7 +588,7 @@ def replay_crown_time_window(
         if duration <= 0:
             return
         busy_set = {hk for hk, c in busy_count.items() if c > 0}
-        rates_for_instant = effective_rates()
+        rates_for_instant = rates
         holders = crown_holders_at_instant(
             rates_for_instant,
             rewardable_hotkeys,
@@ -649,11 +624,6 @@ def replay_crown_time_window(
                 busy_count[event.hotkey] = new_count
             else:
                 busy_count.pop(event.hotkey, None)
-        elif event.kind is EventKind.RESERVED_START:
-            if event.value > 0:
-                pinned_rates[event.hotkey] = event.value
-        elif event.kind is EventKind.RESERVED_END:
-            pinned_rates.pop(event.hotkey, None)
         elif event.kind is EventKind.COLLATERAL:
             collaterals[event.hotkey] = max(0, int(event.value))
         else:  # ACTIVE
@@ -709,9 +679,9 @@ def snapshot_current_crown_holders(
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
     bounds_set = min_swap_amount > 0 or max_swap_amount > 0
     for from_chain, to_chain in DIRECTION_POOLS:
-        rates, busy_count, active_set, pinned_rates, collaterals = reconstruct_window_start_state(
+        rates, busy_count, active_set, collaterals = reconstruct_window_start_state(
             self.state_store,
-            self.event_watcher,
+            self.event_index,
             from_chain,
             to_chain,
             block,
@@ -720,11 +690,6 @@ def snapshot_current_crown_holders(
         canon_from, _ = canonical_pair(from_chain, to_chain)
         lower_rate_wins = from_chain != canon_from
         busy_set = {hk for hk, c in busy_count.items() if c > 0}
-        # Overlay reservation-pinned rates so the live table credits the same
-        # holder the scoring path does during a pin window (bump-after-pin
-        # loophole closure) — otherwise the live view contradicts the ledger.
-        if pinned_rates:
-            rates = {**rates, **pinned_rates}
 
         # Same predicates the scoring replay uses, so the live table never
         # credits a holder the ledger drops. Built per direction so each

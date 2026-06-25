@@ -51,6 +51,11 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # couple hours back, don't try to recover a long outage (the event-watcher only
 # reconstructs ~one window back anyway). >1 window so overshoot can't re-gap.
 MAX_SCORING_BACKFILL_BLOCKS = 2 * SCORING_WINDOW_BLOCKS  # ~2 hours at 12s/block
+# Unix-second axis for the Solana-sourced crown (B3.4): events carry blockTime,
+# not block numbers, so the crown replay window + interval crediting are in
+# seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
+SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
+MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
