@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 from functools import partial
-from pathlib import Path
 
 import bittensor as bt
 import wandb
@@ -21,17 +20,16 @@ from dotenv import load_dotenv
 
 from allways import __version__
 from allways.chain_providers import create_chain_providers
-from allways.commitments import read_miner_commitments
 from allways.constants import (
-    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
-    DIRECTION_POOLS,
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
     SCORING_WINDOW_BLOCKS,
+    SCORING_WINDOW_SECS,
 )
 from allways.contract_client import AllwaysContractClient
 from allways.solana import keys
 from allways.solana.client import AllwaysSolanaClient
+from allways.solana.events import SolanaEventIngest
 from allways.validator.axon_handlers import (
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -43,15 +41,12 @@ from allways.validator.axon_handlers import (
     priority_swap_confirm,
     priority_swap_reserve,
 )
-from allways.validator.bounds_cache import BoundsCache
-from allways.validator.chain_verification import SwapVerifier
-from allways.validator.event_watcher import ContractEventWatcher
+from allways.validator.bounds_cache import BoundsCache, SolanaConfigCache
+from allways.validator.event_index import SolanaEventIndex
 from allways.validator.forward import forward
-from allways.validator.optimistic_extensions import OptimisticExtensionWatcher
 from allways.validator.solana_swap_loop import SolanaSwapLoop
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.storage import DatabaseStorage
-from allways.validator.swap_tracker import SwapTracker
 from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
@@ -73,26 +68,15 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        self.contract_client = AllwaysContractClient(
-            subtensor=self.subtensor,
-            reconnect_subtensor=self.reconnect_and_propagate,
-        )
         self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
-
-        try:
-            timeout_blocks = self.contract_client.get_fulfillment_timeout() or DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
-        except Exception as e:
-            bt.logging.warning(f'fulfillment_timeout read failed at init, using default: {e}')
-            timeout_blocks = DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
         self.fee_divisor = FEE_DIVISOR
 
-        # Single store owning every validator-local table. Must be created
-        # before SwapTracker so the tracker can persist swap outcomes into
-        # the credibility ledger, and before the axon handler wiring so the
-        # handler thread can enqueue pending confirms. Exposes current block
-        # so pending_confirms can purge expired reservations lazily on read.
-        # db path is overridable so a multi-validator dev env can give each
-        # process its own file — shared DBs race on pending_confirms delete.
+        # Single store owning every validator-local table (crown event tables +
+        # the Solana ingest cursor + the axon reservation pins). Created before
+        # the axon handler wiring so handler threads can read/write it. Exposes
+        # current block so the axon reservation pins purge lazily on read. db
+        # path is overridable so a multi-validator dev env can give each process
+        # its own file — shared DBs race on writes.
         state_db_path = getattr(getattr(self.config, 'validator', None), 'state_db_path', None)
         self.state_store = ValidatorStateStore(
             db_path=state_db_path,
@@ -105,10 +89,10 @@ class Validator(BaseValidatorNeuron):
         # don't write to the dashboard DB.
         self.database_storage = DatabaseStorage()
 
-        # B1: read-only Solana swap loop. Discovers live swaps off the contract
-        # (getProgramAccounts), decides per status, and logs "WOULD …" — no
-        # on-chain votes yet (B2 un-stubs voting + adds freshness checks). This
-        # subsumes the old swap_tracker discovery + SwapVerifier orchestration.
+        # Solana swap loop: discovers live swaps off the contract
+        # (getProgramAccounts), decides per status, verifies both legs with
+        # replay-freshness gates, and casts the on-chain consensus vote. This
+        # subsumes the old substrate swap_tracker discovery + verifier.
         solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
         # Safety hatch for staged rollout: SOLANA_VALIDATOR_READONLY=1 logs "WOULD …" without voting.
         solana_read_only = os.environ.get('SOLANA_VALIDATOR_READONLY', '0') == '1'
@@ -116,54 +100,25 @@ class Validator(BaseValidatorNeuron):
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only
         )
+        # Crown-time state is sourced entirely from Solana program events (B3.6):
+        # `event_ingest` polls the program's signature stream each forward step,
+        # `event_index` folds the decoded events into the state_store crown
+        # tables, and scoring replays those tables. `solana_config_cache` serves
+        # swap bounds + halt off the Config account (replacing substrate reads).
+        self.event_ingest = SolanaEventIngest(self.solana_client)
+        self.event_index = SolanaEventIndex(self.state_store)
+        self.solana_config_cache = SolanaConfigCache(self.solana_client)
 
-        self.last_known_rates: dict[tuple[str, str, str], float] = {}
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
         # (which would route emissions to RECYCLE via the empty-norm fallback).
         self.initial_scoring_done = False
-        # Last completed scoring round's block. Drives the block-based gate and
-        # anchors each round's window_start so consecutive rounds tile gap-free.
-        # Seeded one window back so a fresh process scores one trailing window.
+        # Last completed scoring round. `last_scored_block` gates the cadence
+        # (subtensor block); `last_scored_time` anchors the crown replay
+        # window's start (unix seconds, the blockTime axis). Both seeded one
+        # window back so a fresh process scores one trailing window.
         self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
-
-        # Optimistic propose/challenge/finalize for reservation + timeout
-        # extensions. Stateless decision class — the forward loop drives it
-        # per-iteration with the state it already has in hand.
-        self.optimistic_extensions = OptimisticExtensionWatcher(
-            contract_client=self.contract_client,
-            wallet=self.wallet,
-        )
-
-        # Event-sourced miner state. ``sync_to(current_block)`` runs each
-        # forward step; scoring reads the active set from the watcher's
-        # in-memory dicts and trusts the contract's active flag for all
-        # collateral-floor invariants.
-        metadata_path = Path(__file__).resolve().parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
-        self.event_watcher = ContractEventWatcher(
-            substrate=self.subtensor.substrate,
-            contract_address=self.contract_client.contract_address,
-            metadata_path=metadata_path,
-            state_store=self.state_store,
-            metagraph=self.metagraph,
-            netuid=self.config.netuid,
-            subtensor=self.subtensor,
-        )
-        self.event_watcher.initialize(
-            current_block=self.block,
-            metagraph_hotkeys=list(self.metagraph.hotkeys),
-            contract_client=self.contract_client,
-        )
-        # Heal collateral on startup: a warm restart hydrates from state.db and
-        # does no contract reads, so any baseline that drifted/zeroed (e.g. a
-        # fee/slash delta applied without a baseline) would persist and keep the
-        # miner out of crown. Reconcile active miners against the contract now.
-        try:
-            self.event_watcher.reconcile_collateral_from_contract(
-                self.block, list(self.metagraph.hotkeys), self.contract_client
-            )
-        except Exception as e:
-            bt.logging.warning(f'startup collateral reconcile failed: {e}')
+        self.last_scored_time = max(0, int(time.time()) - SCORING_WINDOW_SECS)
 
         # Separate subtensor/contract/providers for axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two
@@ -184,24 +139,7 @@ class Validator(BaseValidatorNeuron):
             self.axon_subtensor.get_current_block,
             lock=self.axon_lock,
         )
-
-        # bootstrap_miner_rates reads bounds_cache, so the block above must
-        # run first.
-        self.bootstrap_miner_rates()
-
-        self.swap_tracker = SwapTracker(client=self.contract_client, metagraph=self.metagraph)
-        self.swap_tracker.initialize()
-        # Late-bind the tracker so TimeoutExtensionFinalized events can write
-        # the new timeout_block straight into the in-memory active swap.
-        self.event_watcher.swap_tracker = self.swap_tracker
-        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}, timeout={timeout_blocks}')
-
-        self.swap_verifier = SwapVerifier(
-            chain_providers=self.chain_providers,
-            fee_divisor=self.fee_divisor,
-            metagraph=self.metagraph,
-            state_store=self.state_store,
-        )
+        bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon
         self.attach_axon_handlers()
@@ -221,76 +159,6 @@ class Validator(BaseValidatorNeuron):
                 )
             except Exception as e:
                 bt.logging.error(f'Failed to initialize wandb run: {e}')
-
-    def bootstrap_miner_rates(self) -> None:
-        """Cold-start anchor for rate events. Without this, a validator with a
-        fresh state.db (first run, or a container recreate that loses the
-        writable layer) has no rate visible at window_start on the first
-        scoring pass, so every miner reads as 'no rate posted' and the entire
-        pool recycles to RECYCLE_UID. Read current commitments from chain and
-        seed one anchor event per (hotkey, direction) at cursor — mirrors the
-        active-flag anchor that event_watcher.initialize already does."""
-        try:
-            max_swap_amount = int(self.bounds_cache.max_swap_amount())
-        except Exception as e:
-            bt.logging.warning(f'max_swap_amount read failed: {e}')
-            max_swap_amount = 0
-        try:
-            min_swap_amount = int(self.bounds_cache.min_swap_amount())
-        except Exception as e:
-            bt.logging.warning(f'min_swap_amount read failed: {e}')
-            min_swap_amount = 0
-
-        try:
-            pairs = read_miner_commitments(
-                self.subtensor,
-                self.config.netuid,
-                min_swap_rao=min_swap_amount,
-                max_swap_rao=max_swap_amount,
-            )
-        except Exception as e:
-            bt.logging.warning(f'Rate bootstrap: commitment read failed: {e}')
-            return
-
-        anchor_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
-        current_hotkeys = set(self.metagraph.hotkeys)
-
-        # Hydrate last_known_rates from persisted state BEFORE seeding the
-        # admitted-pairs cache. Without this, a validator restart on or after
-        # a miner's parser-poison (or sentinel) flip would never see the prior
-        # positive in cache, so refresh_miner_rates' second sweep couldn't
-        # emit a terminator and the stale rate would keep earning crown until
-        # the next genuine on-chain event resets it.
-        for from_chain, to_chain in DIRECTION_POOLS:
-            for hk, (rate, _block) in self.state_store.get_latest_rates_before(
-                from_chain, to_chain, anchor_block
-            ).items():
-                if hk in current_hotkeys and rate > 0:
-                    self.last_known_rates[(hk, from_chain, to_chain)] = rate
-
-        seeded = 0
-        for pair in pairs:
-            if pair.hotkey not in current_hotkeys:
-                continue
-            for from_c, to_c, r in (
-                (pair.from_chain, pair.to_chain, pair.rate),
-                (pair.to_chain, pair.from_chain, pair.counter_rate),
-            ):
-                if r <= 0:
-                    continue
-                self.last_known_rates[(pair.hotkey, from_c, to_c)] = r
-                existing = self.state_store.get_latest_rate_before(pair.hotkey, from_c, to_c, anchor_block)
-                if existing is None:
-                    self.state_store.insert_rate_event(
-                        hotkey=pair.hotkey,
-                        from_chain=from_c,
-                        to_chain=to_c,
-                        rate=r,
-                        block=anchor_block,
-                    )
-                    seeded += 1
-        if seeded:
-            bt.logging.info(f'Rate bootstrap: seeded {seeded} anchor(s) at block {anchor_block}')
 
     def attach_axon_handlers(self):
         """Attach all synapse handlers to the axon."""
@@ -312,7 +180,6 @@ class Validator(BaseValidatorNeuron):
     def reconnect_and_propagate(self):
         """Rebuild the main subtensor and update components that hold it."""
         self.reconnect_subtensor()
-        self.contract_client.subtensor = self.subtensor
         tao_provider = self.chain_providers.get('tao')
         if tao_provider and hasattr(tao_provider, 'subtensor'):
             tao_provider.subtensor = self.subtensor

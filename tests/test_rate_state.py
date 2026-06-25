@@ -10,26 +10,15 @@ def make_store(tmp_path: Path) -> ValidatorStateStore:
     return ValidatorStateStore(db_path=tmp_path / 'state.db')
 
 
-def outcome_counts(store: ValidatorStateStore, since_block: int = 0) -> dict[str, tuple[int, int]]:
-    """Local re-read of the swap_outcomes completed/timed_out tallies. The public
-    get_success_rates_since reader was removed in B3.3 (credibility moved to the
-    on-chain MinerState gate), but insert_swap_outcome + the table survive for
-    volume until B3.6 — so these write-path tests verify the rows directly."""
-    rows = store.require_connection().execute(
-        'SELECT miner_hotkey, SUM(completed) AS c, SUM(1 - completed) AS t '
-        'FROM swap_outcomes WHERE resolved_block >= ? GROUP BY miner_hotkey',
-        (since_block,),
-    ).fetchall()
-    return {r['miner_hotkey']: (int(r['c']), int(r['t'])) for r in rows}
-
-
 class TestValidatorStateStoreSchema:
     def test_init_creates_all_tables_and_indexes(self, tmp_path: Path):
         store = make_store(tmp_path)
         conn = store.require_connection()
 
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {'rate_events', 'swap_outcomes', 'pending_confirms'}.issubset(tables)
+        assert {'rate_events', 'active_events', 'busy_events', 'collateral_events', 'reservation_pins'}.issubset(
+            tables
+        )
 
         indexes = {
             row[0]
@@ -40,7 +29,6 @@ class TestValidatorStateStoreSchema:
         assert 'idx_rate_events_block' in indexes
         assert 'idx_rate_events_dir_block' in indexes
         assert 'idx_rate_events_hotkey' in indexes
-        assert 'idx_swap_outcomes_hotkey' in indexes
 
         store.close()
 
@@ -80,17 +68,6 @@ class TestInsertRateEvent:
         assert store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100) is True
         # Same hotkey, other direction — same-rate dedupe only checks its own direction
         assert store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=105) is True
-        store.close()
-
-
-class TestInsertSwapOutcome:
-    def test_idempotent_on_swap_id(self, tmp_path: Path):
-        store = make_store(tmp_path)
-        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
-        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=False, resolved_block=101)
-
-        # Second insert replaced the first (swap_id PRIMARY KEY): 0 completed, 1 timed_out
-        assert outcome_counts(store) == {'hk1': (0, 1)}
         store.close()
 
 
@@ -136,39 +113,20 @@ class TestGetRateEventsInRange:
 
 
 class TestDeleteHotkey:
-    def test_removes_from_rate_and_outcome_tables(self, tmp_path: Path):
+    def test_removes_rate_events_for_hotkey(self, tmp_path: Path):
         store = make_store(tmp_path)
         store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
-        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
-
-        # Sanity
         store.insert_rate_event('hk2', 'tao', 'btc', 0.00016, block=100)
-        store.insert_swap_outcome(swap_id=2, miner_hotkey='hk2', completed=False, resolved_block=100)
 
         store.delete_hotkey('hk1')
 
         assert store.get_latest_rate_before('hk1', 'tao', 'btc', block=200) is None
-        assert 'hk1' not in outcome_counts(store)
-
         # hk2 untouched
         assert store.get_latest_rate_before('hk2', 'tao', 'btc', block=200) is not None
-        assert 'hk2' in outcome_counts(store)
         store.close()
 
 
 class TestPrune:
-    def test_prune_leaves_swap_outcomes_intact(self, tmp_path: Path):
-        """Pruning only touches rate_events — swap_outcomes has its own lifetime."""
-        store = make_store(tmp_path)
-        store.insert_rate_event('hk1', 'tao', 'btc', 0.00015, block=100)
-        store.insert_swap_outcome(swap_id=1, miner_hotkey='hk1', completed=True, resolved_block=100)
-
-        store.prune_events_older_than(cutoff_block=200)
-
-        # Swap outcomes untouched by rate-event prune.
-        assert outcome_counts(store) == {'hk1': (1, 0)}
-        store.close()
-
     def test_prune_preserves_latest_row_per_direction(self, tmp_path: Path):
         """A miner's single rate row must survive even when it's older than
         the cutoff — otherwise get_latest_rate_before at window_start would
@@ -219,13 +177,9 @@ class TestConcurrency:
         def writer(thread_idx: int):
             try:
                 for i in range(100):
-                    # Use a unique swap_id so no two threads collide on INSERT OR REPLACE.
-                    store.insert_swap_outcome(
-                        swap_id=thread_idx * 1000 + i,
-                        miner_hotkey=f'hk{thread_idx}',
-                        completed=bool(i % 2),
-                        resolved_block=1000 + i,
-                    )
+                    # active_events has no dedup, so every write lands a row —
+                    # a clean count of concurrent inserts.
+                    store.insert_active_event(1000 + i, f'hk{thread_idx}', bool(i % 2))
             except Exception as e:
                 errors.append(e)
 
@@ -238,7 +192,7 @@ class TestConcurrency:
         assert errors == []
 
         conn = store.require_connection()
-        count = conn.execute('SELECT COUNT(*) FROM swap_outcomes').fetchone()[0]
+        count = conn.execute('SELECT COUNT(*) FROM active_events').fetchone()[0]
         assert count == 400
         store.close()
 

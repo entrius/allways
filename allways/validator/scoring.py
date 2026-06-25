@@ -13,6 +13,7 @@ weights currently match the B3.3 crown-only reward. Any shortfall recycles to
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import partial
@@ -72,23 +73,28 @@ def scoring_window_bounds(current_time: int, last_scored_time: int) -> Tuple[int
 
 def score_and_reward_miners(self: Validator) -> None:
     try:
+        # The crown replay window is on the unix-time (blockTime) axis — the same
+        # axis the Solana event tables are keyed on. Captured once so the window
+        # the round scores and the cursor it advances to never drift apart.
+        now = int(time.time())
         halted = contract_is_halted(self)
         if halted:
             rewards, miner_uids = build_halted_rewards(self)
-            _flush_halt_window(self)
+            _flush_halt_window(self, now)
         else:
-            rewards, miner_uids = calculate_miner_rewards(self)
+            rewards, miner_uids = calculate_miner_rewards(self, now)
         self.update_scores(rewards, miner_uids)
-        prune_rate_events(self)
-        # Advance the cursor only after a round completes, so a mid-round
-        # failure retries the same window next forward instead of skipping it.
-        # self.block is TTL-cached, so it equals the window_end the round used.
+        prune_crown_events(self, now)
+        # Advance both cursors only after a round completes, so a mid-round
+        # failure retries the same window next forward. last_scored_block gates
+        # cadence (subtensor block); last_scored_time anchors the crown window.
         self.last_scored_block = self.block
+        self.last_scored_time = now
     except Exception as e:
         bt.logging.error(f'Scoring failed: {e}')
 
 
-def _flush_halt_window(self: Validator) -> None:
+def _flush_halt_window(self: Validator, current_time: int) -> None:
     """Clear crown_holders rows in the halted window, advance the
     sync_cursor watermarks, and clear the live current_crown_holders
     table. Mirrors the daemon's halt-tick semantics so the dashboard
@@ -98,7 +104,7 @@ def _flush_halt_window(self: Validator) -> None:
     check halt — halt is rare; one clear per round is enough."""
     if not self.database_storage.is_enabled():
         return
-    window_end = self.block
+    window_end = current_time
     window_start = max(0, window_end - SCORING_WINDOW_SECS)
     if window_end <= 0:
         return
@@ -118,11 +124,11 @@ def contract_is_halted(self: Validator) -> bool:
     """Best-effort halt check. RPC flakiness should not zero every miner's
     reward, so any exception falls through to normal scoring.
 
-    Delegates to bounds_cache.halted() — short TTL (HALT_TTL_BLOCKS ~ 60s)
-    so the per-forward live-crown writer and the per-round scoring path
-    share one cached value instead of each hitting the contract RPC."""
+    Delegates to solana_config_cache.halted() — short TTL (~60s) so the
+    per-forward live-crown writer and the per-round scoring path share one
+    cached value instead of each hitting the Solana Config RPC."""
     try:
-        return self.bounds_cache.halted()
+        return self.solana_config_cache.halted()
     except Exception as e:
         bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
         return False
@@ -140,10 +146,18 @@ def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     return rewards, set(range(n_uids))
 
 
-def prune_rate_events(self: Validator) -> None:
-    cutoff = self.block - SCORING_WINDOW_SECS
-    if cutoff > 0:
-        self.state_store.prune_events_older_than(cutoff)
+def prune_crown_events(self: Validator, current_time: int) -> None:
+    """Trim the crown-time event tables to one trailing window. The Solana
+    event tables are keyed by unix blockTime, so the cutoff is on that axis;
+    this also takes over the active/busy/collateral pruning the deleted
+    substrate event_watcher used to own (each preserves a per-hotkey anchor)."""
+    cutoff = current_time - SCORING_WINDOW_SECS
+    if cutoff <= 0:
+        return
+    self.state_store.prune_events_older_than(cutoff)
+    self.state_store.prune_active_events(cutoff)
+    self.state_store.prune_busy_events(cutoff)
+    self.state_store.prune_collateral_events(cutoff)
 
 
 def is_eligible(miner_state) -> bool:
@@ -233,9 +247,10 @@ def rate_quality(realized_vwap_rate: float = 0.0, market_rate: Optional[float] =
     return 1.0
 
 
-def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
+def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
     (eligible × [w_a·crown + w_b·quality_volume]), recycle the rest.
+    ``current_time`` is the unix-seconds window_end (the crown axis).
 
     Volume weighting is *per direction*: a miner earning crown on btc→tao is
     compared only to btc→tao volume on the network, not to the total of both
@@ -245,7 +260,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     if n_uids == 0:
         return np.array([], dtype=np.float32), set()
 
-    window_start, window_end = scoring_window_bounds(self.block, self.last_scored_block)
+    window_start, window_end = scoring_window_bounds(current_time, self.last_scored_time)
 
     # A miner's *current* active flag is irrelevant to whether they earned
     # crown during the replay window. The only at-scoring-time check is
@@ -275,12 +290,12 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     storage_enabled = self.database_storage.is_enabled()
     intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, List[str], float]]] = {}
     try:
-        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+        max_swap_amount = int(self.solana_config_cache.max_swap_amount())
     except Exception as e:
         bt.logging.warning(f'max_swap_amount read failed: {e}')
         max_swap_amount = 0
     try:
-        min_swap_amount = int(self.bounds_cache.min_swap_amount())
+        min_swap_amount = int(self.solana_config_cache.min_swap_amount())
     except Exception as e:
         bt.logging.warning(f'min_swap_amount read failed: {e}')
         min_swap_amount = 0
@@ -727,6 +742,7 @@ def replay_crown_time_window(
 
 def snapshot_current_crown_holders(
     self: Validator,
+    at_time: Optional[int] = None,
 ) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
     """Cheap "who holds the crown right now" per direction. Used by the
     per-forward-step live-crown writer.
@@ -746,14 +762,16 @@ def snapshot_current_crown_holders(
     shows the actual best-rate holder during halt for ~1h, while the
     HaltBanner + top-right indicator (both fed by /halt off
     contract_events) signal the recycle state to users."""
-    block = self.block
+    # The live crown reads per-instant state at "now" on the unix-time
+    # (blockTime) axis the event tables use. Tests pass an explicit instant.
+    block = int(time.time()) if at_time is None else at_time
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     # Match the scoring path's executability filter so the live table never
     # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
     # TTL cache (no per-step RPC); both-0 on failure = permissive, as before.
     try:
-        min_swap_amount = int(self.bounds_cache.min_swap_amount())
-        max_swap_amount = int(self.bounds_cache.max_swap_amount())
+        min_swap_amount = int(self.solana_config_cache.min_swap_amount())
+        max_swap_amount = int(self.solana_config_cache.max_swap_amount())
     except Exception as e:
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         min_swap_amount = max_swap_amount = 0

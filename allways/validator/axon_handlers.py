@@ -34,7 +34,7 @@ from allways.utils.rate import (
 )
 from allways.utils.scale import encode_bytes, encode_str, encode_u128
 from allways.validator.solana_swap_loop import is_tx_fresh
-from allways.validator.state_store import PendingConfirm, ReservationPin
+from allways.validator.state_store import ReservationPin
 
 if TYPE_CHECKING:
     from neurons.validator import Validator

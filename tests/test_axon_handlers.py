@@ -16,7 +16,7 @@ from allways.classes import MinerPair, Reservation
 from allways.contract_client import ContractError
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.validator.axon_handlers import handle_miner_activate, handle_swap_confirm, handle_swap_reserve
-from allways.validator.state_store import PendingConfirm, ReservationPin, ValidatorStateStore
+from allways.validator.state_store import ReservationPin, ValidatorStateStore
 
 
 def make_synapse(

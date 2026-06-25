@@ -113,7 +113,7 @@ def log_scoring_trace(
     # state, so the non-earner diagnosis can tell "excluded by collateral"
     # from "genuinely outbid". Absent hotkey == unknown (fail-open), per the
     # gate in scoring.py.
-    collaterals = dict(self.event_watcher.get_miner_collaterals_at(window_start))
+    collaterals = dict(self.event_index.get_miner_collaterals_at(window_start))
     lines.extend(
         non_earner_lines(
             self,
@@ -154,8 +154,8 @@ def non_earner_lines(
     max_swap_rao: int = 0,
 ) -> List[str]:
     collaterals = collaterals or {}
-    ever_active = set(self.event_watcher.get_active_miners_at(window_start))
-    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
+    ever_active = set(self.event_index.get_active_miners_at(window_start))
+    for e in self.event_index.get_active_events_in_range(window_start, window_end):
         if e['active']:
             ever_active.add(e['hotkey'])
 
