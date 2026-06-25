@@ -28,7 +28,7 @@ const TTL: i64 = 1_800;
 // Default pinned quote (matches the pair the tests open on).
 const MFROM: &str = "minerBTCaddr";
 const MTO: &str = "minerSOLaddr";
-const RATE: &str = "1.5";
+const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
 fn pid() -> Pubkey {
     allways_swap_manager::id()
@@ -131,7 +131,7 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: &str) -> Instruction {
+fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: u128) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::SetQuote {
@@ -139,7 +139,7 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
             to_chain: t.to_string(),
             miner_from_addr: mfrom.to_string(),
             miner_to_addr: mto.to_string(),
-            rate: rate.to_string(),
+            rate,
             liquidity: 1_000,
         }
         .data(),
@@ -320,7 +320,7 @@ fn test_validator_can_update_request() {
 fn test_pair_mismatch_rejected() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     // Miner also quotes BTC→TAO so that quote account exists for the join attempt.
-    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "TAO", MFROM, "minerTAOaddr", "2.0"), &miner.pubkey(), &miner).expect("quote2");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "TAO", MFROM, "minerTAOaddr", 2_000_000_000_000_000_000), &miner.pubkey(), &miner).expect("quote2");
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 1, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open BTC/SOL");
     let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "TAO", &user, "u2", "uTAO", 1, 1, 0), &vals[1].pubkey(), &vals[1]);

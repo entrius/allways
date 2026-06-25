@@ -14,7 +14,7 @@ use {
     allways_swap_manager::state::{MinerQuote, Treasury},
     allways_swap_manager::constants::{
         QUOTE_UPDATE_FEE_TIER1_LAMPORTS, QUOTE_UPDATE_FEE_TIER1_MAX_SECS,
-        QUOTE_UPDATE_FEE_TIER2_LAMPORTS, QUOTE_UPDATE_FEE_TIER2_MAX_SECS,
+        QUOTE_UPDATE_FEE_TIER2_LAMPORTS, QUOTE_UPDATE_FEE_TIER2_MAX_SECS, RATE_PRECISION,
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
@@ -86,7 +86,7 @@ fn set_quote_ix(
     to_chain: &str,
     miner_from_addr: &str,
     miner_to_addr: &str,
-    rate: &str,
+    rate: u128,
     liquidity: u128,
 ) -> Instruction {
     Instruction::new_with_bytes(
@@ -96,7 +96,7 @@ fn set_quote_ix(
             to_chain: to_chain.to_string(),
             miner_from_addr: miner_from_addr.to_string(),
             miner_to_addr: miner_to_addr.to_string(),
-            rate: rate.to_string(),
+            rate,
             liquidity,
         }
         .data(),
@@ -157,7 +157,7 @@ fn test_set_quote_creates_pda() {
 
     send(
         &mut svm,
-        set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "bc1qsrc", "5Cdst", "340", 100),
+        set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "bc1qsrc", "5Cdst", 340 * RATE_PRECISION, 100),
         &miner.pubkey(),
         &miner,
     )
@@ -169,7 +169,7 @@ fn test_set_quote_creates_pda() {
     assert_eq!(q.to_chain, "tao");
     assert_eq!(q.miner_from_addr, "bc1qsrc");
     assert_eq!(q.miner_to_addr, "5Cdst");
-    assert_eq!(q.rate, "340");
+    assert_eq!(q.rate, 340 * RATE_PRECISION);
     assert_eq!(q.liquidity, 100);
     assert!(q.updated_at >= 0);
 }
@@ -180,11 +180,11 @@ fn test_set_quote_overwrites_in_place() {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
 
-    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "a", "b", "340", 100), &miner.pubkey(), &miner).expect("set1");
-    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "a", "b", "355", 200), &miner.pubkey(), &miner).expect("set2 overwrite");
+    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "a", "b", 340 * RATE_PRECISION, 100), &miner.pubkey(), &miner).expect("set1");
+    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "a", "b", 355 * RATE_PRECISION, 200), &miner.pubkey(), &miner).expect("set2 overwrite");
 
     let q = read_quote(&svm, &program_id, &miner.pubkey(), "btc", "tao");
-    assert_eq!(q.rate, "355", "rate updated in place");
+    assert_eq!(q.rate, 355 * RATE_PRECISION, "rate updated in place");
     assert_eq!(q.liquidity, 200, "liquidity updated in place");
 }
 
@@ -196,14 +196,14 @@ fn test_multiple_pairs_and_directions_coexist() {
     let m = miner.pubkey();
 
     // Whole book: btc->tao, tao->btc (reverse direction), sol->btc.
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("btc->tao");
-    send(&mut svm, set_quote_ix(&program_id, &m, "tao", "btc", "c", "d", "0.0029", 2), &m, &miner).expect("tao->btc");
-    send(&mut svm, set_quote_ix(&program_id, &m, "sol", "btc", "e", "f", "0.0011", 3), &m, &miner).expect("sol->btc");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("btc->tao");
+    send(&mut svm, set_quote_ix(&program_id, &m, "tao", "btc", "c", "d", 29 * RATE_PRECISION / 10_000, 2), &m, &miner).expect("tao->btc");
+    send(&mut svm, set_quote_ix(&program_id, &m, "sol", "btc", "e", "f", 11 * RATE_PRECISION / 10_000, 3), &m, &miner).expect("sol->btc");
 
     // Each is its own PDA with its own rate; no collision.
-    assert_eq!(read_quote(&svm, &program_id, &m, "btc", "tao").rate, "340");
-    assert_eq!(read_quote(&svm, &program_id, &m, "tao", "btc").rate, "0.0029");
-    assert_eq!(read_quote(&svm, &program_id, &m, "sol", "btc").rate, "0.0011");
+    assert_eq!(read_quote(&svm, &program_id, &m, "btc", "tao").rate, 340 * RATE_PRECISION);
+    assert_eq!(read_quote(&svm, &program_id, &m, "tao", "btc").rate, 29 * RATE_PRECISION / 10_000);
+    assert_eq!(read_quote(&svm, &program_id, &m, "sol", "btc").rate, 11 * RATE_PRECISION / 10_000);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn test_same_chain_rejected() {
     let (mut svm, program_id) = setup();
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
-    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "btc", "a", "b", "1", 1), &miner.pubkey(), &miner);
+    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "btc", "a", "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
     assert!(r.is_err(), "from_chain == to_chain must be rejected");
 }
 
@@ -220,7 +220,7 @@ fn test_empty_field_rejected() {
     let (mut svm, program_id) = setup();
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
-    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "", "b", "1", 1), &miner.pubkey(), &miner);
+    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "", "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
     assert!(r.is_err(), "empty miner_from_addr must be rejected");
 }
 
@@ -230,7 +230,7 @@ fn test_oversized_string_rejected() {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
     let long_addr = "x".repeat(81); // MAX_ADDR_LEN = 80
-    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", &long_addr, "b", "1", 1), &miner.pubkey(), &miner);
+    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", &long_addr, "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
     assert!(r.is_err(), "address over MAX_ADDR_LEN must be rejected");
 }
 
@@ -242,7 +242,7 @@ fn test_remove_quote_closes_and_refunds() {
     let m = miner.pubkey();
 
     set_clock(&mut svm, 2_000_000);
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("set");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("set");
     let before = svm.get_account(&m).unwrap().lamports;
     assert!(svm.get_account(&quote_pda(&program_id, &m, "btc", "tao")).map(|a| a.lamports > 0).unwrap_or(false));
 
@@ -267,17 +267,17 @@ fn test_quote_update_fee_decays() {
     set_clock(&mut svm, 1_000_000); // a real (nonzero) wall clock
 
     // 1) Creation → free.
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("create");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("create");
     assert_eq!(treasury(&svm, &program_id), 0, "creation is free");
 
     // 2) Immediate update (elapsed 0 < 5 min) → tier-1.
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "341", 1), &m, &miner).expect("rapid update");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 341 * RATE_PRECISION, 1), &m, &miner).expect("rapid update");
     let after_t1 = treasury(&svm, &program_id);
     assert_eq!(after_t1, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "rapid update charges tier-1");
 
     // 3) Update just past the 5-min window → tier-2.
     set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER1_MAX_SECS + 1);
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "342", 1), &m, &miner).expect("tier2 update");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 342 * RATE_PRECISION, 1), &m, &miner).expect("tier2 update");
     let after_t2 = treasury(&svm, &program_id);
     assert_eq!(after_t2, after_t1 + QUOTE_UPDATE_FEE_TIER2_LAMPORTS, "5–10 min update charges tier-2");
 
@@ -286,7 +286,7 @@ fn test_quote_update_fee_decays() {
         &mut svm,
         1_000_000 + QUOTE_UPDATE_FEE_TIER1_MAX_SECS + 1 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1,
     );
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "343", 1), &m, &miner).expect("free update");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 343 * RATE_PRECISION, 1), &m, &miner).expect("free update");
     assert_eq!(treasury(&svm, &program_id), after_t2, "long-standing quote updates for free");
 }
 
@@ -301,13 +301,13 @@ fn test_remove_quote_charges_churn_fee() {
     set_clock(&mut svm, 1_000_000);
 
     // Fresh quote (btc/tao), removed immediately → tier-1.
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", "340", 1), &m, &miner).expect("create fresh");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("create fresh");
     assert_eq!(treasury(&svm, &program_id), 0, "creation free");
     send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "tao"), &m, &miner).expect("remove fresh");
     assert_eq!(treasury(&svm, &program_id), QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "removing a fresh quote charges tier-1");
 
     // A different quote (btc/sol) left to stand past the decay window → removes free (treasury unchanged).
-    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "a", "b", "341", 1), &m, &miner).expect("create stale");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "a", "b", 341 * RATE_PRECISION, 1), &m, &miner).expect("create stale");
     set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1);
     send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "sol"), &m, &miner).expect("remove stale");
     assert_eq!(treasury(&svm, &program_id), QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "a long-standing quote removes free");
@@ -321,10 +321,10 @@ fn test_set_quote_is_permissionless() {
     svm.airdrop(&anyone.pubkey(), 10_000_000_000).unwrap();
     send(
         &mut svm,
-        set_quote_ix(&program_id, &anyone.pubkey(), "btc", "tao", "a", "b", "340", 1),
+        set_quote_ix(&program_id, &anyone.pubkey(), "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1),
         &anyone.pubkey(),
         &anyone,
     )
     .expect("permissionless set_quote");
-    assert_eq!(read_quote(&svm, &program_id, &anyone.pubkey(), "btc", "tao").rate, "340");
+    assert_eq!(read_quote(&svm, &program_id, &anyone.pubkey(), "btc", "tao").rate, 340 * RATE_PRECISION);
 }
