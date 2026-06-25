@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, MAX_TX_LEN, MAX_VALIDATORS};
+use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
 /// A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the
 /// stake-weight seam consumed ONLY by the reservation-lottery draw; consensus stays count-based.
@@ -143,8 +143,8 @@ pub struct Reservation {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    #[max_len(MAX_RATE_LEN)]
-    pub rate: String,
+    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    pub rate: u128,
     /// Expiry, unix seconds (0 = empty).
     pub reserved_until: i64,
     /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
@@ -182,8 +182,8 @@ pub struct Swap {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    #[max_len(MAX_RATE_LEN)]
-    pub rate: String,
+    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    pub rate: u128,
     /// Collateral-backed swap size (SOL lamports) — fee/slash basis.
     pub sol_amount: u64,
     pub from_amount: u128,
@@ -235,9 +235,9 @@ pub struct MinerQuote {
     /// Where the miner sends the destination asset (on `to_chain`).
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    /// Offered rate, dest per 1 source, for THIS direction (string for exact sig-fig precision).
-    #[max_len(MAX_RATE_LEN)]
-    pub rate: String,
+    /// Offered rate, dest per 1 source, for THIS direction. Fixed-point = display_rate ×
+    /// RATE_PRECISION (1e18) — exact, no string parse; see constants::RATE_PRECISION.
+    pub rate: u128,
     /// Advertised depth in the asset's own units (u128 to cover wei-scale).
     pub liquidity: u128,
     /// Unix timestamp of the last write (staleness signal for off-chain consumers).
@@ -283,8 +283,8 @@ pub struct Pool {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    #[max_len(MAX_RATE_LEN)]
-    pub rate: String,
+    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    pub rate: u128,
     /// Unix seconds the pool opened (0 = available/empty slot).
     pub opened_at: i64,
     /// Unix seconds the request window closes; `resolve_pool` is callable after this.

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_RATE_LEN, QUOTE_SEED, TREASURY_SEED};
+use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, QUOTE_SEED, TREASURY_SEED};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
 use crate::state::{MinerQuote, Treasury};
@@ -41,16 +41,18 @@ pub fn handler(
     to_chain: String,
     miner_from_addr: String,
     miner_to_addr: String,
-    rate: String,
+    rate: u128,
     liquidity: u128,
 ) -> Result<()> {
-    // Mechanical sanity only — chains are opaque bounded strings; validity is the off-chain layer's call.
+    // Mechanical sanity only — chains/addrs are opaque bounded strings. The rate is an opaque
+    // fixed-point integer (display × RATE_PRECISION); the contract stores whatever the miner posts
+    // and never computes with it — routability/validity is the off-chain layer's call
+    // (`is_executable_rate`), so there is deliberately no on-chain rate check.
     require!(
         !from_chain.is_empty()
             && !to_chain.is_empty()
             && !miner_from_addr.is_empty()
-            && !miner_to_addr.is_empty()
-            && !rate.is_empty(),
+            && !miner_to_addr.is_empty(),
         ErrorCode::EmptyField
     );
     require!(
@@ -61,7 +63,6 @@ pub fn handler(
         miner_from_addr.len() <= MAX_ADDR_LEN && miner_to_addr.len() <= MAX_ADDR_LEN,
         ErrorCode::StringTooLong
     );
-    require!(rate.len() <= MAX_RATE_LEN, ErrorCode::StringTooLong);
     require!(from_chain != to_chain, ErrorCode::SameChain);
 
     let now = Clock::get()?.unix_timestamp;
@@ -100,7 +101,7 @@ pub fn handler(
     quote.to_chain = to_chain.clone();
     quote.miner_from_addr = miner_from_addr;
     quote.miner_to_addr = miner_to_addr;
-    quote.rate = rate.clone();
+    quote.rate = rate;
     quote.liquidity = liquidity;
     quote.updated_at = now;
     quote.bump = bump;

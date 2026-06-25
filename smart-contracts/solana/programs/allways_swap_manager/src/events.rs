@@ -96,7 +96,8 @@ pub struct QuoteSet {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
-    pub rate: String,
+    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18).
+    pub rate: u128,
     pub liquidity: u128,
     pub updated_at: i64,
     /// Anti-flashing churn fee paid into the treasury this call (lamports); 0 on first creation

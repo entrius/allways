@@ -64,7 +64,7 @@ const FROM_CHAIN: &str = "BTC";
 const TO_CHAIN: &str = "SOL";
 const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
-const RATE: &str = "1.5";
+const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
 // ─── PDA helpers (mirror the unit tests) ────────────────────────────────────────
 fn pid() -> Pubkey {
@@ -858,7 +858,7 @@ fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
     .0
 }
 
-fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Instruction {
+fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: u128) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::SetQuote {
@@ -866,7 +866,7 @@ fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: &str) -> Ins
             to_chain: to_chain.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
-            rate: rate.to_string(),
+            rate,
             liquidity: 1_000,
         }
         .data(),
@@ -914,7 +914,7 @@ fn onchain_set_quote_creates_pda() {
     let rpc = rpc();
     let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
 
-    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", "1.5"), &miner.pubkey(), &miner)
+    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", RATE), &miner.pubkey(), &miner)
         .expect("set_quote");
 
     let a = rpc.get_account(&quote_pda(&miner.pubkey(), "BTC", "SOL")).expect("quote account");
@@ -922,7 +922,7 @@ fn onchain_set_quote_creates_pda() {
     assert_eq!(q.miner, miner.pubkey());
     assert_eq!(q.from_chain, "BTC");
     assert_eq!(q.to_chain, "SOL");
-    assert_eq!(q.rate, "1.5");
+    assert_eq!(q.rate, RATE);
     assert!(q.updated_at > 0, "updated_at set from on-chain clock");
 }
 
@@ -933,7 +933,7 @@ fn onchain_remove_quote_closes_pda() {
     let rpc = rpc();
     let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
 
-    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", "1.5"), &miner.pubkey(), &miner).expect("set");
+    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", RATE), &miner.pubkey(), &miner).expect("set");
     assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote exists after set");
 
     send(&rpc, remove_quote_ix(&miner.pubkey(), "BTC", "SOL"), &miner.pubkey(), &miner).expect("remove");

@@ -33,7 +33,7 @@ const FROM_CHAIN: &str = "BTC";
 const TO_CHAIN: &str = "SOL";
 const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
-const RATE: &str = "1.5";
+const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
 fn pid() -> Pubkey {
     allways_swap_manager::id()
@@ -152,7 +152,7 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
             to_chain: TO_CHAIN.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
-            rate: RATE.to_string(),
+            rate: RATE,
             liquidity: 1_000,
         }
         .data(),

@@ -143,7 +143,7 @@ pub fn handler(
                 r.to_chain.clone(),
                 r.miner_from_addr.clone(),
                 r.miner_to_addr.clone(),
-                r.rate.clone(),
+                r.rate,
                 r.sol_amount,
                 r.from_amount,
                 r.to_amount,
