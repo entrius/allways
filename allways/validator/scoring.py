@@ -1,10 +1,14 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``pool × crown_share × eligible × capacity ×
-volume_factor``, where ``eligible`` is a flat 0/1 gate read off the on-chain
-``MinerState`` counters (B3.3) — it replaces the old ``sr³ × credibility ramp``.
-Any shortfall recycles to ``RECYCLE_UID``. Entry point is
-``score_and_reward_miners(validator)``.
+Reward per miner is ``eligible × [w_a·crown + w_b·quality_volume]`` (B3.5),
+where ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState``
+counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. The crown
+component is ``pool × crown_share × capacity × volume_factor``; the
+quality-volume component is the pool's realized-volume share (sourced from the
+on-chain ``MinerDirectionStats`` accounts) gated by a rate-vs-market quality
+curve. ``w_b=0`` until Phase C wires the market-rate feed, so the distributed
+weights currently match the B3.3 crown-only reward. Any shortfall recycles to
+``RECYCLE_UID``. Entry point is ``score_and_reward_miners(validator)``.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from allways.constants import (
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
     RECYCLE_UID,
+    REWARD_WEIGHT_CROWN,
+    REWARD_WEIGHT_QUALITY_VOLUME,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     VOLUME_WEIGHT_ALPHA,
@@ -166,9 +172,70 @@ def build_eligibility(solana_client, metagraph) -> Dict[str, bool]:
     return eligibility
 
 
+def realized_vwap(total_to_amount: int, total_from_amount: int) -> float:
+    """Realized volume-weighted average rate for a direction:
+    ``total_to_amount / total_from_amount`` over all confirmed swaps. The legs
+    are accumulated as exact integers on-chain (``MinerDirectionStats``); the
+    only float is this final ratio. Zero from-volume ⇒ 0.0 (no executed swaps to
+    average — guards divide-by-zero). Phase-C feeds this into the
+    ``rate_quality`` curve."""
+    to_amt = int(total_to_amount)
+    from_amt = int(total_from_amount)
+    if from_amt <= 0:
+        return 0.0
+    return to_amt / from_amt
+
+
+@dataclass
+class DirectionVolume:
+    """A miner's realized per-direction track record, read off the on-chain
+    ``MinerDirectionStats`` ledger (asset-native units). ``from_amount`` is the
+    volume the ``volume_factor`` participation weighting compares within a
+    direction; ``vwap`` is the realized executed rate the Phase-C quality curve
+    will consume."""
+
+    from_amount: int = 0
+    to_amount: int = 0
+
+    @property
+    def vwap(self) -> float:
+        return realized_vwap(self.to_amount, self.from_amount)
+
+
+def build_direction_volumes(solana_client, metagraph) -> Dict[str, Dict[Tuple[str, str], DirectionVolume]]:
+    """``{hotkey: {(from_chain, to_chain): DirectionVolume}}`` — realized
+    per-direction volume read off the on-chain ``MinerDirectionStats`` accounts
+    (B3.5), replacing the per-validator ``swap_outcomes`` ledger (the #1
+    cross-validator divergence source). pubkey→hotkey via the sr25519 binding
+    (B3.2 ``build_attribution``); unbound or off-metagraph miners are dropped
+    (no UID to credit). The PDA is one row per (miner, from, to), so amounts
+    accumulate defensively in case attribution ever folds two pubkeys onto one
+    hotkey."""
+    attribution = build_attribution(solana_client)
+    metagraph_hotkeys = set(metagraph.hotkeys)
+    volumes: Dict[str, Dict[Tuple[str, str], DirectionVolume]] = {}
+    for _pubkey, ds in solana_client.get_all('MinerDirectionStats'):
+        hotkey = attribution.get(str(ds.miner))
+        if hotkey is None or hotkey not in metagraph_hotkeys:
+            continue
+        direction = ((ds.from_chain or '').lower(), (ds.to_chain or '').lower())
+        dv = volumes.setdefault(hotkey, {}).setdefault(direction, DirectionVolume())
+        dv.from_amount += int(ds.total_from_amount or 0)
+        dv.to_amount += int(ds.total_to_amount or 0)
+    return volumes
+
+
+def rate_quality(realized_vwap_rate: float = 0.0, market_rate: Optional[float] = None) -> float:
+    """Phase-C STUB: how good the miner's realized rate is versus the live
+    market. Returns 1.0 (neutral) until the market-rate feed lands — there is no
+    price oracle in B3.5. Phase C replaces the body with a curve over
+    (``realized_vwap_rate`` − ``market_rate``); the signature is the contract."""
+    return 1.0
+
+
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (pool × crown_share × eligible × capacity × volume_factor), recycle the rest.
+    (eligible × [w_a·crown + w_b·quality_volume]), recycle the rest.
 
     Volume weighting is *per direction*: a miner earning crown on btc→tao is
     compared only to btc→tao volume on the network, not to the total of both
@@ -195,6 +262,10 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     # attributed pubkey→hotkey via the sr25519 binding. Absent hotkey → not
     # eligible (no on-chain counters ⇒ no proven successful swaps).
     eligibility = build_eligibility(self.solana_client, self.metagraph)
+    # Per-direction realized volume re-sourced from the on-chain
+    # MinerDirectionStats accounts (B3.5), replacing the per-validator
+    # swap_outcomes ledger. Built once, sliced per direction below.
+    direction_volumes = build_direction_volumes(self.solana_client, self.metagraph)
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -239,7 +310,12 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             max_swap_rao=max_swap_amount,
         )
         total_crown_dir = sum(crown_blocks.values())
-        volumes_dir = self.state_store.get_volume_by_direction_since(window_start, from_chain, to_chain)
+        vols_dir: Dict[str, DirectionVolume] = {
+            hk: dirs[(from_chain, to_chain)]
+            for hk, dirs in direction_volumes.items()
+            if (from_chain, to_chain) in dirs
+        }
+        volumes_dir = {hk: dv.from_amount for hk, dv in vols_dir.items()}
         total_volume_dir = sum(volumes_dir.values())
         for hk, v in volumes_dir.items():
             miner_volume_total[hk] = miner_volume_total.get(hk, 0) + int(v)
@@ -275,9 +351,21 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             vol_dir = volumes_dir.get(hotkey, 0)
             vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
-            base = pool * crown_share_dir * eligible * cap
-            unweighted_rewards[uid] += base
-            rewards[uid] += base * vol_factor
+            # Reward = eligible × [w_a·crown + w_b·quality_volume] (B3.5). crown is
+            # the B3.3 reward (pool·share·cap·vol_factor); quality_volume is the
+            # pool's volume share × rate-quality (Phase-C stub→1.0, w_b=0 for now).
+            crown_component = pool * crown_share_dir * cap * vol_factor
+            qv = vols_dir.get(hotkey)
+            vwap_dir = qv.vwap if qv is not None else 0.0
+            quality_volume_component = pool * vol_share_dir * rate_quality(vwap_dir)
+            base = eligible * (
+                REWARD_WEIGHT_CROWN * crown_component
+                + REWARD_WEIGHT_QUALITY_VOLUME * quality_volume_component
+            )
+            # Trace baseline is the pre-volume crown reward (dashboard attributes
+            # the volume penalty off the gap to the final weighted reward).
+            unweighted_rewards[uid] += eligible * REWARD_WEIGHT_CROWN * pool * crown_share_dir * cap
+            rewards[uid] += base
             if vol_factor < 1.0:
                 bt.logging.debug(
                     f'V1 scoring [{from_chain}→{to_chain}] {hotkey[:8]}: '

@@ -20,12 +20,14 @@ from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.event_watcher import ActiveEvent, CollateralEvent, ContractEventWatcher
 from allways.validator.scoring import (
+    build_direction_volumes,
     build_eligibility,
     calculate_miner_rewards,
     crown_holders_at_instant,
     due_for_scoring,
     is_eligible,
     make_crown_predicates,
+    realized_vwap,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
@@ -47,20 +49,49 @@ def make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
 
 
 class FakeSolanaClient:
-    """Stand-in exposing only ``get_all('MinerState')`` for the flat eligibility
-    gate (B3.3). Each entry's ``miner`` is the test hotkey string; the autouse
+    """Stand-in exposing ``get_all('MinerState')`` for the flat eligibility gate
+    (B3.3) and ``get_all('MinerDirectionStats')`` for the realized-volume read
+    (B3.5). Each entry's ``miner`` is the test hotkey string; the autouse
     ``_identity_attribution`` fixture makes pubkey→hotkey attribution identity so
-    eligibility keys by the same opaque strings the crown tables use. End-to-end
+    state keys by the same opaque strings the crown tables use. End-to-end
     sr25519 attribution is covered in ``tests/test_eligibility.py``."""
 
     def __init__(self, miner_counters: dict[str, tuple[int, int]]):
         self._counters = miner_counters
+        # (hotkey, from_chain, to_chain) -> (total_from_amount, total_to_amount).
+        self._dir_stats: dict[tuple[str, str, str], tuple[int, int]] = {}
+
+    def add_direction_stats(
+        self,
+        miner_hotkey: str,
+        from_amount: int,
+        to_amount: int,
+        from_chain: str = 'tao',
+        to_chain: str = 'btc',
+    ) -> None:
+        """Seed a ``MinerDirectionStats`` row — the on-chain realized-volume
+        ledger that replaces the per-validator ``swap_outcomes`` table (B3.5)."""
+        self._dir_stats[(miner_hotkey, from_chain, to_chain)] = (int(from_amount), int(to_amount))
 
     def get_all(self, name: str):
         if name == 'MinerState':
             return [
                 (f'pda_{hk}', SimpleNamespace(miner=hk, successful_swaps=s, failed_swaps=f))
                 for hk, (s, f) in self._counters.items()
+            ]
+        if name == 'MinerDirectionStats':
+            return [
+                (
+                    f'stats_{hk}_{fr}_{to}',
+                    SimpleNamespace(
+                        miner=hk,
+                        from_chain=fr,
+                        to_chain=to,
+                        total_from_amount=fa,
+                        total_to_amount=ta,
+                    ),
+                )
+                for (hk, fr, to), (fa, ta) in self._dir_stats.items()
             ]
         return []
 
@@ -249,6 +280,62 @@ class TestBuildEligibility:
         metagraph = make_metagraph(['hk_a'])
         client = FakeSolanaClient({'hk_a': (50, MAX_FAILED_SWAPS + 1)})
         assert build_eligibility(client, metagraph) == {'hk_a': False}
+
+
+class TestRealizedVWAP:
+    """Realized VWAP = total_to_amount / total_from_amount with exact-integer
+    accumulation and a divide-by-zero guard (B3.5)."""
+
+    def test_basic_ratio(self):
+        assert realized_vwap(2, 4) == 0.5
+        assert realized_vwap(15, 3) == 5.0
+
+    def test_zero_denominator_guarded(self):
+        # No executed from-leg volume → 0.0, never a ZeroDivisionError.
+        assert realized_vwap(1_000, 0) == 0.0
+        assert realized_vwap(0, 0) == 0.0
+
+    def test_negative_denominator_guarded(self):
+        # Defensive: a non-positive from-leg can't yield a meaningful rate.
+        assert realized_vwap(5, -3) == 0.0
+
+    def test_exact_integer_legs_before_final_ratio(self):
+        # Legs are summed as exact integers on-chain; only the final ratio is a
+        # float. A u128-scale numerator divides without precision loss in the
+        # leading digits.
+        to_amt = 10**30 + 7
+        from_amt = 10**29
+        np.testing.assert_allclose(realized_vwap(to_amt, from_amt), 10.0, rtol=1e-9)
+
+
+class TestBuildDirectionVolumes:
+    """build_direction_volumes attributes on-chain MinerDirectionStats to
+    metagraph hotkeys, keyed by direction (B3.5)."""
+
+    def test_maps_pubkey_to_hotkey_uid_per_direction(self):
+        metagraph = make_metagraph(['hk_a', 'hk_b'])
+        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
+        client.add_direction_stats('hk_a', from_amount=300, to_amount=600, from_chain='tao', to_chain='btc')
+        client.add_direction_stats('hk_b', from_amount=100, to_amount=50, from_chain='btc', to_chain='tao')
+        vols = build_direction_volumes(client, metagraph)
+        assert vols['hk_a'][('tao', 'btc')].from_amount == 300
+        assert vols['hk_a'][('tao', 'btc')].vwap == 2.0  # 600 / 300
+        assert vols['hk_b'][('btc', 'tao')].from_amount == 100
+
+    def test_off_metagraph_miner_dropped(self):
+        metagraph = make_metagraph(['hk_a'])
+        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_ghost': (5, 0)})
+        client.add_direction_stats('hk_a', from_amount=10, to_amount=10)
+        client.add_direction_stats('hk_ghost', from_amount=99, to_amount=99)
+        vols = build_direction_volumes(client, metagraph)
+        assert set(vols) == {'hk_a'}
+
+    def test_direction_is_lowercased(self):
+        metagraph = make_metagraph(['hk_a'])
+        client = FakeSolanaClient({'hk_a': (5, 0)})
+        client.add_direction_stats('hk_a', from_amount=10, to_amount=10, from_chain='TAO', to_chain='BTC')
+        vols = build_direction_volumes(client, metagraph)
+        assert ('tao', 'btc') in vols['hk_a']
 
 
 class TestCrownHoldersHelper:
@@ -1859,20 +1946,23 @@ class TestVolumeWeighting:
         v: SimpleNamespace,
         miner_hotkey: str,
         tao_amount: int,
-        swap_id: int = 1,
-        # Within the default validator's [block - SCORING_WINDOW_BLOCKS, block]
-        # scoring window so the volume actually counts.
-        resolved_block: int = 9_900,
+        swap_id: int = 1,  # retained for call-site compatibility; ignored (cumulative on-chain ledger)
+        resolved_block: int = 9_900,  # ignored — MinerDirectionStats has no per-swap block window
         completed: bool = True,
         from_chain: str = 'tao',
         to_chain: str = 'btc',
+        to_amount: int | None = None,
     ) -> None:
-        v.state_store.insert_swap_outcome(
-            swap_id=swap_id,
-            miner_hotkey=miner_hotkey,
-            completed=completed,
-            resolved_block=resolved_block,
-            tao_amount=tao_amount,
+        """Seed realized per-direction volume on the on-chain ``MinerDirectionStats``
+        ledger (B3.5), replacing the ``swap_outcomes`` table. ``tao_amount`` is the
+        from-leg amount the ``volume_factor`` compares. A non-completed swap never
+        accrues on-chain, so it's a no-op — timed-out swaps contribute no volume."""
+        if not completed:
+            return
+        v.solana_client.add_direction_stats(
+            miner_hotkey,
+            from_amount=tao_amount,
+            to_amount=tao_amount if to_amount is None else to_amount,
             from_chain=from_chain,
             to_chain=to_chain,
         )
@@ -1993,8 +2083,8 @@ class TestVolumeWeighting:
             swap_id=1,
             completed=False,
         )
-        # Timed-out swap is excluded from the volume aggregation entirely.
-        assert v.state_store.get_volume_by_direction_since(0, 'tao', 'btc') == {}
+        # A timed-out swap never accrues on-chain, so MinerDirectionStats has no row.
+        assert build_direction_volumes(v.solana_client, v.metagraph) == {}
         rewards, _ = calculate_miner_rewards(v)
         # Eligible solo crown holder, zero counted volume → idle-network
         # short-circuit → factor 1.0 → full tao→btc pool.
@@ -2002,18 +2092,17 @@ class TestVolumeWeighting:
         v.state_store.close()
 
     def test_volume_split_per_direction(self, tmp_path: Path):
-        """Per-direction volume queries isolate each market. A miner with
-        volume in both directions shows up in both per-direction sums but
-        each query only returns that direction's slice. The aggregate
-        ``get_volume_since`` still sums both, kept for non-scoring callers."""
+        """Per-direction volume isolates each market. A miner with volume in both
+        directions is keyed by direction in ``build_direction_volumes``, so each
+        direction's ``from_amount`` is read independently off MinerDirectionStats."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_tao_btc_crown(v, 'hk_a')
         self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1, from_chain='tao', to_chain='btc')
         self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2, from_chain='btc', to_chain='tao')
-        assert v.state_store.get_volume_by_direction_since(0, 'tao', 'btc') == {'hk_a': 300_000_000}
-        assert v.state_store.get_volume_by_direction_since(0, 'btc', 'tao') == {'hk_a': 200_000_000}
-        assert v.state_store.get_volume_since(0) == {'hk_a': 500_000_000}
+        vols = build_direction_volumes(v.solana_client, v.metagraph)
+        assert vols['hk_a'][('tao', 'btc')].from_amount == 300_000_000
+        assert vols['hk_a'][('btc', 'tao')].from_amount == 200_000_000
         v.state_store.close()
 
     def test_per_direction_volume_isolates_markets(self, tmp_path: Path):
@@ -2040,22 +2129,63 @@ class TestVolumeWeighting:
         assert rewards[1] == 0.0
         v.state_store.close()
 
-    def test_legacy_rows_with_zero_tao_amount_tolerated(self, tmp_path: Path):
-        """Pre-migration rows have tao_amount = 0 in the schema default — they
-        just don't count toward future volume aggregation."""
+    def test_zero_amount_stats_row_tolerated(self, tmp_path: Path):
+        """A MinerDirectionStats row with zero realized volume is tolerated — it
+        carries the direction but contributes no volume (vol_share stays 0)."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        v.solana_client.add_direction_stats('hk_a', from_amount=0, to_amount=0, from_chain='tao', to_chain='btc')
+        vols = build_direction_volumes(v.solana_client, v.metagraph)
+        assert vols['hk_a'][('tao', 'btc')].from_amount == 0
+        assert vols['hk_a'][('tao', 'btc')].vwap == 0.0  # zero from-leg → guarded
+        v.state_store.close()
+
+
+class TestRewardShapeWeights:
+    """Reward = eligible × [w_a·crown + w_b·quality_volume] (B3.5). w_b is pinned
+    to 0.0, so the distributed weights match the B3.3 crown-only reward; a
+    positive w_b shifts weight toward realized volume (Phase-C sanity only)."""
+
+    def _solo_crown_with_volume(self, tmp_path: Path) -> SimpleNamespace:
+        # hk_a holds 100% tao→btc crown and serves 100% of the volume.
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
         conn = v.state_store.require_connection()
         conn.execute(
-            'INSERT INTO swap_outcomes (swap_id, miner_hotkey, completed, resolved_block, tao_amount) VALUES (?, ?, ?, ?, ?)',
-            (1, 'hk_a', 1, 9_000, 0),
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'tao', 'btc', 0.00020, 0),
         )
         conn.commit()
-        volumes = v.state_store.get_volume_since(0)
-        assert volumes == {'hk_a': 0}
-        # Direction is empty → excluded from per-direction sums.
-        assert v.state_store.get_volume_by_direction_since(0, 'tao', 'btc') == {}
+        v.solana_client.add_direction_stats(
+            'hk_a', from_amount=500_000_000, to_amount=100_000, from_chain='tao', to_chain='btc'
+        )
+        return v
+
+    def test_wb_zero_reproduces_b33_crown_only(self, tmp_path: Path):
+        """Default weights (w_a=1, w_b=0): solo crown holder with full vol_share
+        earns the whole pool — the volume_factor short-circuits to 1.0 and the
+        quality_volume component is zeroed out."""
+        v = self._solo_crown_with_volume(tmp_path)
+        rewards, _ = calculate_miner_rewards(v)
+        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
+
+    def test_wb_positive_shifts_weight_toward_volume(self, tmp_path: Path, monkeypatch):
+        """A positive w_b adds the realized-volume component on top of the crown
+        component, so a volume-serving crown holder earns strictly more than it
+        does under the w_b=0 baseline."""
+        v_base = self._solo_crown_with_volume(tmp_path / 'base')
+        baseline, _ = calculate_miner_rewards(v_base)
+        v_base.state_store.close()
+
+        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_QUALITY_VOLUME', 0.5)
+        v_vol = self._solo_crown_with_volume(tmp_path / 'vol')
+        weighted, _ = calculate_miner_rewards(v_vol)
+        v_vol.state_store.close()
+
+        # Crown share 1.0, vol_share 1.0 → qv component = pool. Adds 0.5·pool.
+        assert weighted[0] > baseline[0]
+        np.testing.assert_allclose(weighted[0], baseline[0] + 0.5 * POOL_TAO_BTC, atol=1e-6)
 
 
 class TestCapacityVolumeInteraction:
@@ -2077,14 +2207,8 @@ class TestCapacityVolumeInteraction:
         )
         conn.commit()
         # B serves some volume in A's market (tao→btc) so A's vol_share = 0.
-        v.state_store.insert_swap_outcome(
-            swap_id=1,
-            miner_hotkey='hk_b',
-            completed=True,
-            resolved_block=9_900,  # within the default validator's scoring window
-            tao_amount=500_000_000,
-            from_chain='tao',
-            to_chain='btc',
+        v.solana_client.add_direction_stats(
+            'hk_b', from_amount=500_000_000, to_amount=500_000_000, from_chain='tao', to_chain='btc'
         )
         rewards, _ = calculate_miner_rewards(v)
         # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × volume_factor 0.5
@@ -2108,14 +2232,8 @@ class TestCapacityVolumeInteraction:
                 (hk, from_c, to_c, rate, 0),
             )
         conn.commit()
-        v.state_store.insert_swap_outcome(
-            swap_id=1,
-            miner_hotkey='hk_b',
-            completed=True,
-            resolved_block=9_900,  # within the default validator's scoring window
-            tao_amount=400_000_000,
-            from_chain='btc',
-            to_chain='tao',
+        v.solana_client.add_direction_stats(
+            'hk_b', from_amount=400_000_000, to_amount=400_000_000, from_chain='btc', to_chain='tao'
         )
         rewards, _ = calculate_miner_rewards(v)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)

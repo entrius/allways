@@ -63,6 +63,13 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
+# Reward-shape weights (B3.5): reward = eligible × [w_a·crown + w_b·quality_volume].
+# w_a weights the crown-time component, w_b the realized-volume × rate-quality
+# component. w_b is a Phase-C placeholder pinned to 0.0 — the quality(rate-vs-market)
+# curve + market-rate feed aren't wired yet, so volume contributes nothing to the
+# distributed weights and the output matches the B3.3 crown-only reward.
+REWARD_WEIGHT_CROWN: float = 1.0
+REWARD_WEIGHT_QUALITY_VOLUME: float = 0.0
 # Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
 # replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
 # it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
