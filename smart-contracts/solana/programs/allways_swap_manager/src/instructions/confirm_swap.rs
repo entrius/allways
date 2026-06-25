@@ -111,7 +111,7 @@ pub fn handler(
         let to_amount = ctx.accounts.swap.to_amount;
         let from_chain = ctx.accounts.swap.from_chain.clone();
         let to_chain = ctx.accounts.swap.to_chain.clone();
-        let rate = ctx.accounts.swap.rate.clone();
+        let rate = ctx.accounts.swap.rate;
         let fee = sol_amount / FEE_DIVISOR;
         let min_collateral = ctx.accounts.config.min_collateral;
 

@@ -98,7 +98,8 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         let timeout_at = now.saturating_add(ctx.accounts.config.fulfillment_timeout_secs);
         let max_extend_at = timeout_at.saturating_add(ctx.accounts.config.max_total_extension_secs);
 
-        // Event values (read before the mutable borrow below).
+        // Event values (read before the mutable borrow below). A3: all terms already live on the
+        // claim-created swap (copied from the reservation at submit_swap_claim) — no re-copy here.
         let user = ctx.accounts.swap.user;
         let miner = ctx.accounts.swap.miner;
         let sol_amount = ctx.accounts.swap.sol_amount;

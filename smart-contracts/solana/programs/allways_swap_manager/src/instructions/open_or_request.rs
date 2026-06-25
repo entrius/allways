@@ -182,7 +182,7 @@ pub fn handler(
         let (mfrom, mto, rate) = (
             q.miner_from_addr.clone(),
             q.miner_to_addr.clone(),
-            q.rate.clone(),
+            q.rate,
         );
         let window = ctx.accounts.config.pool_window_secs;
         let seed_slot = clock

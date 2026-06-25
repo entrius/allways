@@ -241,7 +241,7 @@ pub mod allways_swap_manager {
         to_chain: String,
         miner_from_addr: String,
         miner_to_addr: String,
-        rate: String,
+        rate: u128,
         liquidity: u128,
     ) -> Result<()> {
         set_quote::handler(

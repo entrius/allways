@@ -83,8 +83,14 @@ pub const SLOT_MS: u64 = 400;
 /// Bounded max lengths for stored strings.
 pub const MAX_ADDR_LEN: usize = 80;
 pub const MAX_CHAIN_LEN: usize = 16;
-pub const MAX_RATE_LEN: usize = 32;
 pub const MAX_TX_LEN: usize = 128;
+
+/// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
+/// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value
+/// IS the off-chain `rate_fixed` — no decimal-string parse on either side (replaces the old free-form
+/// `rate: String`, which let an unparseable-but-lucrative rate score yet never reserve). The contract
+/// only stores/copies the value; routability/validity is judged off-chain (`is_executable_rate`).
+pub const RATE_PRECISION: u128 = 1_000_000_000_000_000_000; // 1e18
 
 /// Basis-points denominator (10_000 bps = 1.00×). Shared by every ×-multiplier below.
 pub const BPS_DENOMINATOR: u64 = 10_000;

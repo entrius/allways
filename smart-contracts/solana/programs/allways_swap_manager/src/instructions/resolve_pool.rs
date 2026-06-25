@@ -130,7 +130,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
             p.to_chain.clone(),
             p.miner_from_addr.clone(),
             p.miner_to_addr.clone(),
-            p.rate.clone(),
+            p.rate,
         )
     };
 
