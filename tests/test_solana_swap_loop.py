@@ -1,6 +1,7 @@
-"""B1 — unit tests for the read-only Solana swap loop (decisions + Option-A 99% verification).
+"""Unit tests for the Solana swap loop — decisions, Option-A 99% verification (B1), and the B2 replay
+freshness gates (source vs Reservation.created_at, dest vs Swap.initiated_at).
 
-Mocks the solana client (get_swaps) + chain providers; no chain, no votes.
+Mocks the solana client (get_swaps / get_reservation) + chain providers; no chain, no votes.
 """
 
 from types import SimpleNamespace
@@ -8,10 +9,15 @@ from types import SimpleNamespace
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.validator.solana_swap_loop import SolanaSwapLoop, SwapDecision
 
+INITIATED_AT = 1000  # dest-freshness floor
+RESV_CREATED_AT = 1200  # source-freshness floor
+FRESH = 5000  # block_time comfortably after both floors
+
 
 def make_swap(status='Fulfilled', to_amount=1000, from_amount=500, timeout_at=2000, key=b'\x01' * 32):
     return SimpleNamespace(
         swap_key=key,
+        miner='minerPK',
         status=status,
         from_chain='btc',
         to_chain='sol',
@@ -25,16 +31,22 @@ def make_swap(status='Fulfilled', to_amount=1000, from_amount=500, timeout_at=20
         from_tx_block=0,
         to_tx_block=0,
         timeout_at=timeout_at,
-        initiated_at=1000,
+        initiated_at=INITIATED_AT,
     )
 
 
 class RecordingProvider:
-    """Configurable verify_transaction: result can be True/False (confirmed) / None (missing) / 'unreachable'."""
+    """verify_transaction → confirmed-match info / None (missing) / raises (unreachable). block_time and
+    a per-chain replay_grace_secs feed the freshness checks."""
 
-    def __init__(self, result=True):
+    def __init__(self, result=True, block_time=FRESH, grace=0):
         self.result = result
+        self.block_time = block_time
+        self.grace = grace
         self.calls = []
+
+    def get_chain(self):
+        return SimpleNamespace(replay_grace_secs=self.grace)
 
     def verify_transaction(self, tx_hash, expected_recipient, expected_amount, block_hint=0, expected_sender=None):
         self.calls.append(SimpleNamespace(tx_hash=tx_hash, recipient=expected_recipient, amount=expected_amount))
@@ -42,12 +54,15 @@ class RecordingProvider:
             raise ProviderUnreachableError('down')
         if self.result is None:
             return None  # tx not found
-        return SimpleNamespace(confirmed=bool(self.result))
+        return SimpleNamespace(confirmed=bool(self.result), block_time=self.block_time)
 
 
-def loop_with(result=True):
+def loop_with(result=True, created_at=RESV_CREATED_AT):
     providers = {'btc': RecordingProvider(result), 'sol': RecordingProvider(result)}
-    client = SimpleNamespace(get_swaps=lambda: [])
+    client = SimpleNamespace(
+        get_swaps=lambda: [],
+        get_reservation=lambda miner: SimpleNamespace(created_at=created_at),
+    )
     return SolanaSwapLoop(client, providers, fee_divisor=100), providers
 
 
@@ -75,6 +90,18 @@ def test_fulfilled_dest_unconfirmed_waits():
     assert loop.decide(make_swap(status='Fulfilled'), now=1500) == SwapDecision.WAIT
 
 
+def test_fulfilled_stale_dest_tx_rejected_as_replay():
+    loop, providers = loop_with(result=True)
+    providers['sol'].block_time = INITIATED_AT - 1  # payout mined before the swap was initiated
+    assert loop.decide(make_swap(status='Fulfilled'), now=1500) == SwapDecision.WAIT
+
+
+def test_fulfilled_dest_missing_block_time_rejected():
+    loop, providers = loop_with(result=True)
+    providers['sol'].block_time = None  # cannot prove freshness → fail closed
+    assert loop.decide(make_swap(status='Fulfilled'), now=1500) == SwapDecision.WAIT
+
+
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.ATTEST
@@ -83,6 +110,25 @@ def test_pending_attestation_source_ok_attests():
 def test_pending_attestation_source_missing_waits():
     loop, _ = loop_with(result=None)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.WAIT
+
+
+def test_pending_attestation_stale_deposit_rejected_as_replay():
+    loop, providers = loop_with(result=True)
+    providers['btc'].block_time = RESV_CREATED_AT - 1  # deposit predates the reservation
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.WAIT
+
+
+def test_pending_attestation_no_reservation_waits():
+    loop, _ = loop_with(result=True)
+    loop.client.get_reservation = lambda miner: None
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.WAIT
+
+
+def test_pending_attestation_grace_allows_slightly_old_deposit():
+    loop, providers = loop_with(result=True)
+    providers['btc'].grace = 300
+    providers['btc'].block_time = RESV_CREATED_AT - 100  # within grace of the floor
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.ATTEST
 
 
 def test_active_timed_out_vs_waiting():
@@ -102,7 +148,10 @@ def test_run_once_discovers_and_decides_mix():
         ('pk2', make_swap(status='Fulfilled', key=b'\x02' * 32)),
     ]
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
-    client = SimpleNamespace(get_swaps=lambda: swaps)
+    client = SimpleNamespace(
+        get_swaps=lambda: swaps,
+        get_reservation=lambda miner: SimpleNamespace(created_at=RESV_CREATED_AT),
+    )
     loop = SolanaSwapLoop(client, providers, fee_divisor=100)
     out = dict(loop.run_once(now=1500))
     assert out[(b'\x01' * 32).hex()] == SwapDecision.TIMEOUT

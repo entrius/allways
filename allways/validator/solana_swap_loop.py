@@ -47,16 +47,20 @@ class SolanaSwapLoop:
         """Dest amount the miner must deliver = 99% of the pinned to_amount (Option A)."""
         return apply_fee_deduction(int(swap.to_amount), self.fee_divisor)
 
-    def _verify_leg(
+    def _label(self, swap: Any) -> str:
+        return f'swap {_swap_key_hex(getattr(swap, "swap_key", "?"))[:16]} [{swap.from_chain}->{swap.to_chain}]'
+
+    def _fetch_leg(
         self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: str = ''
-    ) -> Optional[bool]:
-        """True/False if verifiable this round; None if the provider was unreachable (skip)."""
+    ) -> Tuple[str, Any]:
+        """Return ('ok', info) for a confirmed match, ('no', None) if absent/unconfirmed/no-provider,
+        ('down', None) if the provider was unreachable this round."""
         provider = self.providers.get(chain)
         if provider is None:
             bt.logging.warning(f'no chain provider for {chain}; cannot verify')
-            return False
+            return ('no', None)
         if not tx_hash:
-            return False
+            return ('no', None)
         try:
             info = provider.verify_transaction(
                 tx_hash=tx_hash,
@@ -66,19 +70,52 @@ class SolanaSwapLoop:
                 expected_sender=sender or None,
             )
         except ProviderUnreachableError:
+            return ('down', None)
+        if info is None or not info.confirmed:
+            return ('no', None)
+        return ('ok', info)
+
+    def _is_fresh(self, info: Any, floor_unix: int, chain: str, label: str) -> bool:
+        """Replay defense: the tx must be mined AFTER the on-chain floor (unix seconds).
+
+        Compares block_time, NOT block height (the floor is unix seconds, so a height-vs-seconds compare
+        would silently always-pass). Fresh iff block_time > floor - grace; a per-chain GRACE (default 0)
+        absorbs honest clock skew. Fails closed if block_time is missing."""
+        if getattr(info, 'block_time', None) is None:
+            bt.logging.warning(f'{label}: {chain} tx has no block_time — cannot prove freshness, rejecting')
+            return False
+        provider = self.providers.get(chain)
+        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0) if provider else 0
+        if info.block_time <= floor_unix - grace:
+            bt.logging.warning(
+                f'{label}: {chain} tx block_time {info.block_time} <= floor {floor_unix} '
+                f'(grace {grace}s) — replay/stale, rejecting'
+            )
+            return False
+        return True
+
+    def _get_reservation(self, miner: Any) -> Any:
+        try:
+            return self.client.get_reservation(miner)
+        except Exception as e:
+            bt.logging.warning(f'reservation read failed for miner: {e}')
             return None
-        return info is not None and info.confirmed
 
     def verify_fulfillment(self, swap: Any) -> Optional[bool]:
-        """Verify source (user funded miner) + dest (miner delivered 99% to user). None = provider down."""
-        source = self._verify_leg(
+        """Verify source (user funded miner) + dest (miner delivered 99% to user, fresh). None = provider
+        down. Source freshness was gated at attestation; dest freshness (vs swap.initiated_at) is here."""
+        s_status, _ = self._fetch_leg(
             swap.from_chain,
             swap.from_tx_hash,
             swap.miner_from_addr,
             int(swap.from_amount),
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
         )
-        dest = self._verify_leg(
+        if s_status == 'down':
+            return None
+        if s_status != 'ok':
+            return False
+        d_status, d_info = self._fetch_leg(
             swap.to_chain,
             swap.to_tx_hash,
             swap.user_to_addr,
@@ -86,25 +123,39 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'to_tx_block', 0)),
             sender=swap.miner_to_addr,
         )
-        if source is None or dest is None:
+        if d_status == 'down':
             return None
-        return source and dest
+        if d_status != 'ok':
+            return False
+        # Dest freshness: payout must be mined after the swap was initiated on-chain (replay defense).
+        if not self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap)):
+            return False
+        return True
 
     def decide(self, swap: Any, now: int) -> SwapDecision:
-        """Per-status decision. Verifies legs where needed; pure-ish (only reads chain providers)."""
+        """Per-status decision. Verifies legs where needed; reads chain providers + the Reservation PDA."""
         status = _status_name(swap)
         if status == 'PendingAttestation':
-            # Source deposit must exist/confirm before we'd attest (full source freshness vs created_at = B2).
-            ok = self._verify_leg(
+            # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
+            s_status, info = self._fetch_leg(
                 swap.from_chain,
                 swap.from_tx_hash,
                 swap.miner_from_addr,
                 int(swap.from_amount),
                 block_hint=int(getattr(swap, 'from_tx_block', 0)),
             )
-            if ok is None:
+            if s_status == 'down':
                 return SwapDecision.SKIP
-            return SwapDecision.ATTEST if ok else SwapDecision.WAIT
+            if s_status != 'ok':
+                return SwapDecision.WAIT
+            reservation = self._get_reservation(swap.miner)
+            if reservation is None:
+                bt.logging.warning(f'{self._label(swap)}: no reservation read — cannot check freshness, waiting')
+                return SwapDecision.WAIT
+            # Source freshness: deposit must be mined after the reservation was created (replay defense).
+            if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
+                return SwapDecision.WAIT  # replayed/stale deposit — never attest
+            return SwapDecision.ATTEST
         if status == 'Active':
             return SwapDecision.TIMEOUT if now > int(swap.timeout_at) else SwapDecision.WAIT
         if status == 'Fulfilled':
