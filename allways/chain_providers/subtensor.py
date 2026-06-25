@@ -172,6 +172,22 @@ class SubtensorProvider(ChainProvider):
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
             return None
 
+    def get_block_time(self, block_num: int) -> Optional[int]:
+        """Block's mined time in unix seconds, via the Timestamp pallet at that block hash (millis ÷ 1000).
+
+        Used by the B2 replay-freshness checks (the substrate block carries no time on the parsed dict).
+        """
+        try:
+            block_hash = self.subtensor.substrate.get_block_hash(block_num)
+            if not block_hash:
+                return None
+            result = self.subtensor.substrate.query('Timestamp', 'Now', block_hash=block_hash)
+            millis = int(getattr(result, 'value', result))
+            return millis // 1000
+        except Exception as e:
+            bt.logging.debug(f'{LOG_SUB} block_time fetch failed for block {block_num}: {e}')
+            return None
+
     def fetch_matching_tx(
         self,
         tx_hash: str,
@@ -226,6 +242,7 @@ class SubtensorProvider(ChainProvider):
                             amount=amount,
                             block_number=block_num,
                             confirmations=confs,
+                            block_time=self.get_block_time(block_num),
                         )
 
             if tx_hash_seen:

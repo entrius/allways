@@ -244,6 +244,7 @@ class BitcoinProvider(ChainProvider):
         confirmations = raw_tx.get('confirmations', 0)
         confirmed = confirmations >= self.get_chain().min_confirmations
         block_number = None
+        block_time = raw_tx.get('blocktime')  # unix seconds, present once mined (replay freshness, B2)
 
         if confirmed and 'blockhash' in raw_tx:
             block_info = self.rpc_call('getblock', [raw_tx['blockhash']])
@@ -269,6 +270,7 @@ class BitcoinProvider(ChainProvider):
                     amount=amount_sat,
                     block_number=block_number,
                     confirmations=confirmations,
+                    block_time=block_time,
                 )
 
         bt.logging.warning(
@@ -325,6 +327,7 @@ class BitcoinProvider(ChainProvider):
 
             confirmed = data.get('status', {}).get('confirmed', False)
             block_number = data.get('status', {}).get('block_height')
+            block_time = data.get('status', {}).get('block_time')  # unix seconds (replay freshness, B2)
             confirmations = 0
 
             if confirmed and block_number:
@@ -363,6 +366,7 @@ class BitcoinProvider(ChainProvider):
                         amount=amount_sat,
                         block_number=block_number,
                         confirmations=confirmations,
+                        block_time=block_time,
                     )
 
             bt.logging.warning(
