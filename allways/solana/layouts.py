@@ -205,6 +205,16 @@ IX_DISCRIMINATORS = {
     'set_quote': bytes([59, 95, 185, 175, 67, 228, 200, 29]),
     'post_collateral': bytes([124, 252, 97, 53, 118, 194, 88, 112]),
     'withdraw_collateral': bytes([115, 135, 168, 106, 139, 214, 138, 150]),
+    # B2 — swap lifecycle (validator votes + miner mark + the claim relay).
+    'submit_swap_claim': bytes([15, 176, 220, 236, 85, 115, 110, 135]),
+    'vote_initiate': bytes([210, 23, 157, 114, 35, 129, 164, 4]),
+    'confirm_swap': bytes([183, 168, 179, 117, 86, 243, 166, 195]),
+    'timeout_swap': bytes([18, 157, 212, 120, 145, 200, 239, 63]),
+    'vote_activate': bytes([24, 233, 47, 230, 116, 115, 109, 41]),
+    'mark_fulfilled': bytes([40, 188, 159, 127, 20, 151, 228, 191]),
+    'extend_timeout': bytes([246, 84, 96, 134, 76, 55, 57, 33]),
+    'extend_reservation': bytes([97, 77, 20, 170, 71, 8, 163, 187]),
+    'add_validator': bytes([250, 113, 53, 54, 141, 117, 215, 185]),  # admin (test/bootstrap helper)
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -224,6 +234,15 @@ IX_SET_QUOTE_ARGS = CStruct(
     'liquidity' / U128,
 )
 IX_AMOUNT_ARGS = CStruct('amount' / U64)
+
+# B2 swap-lifecycle args. `swap_key` is a borsh `[u8; 32]` (fixed array → raw 32 bytes, no len prefix).
+IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # vote_initiate, timeout_swap, close_stale_claim
+IX_SUBMIT_CLAIM_ARGS = CStruct('swap_key' / Hash32, 'from_tx_hash' / String, 'from_tx_block' / U32)
+IX_CONFIRM_SWAP_ARGS = CStruct('swap_key' / Hash32, 'from_chain' / String, 'to_chain' / String)
+IX_MARK_FULFILLED_ARGS = CStruct('swap_key' / Hash32, 'to_tx_hash' / String, 'to_tx_block' / U32)
+IX_EXTEND_TIMEOUT_ARGS = CStruct('swap_key' / Hash32, 'target_at' / I64)
+IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64)
+IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # name -> CStruct for the generic reader.
 ACCOUNT_LAYOUTS = {

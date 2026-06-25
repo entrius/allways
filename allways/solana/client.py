@@ -10,6 +10,7 @@ import base64
 import time
 from typing import List, Optional, Tuple
 
+from Crypto.Hash import keccak
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
@@ -20,6 +21,19 @@ from allways.solana import layouts, pdas
 from allways.solana.rpc import SolanaRpc
 
 SYSTEM_PROGRAM = Pubkey.from_string('11111111111111111111111111111111')
+
+
+def swap_key_from_tx_hash(from_tx_hash: str) -> bytes:
+    """swap_key = keccak256(from_tx_hash) — matches the contract's hashv(&[from_tx_hash.as_bytes()])."""
+    return keccak.new(data=from_tx_hash.encode(), digest_bits=256).digest()
+
+
+def _as_pubkey(p) -> Pubkey:
+    if isinstance(p, Pubkey):
+        return p
+    if isinstance(p, (bytes, bytearray)):
+        return Pubkey.from_bytes(bytes(p))
+    return Pubkey.from_string(str(p))
 
 
 class SolanaClientError(Exception):
@@ -82,6 +96,17 @@ class AllwaysSolanaClient:
     def get_collateral_lamports(self, miner) -> Optional[int]:
         """Collateral balance = vault lamports (the SOL the miner posted; rent is included)."""
         return self.rpc.get_account_lamports(pdas.collateral_vault_pda(miner, self.program_id))
+
+    def get_vote_round(self, req_type: int, target=None):
+        return self._get('VoteRound', pdas.vote_round_pda(req_type, target, self.program_id))
+
+    def has_voted(self, req_type: int, target, voter) -> bool:
+        """True if `voter` (Pubkey/bytes) already recorded a vote in this round — skip a wasted re-vote."""
+        vr = self.get_vote_round(req_type, target)
+        if vr is None:
+            return False
+        vb = bytes(_as_pubkey(voter))
+        return any(bytes(v) == vb for v in vr.voters)
 
     # ---------- discovery (getProgramAccounts by discriminator) ----------
     def get_all(self, name: str) -> List[Tuple[str, object]]:
@@ -157,6 +182,16 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('initialize', args, metas)])
 
+    def add_validator(self, validator, weight: int) -> str:
+        """Admin: whitelist a validator (bootstrap/test helper). Signer = this client's keypair (admin)."""
+        admin = self.keypair.pubkey()
+        args = layouts.IX_ADD_VALIDATOR_ARGS.build({'validator': bytes(_as_pubkey(validator)), 'weight': weight})
+        metas = [
+            AccountMeta(admin, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, True),
+        ]
+        return self._send([self._ix('add_validator', args, metas)])
+
     # ---------- representative writes (miner-side, no consensus) ----------
     def bind_hotkey(self, hotkey: bytes, hotkey_sig: bytes) -> str:
         miner = self.keypair.pubkey()
@@ -210,6 +245,136 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.collateral_vault_pda(miner, self.program_id), False, True),
         ]
         return self._send([self._ix('withdraw_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}), metas)])
+
+    # ---------- swap lifecycle (B2: validator votes + the claim relay) ----------
+    def submit_swap_claim(self, miner, swap_key: bytes, from_tx_hash: str, from_tx_block: int) -> str:
+        """Validator-relayed: record the winner's source-tx on-chain, creating the Swap in
+        PendingAttestation (all terms pinned from the Reservation). swap_key must == keccak(from_tx_hash)."""
+        caller = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        args = layouts.IX_SUBMIT_CLAIM_ARGS.build(
+            {'swap_key': swap_key, 'from_tx_hash': from_tx_hash, 'from_tx_block': from_tx_block}
+        )
+        metas = [
+            AccountMeta(caller, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('submit_swap_claim', args, metas)])
+
+    def vote_initiate(self, swap_key: bytes, miner) -> str:
+        """Vote to attest a PendingAttestation swap; on quorum it transitions to Active."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, m, self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
+        return self._send([self._ix('vote_initiate', args, metas)])
+
+    def confirm_swap(self, swap_key: bytes, miner, from_chain: str, to_chain: str) -> str:
+        """Vote to confirm a Fulfilled swap; on quorum the fee skims from collateral and the swap closes."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.collateral_vault_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.treasury_pda(self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(pdas.stats_pda(m, from_chain, to_chain, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_CONFIRM, swap_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_CONFIRM_SWAP_ARGS.build(
+            {'swap_key': swap_key, 'from_chain': from_chain, 'to_chain': to_chain}
+        )
+        return self._send([self._ix('confirm_swap', args, metas)])
+
+    def timeout_swap(self, swap_key: bytes, miner, user) -> str:
+        """Vote to time out a swap past its deadline; on quorum collateral is slashed and the user refunded."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.collateral_vault_pda(m, self.program_id), False, True),
+            AccountMeta(_as_pubkey(user), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_TIMEOUT, swap_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
+        return self._send([self._ix('timeout_swap', args, metas)])
+
+    def vote_activate(self, miner) -> str:
+        """Vote to activate a miner; on quorum its MinerState flips active=true."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_ACTIVATE, m, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('vote_activate', b'', metas)])
+
+    def mark_fulfilled(self, swap_key: bytes, to_tx_hash: str, to_tx_block: int) -> str:
+        """Miner-only: mark an Active swap Fulfilled with the dest-leg tx. Prod miner wiring lands in B4;
+        kept here so the test harness can drive a swap to Fulfilled. Signer = this client's keypair."""
+        miner = self.keypair.pubkey()
+        args = layouts.IX_MARK_FULFILLED_ARGS.build(
+            {'swap_key': swap_key, 'to_tx_hash': to_tx_hash, 'to_tx_block': to_tx_block}
+        )
+        metas = [
+            AccountMeta(miner, True, False),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+        ]
+        return self._send([self._ix('mark_fulfilled', args, metas)])
+
+    def extend_timeout(self, swap_key: bytes, miner, target_at: int) -> str:
+        """Single-validator slide of a swap's timeout_at forward (no consensus). Loop wiring is a later pass."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+        ]
+        args = layouts.IX_EXTEND_TIMEOUT_ARGS.build({'swap_key': swap_key, 'target_at': target_at})
+        return self._send([self._ix('extend_timeout', args, metas)])
+
+    def extend_reservation(self, miner, target_at: int) -> str:
+        """Single-validator slide of a reservation's reserved_until forward (no consensus)."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+        ]
+        args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at})
+        return self._send([self._ix('extend_reservation', args, metas)])
 
     # ---------- event-log ingest skeleton (full decode-by-discriminator in B3) ----------
     def get_program_signatures(
