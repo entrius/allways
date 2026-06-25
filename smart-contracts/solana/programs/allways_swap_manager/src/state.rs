@@ -93,6 +93,12 @@ pub struct MinerState {
     pub busy_until: i64,
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
+    /// Lifetime swaps completed (confirm_swap quorum). Monotonic. Off-chain emissions warm-up gate:
+    /// a miner earns nothing until `successful_swaps >= 2`.
+    pub successful_swaps: u32,
+    /// Lifetime swaps failed (timeout_swap quorum). Monotonic, never resets. Off-chain strike-out gate:
+    /// `failed_swaps > 2` => no emissions (recover by re-registering).
+    pub failed_swaps: u32,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -123,11 +129,14 @@ pub struct VoteRound {
 #[account]
 #[derive(InitSpace)]
 pub struct Reservation {
-    /// keccak-256 binding (miner, from_addr, chains, amounts) — same preimage validators voted on.
-    pub bound_hash: [u8; 32],
     /// User's source-chain address (the reserver).
     #[max_len(MAX_ADDR_LEN)]
     pub from_addr: String,
+    /// Pinned taker + payout address (from the winning lottery Request) — copied to the Swap at claim
+    /// so the validator-relayed `submit_swap_claim` can't redirect the payout (front-run defense).
+    pub user: Pubkey,
+    #[max_len(MAX_ADDR_LEN)]
+    pub user_to_addr: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
@@ -145,21 +154,31 @@ pub struct Reservation {
     pub miner_to_addr: String,
     /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
     pub rate: u128,
+    /// Reservation creation time, unix seconds. The **source-freshness lower bound**: the user's
+    /// deposit must be mined after this (a replayed prior-swap deposit predates it → rejected by the
+    /// validator's freshness check, which replaces the source `TxMarker`).
+    pub created_at: i64,
     /// Expiry, unix seconds (0 = empty).
     pub reserved_until: i64,
     /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
     /// initial deadline + the Config budget then, so a later retune can't move an in-flight ceiling.
     pub max_extend_at: i64,
+    /// The one live claim's swap_key (`[0;32]` = none). Enforces one pending claim per reservation:
+    /// set by `submit_swap_claim`, cleared on `vote_initiate` consume / `close_stale_claim` / a new
+    /// `resolve_pool`.
+    pub claimed_swap_key: [u8; 32],
     /// Stored PDA bump.
     pub bump: u8,
 }
 
-/// Swap lifecycle status. Terminal states (Completed/TimedOut) are not stored — the Swap PDA is
-/// closed on confirm/timeout — so only the two live states exist here.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+/// Swap lifecycle status. `PendingAttestation` = source-tx claim recorded, not yet attested (no miner
+/// obligation). Terminal states (Completed/TimedOut) aren't stored — the Swap PDA is closed on
+/// confirm/timeout. New variant appended last to keep Active/Fulfilled discriminants stable.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum SwapStatus {
     Active,
     Fulfilled,
+    PendingAttestation,
 }
 
 /// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
@@ -204,14 +223,9 @@ pub struct Swap {
     pub bump: u8,
 }
 
-/// Permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`). Set `used` on initiate quorum
-/// and never closed, so it outlives the Swap: a from_tx_hash can initiate at most one swap, ever.
-#[account]
-#[derive(InitSpace)]
-pub struct TxMarker {
-    pub used: bool,
-    pub bump: u8,
-}
+// (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
+// validator freshness check: a deposit must be mined after `Reservation.created_at`; an old (replayed)
+// deposit predates any later reservation. See SOLANA_VALIDATOR_OFFLOAD.md "Tx-hash replay protection".)
 
 /// A miner's standing on-chain quote for one pair-direction
 /// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain]`).
@@ -246,12 +260,73 @@ pub struct MinerQuote {
     pub bump: u8,
 }
 
-/// One validator's entry into a reservation lottery `Pool`. Carries only the taker-side intent;
+/// A miner's realized per-direction track record (`seeds = [STATS_SEED, miner, from_chain, to_chain]`).
+///
+/// Accrued by `confirm_swap` on quorum (one row per (miner, from_chain, to_chain)); never closed. Lets
+/// the off-chain validator read realized volume + the executed rate via `getProgramAccounts` instead of
+/// a local ledger. Realized VWAP for the direction = `total_to_amount / total_from_amount` (exact
+/// integer math, no on-chain rate-string parse). Both fields are **asset-pure** (from/to in their own
+/// chain's units) — kept deliberately asset-agnostic so the PDA survives split-collateral; the validator
+/// derives any common-unit (SOL-notional) volume off-chain from its price feed, and the at-time notional
+/// stays in the `SwapCompleted` event.
+#[account]
+#[derive(InitSpace)]
+pub struct MinerDirectionStats {
+    pub miner: Pubkey,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    pub to_chain: String,
+    /// Count of completed (confirmed) swaps in this direction.
+    pub completed: u32,
+    /// Sum of the source/destination leg amounts over completed swaps (asset-native units).
+    pub total_from_amount: u128,
+    pub total_to_amount: u128,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Per-miner identity binding (`seeds = [BIND_SEED, miner]`): links a miner's Solana pubkey to its
+/// Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;
+/// the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it
+/// off-chain. This PDA enforces pubkey→≤1 hotkey structurally; the reverse (hotkey→≤1 pubkey) is enforced
+/// by the `HotkeyBinding` marker below. The miner may re-bind in place (refresh sig / change hotkey).
+#[account]
+#[derive(InitSpace)]
+pub struct Binding {
+    /// The miner's Solana pubkey (== seed; stored for `getProgramAccounts` convenience).
+    pub miner: Pubkey,
+    /// Bittensor hotkey (sr25519 public key).
+    pub hotkey: [u8; 32],
+    /// sr25519 signature by `hotkey` over the miner pubkey — validator-verified off-chain.
+    pub hotkey_sig: [u8; 64],
+    /// Unix timestamp of the last (re)bind (staleness signal for off-chain consumers).
+    pub bound_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Set-once hotkey→pubkey reverse marker (`seeds = [HOTKEY_BIND_SEED, hotkey]`): the first pubkey to bind
+/// a hotkey claims it permanently. A second, different pubkey trying the same hotkey is rejected, so the
+/// strike-dodge (struck pubkey rotates to a fresh one and re-binds the same hotkey) is closed on-chain
+/// rather than relying on every validator's off-chain first-seen pin. Never closed — one tiny rent-funded
+/// marker per identity (bounded by hotkey churn, not per-event).
+#[account]
+#[derive(InitSpace)]
+pub struct HotkeyBinding {
+    /// The pubkey that first claimed this hotkey (== the `Binding.miner`); also a reverse lookup.
+    pub miner: Pubkey,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// One entry into a reservation lottery `Pool`. Carries only the taker-side intent;
 /// the miner quote is the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct Request {
-    /// The validator that routed this request (also the lottery weight key + dedup key).
-    pub validator: Pubkey,
+    /// The account that routed this request — a whitelisted validator OR a plain user (entry is
+    /// permissionless). Also the lottery weight key (0 if not whitelisted) and the dedup key.
+    pub router: Pubkey,
     /// The taker.
     pub user: Pubkey,
     #[max_len(MAX_ADDR_LEN)]
@@ -266,7 +341,7 @@ pub struct Request {
 
 /// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`).
 ///
-/// Opened by the first validator to route a request (pinning the miner's quote for the chosen pair);
+/// Opened by the first router to route a request (pinning the miner's quote for the chosen pair);
 /// later in-window requests must match that pair. `resolve_pool` runs a stake-weighted draw after
 /// `closes_at` and creates the winner's `Reservation`. Keyed per-miner; the account is reused across
 /// contests (`opened_at == 0` = available), reset rather than closed by `resolve_pool`.
@@ -291,7 +366,7 @@ pub struct Pool {
     pub closes_at: i64,
     /// Future slot whose SlotHash seeds the draw (pinned at open).
     pub seed_slot: u64,
-    /// Requests this contest (deduped by validator), capped at MAX_VALIDATORS.
+    /// Requests this contest (deduped by router), capped at MAX_VALIDATORS.
     #[max_len(MAX_VALIDATORS)]
     pub requests: Vec<Request>,
     /// Stored PDA bump.

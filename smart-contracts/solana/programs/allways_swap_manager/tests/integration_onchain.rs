@@ -25,7 +25,7 @@ use {
         InstructionData, ToAccountMetas,
     },
     allways_swap_manager::state::{
-        Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury, TxMarker,
+        Binding, Config, MinerQuote, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury,
     },
     solana_commitment_config::CommitmentConfig,
     solana_keccak_hasher::hashv,
@@ -58,8 +58,10 @@ const SOL_AMOUNT: u64 = 2 * LAMPORTS_PER_SOL; // 2 SOL swap size
 // real-wall-clock on-chain tests don't each sleep a full minute waiting for the window to close.
 const TEST_POOL_WINDOW_SECS: i64 = 3;
 
-// Reservation quote — must be byte-identical reserve→initiate (it's hash-bound).
+// Reservation quote — the miner-side terms are pinned at resolve; the user-side payout too.
 const FROM_ADDR: &str = "userBTCaddr";
+// Fixed taker pinned by the lottery (the Swap's user/payout come from the reservation, not the claim).
+const PINNED_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
 const FROM_CHAIN: &str = "BTC";
 const TO_CHAIN: &str = "SOL";
 const MINER_FROM: &str = "minerBTCaddr";
@@ -96,9 +98,6 @@ fn weights_round_pda() -> Pubkey {
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
-}
-fn tx_pda(key: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"tx", key], &pid()).0
 }
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
@@ -253,7 +252,7 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            validator: *validator,
+            router: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -289,25 +288,32 @@ fn wait_pool_window() {
         (TEST_POOL_WINDOW_SECS as u64) * 1000 + 1200,
     ));
 }
-fn initiate_ix(
-    validator: &Pubkey,
-    miner: &Pubkey,
-    from_tx_hash: &str,
-    user: &Pubkey,
-    user_to: &str,
-) -> Instruction {
+fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate {
+        &allways_swap_manager::instruction::SubmitSwapClaim {
             swap_key: key,
             from_tx_hash: from_tx_hash.to_string(),
             from_tx_block: 800_000,
-            user: *user,
-            user_from_address: FROM_ADDR.to_string(),
-            user_to_address: user_to.to_string(),
         }
         .data(),
+        allways_swap_manager::accounts::SubmitSwapClaim {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            reservation: resv_pda(miner),
+            swap: swap_pda(&key),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
@@ -315,7 +321,6 @@ fn initiate_ix(
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
-            tx_marker: tx_pda(&key),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -340,7 +345,12 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
+        &allways_swap_manager::instruction::ConfirmSwap {
+            swap_key: key,
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+        }
+        .data(),
         allways_swap_manager::accounts::ConfirmSwap {
             validator: *validator,
             config: config_pda(),
@@ -349,6 +359,11 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
+            direction_stats: Pubkey::find_program_address(
+                &[b"stats", miner.as_ref(), FROM_CHAIN.as_bytes(), TO_CHAIN.as_bytes()],
+                &pid(),
+            )
+            .0,
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -479,9 +494,8 @@ fn active_miner(rpc: &RpcClient) -> Keypair {
 fn reserved_miner(rpc: &RpcClient) -> Keypair {
     let vals = validator_keypairs();
     let miner = active_miner(rpc);
-    let user = Keypair::new().pubkey();
     send(rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
-    send(rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+    send(rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &PINNED_USER), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
     wait_pool_window();
     send(rpc, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
@@ -507,7 +521,7 @@ fn onchain_initialize_creates_config() {
     let admin = admin_keypair();
     let cfg = read_config(&rpc);
     assert_eq!(cfg.admin, admin.pubkey(), "admin recorded");
-    assert_eq!(cfg.version, 7, "schema version");
+    assert_eq!(cfg.version, 10, "schema version");
     assert_eq!(cfg.min_collateral, MIN_COLLATERAL);
     assert_eq!(cfg.consensus_threshold_percent, THRESHOLD);
     assert_eq!(cfg.fulfillment_timeout_secs, TIMEOUT_SECS);
@@ -683,17 +697,17 @@ fn onchain_vote_initiate_creates_swap() {
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = reserved_miner(&rpc);
-    let user = Keypair::new().pubkey();
     let tx = "srctx_initiate";
 
-    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, claim_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx),
         &vals[0].pubkey(), &vals[0]).expect("initiate v0");
-    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx),
         &vals[1].pubkey(), &vals[1]).expect("initiate v1");
 
     let key = swap_key(tx);
     let s = read_swap(&rpc, &key);
-    assert_eq!(s.user, user);
+    assert_eq!(s.user, PINNED_USER); // pinned by the lottery reservation
     assert_eq!(s.miner, miner.pubkey());
     assert_eq!(s.sol_amount, SOL_AMOUNT);
     assert_eq!(s.miner_from_addr, MINER_FROM, "miner quote from reservation");
@@ -702,10 +716,7 @@ fn onchain_vote_initiate_creates_swap() {
     assert_eq!(s.user_to_addr, "userSOLaddr");
     assert!(s.status == SwapStatus::Active, "swap starts Active");
 
-    // TxMarker.used set (permanent replay guard).
-    let tm = rpc.get_account(&tx_pda(&key)).expect("tx_marker");
-    let marker = TxMarker::try_deserialize(&mut tm.data.as_slice()).unwrap();
-    assert!(marker.used, "tx marker used");
+    // (A4: no TxMarker — source replay is now a validator freshness check, not an on-chain marker.)
 
     // miner now has an in-flight swap.
     assert!(read_miner(&rpc, &miner.pubkey()).has_active_swap, "miner has_active_swap");
@@ -721,12 +732,12 @@ fn onchain_mark_fulfilled() {
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = reserved_miner(&rpc);
-    let user = Keypair::new().pubkey();
     let tx = "srctx_fulfill";
 
-    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, claim_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx),
         &vals[0].pubkey(), &vals[0]).expect("initiate v0");
-    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx),
         &vals[1].pubkey(), &vals[1]).expect("initiate v1");
 
     send(&rpc, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), &miner).expect("fulfill");
@@ -748,12 +759,12 @@ fn onchain_confirm_swap_full_lifecycle() {
     // Capture this miner's collateral-vault rent reserve = lamports - collateral, before the swap.
     let rent_reserve = collateral_vault_lamports(&rpc, &miner.pubkey()) - read_miner(&rpc, &miner.pubkey()).collateral;
     assert!(invariant_holds(&rpc, &miner.pubkey(), rent_reserve), "collateral-vault invariant pre-flow");
-    let user = Keypair::new().pubkey();
     let tx = "srctx_confirm";
 
-    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, claim_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx),
         &vals[0].pubkey(), &vals[0]).expect("initiate v0");
-    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx),
         &vals[1].pubkey(), &vals[1]).expect("initiate v1");
     send(&rpc, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), &miner).expect("fulfill");
 
@@ -786,11 +797,11 @@ fn onchain_withdraw_treasury_happy_path() {
 
     // Accrue a fee via a full swap+confirm.
     let miner = reserved_miner(&rpc);
-    let user = Keypair::new().pubkey();
     let tx = "srctx_withdraw";
-    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, claim_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&rpc, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), tx),
         &vals[0].pubkey(), &vals[0]).expect("initiate v0");
-    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx, &user, "userSOLaddr"),
+    send(&rpc, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), tx),
         &vals[1].pubkey(), &vals[1]).expect("initiate v1");
     send(&rpc, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), &miner).expect("fulfill");
     send(&rpc, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0])
@@ -856,6 +867,25 @@ fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
         &pid(),
     )
     .0
+}
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
+fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0
+}
+fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::BindHotkey { hotkey, hotkey_sig }.data(),
+        allways_swap_manager::accounts::BindHotkey {
+            miner: *miner,
+            binding: bind_pda(miner),
+            hotkey_binding: hkbind_pda(&hotkey),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
 }
 
 fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: u128) -> Instruction {
@@ -938,6 +968,25 @@ fn onchain_remove_quote_closes_pda() {
 
     send(&rpc, remove_quote_ix(&miner.pubkey(), "BTC", "SOL"), &miner.pubkey(), &miner).expect("remove");
     assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote closed after remove");
+}
+
+#[test]
+#[ignore = "requires a live solana-test-validator with the program deployed"]
+fn onchain_bind_hotkey() {
+    let _ = shared();
+    let rpc = rpc();
+    let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
+    let hotkey = [9u8; 32];
+    let sig = [3u8; 64];
+
+    send(&rpc, bind_ix(&miner.pubkey(), hotkey, sig), &miner.pubkey(), &miner).expect("bind_hotkey");
+
+    let a = rpc.get_account(&bind_pda(&miner.pubkey())).expect("binding account");
+    let b = Binding::try_deserialize(&mut a.data.as_slice()).unwrap();
+    assert_eq!(b.miner, miner.pubkey());
+    assert_eq!(b.hotkey, hotkey);
+    assert_eq!(b.hotkey_sig, sig);
+    assert!(b.bound_at > 0, "bound_at set from on-chain clock");
 }
 
 #[test]

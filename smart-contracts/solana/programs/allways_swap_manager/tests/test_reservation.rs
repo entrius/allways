@@ -179,7 +179,7 @@ fn open_ix(
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            validator: *validator,
+            router: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -283,7 +283,7 @@ fn test_open_pins_quote_and_charges_fee() {
     assert_eq!(p.opened_at, BASE_TS);
     assert_eq!(p.closes_at, BASE_TS + POOL_WINDOW_SECS);
     assert_eq!(p.requests.len(), 1);
-    assert_eq!(p.requests[0].validator, vals[0].pubkey());
+    assert_eq!(p.requests[0].router, vals[0].pubkey());
     assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "flat fee accrued to treasury");
 }
 
@@ -310,7 +310,7 @@ fn test_validator_can_update_request() {
 
     let p = pool(&svm, &miner.pubkey());
     assert_eq!(p.requests.len(), 1, "update replaces in place, not appended");
-    assert_eq!(p.requests[0].validator, vals[0].pubkey());
+    assert_eq!(p.requests[0].router, vals[0].pubkey());
     assert_eq!(p.requests[0].user, u2, "bid updated to the new user");
     assert_eq!(p.requests[0].user_from_addr, "u2");
     assert_eq!(p.requests[0].sol_amount, 2_000_000_000, "bid updated to the new amount");

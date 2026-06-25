@@ -66,9 +66,6 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
-fn tx_pda(key: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"tx", key], &pid()).0
-}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -181,7 +178,7 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            validator: *validator,
+            router: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -211,19 +208,32 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, user: &Pubkey) -> Instruction {
+fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate {
+        &allways_swap_manager::instruction::SubmitSwapClaim {
             swap_key: key,
             from_tx_hash: from_tx_hash.to_string(),
             from_tx_block: 800_000,
-            user: *user,
-            user_from_address: FROM_ADDR.to_string(),
-            user_to_address: "userSOLaddr".to_string(),
         }
         .data(),
+        allways_swap_manager::accounts::SubmitSwapClaim {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            reservation: resv_pda(miner),
+            swap: swap_pda(&key),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
@@ -231,7 +241,6 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, user: &Pu
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
-            tx_marker: tx_pda(&key),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -331,9 +340,10 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair) {
     (svm, vals, miner)
 }
 
-fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str, user: &Pubkey) {
-    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx, user), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx, user), &vals[1].pubkey(), &vals[1]).expect("i1");
+fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str) {
+    send(svm, claim_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx), &vals[1].pubkey(), &vals[1]).expect("i1");
 }
 
 // ---- extend_reservation ----
@@ -391,8 +401,7 @@ fn test_extend_reservation_validator_only() {
 #[test]
 fn test_extend_timeout_active_pushes_deadline_and_busy_lock() {
     let (mut svm, vals, miner) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
 
     let s = swap(&svm, "srctx1");
     assert_eq!(s.max_extend_at, s.timeout_at + MAX_TOTAL_EXTENSION_SECS, "ceiling frozen at creation");
@@ -407,8 +416,7 @@ fn test_extend_timeout_active_pushes_deadline_and_busy_lock() {
 #[test]
 fn test_extend_timeout_after_fulfilled() {
     let (mut svm, vals, miner) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
 
     let target = swap(&svm, "srctx1").timeout_at + 300;
@@ -419,8 +427,7 @@ fn test_extend_timeout_after_fulfilled() {
 #[test]
 fn test_extend_timeout_ceiling_and_monotonic() {
     let (mut svm, vals, miner) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     let s = swap(&svm, "srctx1");
 
     let over = send(&mut svm, extend_timeout_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", s.max_extend_at + 1), &vals[0].pubkey(), &vals[0]);
@@ -432,8 +439,7 @@ fn test_extend_timeout_ceiling_and_monotonic() {
 #[test]
 fn test_extend_timeout_validator_only() {
     let (mut svm, vals, miner) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     let outsider = Keypair::new();
     svm.airdrop(&outsider.pubkey(), 1_000_000_000).unwrap();
     let target = swap(&svm, "srctx1").timeout_at + 300;

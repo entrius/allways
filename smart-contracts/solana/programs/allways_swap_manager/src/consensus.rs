@@ -10,32 +10,8 @@ pub fn request_hash(request_type: u8, target: &Pubkey) -> [u8; 32] {
     hashv(&[&[request_type], target.as_ref()]).to_bytes()
 }
 
-/// Bound hash for an initiate round — binds the user-side payout fields the seeds/reservation don't
-/// cover (`user`, `user_from_addr`, `user_to_addr`, `from_tx_block`). Miner quote + amounts come
-/// from the immutable reservation, so they need not be re-bound here.
-#[allow(clippy::too_many_arguments)]
-pub fn initiate_hash(
-    miner: &Pubkey,
-    user: &Pubkey,
-    user_from_addr: &str,
-    user_to_addr: &str,
-    from_tx_hash: &str,
-    from_tx_block: u32,
-) -> [u8; 32] {
-    hashv(&[
-        &[crate::constants::REQ_INITIATE],
-        miner.as_ref(),
-        user.as_ref(),
-        user_from_addr.as_bytes(),
-        user_to_addr.as_bytes(),
-        from_tx_hash.as_bytes(),
-        &from_tx_block.to_le_bytes(),
-    ])
-    .to_bytes()
-}
-
-/// Bound hash for a swap-keyed round (confirm/timeout). All params live in the seeds (`swap_key`),
-/// so the binding is trivial.
+/// Bound hash for a swap-keyed round (initiate-attest/confirm/timeout). All params live in the seeds
+/// (`swap_key`), so the binding is trivial.
 pub fn swap_request_hash(request_type: u8, swap_key: &[u8; 32]) -> [u8; 32] {
     hashv(&[&[request_type], swap_key]).to_bytes()
 }

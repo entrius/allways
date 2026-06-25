@@ -101,8 +101,8 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         None => draw_seed(&pool_key, &seed_slot.to_le_bytes()),
     };
 
-    // Weight per request = its validator's config weight (0 if removed). pick_weighted falls back to
-    // uniform if every weight is 0.
+    // Weight per request = its router's config weight (0 if the router isn't a whitelisted validator —
+    // e.g. a plain user). pick_weighted falls back to uniform if every weight is 0.
     let weights: Vec<u64> = ctx
         .accounts
         .pool
@@ -113,7 +113,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
                 .config
                 .validators
                 .iter()
-                .find(|v| v.key == r.validator)
+                .find(|v| v.key == r.router)
                 .map(|v| v.weight)
                 .unwrap_or(0)
         })
@@ -134,14 +134,14 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         )
     };
 
-    // Create the Reservation for the winner — same shape vote_reserve produced, so everything
-    // downstream is unchanged.
+    // Create the Reservation for the winner (lottery is the only path to a reservation).
     let ttl = ctx.accounts.config.reservation_ttl_secs;
     let extension_budget = ctx.accounts.config.max_total_extension_secs;
     let reservation_bump = ctx.bumps.reservation;
     let r = &mut ctx.accounts.reservation;
-    r.bound_hash = [0u8; 32]; // unused post-lottery (no consensus binding); reserved_until is the sentinel
     r.from_addr = winner.user_from_addr;
+    r.user = winner.user; // pin taker + payout so the validator-relayed claim can't redirect it
+    r.user_to_addr = winner.user_to_addr;
     r.from_chain = from_chain;
     r.to_chain = to_chain;
     r.sol_amount = winner.sol_amount;
@@ -150,8 +150,10 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
+    r.created_at = now; // source-freshness lower bound: the deposit must be mined after this
     r.reserved_until = now.saturating_add(ttl);
     r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
+    r.claimed_swap_key = [0u8; 32]; // fresh contest → no live claim (clears any stale prior key)
     r.bump = reservation_bump;
 
     // Lock the miner busy for the reservation's life (read by deactivate/withdraw, non-bypassable).
@@ -165,7 +167,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
 
     emit!(PoolResolved {
         miner: miner_key,
-        winner: winner.validator,
+        winner: winner.router,
         user: winner.user,
         requests: req_count,
     });

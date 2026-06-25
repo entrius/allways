@@ -61,6 +61,8 @@ pub enum ErrorCode {
     // --- Phase 4: swap lifecycle ---
     #[msg("swap_key does not match keccak(from_tx_hash)")]
     SwapKeyMismatch,
+    /// Retained (unused) to avoid shifting later error-code indices — A4 removed the `TxMarker`;
+    /// source replay is now blocked by the validator freshness check, not this error.
     #[msg("Source transaction has already been used")]
     DuplicateSourceTx,
     #[msg("user_from_address does not match the reservation")]
@@ -69,6 +71,14 @@ pub enum ErrorCode {
     InvalidStatus,
     #[msg("Swap has not reached its timeout yet")]
     NotTimedOut,
+    #[msg("from_chain/to_chain args do not match the swap")]
+    ChainMismatch,
+    #[msg("Swap is not in PendingAttestation status")]
+    NotPending,
+    #[msg("Reservation already has a live claim")]
+    ClaimAlreadyExists,
+    #[msg("Claim's reservation has not expired; cannot reap")]
+    ClaimNotExpired,
     #[msg("Extension target must be later than the current deadline")]
     ExtensionNotLater,
     #[msg("Extension target exceeds the deadline's absolute ceiling")]
@@ -103,4 +113,8 @@ pub enum ErrorCode {
     InvalidWeightsVector,
     #[msg("Minimum interval between weight updates has not elapsed")]
     WeightsUpdateTooSoon,
+
+    // --- A5: hotkey binding ---
+    #[msg("This hotkey is already bound to a different pubkey (set-once)")]
+    HotkeyAlreadyBound,
 }

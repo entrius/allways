@@ -23,6 +23,24 @@ pub struct CollateralWithdrawn {
 
 // --- Phase 4: swap lifecycle (keyed by swap_key = keccak(from_tx_hash)) ---
 
+/// A reservation holder recorded their source-tx hash on-chain (PendingAttestation). No miner
+/// obligation yet — validators attest it via `vote_initiate`.
+#[event]
+pub struct SwapClaimed {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub user: Pubkey,
+    pub from_tx_hash: String,
+    pub from_tx_block: u32,
+}
+
+/// A stale (never-attested, reservation-expired) PendingAttestation claim was reaped.
+#[event]
+pub struct StaleClaimClosed {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+}
+
 #[event]
 pub struct SwapInitiated {
     pub swap_key: [u8; 32],
@@ -50,6 +68,14 @@ pub struct SwapCompleted {
     pub sol_amount: u64,
     /// Protocol fee taken from collateral into the treasury (lamports).
     pub fee: u64,
+    /// Direction + realized leg amounts + executed rate, for off-chain per-swap history (so indexers
+    /// don't re-read the now-closed Swap). Feeds the realized volume/VWAP track record (A2).
+    pub from_chain: String,
+    pub to_chain: String,
+    pub from_amount: u128,
+    pub to_amount: u128,
+    /// Fixed-point executed rate (display_rate × RATE_PRECISION); matches the on-chain u128 (#495).
+    pub rate: u128,
 }
 
 #[event]
@@ -115,6 +141,15 @@ pub struct QuoteRemoved {
     pub remove_fee: u64,
 }
 
+/// A miner (re)bound its Bittensor hotkey to its Solana pubkey (A5). The sr25519 signature lives on the
+/// `Binding` PDA; the validator verifies it off-chain.
+#[event]
+pub struct HotkeyBound {
+    pub miner: Pubkey,
+    pub hotkey: [u8; 32],
+    pub bound_at: i64,
+}
+
 // --- Phase 9: reservation lottery (pool keyed per miner) ---
 
 #[event]
@@ -130,7 +165,7 @@ pub struct PoolOpened {
 #[event]
 pub struct ReservationRequested {
     pub miner: Pubkey,
-    pub validator: Pubkey,
+    pub router: Pubkey,
     pub user: Pubkey,
     /// Number of requests in the pool after this one.
     pub requests: u8,
@@ -139,7 +174,7 @@ pub struct ReservationRequested {
 #[event]
 pub struct PoolResolved {
     pub miner: Pubkey,
-    /// The validator whose request won the draw.
+    /// The winning router (a validator or a plain user).
     pub winner: Pubkey,
     pub user: Pubkey,
     /// How many requests contended.

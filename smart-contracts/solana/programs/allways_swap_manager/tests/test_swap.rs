@@ -6,7 +6,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Swap, Treasury},
+    allways_swap_manager::state::{MinerDirectionStats, MinerState, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -26,6 +26,11 @@ const TTL: i64 = 1_800;
 const TIMEOUT_SECS: i64 = 3_600;
 const COLLATERAL: u64 = 10_000_000_000; // 10 SOL
 const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL swap size
+const FROM_AMOUNT: u128 = 100_000; // source leg (asset-native units)
+const TO_AMOUNT: u128 = 150_000; // dest leg → realized VWAP = to/from = 1.5 (matches RATE)
+const FROM_TX_BLOCK: u32 = 800_000;
+// Fixed taker pinned by the lottery in `setup` (the Swap's user now comes from the reservation).
+const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
 
 // reservation quote (must be consistent reserve→initiate)
 const FROM_ADDR: &str = "userBTCaddr";
@@ -59,14 +64,14 @@ fn resv_pda(m: &Pubkey) -> Pubkey {
 fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
     Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
 }
+fn stats_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"stats", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
 fn pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
-}
-fn tx_pda(key: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"tx", key], &pid()).0
 }
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
@@ -175,12 +180,12 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             user_from_addr: FROM_ADDR.to_string(),
             user_to_addr: "userSOLaddr".to_string(),
             sol_amount: SOL_AMOUNT,
-            from_amount: 100_000,
-            to_amount: 0,
+            from_amount: FROM_AMOUNT,
+            to_amount: TO_AMOUNT,
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            validator: *validator,
+            router: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -210,26 +215,32 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-#[allow(clippy::too_many_arguments)]
-fn initiate_ix(
-    validator: &Pubkey,
-    miner: &Pubkey,
-    from_tx_hash: &str,
-    user: &Pubkey,
-    user_to: &str,
-) -> Instruction {
+fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate {
+        &allways_swap_manager::instruction::SubmitSwapClaim {
             swap_key: key,
             from_tx_hash: from_tx_hash.to_string(),
-            from_tx_block: 800_000,
-            user: *user,
-            user_from_address: FROM_ADDR.to_string(),
-            user_to_address: user_to.to_string(),
+            from_tx_block: FROM_TX_BLOCK,
         }
         .data(),
+        allways_swap_manager::accounts::SubmitSwapClaim {
+            caller: *caller,
+            config: config_pda(),
+            miner: *miner,
+            reservation: resv_pda(miner),
+            swap: swap_pda(&key),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
@@ -237,9 +248,22 @@ fn initiate_ix(
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
-            tx_marker: tx_pda(&key),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+fn close_stale_claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseStaleClaim { swap_key: key }.data(),
+        allways_swap_manager::accounts::CloseStaleClaim {
+            caller: *caller,
+            miner: *miner,
+            reservation: resv_pda(miner),
+            swap: swap_pda(&key),
         }
         .to_account_metas(None),
     )
@@ -262,7 +286,12 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ConfirmSwap { swap_key: key }.data(),
+        &allways_swap_manager::instruction::ConfirmSwap {
+            swap_key: key,
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+        }
+        .data(),
         allways_swap_manager::accounts::ConfirmSwap {
             validator: *validator,
             config: config_pda(),
@@ -271,6 +300,7 @@ fn confirm_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruc
             collateral_vault: collateral_vault_pda(miner),
             treasury: treasury_pda(),
             swap: swap_pda(&key),
+            direction_stats: stats_pda(miner, FROM_CHAIN, TO_CHAIN),
             vote_round: vote_pda(REQ_CONFIRM, &key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -300,6 +330,10 @@ fn timeout_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey, from_tx_hash: &
 fn miner_state(svm: &LiteSVM, m: &Pubkey) -> MinerState {
     let a = svm.get_account(&miner_pda(m)).unwrap();
     MinerState::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+fn direction_stats(svm: &LiteSVM, m: &Pubkey, f: &str, t: &str) -> MinerDirectionStats {
+    let a = svm.get_account(&stats_pda(m, f, t)).unwrap();
+    MinerDirectionStats::try_deserialize(&mut a.data.as_slice()).unwrap()
 }
 fn treasury_total(svm: &LiteSVM) -> u64 {
     let a = svm.get_account(&treasury_pda()).unwrap();
@@ -351,8 +385,7 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     // unchanged. Single requester → that requester wins the draw deterministically.
     let setup_ts = BASE_TS - 100;
     set_clock(&mut svm, setup_ts);
-    let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
     send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
     set_clock(&mut svm, BASE_TS);
@@ -360,9 +393,11 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     (svm, vals, miner, rent_reserve)
 }
 
-fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str, user: &Pubkey) {
-    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx, user, "userSOLaddr"), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx, user, "userSOLaddr"), &vals[1].pubkey(), &vals[1]).expect("i1");
+/// Claim the source tx on-chain, then attest it to quorum (PendingAttestation → Active).
+fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str) {
+    send(svm, claim_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx), &vals[1].pubkey(), &vals[1]).expect("i1");
 }
 
 /// Reserve a miner via the lottery (open → warp past the window → resolve; sole entrant wins). Leaves
@@ -383,13 +418,12 @@ fn invariant_holds(svm: &LiteSVM, miner: &Pubkey, rent_reserve: u64) -> bool {
 #[test]
 fn test_initiate_creates_swap() {
     let (mut svm, vals, miner, _rent) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
 
     let key = swap_key("srctx1");
     let a = svm.get_account(&swap_pda(&key)).unwrap();
     let s = Swap::try_deserialize(&mut a.data.as_slice()).unwrap();
-    assert_eq!(s.user, user);
+    assert_eq!(s.user, LOTTERY_USER); // pinned by the lottery reservation, not the claimer
     assert_eq!(s.miner, miner.pubkey());
     assert_eq!(s.sol_amount, SOL_AMOUNT);
     // miner quote sourced from the (immutable) reservation
@@ -400,7 +434,6 @@ fn test_initiate_creates_swap() {
     assert_eq!(s.timeout_at, BASE_TS + TIMEOUT_SECS);
     // side effects
     assert!(miner_state(&svm, &miner.pubkey()).has_active_swap);
-    assert!(svm.get_account(&tx_pda(&key)).is_some());
 }
 
 #[test]
@@ -435,53 +468,76 @@ fn test_open_rejected_below_overcollateralization() {
 }
 
 #[test]
-fn test_initiate_user_mismatch_rejected() {
+fn test_claim_creates_pending() {
+    // A claim records the source tx on-chain (PendingAttestation) with the pinned payout, obligates
+    // nothing, and leaves the reservation live with its claim slot set.
     let (mut svm, vals, miner, _rent) = setup();
-    let user = Keypair::new().pubkey();
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+
     let key = swap_key("srctx1");
-    let bad = Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::VoteInitiate {
-            swap_key: key,
-            from_tx_hash: "srctx1".to_string(),
-            from_tx_block: 1,
-            user,
-            user_from_address: "WRONGaddr".to_string(), // != reservation.from_addr
-            user_to_address: "x".to_string(),
-        }
-        .data(),
-        allways_swap_manager::accounts::VoteInitiate {
-            validator: vals[0].pubkey(),
-            config: config_pda(),
-            miner: miner.pubkey(),
-            miner_state: miner_pda(&miner.pubkey()),
-            reservation: resv_pda(&miner.pubkey()),
-            vote_round: vote_pda(REQ_INITIATE, miner.pubkey().as_ref()),
-            tx_marker: tx_pda(&key),
-            swap: swap_pda(&key),
-            system_program: SYSTEM_PROGRAM,
-        }
-        .to_account_metas(None),
-    );
-    assert!(send(&mut svm, bad, &vals[0].pubkey(), &vals[0]).is_err(), "user_from mismatch rejected");
+    let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&key)).unwrap().data.as_slice()).unwrap();
+    assert_eq!(s.status, SwapStatus::PendingAttestation);
+    assert_eq!(s.user, LOTTERY_USER, "payout pinned from the reservation, not the claimer");
+    assert_eq!(s.user_to_addr, "userSOLaddr");
+    assert_eq!(s.from_tx_hash, "srctx1");
+    assert_eq!(s.timeout_at, 0, "no obligation at claim");
+    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap, "claim sets no obligation");
+    let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
+    assert_ne!(r.reserved_until, 0, "reservation still live");
+    assert_eq!(r.claimed_swap_key, key, "claim slot taken");
+    assert!(r.created_at > 0, "resolve_pool stamped created_at (the source-freshness bound)");
 }
 
 #[test]
-fn test_initiate_hash_binding_user_to() {
-    // Two validators differing only in user_to_address → second rejected (closes #2 / #411).
+fn test_claim_requires_validator() {
+    // The claim is validator-relayed: a non-validator caller is rejected, so there's no anonymous claim
+    // to squat the slot / make validators RPC-chase. Participation stays open via the pool draw; only
+    // the on-chain relay of the deposit is gated to validators.
+    let (mut svm, _vals, miner, _rent) = setup();
+    let attacker = Keypair::new();
+    svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let res = send(&mut svm, claim_ix(&attacker.pubkey(), &miner.pubkey(), "srctx1"), &attacker.pubkey(), &attacker);
+    assert!(res.is_err(), "non-validator claim must be rejected (validator-relay gate)");
+}
+
+#[test]
+fn test_second_claim_rejected() {
+    // One live claim per reservation: a second claim (different tx) is rejected.
     let (mut svm, vals, miner, _rent) = setup();
-    let user = Keypair::new().pubkey();
-    send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "destA"), &vals[0].pubkey(), &vals[0]).expect("i0");
-    let mismatched = send(&mut svm, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1", &user, "destB"), &vals[1].pubkey(), &vals[1]);
-    assert!(mismatched.is_err(), "differing user_to_address must be rejected");
-    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap, "no quorum");
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim1");
+    let second = send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx2"), &vals[0].pubkey(), &vals[0]);
+    assert!(second.is_err(), "reservation already has a live claim");
+}
+
+#[test]
+fn test_pending_cannot_be_fulfilled_or_confirmed() {
+    // A claim that hasn't been attested is not Active → can't be fulfilled or confirmed.
+    let (mut svm, vals, miner, _rent) = setup();
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    assert!(send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).is_err(), "pending can't fulfill");
+    assert!(confirm_only(&mut svm, &vals[0], &miner.pubkey(), "srctx1").is_err(), "pending can't confirm");
+}
+
+#[test]
+fn test_stale_claim_reap() {
+    // A claim whose reservation lapsed (no attestation) is reapable; rent → caller, slot cleared.
+    let (mut svm, vals, miner, _rent) = setup();
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let key = swap_key("srctx1");
+    // can't reap while the reservation is still live
+    assert!(send(&mut svm, close_stale_claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).is_err());
+
+    set_clock(&mut svm, BASE_TS + TTL + 1); // reservation expired
+    send(&mut svm, close_stale_claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("reap");
+    assert!(svm.get_account(&swap_pda(&key)).is_none(), "stale claim closed");
+    let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
+    assert_eq!(r.claimed_swap_key, [0u8; 32], "claim slot freed");
 }
 
 #[test]
 fn test_fulfill_confirm_fee_and_invariant() {
     let (mut svm, vals, miner, rent) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent));
 
     // confirm before fulfill must fail
@@ -490,6 +546,7 @@ fn test_fulfill_confirm_fee_and_invariant() {
     send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
 
     let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 0, "no success credit before confirm quorum");
     send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
@@ -502,6 +559,18 @@ fn test_fulfill_confirm_fee_and_invariant() {
         "fees accrued to treasury"
     );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "success counter bumped on confirm quorum");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 0, "no failure on a completed swap");
+    // realized per-direction stats accrued on the completed swap
+    let st = direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN);
+    assert_eq!(st.miner, miner.pubkey());
+    assert_eq!(st.from_chain, FROM_CHAIN);
+    assert_eq!(st.to_chain, TO_CHAIN);
+    assert_eq!(st.completed, 1, "one completed swap");
+    assert_eq!(st.total_from_amount, FROM_AMOUNT);
+    assert_eq!(st.total_to_amount, TO_AMOUNT);
+    // realized VWAP = to/from = 1.5
+    assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP 1.5");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
 }
@@ -513,26 +582,30 @@ fn confirm_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, tx: &str) -> Res
 #[test]
 fn test_timeout_slash_refund_and_invariant() {
     let (mut svm, vals, miner, rent) = setup();
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user.pubkey());
+    // the swap's user (refund recipient) is the pinned lottery user
+    let user = LOTTERY_USER;
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
 
     // not yet timed out
-    assert!(timeout_only(&mut svm, &vals[0], &miner.pubkey(), &user.pubkey(), "srctx1").is_err());
+    assert!(timeout_only(&mut svm, &vals[0], &miner.pubkey(), &user, "srctx1").is_err());
 
     set_clock(&mut svm, BASE_TS + TIMEOUT_SECS + 1);
     let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
-    let user_before = lamports(&svm, &user.pubkey());
+    let user_before = lamports(&svm, &user);
 
-    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &user.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
-    send(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &user.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &user, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
+    send(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &user, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
 
     // v2 #4: failed swaps are slashed at 1.10× the swap size, all refunded to the user.
     // collateral (10 SOL) >= 1.1× swap size (2.2 SOL), so the full penalty is taken.
     let slash = SOL_AMOUNT + SOL_AMOUNT / 10; // 1.10× = 2.2 SOL
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - slash, "collateral slashed 1.1x");
-    assert_eq!(lamports(&svm, &user.pubkey()), user_before + slash, "user refunded full 1.1x slash");
+    assert_eq!(lamports(&svm, &user), user_before + slash, "user refunded full 1.1x slash");
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 1, "failure counter bumped on timeout quorum");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 0, "no success on a timed-out swap");
+    // a timed-out swap accrues NO direction stats (timeout_swap has no stats account)
+    assert!(svm.get_account(&stats_pda(&miner.pubkey(), FROM_CHAIN, TO_CHAIN)).is_none(), "no stats on timeout");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after slash");
 }
@@ -542,16 +615,61 @@ fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, t
 }
 
 #[test]
-fn test_replay_guard_survives_completion() {
+fn test_contract_no_longer_blocks_reused_tx() {
+    // A4: the permanent on-chain TxMarker is gone, so the CONTRACT no longer blocks a reused
+    // from_tx_hash after the swap closes. Source-replay defense moved to the validator freshness check
+    // (the deposit must be mined after Reservation.created_at — an old replayed deposit predates any
+    // later reservation), which is off-chain and tested in the validator (Phase B). Here we just prove
+    // the marker is truly gone: the re-claim + re-attest now succeeds at the contract level.
     let (mut svm, vals, miner, _rent) = setup();
-    let user = Keypair::new().pubkey();
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", &user);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
     send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
-    // miner freed → re-reserve via the lottery, then re-initiate with the SAME from_tx_hash → replay rejected.
+    // miner freed → re-reserve, re-claim + re-attest the SAME from_tx_hash → now permitted on-chain.
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
-    let replay = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", &user, "userSOLaddr"), &vals[0].pubkey(), &vals[0]);
-    assert!(replay.is_err(), "reused source tx must be rejected even after the swap closed");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice()).unwrap();
+    assert_eq!(s.status, SwapStatus::Active, "contract permits re-attest after close (replay defense now off-chain)");
+}
+
+fn run_full_swap(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, tx: &str) {
+    do_initiate(svm, vals, &miner.pubkey(), tx);
+    send(svm, fulfill_ix(&miner.pubkey(), tx), &miner.pubkey(), miner).expect("fulfill");
+    send(svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), tx), &vals[0].pubkey(), &vals[0]).expect("c0");
+    send(svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), tx), &vals[1].pubkey(), &vals[1]).expect("c1");
+}
+
+#[test]
+fn test_stats_accumulate_same_direction() {
+    let (mut svm, vals, miner, _rent) = setup();
+
+    run_full_swap(&mut svm, &vals, &miner, "srctx1");
+    assert_eq!(direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN).completed, 1);
+
+    // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction
+    do_reserve(&mut svm, &vals[0], &miner.pubkey());
+    run_full_swap(&mut svm, &vals, &miner, "srctx2");
+
+    // same PDA, accumulated across both swaps
+    let st = direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN);
+    assert_eq!(st.completed, 2, "two completed swaps accumulate");
+    assert_eq!(st.total_from_amount, 2 * FROM_AMOUNT);
+    assert_eq!(st.total_to_amount, 2 * TO_AMOUNT);
+    assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP still 1.5");
+}
+
+#[test]
+fn test_stats_separate_per_direction() {
+    let (mut svm, vals, miner, _rent) = setup();
+    run_full_swap(&mut svm, &vals, &miner, "srctx1");
+
+    // the forward (BTC→SOL) direction accrued; the reverse-direction PDA was never created — directions
+    // do not collide into one stats account.
+    assert_eq!(direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN).completed, 1);
+    assert!(
+        svm.get_account(&stats_pda(&miner.pubkey(), TO_CHAIN, FROM_CHAIN)).is_none(),
+        "reverse-direction stats PDA not created"
+    );
 }

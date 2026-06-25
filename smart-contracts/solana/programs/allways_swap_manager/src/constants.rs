@@ -26,14 +26,26 @@ pub const RESV_SEED: &[u8] = b"resv";
 #[constant]
 pub const SWAP_SEED: &[u8] = b"swap";
 
-/// PDA seed prefix for the permanent source-tx replay marker (`seeds = [TX_SEED, swap_key]`).
-#[constant]
-pub const TX_SEED: &[u8] = b"tx";
 
 /// PDA seed prefix for a miner's standing per-pair quote
 /// (`seeds = [QUOTE_SEED, miner_pubkey, from_chain, to_chain]`).
 #[constant]
 pub const QUOTE_SEED: &[u8] = b"quote";
+
+/// PDA seed prefix for a miner's realized per-direction stats
+/// (`seeds = [STATS_SEED, miner_pubkey, from_chain, to_chain]`).
+#[constant]
+pub const STATS_SEED: &[u8] = b"stats";
+
+/// PDA seed prefix for a miner's hotkey↔pubkey identity binding (`seeds = [BIND_SEED, miner_pubkey]`).
+#[constant]
+pub const BIND_SEED: &[u8] = b"bind";
+
+/// PDA seed prefix for the set-once hotkey→pubkey reverse marker (`seeds = [HOTKEY_BIND_SEED, hotkey]`).
+/// Enforces hotkey→≤1 pubkey on-chain: a hotkey can be claimed by exactly one pubkey, ever, so a struck
+/// pubkey can't rotate to a fresh one and re-bind the same hotkey to dodge strikes.
+#[constant]
+pub const HOTKEY_BIND_SEED: &[u8] = b"hkbind";
 
 /// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
 #[constant]
@@ -44,9 +56,10 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v7: deadline extensions
-/// (max_total_extension_secs in Config; see git history for the v2–v6 progression).
-pub const CONFIG_VERSION: u32 = 7;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v10: A4 source-replay via
+/// freshness — removed the permanent `TxMarker`, added `Reservation.created_at` as the source bound.
+/// v9 = A5 binding; v8 = scoring read-surface + #493 extensions; see git history for v2–v9.
+pub const CONFIG_VERSION: u32 = 10;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
