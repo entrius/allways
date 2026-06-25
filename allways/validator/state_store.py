@@ -1,7 +1,7 @@
 """SQLite-backed store for all validator-local state.
 
 Tables: ``pending_confirms`` (axon→forward queue), ``rate_events`` (crown-time
-input), ``swap_outcomes`` (credibility ledger), ``active_events`` +
+input), ``swap_outcomes`` (per-direction volume ledger), ``active_events`` +
 ``busy_events`` + ``collateral_events`` + ``event_watcher_meta`` +
 ``bootstrapped_swaps`` (event watcher persistence — warm restarts hydrate
 from these instead of replaying contract history). Single connection guarded
@@ -528,22 +528,6 @@ class ValidatorStateStore:
             ),
         )
 
-    def get_success_rates_since(self, since_block: int) -> Dict[str, Tuple[int, int]]:
-        """Return ``{hotkey: (completed_count, timed_out_count)}`` for outcomes
-        resolved at or after ``since_block``."""
-        rows = self._fetchall(
-            """
-            SELECT miner_hotkey,
-                   SUM(completed) AS completed,
-                   SUM(1 - completed) AS timed_out
-            FROM swap_outcomes
-            WHERE resolved_block >= ?
-            GROUP BY miner_hotkey
-            """,
-            (since_block,),
-        )
-        return {r['miner_hotkey']: (int(r['completed']), int(r['timed_out'])) for r in rows}
-
     def get_volume_since(self, since_block: int) -> Dict[str, int]:
         """Sum ``tao_amount`` of completed swaps per miner (rao) since
         ``since_block``. Timed-out swaps don't count toward volume.
@@ -583,11 +567,6 @@ class ValidatorStateStore:
             (since_block, (from_chain or '').lower(), (to_chain or '').lower()),
         )
         return {r['miner_hotkey']: int(r['total'] or 0) for r in rows}
-
-    def prune_swap_outcomes_older_than(self, cutoff_block: int) -> None:
-        if cutoff_block <= 0:
-            return
-        self._execute('DELETE FROM swap_outcomes WHERE resolved_block < ?', (cutoff_block,))
 
     # ─── event_watcher state ────────────────────────────────────────────
 

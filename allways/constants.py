@@ -57,21 +57,18 @@ MAX_SCORING_BACKFILL_BLOCKS = 2 * SCORING_WINDOW_BLOCKS  # ~2 hours at 12s/block
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
-CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
     ('tao', 'btc'): 0.25,
     ('btc', 'tao'): 0.25,
 }
-# 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
-SUCCESS_EXPONENT: int = 3
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
-# Closed swaps required for full credibility (0 → 100% linear ramp).
-CREDIBILITY_RAMP_OBSERVATIONS: int = 10
-# More than this many timed-out swaps within CREDIBILITY_WINDOW_BLOCKS hard-zeros
-# a miner's credibility (and thus their whole reward) until the old timeouts age
-# out of the rolling window. 0-2 tolerated; the 3rd timeout zeros credibility.
-CREDIBILITY_MAX_TIMEOUTS: int = 2
+# Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
+# replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
+# it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
+# failures — a binary 0/1 multiplier, no ramp.
+MIN_SUCCESSFUL_SWAPS: int = 2
+MAX_FAILED_SWAPS: int = 2
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID

@@ -1,8 +1,9 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``pool × crown_share × sr³ × ramp × capacity ×
-volume_factor``; the credibility ramp is applied linearly, not cubed. Any
-shortfall recycles to ``RECYCLE_UID``. Entry point is
+Reward per miner is ``pool × crown_share × eligible × capacity ×
+volume_factor``, where ``eligible`` is a flat 0/1 gate read off the on-chain
+``MinerState`` counters (B3.3) — it replaces the old ``sr³ × credibility ramp``.
+Any shortfall recycles to ``RECYCLE_UID``. Entry point is
 ``score_and_reward_miners(validator)``.
 """
 
@@ -18,18 +19,17 @@ import numpy as np
 
 from allways.chains import canonical_pair
 from allways.constants import (
-    CREDIBILITY_MAX_TIMEOUTS,
-    CREDIBILITY_RAMP_OBSERVATIONS,
-    CREDIBILITY_WINDOW_BLOCKS,
     DIRECTION_POOLS,
+    MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
+    MIN_SUCCESSFUL_SWAPS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
-    SUCCESS_EXPONENT,
     VOLUME_WEIGHT_ALPHA,
 )
 from allways.utils.rate import is_executable_rate, min_executable_tao_leg
+from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
 
@@ -74,7 +74,6 @@ def score_and_reward_miners(self: Validator) -> None:
             rewards, miner_uids = calculate_miner_rewards(self)
         self.update_scores(rewards, miner_uids)
         prune_rate_events(self)
-        prune_swap_outcomes(self)
         # Advance the cursor only after a round completes, so a mid-round
         # failure retries the same window next forward instead of skipping it.
         # self.block is TTL-cached, so it equals the window_end the round used.
@@ -141,15 +140,35 @@ def prune_rate_events(self: Validator) -> None:
         self.state_store.prune_events_older_than(cutoff)
 
 
-def prune_swap_outcomes(self: Validator) -> None:
-    cutoff = self.block - CREDIBILITY_WINDOW_BLOCKS
-    if cutoff > 0:
-        self.state_store.prune_swap_outcomes_older_than(cutoff)
+def is_eligible(miner_state) -> bool:
+    """Flat binary crown gate off the on-chain ``MinerState`` counters (B3.3):
+    eligible iff the miner has at least ``MIN_SUCCESSFUL_SWAPS`` successes and at
+    most ``MAX_FAILED_SWAPS`` failures. Replaces ``success_rate³ × credibility``."""
+    return (
+        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
+        and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
+    )
+
+
+def build_eligibility(solana_client, metagraph) -> Dict[str, bool]:
+    """``{hotkey: eligible_bool}`` for on-metagraph miners, from the on-chain
+    ``MinerState`` counters. Each pubkey-keyed ``MinerState`` is attributed to a
+    Bittensor hotkey via the sr25519 binding (B3.2 ``build_attribution``);
+    unbound or off-metagraph miners are dropped (they have no UID to credit)."""
+    attribution = build_attribution(solana_client)
+    metagraph_hotkeys = set(metagraph.hotkeys)
+    eligibility: Dict[str, bool] = {}
+    for _pubkey, ms in solana_client.get_all('MinerState'):
+        hotkey = attribution.get(str(ms.miner))
+        if hotkey is None or hotkey not in metagraph_hotkeys:
+            continue
+        eligibility[hotkey] = is_eligible(ms)
+    return eligibility
 
 
 def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (pool × crown_share × sr³ × ramp × capacity × volume_factor), recycle the rest.
+    (pool × crown_share × eligible × capacity × volume_factor), recycle the rest.
 
     Volume weighting is *per direction*: a miner earning crown on btc→tao is
     compared only to btc→tao volume on the network, not to the total of both
@@ -172,10 +191,10 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     unweighted_rewards = np.zeros(n_uids, dtype=np.float32)
-    credibility_since = max(0, self.block - CREDIBILITY_WINDOW_BLOCKS)
-    success_stats = self.state_store.get_success_rates_since(credibility_since)
-    success_rates = {hk: success_rate(success_stats.get(hk)) for hk in rewardable_hotkeys}
-    credibility_ramps = {hk: credibility_ramp(success_stats.get(hk)) for hk in rewardable_hotkeys}
+    # Flat eligibility gate off the on-chain MinerState counters (B3.3),
+    # attributed pubkey→hotkey via the sr25519 binding. Absent hotkey → not
+    # eligible (no on-chain counters ⇒ no proven successful swaps).
+    eligibility = build_eligibility(self.solana_client, self.metagraph)
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -248,20 +267,15 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
             # already earned (#409).
             cap_blocks = trace.cap_weighted_blocks.get(hotkey, 0.0)
             cap = (cap_blocks / blocks) if blocks > 0 else 0.0
+            eligible = 1.0 if eligibility.get(hotkey, False) else 0.0
             wt = weighting_traces.setdefault(hotkey, WeightingTrace())
             wt.record_capacity(factor=cap)
-            wt.record_credibility(
-                closed_swaps=sum(success_stats.get(hotkey, (0, 0))),
-                ramp_target=CREDIBILITY_RAMP_OBSERVATIONS,
-                timed_out=success_stats.get(hotkey, (0, 0))[1],
-            )
+            wt.record_eligibility(eligible=bool(eligible))
             crown_share_dir = blocks / total_crown_dir
             vol_dir = volumes_dir.get(hotkey, 0)
             vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
-            base = (
-                pool * crown_share_dir * (success_rates[hotkey] ** SUCCESS_EXPONENT) * credibility_ramps[hotkey] * cap
-            )
+            base = pool * crown_share_dir * eligible * cap
             unweighted_rewards[uid] += base
             rewards[uid] += base * vol_factor
             if vol_factor < 1.0:
@@ -293,7 +307,7 @@ def calculate_miner_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
         window_end=window_end,
         direction_traces=direction_traces,
         rewards=rewards,
-        success_rates=success_rates,
+        eligibility=eligibility,
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
@@ -379,27 +393,6 @@ def record_volume_traces(
             crown_share=crown_share,
             factor=effective,
         )
-
-
-def success_rate(stats: Optional[Tuple[int, int]]) -> float:
-    """Raw completed / closed ratio. Cubed in the reward. Zero observations → 0."""
-    if not stats or stats == (0, 0):
-        return 0.0
-    completed, timed_out = stats
-    return completed / (completed + timed_out)
-
-
-def credibility_ramp(stats: Optional[Tuple[int, int]]) -> float:
-    """Linear ramp to full credibility at CREDIBILITY_RAMP_OBSERVATIONS closed
-    swaps. Applied linearly to the reward, not cubed. Zero observations → 0.
-    More than CREDIBILITY_MAX_TIMEOUTS timed-out swaps in the window hard-zeros
-    credibility — a rolling penalty that recovers as old timeouts age out."""
-    if not stats or stats == (0, 0):
-        return 0.0
-    _completed, timed_out = stats
-    if timed_out > CREDIBILITY_MAX_TIMEOUTS:
-        return 0.0
-    return min(1.0, sum(stats) / CREDIBILITY_RAMP_OBSERVATIONS)
 
 
 # ─── Crown-time replay ───────────────────────────────────────────────────

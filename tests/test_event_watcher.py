@@ -43,6 +43,19 @@ def make_watcher(tmp_path: Path, *, netuid=None, subtensor=None) -> ContractEven
     )
 
 
+def outcome_counts(store: ValidatorStateStore, since_block: int = 0) -> dict[str, tuple[int, int]]:
+    """Local re-read of the swap_outcomes completed/timed_out tallies. The public
+    get_success_rates_since reader was removed in B3.3 (credibility moved to the
+    on-chain MinerState gate); the watcher still writes the rows until B3.6, so
+    these write-path tests read the table directly."""
+    rows = store.require_connection().execute(
+        'SELECT miner_hotkey, SUM(completed) AS c, SUM(1 - completed) AS t '
+        'FROM swap_outcomes WHERE resolved_block >= ? GROUP BY miner_hotkey',
+        (since_block,),
+    ).fetchall()
+    return {r['miner_hotkey']: (int(r['c']), int(r['t'])) for r in rows}
+
+
 def encode_u64_le(v: int) -> bytes:
     return struct.pack('<Q', v)
 
@@ -89,14 +102,14 @@ class TestSwapOutcomePersistence:
     def test_completed_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_success_rates_since(0)
+        stats = outcome_counts(w.state_store, 0)
         assert stats['hk_a'] == (1, 0)
         w.state_store.close()
 
     def test_timed_out_writes_ledger(self, tmp_path: Path):
         w = make_watcher(tmp_path)
         w.apply_event(100, 'SwapTimedOut', {'swap_id': 42, 'miner': 'hk_a'})
-        stats = w.state_store.get_success_rates_since(0)
+        stats = outcome_counts(w.state_store, 0)
         assert stats['hk_a'] == (0, 1)
         w.state_store.close()
 
@@ -105,7 +118,7 @@ class TestSwapOutcomePersistence:
         w.apply_event(100, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
         w.apply_event(101, 'SwapCompleted', {'swap_id': 2, 'miner': 'hk_a'})
         w.apply_event(102, 'SwapTimedOut', {'swap_id': 3, 'miner': 'hk_a'})
-        stats = w.state_store.get_success_rates_since(0)
+        stats = outcome_counts(w.state_store, 0)
         assert stats['hk_a'] == (2, 1)
         w.state_store.close()
 
@@ -1159,7 +1172,7 @@ class TestSwapOutcomesIdempotency:
         w = make_watcher(tmp_path)
         w.apply_event(1000, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a', 'tao_amount': 500})
         w.apply_event(1000, 'SwapCompleted', {'swap_id': 42, 'miner': 'hk_a', 'tao_amount': 500})
-        rows = w.state_store.get_success_rates_since(0)
+        rows = outcome_counts(w.state_store, 0)
         # Two SwapCompleted apply()s, but swap_outcomes is keyed by swap_id (INSERT OR REPLACE).
         assert rows.get('hk_a') == (1, 0)
         w.state_store.close()
