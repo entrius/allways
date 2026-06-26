@@ -227,6 +227,7 @@ IX_DISCRIMINATORS = {
     'set_max_swap_amount': bytes([7, 177, 215, 146, 45, 7, 220, 199]),
     'set_min_collateral': bytes([128, 193, 225, 225, 249, 133, 38, 70]),
     'set_min_swap_amount': bytes([189, 59, 139, 62, 167, 12, 58, 88]),
+    'set_reservation_ttl': bytes([108, 189, 90, 167, 113, 34, 82, 140]),
     'withdraw_treasury': bytes([40, 63, 122, 158, 144, 216, 83, 96]),
 }
 IX_INITIALIZE_ARGS = CStruct(

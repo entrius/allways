@@ -62,6 +62,7 @@ def test_b4_discriminators_match_anchor_global_formula():
         'set_max_collateral',
         'set_min_swap_amount',
         'set_max_swap_amount',
+        'set_reservation_ttl',
         'withdraw_treasury',
     ):
         assert layouts.IX_DISCRIMINATORS[name] == _global_disc(name), f'{name} ix discriminator mismatch'
@@ -118,6 +119,7 @@ def test_withdraw_treasury(client):
         (lambda c: c.set_max_collateral(9_000), 'set_max_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': 9_000})),
         (lambda c: c.set_min_swap_amount(10), 'set_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 10})),
         (lambda c: c.set_max_swap_amount(99), 'set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 99})),
+        (lambda c: c.set_reservation_ttl(600), 'set_reservation_ttl', layouts.IX_I64_ARGS.build({'value': 600})),
     ],
 )
 def test_admin_config_setters(client, call, ix_name, body):

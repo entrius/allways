@@ -294,6 +294,9 @@ class AllwaysSolanaClient:
     def set_max_swap_amount(self, amount: int) -> str:
         return self._admin_config('set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
 
+    def set_reservation_ttl(self, secs: int) -> str:
+        return self._admin_config('set_reservation_ttl', layouts.IX_I64_ARGS.build({'value': secs}))
+
     def withdraw_treasury(self, recipient, amount: int) -> str:
         """Admin: move accrued protocol fees from the Treasury PDA to `recipient`."""
         admin = self.keypair.pubkey()
