@@ -219,6 +219,31 @@ class SolanaSwapLoop:
         bt.logging.success(f'{label}: {decision.value} vote submitted')
         return True
 
+    def resolve_pools_once(self, now: int) -> List[str]:
+        """Permissionless crank: resolve every pool whose window has closed into a winner Reservation.
+        Idempotent — `resolve_pool` zeroes `opened_at` + clears requests, so a resolved pool is skipped
+        next pass. One bad pool never breaks the sweep. Returns the miners whose pools we resolved."""
+        resolved: List[str] = []
+        for _pubkey, pool in self.client.get_all('Pool'):
+            if int(getattr(pool, 'opened_at', 0)) == 0:
+                continue  # available/empty slot
+            if now <= int(pool.closes_at):
+                continue  # window still open
+            if not getattr(pool, 'requests', None):
+                continue  # nothing to draw
+            miner = pool.miner
+            if self.read_only:
+                bt.logging.info(f'pool {miner}: WOULD resolve_pool ({len(pool.requests)} req, read-only)')
+                continue
+            try:
+                self.client.resolve_pool(miner)
+            except Exception as e:  # one bad pool must not break the pass
+                bt.logging.error(f'pool {miner}: resolve_pool failed: {e}')
+                continue
+            bt.logging.success(f'pool {miner}: resolved ({len(pool.requests)} req)')
+            resolved.append(str(miner))
+        return resolved
+
     def run_once(self, now: int) -> List[Tuple[str, SwapDecision]]:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""

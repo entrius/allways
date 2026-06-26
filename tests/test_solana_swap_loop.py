@@ -221,3 +221,61 @@ def test_run_once_skips_already_voted():
     loop = SolanaSwapLoop(client, providers, fee_divisor=100)
     loop.run_once(now=1500)
     assert client.calls == []  # has_voted → no re-submission
+
+
+def make_pool(opened_at=100, closes_at=200, requests=1, miner='minerPK'):
+    return SimpleNamespace(
+        miner=miner,
+        opened_at=opened_at,
+        closes_at=closes_at,
+        requests=[SimpleNamespace(router='r')] * requests,
+    )
+
+
+class PoolRecordingClient:
+    """get_all('Pool') → fixtures; resolve_pool captures the miners cranked."""
+
+    def __init__(self, pools):
+        self._pools = pools
+        self.resolved = []
+
+    def get_all(self, name):
+        assert name == 'Pool'
+        return list(enumerate(self._pools))
+
+    def resolve_pool(self, miner):
+        self.resolved.append(miner)
+        return 'SIG'
+
+
+def test_resolve_pools_only_closed_nonempty():
+    pools = [
+        make_pool(opened_at=100, closes_at=200, requests=2, miner='closed'),  # eligible
+        make_pool(opened_at=0, closes_at=200, requests=2, miner='emptyslot'),  # opened_at==0 → skip
+        make_pool(opened_at=100, closes_at=900, requests=2, miner='stillopen'),  # window open → skip
+        make_pool(opened_at=100, closes_at=200, requests=0, miner='norequests'),  # no draw → skip
+    ]
+    client = PoolRecordingClient(pools)
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    resolved = loop.resolve_pools_once(now=500)
+    assert client.resolved == ['closed']
+    assert resolved == ['closed']
+
+
+def test_resolve_pools_read_only_casts_nothing():
+    client = PoolRecordingClient([make_pool(miner='closed')])
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100, read_only=True)
+    assert loop.resolve_pools_once(now=500) == []
+    assert client.resolved == []
+
+
+def test_resolve_pools_one_failure_does_not_break_sweep():
+    class Boom(PoolRecordingClient):
+        def resolve_pool(self, miner):
+            if miner == 'bad':
+                raise RuntimeError('rpc down')
+            return super().resolve_pool(miner)
+
+    client = Boom([make_pool(miner='bad'), make_pool(miner='good')])
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop.resolve_pools_once(now=500) == ['good']
