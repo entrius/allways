@@ -215,6 +215,19 @@ IX_DISCRIMINATORS = {
     'extend_timeout': bytes([246, 84, 96, 134, 76, 55, 57, 33]),
     'extend_reservation': bytes([97, 77, 20, 170, 71, 8, 163, 187]),
     'add_validator': bytes([250, 113, 53, 54, 141, 117, 215, 185]),  # admin (test/bootstrap helper)
+    # B4 — miner self-deactivate + quote retract.
+    'deactivate': bytes([44, 112, 33, 172, 113, 28, 142, 13]),
+    'remove_quote': bytes([168, 104, 162, 147, 237, 163, 196, 74]),
+    # B4 — admin runtime config setters (Context<AdminConfig>: admin signer + config mut).
+    'remove_validator': bytes([25, 96, 211, 155, 161, 14, 168, 188]),
+    'set_consensus_threshold': bytes([183, 186, 216, 249, 16, 231, 243, 244]),
+    'set_fulfillment_timeout': bytes([73, 250, 230, 231, 192, 14, 146, 215]),
+    'set_halted': bytes([153, 114, 136, 116, 7, 134, 47, 12]),
+    'set_max_collateral': bytes([18, 180, 73, 244, 52, 74, 176, 110]),
+    'set_max_swap_amount': bytes([7, 177, 215, 146, 45, 7, 220, 199]),
+    'set_min_collateral': bytes([128, 193, 225, 225, 249, 133, 38, 70]),
+    'set_min_swap_amount': bytes([189, 59, 139, 62, 167, 12, 58, 88]),
+    'withdraw_treasury': bytes([40, 63, 122, 158, 144, 216, 83, 96]),
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -243,6 +256,14 @@ IX_MARK_FULFILLED_ARGS = CStruct('swap_key' / Hash32, 'to_tx_hash' / String, 'to
 IX_EXTEND_TIMEOUT_ARGS = CStruct('swap_key' / Hash32, 'target_at' / I64)
 IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64)
 IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
+
+# B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
+IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String)
+IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
+IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
+IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
+IX_BOOL_ARGS = CStruct('value' / Bool)  # set_halted
+# set_min/max_collateral, set_min/max_swap_amount, withdraw_treasury reuse IX_AMOUNT_ARGS (single u64).
 
 # name -> CStruct for the generic reader.
 ACCOUNT_LAYOUTS = {

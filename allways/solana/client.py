@@ -8,6 +8,7 @@ builders land in B1/B2 as the loop needs them.
 
 import base64
 import time
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from Crypto.Hash import keccak
@@ -26,6 +27,74 @@ SYSTEM_PROGRAM = Pubkey.from_string('11111111111111111111111111111111')
 def swap_key_from_tx_hash(from_tx_hash: str) -> bytes:
     """swap_key = keccak256(from_tx_hash) — matches the contract's hashv(&[from_tx_hash.as_bytes()])."""
     return keccak.new(data=from_tx_hash.encode(), digest_bits=256).digest()
+
+
+@dataclass
+class SolanaSwap:
+    """Miner-facing view of an on-chain `Swap`, keyed by its `swap_key` (== keccak(from_tx_hash)).
+
+    Flattens the borsh `Swap` layout into the fields the miner poller/fulfiller consume. Replaces the
+    ink! `classes.Swap` (int id → swap_key bytes; block `timeout_block` → unix `timeout_at`; ss58
+    `miner_hotkey` → `miner` pubkey; no per-swap fee — `to_amount` is the full pinned payout).
+    """
+
+    swap_key: bytes
+    miner: Pubkey
+    user: Pubkey
+    from_chain: str
+    to_chain: str
+    user_from_addr: str
+    user_to_addr: str
+    miner_from_addr: str
+    miner_to_addr: str
+    rate: int
+    sol_amount: int
+    from_amount: int
+    to_amount: int
+    from_tx_hash: str
+    from_tx_block: int
+    to_tx_hash: str
+    to_tx_block: int
+    status: str  # 'Active' | 'Fulfilled' | 'PendingAttestation'
+    initiated_at: int
+    timeout_at: int
+    max_extend_at: int
+    fulfilled_at: int
+
+    @property
+    def key_hex(self) -> str:
+        return self.swap_key.hex()
+
+
+def swap_from_solana(acct, swap_key: Optional[bytes] = None) -> SolanaSwap:
+    """Adapt a decoded `Swap` account into a `SolanaSwap`. `swap_key` is derived from `from_tx_hash`
+    when not supplied (the swap_key is the PDA seed, not stored in the account)."""
+    if swap_key is None:
+        swap_key = swap_key_from_tx_hash(acct.from_tx_hash)
+    return SolanaSwap(
+        swap_key=swap_key,
+        miner=_as_pubkey(acct.miner),
+        user=_as_pubkey(acct.user),
+        from_chain=acct.from_chain,
+        to_chain=acct.to_chain,
+        user_from_addr=acct.user_from_addr,
+        user_to_addr=acct.user_to_addr,
+        miner_from_addr=acct.miner_from_addr,
+        miner_to_addr=acct.miner_to_addr,
+        rate=acct.rate,
+        sol_amount=acct.sol_amount,
+        from_amount=acct.from_amount,
+        to_amount=acct.to_amount,
+        from_tx_hash=acct.from_tx_hash,
+        from_tx_block=acct.from_tx_block,
+        to_tx_hash=acct.to_tx_hash,
+        to_tx_block=acct.to_tx_block,
+        status=type(acct.status).__name__,
+        initiated_at=acct.initiated_at,
+        timeout_at=acct.timeout_at,
+        max_extend_at=acct.max_extend_at,
+        fulfilled_at=acct.fulfilled_at,
+    )
 
 
 def _as_pubkey(p) -> Pubkey:
@@ -192,6 +261,50 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('add_validator', args, metas)])
 
+    # ---------- admin runtime config (Context<AdminConfig>: admin signer + config mut) ----------
+    def _admin_config(self, name: str, arg_bytes: bytes) -> str:
+        admin = self.keypair.pubkey()
+        metas = [
+            AccountMeta(admin, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, True),
+        ]
+        return self._send([self._ix(name, arg_bytes, metas)])
+
+    def remove_validator(self, validator) -> str:
+        return self._admin_config('remove_validator', layouts.IX_PUBKEY_ARGS.build({'value': bytes(_as_pubkey(validator))}))
+
+    def set_consensus_threshold(self, percent: int) -> str:
+        return self._admin_config('set_consensus_threshold', layouts.IX_U8_ARGS.build({'value': percent}))
+
+    def set_fulfillment_timeout(self, secs: int) -> str:
+        return self._admin_config('set_fulfillment_timeout', layouts.IX_I64_ARGS.build({'value': secs}))
+
+    def set_halted(self, halted: bool) -> str:
+        return self._admin_config('set_halted', layouts.IX_BOOL_ARGS.build({'value': halted}))
+
+    def set_min_collateral(self, amount: int) -> str:
+        return self._admin_config('set_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_max_collateral(self, amount: int) -> str:
+        return self._admin_config('set_max_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_min_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_max_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def withdraw_treasury(self, recipient, amount: int) -> str:
+        """Admin: move accrued protocol fees from the Treasury PDA to `recipient`."""
+        admin = self.keypair.pubkey()
+        metas = [
+            AccountMeta(admin, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(pdas.treasury_pda(self.program_id), False, True),
+            AccountMeta(_as_pubkey(recipient), False, True),
+        ]
+        return self._send([self._ix('withdraw_treasury', layouts.IX_AMOUNT_ARGS.build({'amount': amount}), metas)])
+
     # ---------- representative writes (miner-side, no consensus) ----------
     def bind_hotkey(self, hotkey: bytes, hotkey_sig: bytes) -> str:
         miner = self.keypair.pubkey()
@@ -245,6 +358,28 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.collateral_vault_pda(miner, self.program_id), False, True),
         ]
         return self._send([self._ix('withdraw_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}), metas)])
+
+    def remove_quote(self, from_chain: str, to_chain: str) -> str:
+        """Miner retracts one quote-direction; the PDA closes (rent → miner) minus a churn fee → treasury."""
+        miner = self.keypair.pubkey()
+        args = layouts.IX_REMOVE_QUOTE_ARGS.build({'from_chain': from_chain, 'to_chain': to_chain})
+        metas = [
+            AccountMeta(miner, True, True),
+            AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, self.program_id), False, True),
+            AccountMeta(pdas.treasury_pda(self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('remove_quote', args, metas)])
+
+    def deactivate(self) -> str:
+        """Miner self-deactivation (no consensus). Guarded on-chain: must be active, no in-flight swap,
+        past `busy_until`."""
+        miner = self.keypair.pubkey()
+        metas = [
+            AccountMeta(miner, True, False),
+            AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, True),
+        ]
+        return self._send([self._ix('deactivate', b'', metas)])
 
     # ---------- swap lifecycle (B2: validator votes + the claim relay) ----------
     def submit_swap_claim(self, miner, swap_key: bytes, from_tx_hash: str, from_tx_block: int) -> str:
