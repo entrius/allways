@@ -19,6 +19,7 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
+from allways.validator.binding import verify_binding
 from allways.validator.solana_swap_loop import is_tx_fresh
 
 if TYPE_CHECKING:
@@ -30,11 +31,20 @@ EMPTY_SWAP_KEY = b'\x00' * 32
 def resolve_miner_pubkey(validator: 'Validator', miner_hotkey: str):
     """Map a Bittensor hotkey (ss58) → the miner's bound Solana pubkey via the HotkeyBinding PDA (A5).
 
-    Returns None if the miner hasn't bound a hotkey yet. PDAs (reservation / miner_state) are keyed by the
-    Solana pubkey, so every Solana-side action from an axon handler goes through this binding."""
+    Returns None if unbound or if the sr25519 sig fails to verify. The contract stores the sig unverified
+    (too costly on-chain), so we verify here — same as scoring's `build_attribution` — else an attacker could
+    squat a victim's set-once marker with a garbage sig."""
     hotkey_bytes = bytes.fromhex(Keypair(ss58_address=miner_hotkey).public_key.hex())
-    binding = validator.solana_client.get_hotkey_binding(hotkey_bytes)
-    return binding.miner if binding is not None else None
+    hk_binding = validator.solana_client.get_hotkey_binding(hotkey_bytes)
+    if hk_binding is None:
+        return None
+    binding = validator.solana_client.get_binding(hk_binding.miner)
+    if binding is None or bytes(binding.hotkey) != hotkey_bytes:
+        return None
+    if not verify_binding(hk_binding.miner, binding.hotkey, binding.hotkey_sig):
+        bt.logging.warning(f'binding for {miner_hotkey}: invalid sr25519 sig, refusing to resolve')
+        return None
+    return hk_binding.miner
 
 
 def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:

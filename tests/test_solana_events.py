@@ -6,12 +6,11 @@ by a fake client.
 """
 
 import hashlib
-from types import SimpleNamespace
 
 from solders.keypair import Keypair
 
 from allways.solana import events
-from allways.solana.events import EventRecord, SolanaEventIngest, decode_event
+from allways.solana.events import SolanaEventIngest, decode_event
 
 
 def _event_disc(name: str) -> bytes:

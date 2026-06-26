@@ -10,13 +10,18 @@ from allways.constants import (
     TAO_TO_RAO,
 )
 from allways.validator.scoring import (
+    _canonical_rate_and_weight,
     quality_curve,
     rate_advantage,
     rate_quality,
-    realized_canonical_rate,
 )
 
 TOL = RATE_QUALITY_TOLERANCE_BPS / 10_000.0
+
+
+def realized_canonical_rate(from_chain, to_chain, from_amount, to_amount):
+    """Canonical 'dest per source' display rate (drops the volume weight)."""
+    return _canonical_rate_and_weight(from_chain, to_chain, from_amount, to_amount)[0]
 
 
 def btc_tao_legs(tao_per_btc, btc=1.0):

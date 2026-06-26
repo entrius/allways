@@ -185,12 +185,14 @@ def is_eligible(miner_state) -> bool:
     )
 
 
-def build_eligibility(solana_client, metagraph) -> Dict[str, bool]:
+def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
     """``{hotkey: eligible_bool}`` for on-metagraph miners, from the on-chain
     ``MinerState`` counters. Each pubkey-keyed ``MinerState`` is attributed to a
     Bittensor hotkey via the sr25519 binding (B3.2 ``build_attribution``);
-    unbound or off-metagraph miners are dropped (they have no UID to credit)."""
-    attribution = build_attribution(solana_client)
+    unbound or off-metagraph miners are dropped (they have no UID to credit).
+    Pass ``attribution`` to reuse one per-round binding snapshot."""
+    if attribution is None:
+        attribution = build_attribution(solana_client)
     metagraph_hotkeys = set(metagraph.hotkeys)
     eligibility: Dict[str, bool] = {}
     for _pubkey, ms in solana_client.get_all('MinerState'):
@@ -231,7 +233,9 @@ class DirectionVolume:
         return realized_vwap(self.to_amount, self.from_amount)
 
 
-def build_direction_volumes(solana_client, metagraph) -> Dict[str, Dict[Tuple[str, str], DirectionVolume]]:
+def build_direction_volumes(
+    solana_client, metagraph, attribution: Optional[Dict[str, str]] = None
+) -> Dict[str, Dict[Tuple[str, str], DirectionVolume]]:
     """``{hotkey: {(from_chain, to_chain): DirectionVolume}}`` — realized
     per-direction volume read off the on-chain ``MinerDirectionStats`` accounts
     (B3.5), replacing the per-validator ``swap_outcomes`` ledger (the #1
@@ -239,8 +243,9 @@ def build_direction_volumes(solana_client, metagraph) -> Dict[str, Dict[Tuple[st
     (B3.2 ``build_attribution``); unbound or off-metagraph miners are dropped
     (no UID to credit). The PDA is one row per (miner, from, to), so amounts
     accumulate defensively in case attribution ever folds two pubkeys onto one
-    hotkey."""
-    attribution = build_attribution(solana_client)
+    hotkey. Pass ``attribution`` to reuse one per-round binding snapshot."""
+    if attribution is None:
+        attribution = build_attribution(solana_client)
     metagraph_hotkeys = set(metagraph.hotkeys)
     volumes: Dict[str, Dict[Tuple[str, str], DirectionVolume]] = {}
     for _pubkey, ds in solana_client.get_all('MinerDirectionStats'):
@@ -271,15 +276,6 @@ def _canonical_rate_and_weight(
     src_disp = src_native / (10 ** get_chain(canon_source).decimals)
     dst_disp = dst_native / (10 ** get_chain(canon_dest).decimals)
     return dst_disp / src_disp, src_native
-
-
-def realized_canonical_rate(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> float:
-    """Realized executed rate in canonical 'dest per source' display units (TAO
-    per BTC for the btc/tao pair), derived from native-unit leg totals.
-    Orientation matches the crown's stored rates, so it's directly comparable to
-    the on-chain reference. Non-positive legs ⇒ 0.0 (no executed volume to price)."""
-    rate, _weight = _canonical_rate_and_weight(from_chain, to_chain, from_amount, to_amount)
-    return rate
 
 
 def trimmed_reference(
@@ -454,14 +450,16 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     unweighted_rewards = np.zeros(n_uids, dtype=np.float32)
+    # One per-round sr25519 binding snapshot, shared by both reads (each re-verifies every binding).
+    attribution = build_attribution(self.solana_client)
     # Flat eligibility gate off the on-chain MinerState counters (B3.3),
     # attributed pubkey→hotkey via the sr25519 binding. Absent hotkey → not
     # eligible (no on-chain counters ⇒ no proven successful swaps).
-    eligibility = build_eligibility(self.solana_client, self.metagraph)
+    eligibility = build_eligibility(self.solana_client, self.metagraph, attribution)
     # Per-direction realized volume re-sourced from the on-chain
     # MinerDirectionStats accounts (B3.5), replacing the per-validator
     # swap_outcomes ledger. Built once, sliced per direction below.
-    direction_volumes = build_direction_volumes(self.solana_client, self.metagraph)
+    direction_volumes = build_direction_volumes(self.solana_client, self.metagraph, attribution)
     # On-chain rate-quality reference (C-rev): trimmed volume-weighted clearing
     # rate per direction + each miner's windowed realized VWAP, built once per
     # round from the ingested clearing_rates history. Deterministic — no feed, no

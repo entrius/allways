@@ -9,7 +9,7 @@ crown — replacing the old substrate event_watcher. Only the crown-relevant eve
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from borsh_construct import CStruct, I64, U64, U128, String
+from borsh_construct import I64, U64, U128, CStruct, String
 from solders.pubkey import Pubkey
 
 from allways.solana.layouts import Hash32, Pubkey32

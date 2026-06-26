@@ -178,13 +178,17 @@ class SolanaSwapLoop:
             if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
                 return SwapDecision.WAIT  # replayed/stale deposit — never attest
             return SwapDecision.ATTEST
+        overdue = now >= int(swap.timeout_at)
         if status == 'Active':
-            return SwapDecision.TIMEOUT if now > int(swap.timeout_at) else SwapDecision.WAIT
+            return SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT
         if status == 'Fulfilled':
             ok = self.verify_fulfillment(swap)
             if ok is None:
                 return SwapDecision.SKIP
-            return SwapDecision.CONFIRM if ok else SwapDecision.WAIT
+            if ok:
+                return SwapDecision.CONFIRM
+            # Unverifiable dest + overdue ⇒ TIMEOUT (contract slashes Fulfilled too); else wait for the leg.
+            return SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT
         return SwapDecision.WAIT
 
     def _cast_vote(self, swap: Any, decision: SwapDecision) -> bool:

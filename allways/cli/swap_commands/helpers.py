@@ -37,8 +37,6 @@ def phase9_unavailable(what: str) -> None:
     )
 
 
-SECONDS_PER_BLOCK = 12
-
 # --- Miner reliability (swap success rate) -------------------------------
 # Per-miner success rate is not on-chain. `view rates` and `swap now` pull a
 # pre-aggregated per-direction completed/total map from the allways API and
@@ -124,11 +122,6 @@ def reliability_text(hotkey: str, src: str, dst: str, reliability: Optional[dict
     pct = comp / tot
     style = 'green' if pct >= 0.9 else 'yellow' if pct >= 0.5 else 'red'
     return Text(f'{comp}/{tot}', style=style)
-
-
-def blocks_to_minutes_str(blocks: int) -> str:
-    """Render a block count as an approximate minutes string like '~5 min'."""
-    return f'~{blocks * SECONDS_PER_BLOCK / 60:.0f} min'
 
 
 SWAP_STATUS_COLORS = {

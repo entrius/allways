@@ -17,8 +17,11 @@ from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse
 from allways.validator import axon_handlers
 
-HOTKEY = bt.Keypair.create_from_seed('0x' + '11' * 32).ss58_address
+HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
+HOTKEY = HK.ss58_address
 MINER_PK = SolKeypair().pubkey()
+HOTKEY_BYTES = bytes.fromhex(HK.public_key.hex())
+BINDING_SIG = HK.sign(bytes(MINER_PK))  # valid sr25519 binding: hotkey signs the miner pubkey bytes
 NOW = 2_000_000_000
 CREATED_AT = NOW - 600  # reservation created 10 min ago
 
@@ -26,6 +29,9 @@ CREATED_AT = NOW - 600  # reservation created 10 min ago
 class FakeSolanaClient:
     def __init__(self, *, binding=True, miner_state=None, reservation=None, min_collateral=1_000_000):
         self.binding = SimpleNamespace(miner=MINER_PK) if binding else None
+        self.full_binding = (
+            SimpleNamespace(miner=MINER_PK, hotkey=HOTKEY_BYTES, hotkey_sig=BINDING_SIG) if binding else None
+        )
         self.miner_state = miner_state
         self.reservation = reservation
         self._min_collateral = min_collateral
@@ -33,6 +39,9 @@ class FakeSolanaClient:
 
     def get_hotkey_binding(self, hotkey_bytes):
         return self.binding
+
+    def get_binding(self, miner):
+        return self.full_binding
 
     def get_miner_state(self, miner):
         return self.miner_state

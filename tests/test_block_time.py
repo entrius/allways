@@ -8,8 +8,6 @@ providers actually populate block_time: BTC from Esplora status.block_time, TAO 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
 from allways.chain_providers.base import TransactionInfo
 from allways.chain_providers.bitcoin import BitcoinProvider
 from allways.chain_providers.subtensor import SubtensorProvider

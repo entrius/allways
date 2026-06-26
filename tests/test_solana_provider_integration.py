@@ -10,10 +10,8 @@ Gated behind @pytest.mark.integration. Run with:
 Tear down: pkill -9 -f solana-test-validator; ensure port 8899 is free.
 """
 
-import json
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 from solders.keypair import Keypair

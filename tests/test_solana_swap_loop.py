@@ -102,6 +102,19 @@ def test_fulfilled_dest_missing_block_time_rejected():
     assert loop.decide(make_swap(status='Fulfilled'), now=1500) == SwapDecision.WAIT
 
 
+def test_fulfilled_overdue_unverifiable_dest_times_out():
+    # Junk dest tx past the deadline must not escape the slash → TIMEOUT (contract allows Active|Fulfilled).
+    loop, providers = loop_with(result=True)
+    providers['sol'].result = False  # dest never confirms
+    assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500) == SwapDecision.TIMEOUT
+
+
+def test_fulfilled_overdue_but_verifiable_still_confirms():
+    # Overdue is irrelevant when both legs verify — a good fulfillment still confirms.
+    loop, _ = loop_with(result=True)
+    assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500) == SwapDecision.CONFIRM
+
+
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.ATTEST

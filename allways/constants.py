@@ -47,10 +47,6 @@ BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and window width
-# Cap on how far back one scoring round replays after a stall: just resume a
-# couple hours back, don't try to recover a long outage (the event-watcher only
-# reconstructs ~one window back anyway). >1 window so overshoot can't re-gap.
-MAX_SCORING_BACKFILL_BLOCKS = 2 * SCORING_WINDOW_BLOCKS  # ~2 hours at 12s/block
 # Unix-second axis for the Solana-sourced crown (B3.4): events carry blockTime,
 # not block numbers, so the crown replay window + interval crediting are in
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
@@ -68,7 +64,7 @@ VOLUME_WEIGHT_ALPHA: float = 0.5
 # realized-volume share × rate-quality (executed throughput at fair rates). Phase C
 # turns w_b on at a conservative 0.2 so crown stays the primary driver while real
 # throughput at good rates earns weight. Kept w_a + w_b = 1 so the total distributed
-# envelope is unchanged. When the market-rate feed is stale, rate_quality is neutral
+# envelope is unchanged. Too-thin on-chain clearing-rate history ⇒ rate_quality neutral
 # (1.0), so w_b still pays realized volume by raw share — it never zeroes everyone.
 REWARD_WEIGHT_CROWN: float = 0.8
 REWARD_WEIGHT_QUALITY_VOLUME: float = 0.2
