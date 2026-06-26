@@ -188,8 +188,8 @@ def test_scoring_round_off_solana_events(env):
         window_start=now - 600,
         window_end=now + 60,
         rewardable_hotkeys={hka, hkb, hks},
-        min_swap_rao=MIN_SWAP_RAO,
-        max_swap_rao=MAX_SWAP_RAO,
+        min_swap_lamports=MIN_SWAP_RAO,
+        max_swap_lamports=MAX_SWAP_RAO,
     )
     assert set(crown) == {hka}
     assert crown[hka] > 0

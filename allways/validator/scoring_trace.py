@@ -68,8 +68,8 @@ def log_scoring_trace(
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -124,8 +124,8 @@ def log_scoring_trace(
             direction_traces,
             recycle_uid,
             collaterals,
-            min_swap_rao,
-            max_swap_rao,
+            min_swap_lamports,
+            max_swap_lamports,
         )
     )
 
@@ -150,8 +150,8 @@ def non_earner_lines(
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> List[str]:
     collaterals = collaterals or {}
     ever_active = set(self.event_index.get_active_miners_at(window_start))
@@ -173,7 +173,7 @@ def non_earner_lines(
             continue
         eligible = eligibility.get(hk, False)
         reason = diagnose_non_earner(
-            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, min_swap_rao, max_swap_rao
+            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, min_swap_lamports, max_swap_lamports
         )
         out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" eligible={eligible}')
         if len(out) >= NON_EARNER_LINE_CAP:
@@ -188,8 +188,8 @@ def diagnose_non_earner(
     ever_active: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> str:
     """Best-effort reason a miner earned no crown. Direction-aware: tao→btc is
     lower-rate-wins, btc→tao higher-wins, so "outbid" only fires when the
@@ -220,7 +220,7 @@ def diagnose_non_earner(
         # qualification gate dropped this miner. Collateral is the usual cause.
         if hotkey not in collaterals:
             return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
-        min_leg = min_executable_sol_leg(own, from_c, to_c, min_swap_rao, max_swap_rao)
+        min_leg = min_executable_sol_leg(own, from_c, to_c, min_swap_lamports, max_swap_lamports)
         have = collaterals[hotkey]
         if min_leg > 0 and have < min_leg:
             return (

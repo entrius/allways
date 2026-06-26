@@ -485,8 +485,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
-            min_swap_rao=100_000_000,  # 0.1 TAO
-            max_swap_rao=500_000_000,  # 0.5 TAO
+            min_swap_lamports=100_000_000,  # 0.1 TAO
+            max_swap_lamports=500_000_000,  # 0.5 TAO
         )
         assert crown == {'hk_sane': 1000.0}
         store.close()
@@ -514,8 +514,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert crown == {}
         store.close()
@@ -546,8 +546,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert crown == {'hk_funded': 1000.0}
         store.close()
@@ -601,8 +601,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         # Blocks (100, 600] dropped (collateral 0.15 < 0.5 TAO leg).
         # Blocks (600, 1100] credited (collateral 0.5 TAO).
@@ -656,8 +656,8 @@ class TestReplayCrownTime:
             window_start=1100,
             window_end=2100,
             rewardable_hotkeys={'hk_a'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert strict == {}
 
@@ -973,8 +973,8 @@ class TestLedgerSnapshotAgreement:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
 
         assert snapshot_holders == ['hk_funded']
@@ -2410,8 +2410,8 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 0},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert reason.startswith('insufficient_collateral'), reason
 
@@ -2425,8 +2425,8 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={},  # absent → unknown
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert reason.startswith('unknown_collateral'), reason
 
@@ -2441,8 +2441,8 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert reason.startswith('outbid'), reason
 
@@ -2456,8 +2456,8 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         assert reason.startswith('competitive_but_unfilled'), reason
 

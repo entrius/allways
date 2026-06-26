@@ -500,8 +500,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
             intervals_out=intervals,
-            min_swap_rao=min_swap_amount,
-            max_swap_rao=max_swap_amount,
+            min_swap_lamports=min_swap_amount,
+            max_swap_lamports=max_swap_amount,
         )
         total_crown_dir = sum(crown_blocks.values())
         vols_dir: Dict[str, DirectionVolume] = {
@@ -602,8 +602,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
-        min_swap_rao=min_swap_amount,
-        max_swap_rao=max_swap_amount,
+        min_swap_lamports=min_swap_amount,
+        max_swap_lamports=max_swap_amount,
     )
 
     if storage_enabled:
@@ -783,18 +783,18 @@ def merge_replay_events(
     return events
 
 
-def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
+def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
     """Boundary-squat gate: a miner whose own rate forces a SOL leg larger than
     their collateral earns no crown (collateral and the bounded leg are both SOL).
     Fail open on unknown collateral (absent != zero) so a missing baseline doesn't
     silently drop them."""
     if hotkey not in collaterals:
         return True
-    min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports)
     return min_leg == 0 or collaterals[hotkey] >= min_leg
 
 
-def make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
+def make_crown_predicates(from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
     """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
     scoring replay and the live snapshot, so the live crown view can never diverge
     from the rewarded ledger. Both are the shared rate utils with this direction's
@@ -803,15 +803,15 @@ def make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, coll
         is_executable_rate,
         from_chain=from_chain,
         to_chain=to_chain,
-        min_swap_rao=min_swap_rao,
-        max_swap_rao=max_swap_rao,
+        min_swap_lamports=min_swap_lamports,
+        max_swap_lamports=max_swap_lamports,
     )
     can_fund = partial(
         crown_can_fund,
         from_chain=from_chain,
         to_chain=to_chain,
-        min_swap_rao=min_swap_rao,
-        max_swap_rao=max_swap_rao,
+        min_swap_lamports=min_swap_lamports,
+        max_swap_lamports=max_swap_lamports,
         collaterals=collaterals,
     )
     return executable_check, can_fund
@@ -827,8 +827,8 @@ def replay_crown_time_window(
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
     intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
@@ -846,7 +846,7 @@ def replay_crown_time_window(
 
     When ``trace`` is supplied, ``trace.cap_weighted_blocks`` is populated
     alongside ``trace.crown_blocks``. The weighted series multiplies each
-    interval's split by ``capacity_factor(collateral_at_block, max_swap_rao)``
+    interval's split by ``capacity_factor(collateral_at_block, max_swap_lamports)``
     so a post-window collateral boost cannot retroactively scale credit
     already earned (closes #409)."""
     rates, busy_count, active_set, collaterals = reconstruct_window_start_state(
@@ -860,13 +860,15 @@ def replay_crown_time_window(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
-    executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals)
+    executable_check, can_fund = make_crown_predicates(
+        from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals
+    )
 
     crown_blocks: Dict[str, float] = {}
     cap_weighted_blocks: Dict[str, float] = {}
     prev_block = window_start
 
-    bounds_set = min_swap_rao > 0 or max_swap_rao > 0
+    bounds_set = min_swap_lamports > 0 or max_swap_lamports > 0
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
@@ -897,7 +899,7 @@ def replay_crown_time_window(
             crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
             # Unknown collateral (no event recorded) → capacity 1.0, matching
             # can_fund's fail-open. Only a known value scales capacity down.
-            cap = capacity_factor(collaterals[hk], max_swap_rao) if hk in collaterals else 1.0
+            cap = capacity_factor(collaterals[hk], max_swap_lamports) if hk in collaterals else 1.0
             cap_weighted_blocks[hk] = cap_weighted_blocks.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:
