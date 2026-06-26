@@ -1,9 +1,11 @@
 """Swap fulfillment engine - verifies receipt and sends funds (Solana-sourced).
 
-The miner sends the **full pinned** ``swap.to_amount`` to the user: under the Solana program the 1%
-fee is skimmed from the miner's collateral vault at ``confirm_swap`` (not deducted from the destination
-leg), and ``mark_fulfilled`` records only the dest tx hash/block — ``to_amount`` is the pinned
-reservation value, no longer miner-supplied. Deadlines are unix-seconds (``Swap.timeout_at``).
+Fee model = Option A: the miner delivers **99% of the pinned ``to_amount``** (``apply_fee_deduction``);
+the protocol's 1% is skimmed from the miner's SOL collateral by ``confirm_swap``. The validator's
+``verify_fulfillment`` checks the dest leg delivered exactly this 99%, so the miner MUST match it. The
+fee saved on the dest leg offsets the collateral skim → the user bears the fee, the miner is a
+pass-through. ``mark_fulfilled`` records only the dest tx hash/block (``to_amount`` is pinned on-chain).
+Deadlines are unix-seconds (``Swap.timeout_at``).
 """
 
 import json
@@ -15,9 +17,10 @@ from typing import Dict, Optional, Set, Tuple
 import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
-from allways.constants import MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
+from allways.constants import FEE_DIVISOR, MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
 from allways.solana.client import SolanaClientError, SolanaSwap
 from allways.utils.logging import log_on_change
+from allways.utils.rate import apply_fee_deduction
 
 
 @dataclass
@@ -53,9 +56,11 @@ class SwapFulfiller:
         chain_providers: Dict[str, ChainProvider],
         sent_cache_path: Optional[Path] = None,
         my_addresses: Optional[Dict[str, str]] = None,
+        fee_divisor: int = FEE_DIVISOR,
     ):
         self.client = solana_client
         self.providers = chain_providers
+        self.fee_divisor = fee_divisor
         # Chain → miner's own deposit/fulfillment address, populated at startup from this miner's own
         # quotes and refreshed by the miner loop when a new quote is posted. Shared dict so the miner
         # neuron's reload mutates what we read here.
@@ -151,8 +156,8 @@ class SwapFulfiller:
         """Verify the swap is safe to fulfill.
 
         Returns ``(user_receives_amount, miner_from_address)`` or ``None`` if the swap isn't safe to
-        fulfill. ``user_receives_amount`` is the full pinned ``swap.to_amount`` (the fee is taken from
-        collateral at confirm, not from this leg).
+        fulfill. ``user_receives_amount`` is 99% of the pinned ``swap.to_amount`` (Option A — the 1% the
+        validator expects withheld here; the protocol then skims 1% of collateral at confirm).
         """
         # Timeout check — bail out MINER_TIMEOUT_CUSHION_SECS before the hard deadline so slow
         # dest-chain inclusion can't turn a legitimate fulfillment into a timeout and a slash. Sized to
@@ -172,11 +177,12 @@ class SwapFulfiller:
             bt.logging.error(f'Swap {swap.key_hex[:16]}: missing miner_from_addr on swap')
             return None
 
-        if swap.to_amount == 0:
-            bt.logging.error(f'Swap {swap.key_hex[:16]}: pinned to_amount is 0')
+        user_receives = apply_fee_deduction(swap.to_amount, self.fee_divisor)
+        if user_receives == 0:
+            bt.logging.error(f'Swap {swap.key_hex[:16]}: pinned to_amount yields 0 after the fee haircut')
             return None
 
-        return swap.to_amount, swap.miner_from_addr
+        return user_receives, swap.miner_from_addr
 
     def verify_user_sent_funds(self, swap: SolanaSwap, miner_from_address: str) -> bool:
         """Verify that the user sent funds on the source chain."""

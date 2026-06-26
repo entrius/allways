@@ -89,17 +89,19 @@ class TestVerifySwapSafetyCushion:
         assert f.verify_swap_safety(make_swap(to_amount=0)) is None
 
 
-class TestVerifySwapSafetyReturnsFullAmount:
-    """No per-swap fee on Solana — the miner sends the full pinned to_amount."""
+class TestVerifySwapSafetyReturnsPostFeeAmount:
+    """Option A: the miner delivers 99% of the pinned to_amount; the protocol takes its 1% from
+    collateral at confirm. The validator's verify_fulfillment checks for exactly this 99%."""
 
-    def test_returns_full_pinned_to_amount(self, at_now):
-        f = make_fulfiller()
+    def test_returns_post_fee_99_percent(self, at_now):
+        f = make_fulfiller()  # default fee_divisor = 100
         at_now(0)
         swap = make_swap(timeout_at=5000, to_amount=3_450_000_000)
         result = f.verify_swap_safety(swap)
         assert result is not None
         user_receives_amount, addr = result
-        assert user_receives_amount == 3_450_000_000  # full amount, no fee deduction
+        # 3_450_000_000 - 3_450_000_000 // 100 = 3_415_500_000
+        assert user_receives_amount == 3_415_500_000
         assert addr == 'bc1q-miner'
 
 
