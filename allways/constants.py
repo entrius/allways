@@ -77,6 +77,16 @@ REWARD_WEIGHT_QUALITY_VOLUME: float = 0.0
 MIN_SUCCESSFUL_SWAPS: int = 2
 MAX_FAILED_SWAPS: int = 2
 
+# ─── Rate-quality curve (Phase C) ────────────────────────
+# One-sided clamp mapping realized-VWAP-vs-market advantage → a quality
+# multiplier on the quality-volume reward. At/above market (within a tolerance
+# deadband) scores 1.0 — the crown already rewards best-rate presence, so
+# above-market is not paid again here. Worse-than-market ramps linearly to
+# RATE_QUALITY_MIN at RATE_QUALITY_FLOOR_ADV. Tunable without code changes.
+RATE_QUALITY_TOLERANCE_BPS = 100  # 1% deadband around market (spread/timing noise) → quality 1.0
+RATE_QUALITY_FLOOR_ADV = -0.10  # at 10% worse than market, quality bottoms out
+RATE_QUALITY_MIN = 0.0  # floor multiplier once a rate is ≥ FLOOR_ADV worse than market
+
 # ─── Market-rate feed (Phase C) ──────────────────────────
 # Off-chain price feed backing the rate-quality scoring component. The contract
 # can't see prices, so the scoring validator derives TAO/BTC = BTC_usd / TAO_usd,

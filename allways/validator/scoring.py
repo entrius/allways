@@ -22,12 +22,15 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
-from allways.chains import canonical_pair
+from allways.chains import canonical_pair, get_chain
 from allways.constants import (
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    RATE_QUALITY_FLOOR_ADV,
+    RATE_QUALITY_MIN,
+    RATE_QUALITY_TOLERANCE_BPS,
     RECYCLE_UID,
     REWARD_WEIGHT_CROWN,
     REWARD_WEIGHT_QUALITY_VOLUME,
@@ -239,12 +242,71 @@ def build_direction_volumes(solana_client, metagraph) -> Dict[str, Dict[Tuple[st
     return volumes
 
 
-def rate_quality(realized_vwap_rate: float = 0.0, market_rate: Optional[float] = None) -> float:
-    """Phase-C STUB: how good the miner's realized rate is versus the live
-    market. Returns 1.0 (neutral) until the market-rate feed lands — there is no
-    price oracle in B3.5. Phase C replaces the body with a curve over
-    (``realized_vwap_rate`` − ``market_rate``); the signature is the contract."""
-    return 1.0
+def realized_canonical_rate(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> float:
+    """Realized executed rate in canonical 'dest per source' display units (TAO
+    per BTC for the btc/tao pair), derived from native-unit leg totals
+    (``MinerDirectionStats``). Orientation matches the crown's stored rates, so
+    it's directly comparable to the market feed. Non-positive legs ⇒ 0.0 (no
+    executed volume to price)."""
+    canon_source, canon_dest = canonical_pair(from_chain, to_chain)
+    native = {from_chain: int(from_amount), to_chain: int(to_amount)}
+    src_native = native.get(canon_source, 0)
+    dst_native = native.get(canon_dest, 0)
+    if src_native <= 0 or dst_native <= 0:
+        return 0.0
+    src_disp = src_native / (10 ** get_chain(canon_source).decimals)
+    dst_disp = dst_native / (10 ** get_chain(canon_dest).decimals)
+    return dst_disp / src_disp
+
+
+def rate_advantage(from_chain: str, to_chain: str, realized_rate: float, market_rate: float) -> float:
+    """Taker-oriented relative advantage of a realized rate vs market, signed so
+    positive = better-than-market for the swapper. Direction-aware: in the
+    canonical direction (btc→tao) a higher TAO/BTC is better; in the reverse
+    (tao→btc) a lower TAO/BTC is better — the same orientation the crown uses
+    (``lower_rate_wins``)."""
+    if market_rate <= 0:
+        return 0.0
+    canon_source, _ = canonical_pair(from_chain, to_chain)
+    higher_is_better = from_chain == canon_source
+    if higher_is_better:
+        return (realized_rate - market_rate) / market_rate
+    return (market_rate - realized_rate) / market_rate
+
+
+def quality_curve(advantage: float) -> float:
+    """One-sided clamp: 1.0 at/above market (within the tolerance deadband),
+    ramping linearly down to ``RATE_QUALITY_MIN`` at ``RATE_QUALITY_FLOOR_ADV``.
+    Above-market is capped at 1.0 — the crown already rewards best-rate presence,
+    so paying it again here would double-reward rate and invite wash-trade
+    farming at fake-good quotes."""
+    tol = RATE_QUALITY_TOLERANCE_BPS / 10_000.0
+    if advantage >= -tol:
+        return 1.0
+    if advantage <= RATE_QUALITY_FLOOR_ADV:
+        return RATE_QUALITY_MIN
+    # Linear interpolation from 1.0 (at -tol) to RATE_QUALITY_MIN (at FLOOR_ADV).
+    frac = (advantage + tol) / (RATE_QUALITY_FLOOR_ADV + tol)
+    return 1.0 + frac * (RATE_QUALITY_MIN - 1.0)
+
+
+def rate_quality(
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+    to_amount: int,
+    market_rate: Optional[float] = None,
+) -> float:
+    """Quality multiplier for a miner's realized volume in a direction: how good
+    the executed rate was versus the live market (Phase C). ``market_rate``
+    None/≤0 (feed stale or unwired) ⇒ 1.0 neutral, so a dead feed never zeroes
+    everyone or hands out free reward. No executed volume to price ⇒ 1.0."""
+    if market_rate is None or market_rate <= 0:
+        return 1.0
+    realized = realized_canonical_rate(from_chain, to_chain, from_amount, to_amount)
+    if realized <= 0:
+        return 1.0
+    return quality_curve(rate_advantage(from_chain, to_chain, realized, market_rate))
 
 
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
@@ -281,6 +343,9 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # MinerDirectionStats accounts (B3.5), replacing the per-validator
     # swap_outcomes ledger. Built once, sliced per direction below.
     direction_volumes = build_direction_volumes(self.solana_client, self.metagraph)
+    # Live market rate for the rate-quality curve (Phase C). Wired to the
+    # validator's MarketRateFeed in C3; None here keeps quality neutral (1.0).
+    market_rate: Optional[float] = None
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -371,8 +436,11 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             # pool's volume share × rate-quality (Phase-C stub→1.0, w_b=0 for now).
             crown_component = pool * crown_share_dir * cap * vol_factor
             qv = vols_dir.get(hotkey)
-            vwap_dir = qv.vwap if qv is not None else 0.0
-            quality_volume_component = pool * vol_share_dir * rate_quality(vwap_dir)
+            q_from = qv.from_amount if qv is not None else 0
+            q_to = qv.to_amount if qv is not None else 0
+            quality_volume_component = (
+                pool * vol_share_dir * rate_quality(from_chain, to_chain, q_from, q_to, market_rate)
+            )
             base = eligible * (
                 REWARD_WEIGHT_CROWN * crown_component
                 + REWARD_WEIGHT_QUALITY_VOLUME * quality_volume_component
