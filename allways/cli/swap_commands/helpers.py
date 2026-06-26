@@ -301,13 +301,24 @@ def get_solana_cli_context(need_keypair: bool = True):
     wallet — collateral, quotes, and config are keyed by that pubkey on the program. The bt wallet is only
     needed where a command links the two identities (`alw miner bind-hotkey`).
     """
-    from allways.solana import keys
+    from solders.pubkey import Pubkey
+
+    from allways.solana import keys, pdas
     from allways.solana.client import AllwaysSolanaClient
 
     config = get_effective_config()
-    rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+    rpc_url = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc') or 'http://127.0.0.1:8899'
+    program_id = pdas.PROGRAM_ID
+    configured = config.get('program-id') or config.get('contract')
+    if configured:
+        try:
+            program_id = Pubkey.from_string(configured)
+        except (ValueError, TypeError):
+            console.print(
+                f'[yellow]Ignoring invalid program-id config {configured!r}; using default {program_id}[/yellow]'
+            )
     keypair = keys.load_or_create() if need_keypair else None
-    return config, AllwaysSolanaClient(rpc_url, keypair=keypair)
+    return config, AllwaysSolanaClient(rpc_url, program_id=program_id, keypair=keypair)
 
 
 def load_cli_config() -> dict:
@@ -386,7 +397,12 @@ def get_cli_context(
                 name=config.get('wallet', 'default'),
                 hotkey=config.get('hotkey', 'default'),
             )
-        contract_addr = config.get('contract-address') or config.get('contract_address') or DEFAULT_CONTRACT_ADDRESS
+        contract_addr = (
+            config.get('contract-address')
+            or config.get('contract_address')
+            or config.get('contract')
+            or DEFAULT_CONTRACT_ADDRESS
+        )
         client = AllwaysContractClient(contract_address=contract_addr, subtensor=subtensor) if need_client else None
     # Ensure netuid is resolved for callers
     if 'netuid' not in config:

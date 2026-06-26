@@ -112,7 +112,7 @@ KNOWN_NETWORKS = {
     'local': 'ws://127.0.0.1:9944',
 }
 
-VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address')
+VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address', 'program-id', 'solana-rpc')
 
 
 @config_group.command('set')
@@ -124,7 +124,9 @@ def config_set(key: str, value: str):
     [dim]Valid keys:
         wallet              Wallet name
         hotkey              Hotkey name
-        contract-address    Contract address
+        contract-address    Substrate contract address (legacy taker/reserve path)
+        program-id          Solana program ID (miner/admin commands)
+        solana-rpc          Solana RPC URL (overridden by SOLANA_RPC_URL env)
         network             Network name or endpoint URL
         netuid              Subnet UID[/dim]
 
