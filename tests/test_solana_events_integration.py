@@ -41,8 +41,9 @@ def _wait_health(rpc: SolanaRpc, timeout: float = 60.0):
 
 
 def _airdrop(pubkey, sol):
-    subprocess.run(['solana', 'airdrop', str(sol), str(pubkey), '--url', RPC], check=True,
-                   capture_output=True, timeout=60)
+    subprocess.run(
+        ['solana', 'airdrop', str(sol), str(pubkey), '--url', RPC], check=True, capture_output=True, timeout=60
+    )
 
 
 @pytest.fixture(scope='module')
@@ -52,15 +53,28 @@ def env(tmp_path_factory):
     (work / 'payer.json').write_text(json.dumps(list(bytes(payer))))
     proc = subprocess.Popen(
         ['solana-test-validator', '--reset', '--quiet', '--ledger', str(work / 'ledger'), '--rpc-port', '8899'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         _wait_health(SolanaRpc(RPC))
         _airdrop(payer.pubkey(), 100)
         subprocess.run(
-            ['solana', 'program', 'deploy', str(SO), '--program-id', str(PROG_KP),
-             '--keypair', str(work / 'payer.json'), '--url', RPC],
-            check=True, capture_output=True, timeout=120,
+            [
+                'solana',
+                'program',
+                'deploy',
+                str(SO),
+                '--program-id',
+                str(PROG_KP),
+                '--keypair',
+                str(work / 'payer.json'),
+                '--url',
+                RPC,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
         )
         yield {'payer': payer}
     finally:
@@ -71,8 +85,13 @@ def env(tmp_path_factory):
 def test_ingest_decodes_emitted_events(env):
     admin = AllwaysSolanaClient(RPC, keypair=env['payer'])
     admin.initialize(
-        min_collateral=1_000_000, max_collateral=0, fulfillment_timeout_secs=12_600,
-        consensus_threshold_percent=66, min_swap_amount=0, max_swap_amount=0, reservation_ttl_secs=1_800,
+        min_collateral=1_000_000,
+        max_collateral=0,
+        fulfillment_timeout_secs=12_600,
+        consensus_threshold_percent=66,
+        min_swap_amount=0,
+        max_swap_amount=0,
+        reservation_ttl_secs=1_800,
     )
     validators = []
     for _ in range(3):
@@ -84,11 +103,11 @@ def test_ingest_decodes_emitted_events(env):
     miner = Keypair()
     _airdrop(miner.pubkey(), 10)
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
-    mclient.post_collateral(5_000_000)                                  # → CollateralPosted
+    mclient.post_collateral(5_000_000)  # → CollateralPosted
     mclient.set_quote('btc', 'tao', 'minerBTC', 'minerTAO', 345 * 10**18, 1_000)  # → QuoteSet
 
     validators[0].vote_activate(miner.pubkey())
-    validators[1].vote_activate(miner.pubkey())                          # quorum → MinerActivated
+    validators[1].vote_activate(miner.pubkey())  # quorum → MinerActivated
 
     records, cursor = SolanaEventIngest(admin).poll(until_sig=None)
     by_name = {}

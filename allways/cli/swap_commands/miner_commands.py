@@ -265,8 +265,7 @@ def miner_deactivate():
         if ms.busy_until > now:
             remaining = ms.busy_until - now
             console.print(
-                f'[red]Cannot deactivate: you are busy (open pool / held reservation), '
-                f'~{remaining}s left.[/red]\n'
+                f'[red]Cannot deactivate: you are busy (open pool / held reservation), ~{remaining}s left.[/red]\n'
             )
             return
     except SolanaClientError as e:

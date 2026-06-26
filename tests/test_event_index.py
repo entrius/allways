@@ -101,8 +101,17 @@ class TestIngestRate:
         idx = SolanaEventIndex(store)
         # On-chain rate is display × RATE_PRECISION; the index must divide it back.
         idx.ingest(
-            [rec('QuoteSet', miner='pk_a', block_time=100, from_chain='btc', to_chain='tao',
-                 rate=326 * RATE_PRECISION, liquidity=0)],
+            [
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=100,
+                    from_chain='btc',
+                    to_chain='tao',
+                    rate=326 * RATE_PRECISION,
+                    liquidity=0,
+                )
+            ],
             ATTR,
         )
         latest = store.get_latest_rate_before('hk_a', 'btc', 'tao', 200)
@@ -114,8 +123,15 @@ class TestIngestRate:
         idx = SolanaEventIndex(store)
         idx.ingest(
             [
-                rec('QuoteSet', miner='pk_a', block_time=100, from_chain='btc', to_chain='tao',
-                    rate=200 * RATE_PRECISION, liquidity=0),
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=100,
+                    from_chain='btc',
+                    to_chain='tao',
+                    rate=200 * RATE_PRECISION,
+                    liquidity=0,
+                ),
                 rec('QuoteRemoved', miner='pk_a', block_time=500, from_chain='btc', to_chain='tao'),
             ],
             ATTR,
@@ -127,8 +143,17 @@ class TestIngestRate:
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         idx.ingest(
-            [rec('QuoteSet', miner='pk_a', block_time=100, from_chain='BTC', to_chain='TAO',
-                 rate=200 * RATE_PRECISION, liquidity=0)],
+            [
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=100,
+                    from_chain='BTC',
+                    to_chain='TAO',
+                    rate=200 * RATE_PRECISION,
+                    liquidity=0,
+                )
+            ],
             ATTR,
         )
         # Stored under the lowercased direction the crown queries by.
@@ -166,8 +191,17 @@ class TestIngestClearingRate:
         idx = SolanaEventIndex(store)
         big = (1 << 100) + 7  # well past signed-64 INTEGER
         idx.ingest(
-            [rec('SwapCompleted', miner='pk_a', block_time=10, from_chain='btc', to_chain='tao',
-                 from_amount=big, to_amount=big - 1)],
+            [
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=10,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=big,
+                    to_amount=big - 1,
+                )
+            ],
             ATTR,
         )
         rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 100)
@@ -178,8 +212,17 @@ class TestIngestClearingRate:
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         idx.ingest(
-            [rec('SwapCompleted', miner='pk_a', block_time=10, from_chain='BTC', to_chain='TAO',
-                 from_amount=1, to_amount=2)],
+            [
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=10,
+                    from_chain='BTC',
+                    to_chain='TAO',
+                    from_amount=1,
+                    to_amount=2,
+                )
+            ],
             ATTR,
         )
         assert store.get_clearing_rates_in_range('btc', 'tao', 0, 100)  # found under lowercased direction
@@ -190,10 +233,24 @@ class TestIngestClearingRate:
         idx = SolanaEventIndex(store)
         idx.ingest(
             [
-                rec('SwapCompleted', miner='pk_c', block_time=10, from_chain='btc', to_chain='tao',
-                    from_amount=1, to_amount=2),  # unbound → dropped
-                rec('SwapCompleted', miner='pk_a', block_time=None, from_chain='btc', to_chain='tao',
-                    from_amount=1, to_amount=2),  # unstamped tip → skipped
+                rec(
+                    'SwapCompleted',
+                    miner='pk_c',
+                    block_time=10,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=1,
+                    to_amount=2,
+                ),  # unbound → dropped
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=None,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=1,
+                    to_amount=2,
+                ),  # unstamped tip → skipped
             ],
             ATTR,
         )
@@ -205,10 +262,24 @@ class TestIngestClearingRate:
         idx = SolanaEventIndex(store)
         idx.ingest(
             [
-                rec('SwapCompleted', miner='pk_a', block_time=100, from_chain='btc', to_chain='tao',
-                    from_amount=1, to_amount=2),
-                rec('SwapCompleted', miner='pk_a', block_time=900, from_chain='btc', to_chain='tao',
-                    from_amount=3, to_amount=4),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=100,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=1,
+                    to_amount=2,
+                ),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=900,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=3,
+                    to_amount=4,
+                ),
             ],
             ATTR,
         )
@@ -272,14 +343,35 @@ class TestIngestEndToEndCrown:
                 rec('MinerActivated', miner='pk_b', block_time=0, at=0),
                 rec('CollateralPosted', miner='pk_a', block_time=0, amount=0, total=500_000_000),
                 rec('CollateralPosted', miner='pk_b', block_time=0, amount=0, total=500_000_000),
-                rec('QuoteSet', miner='pk_a', block_time=0, from_chain='btc', to_chain='tao',
-                    rate=300 * RATE_PRECISION, liquidity=0),
-                rec('QuoteSet', miner='pk_b', block_time=0, from_chain='btc', to_chain='tao',
-                    rate=200 * RATE_PRECISION, liquidity=0),
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='tao',
+                    rate=300 * RATE_PRECISION,
+                    liquidity=0,
+                ),
+                rec(
+                    'QuoteSet',
+                    miner='pk_b',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='tao',
+                    rate=200 * RATE_PRECISION,
+                    liquidity=0,
+                ),
                 # A takes a swap mid-window — crown flips to B while busy.
                 rec('SwapInitiated', miner='pk_a', block_time=400),
-                rec('SwapCompleted', miner='pk_a', block_time=800, from_chain='btc', to_chain='tao',
-                    from_amount=100_000, to_amount=500_000_000),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=800,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
             ],
             ATTR,
         )

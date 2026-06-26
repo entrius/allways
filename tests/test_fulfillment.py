@@ -34,7 +34,9 @@ def make_fulfiller(**kw) -> SwapFulfiller:
     return SwapFulfiller(solana_client=MagicMock(), chain_providers={}, **kw)
 
 
-def make_swap(timeout_at: int = 5000, to_amount: int = 345_000_000, miner_from: str = 'bc1q-miner', sid: int = 1) -> SolanaSwap:
+def make_swap(
+    timeout_at: int = 5000, to_amount: int = 345_000_000, miner_from: str = 'bc1q-miner', sid: int = 1
+) -> SolanaSwap:
     return SolanaSwap(
         swap_key=bytes([sid] * 32),
         miner=Keypair().pubkey(),

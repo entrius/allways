@@ -68,9 +68,21 @@ def env(tmp_path_factory):
         _wait_health(rpc)
         _airdrop(payer.pubkey(), 100)
         subprocess.run(
-            ['solana', 'program', 'deploy', str(SO), '--program-id', str(PROG_KP),
-             '--keypair', str(payer_path), '--url', RPC],
-            check=True, capture_output=True, timeout=120,
+            [
+                'solana',
+                'program',
+                'deploy',
+                str(SO),
+                '--program-id',
+                str(PROG_KP),
+                '--keypair',
+                str(payer_path),
+                '--url',
+                RPC,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
         )
         yield {'payer': payer}
     finally:

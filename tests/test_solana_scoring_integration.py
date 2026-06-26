@@ -74,8 +74,9 @@ def _wait_health(rpc: SolanaRpc, timeout: float = 60.0):
 
 
 def _airdrop(pubkey, sol):
-    subprocess.run(['solana', 'airdrop', str(sol), str(pubkey), '--url', RPC], check=True,
-                   capture_output=True, timeout=60)
+    subprocess.run(
+        ['solana', 'airdrop', str(sol), str(pubkey), '--url', RPC], check=True, capture_output=True, timeout=60
+    )
 
 
 @pytest.fixture(scope='module')
@@ -85,15 +86,28 @@ def env(tmp_path_factory):
     (work / 'payer.json').write_text(json.dumps(list(bytes(payer))))
     proc = subprocess.Popen(
         ['solana-test-validator', '--reset', '--quiet', '--ledger', str(work / 'ledger'), '--rpc-port', '8899'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         _wait_health(SolanaRpc(RPC))
         _airdrop(payer.pubkey(), 100)
         subprocess.run(
-            ['solana', 'program', 'deploy', str(SO), '--program-id', str(PROG_KP),
-             '--keypair', str(work / 'payer.json'), '--url', RPC],
-            check=True, capture_output=True, timeout=120,
+            [
+                'solana',
+                'program',
+                'deploy',
+                str(SO),
+                '--program-id',
+                str(PROG_KP),
+                '--keypair',
+                str(work / 'payer.json'),
+                '--url',
+                RPC,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
         )
         yield {'payer': payer, 'work': work}
     finally:
@@ -124,8 +138,12 @@ def _activate_miner(admin, validators, rate_int):
 def test_scoring_round_off_solana_events(env):
     admin = AllwaysSolanaClient(RPC, keypair=env['payer'])
     admin.initialize(
-        min_collateral=1_000_000, max_collateral=0, fulfillment_timeout_secs=12_600,
-        consensus_threshold_percent=66, min_swap_amount=MIN_SWAP_RAO, max_swap_amount=MAX_SWAP_RAO,
+        min_collateral=1_000_000,
+        max_collateral=0,
+        fulfillment_timeout_secs=12_600,
+        consensus_threshold_percent=66,
+        min_swap_amount=MIN_SWAP_RAO,
+        max_swap_amount=MAX_SWAP_RAO,
         reservation_ttl_secs=1_800,
     )
     validators = []
@@ -163,9 +181,15 @@ def test_scoring_round_off_solana_events(env):
     # ── crown replay credits the better-rate holder A, not B, and NOT the
     #    sentinel S — its rate is unexecutable against the on-chain swap bounds. ──
     crown = replay_crown_time_window(
-        store=store, event_index=index, from_chain='btc', to_chain='tao',
-        window_start=now - 600, window_end=now + 60, rewardable_hotkeys={hka, hkb, hks},
-        min_swap_rao=MIN_SWAP_RAO, max_swap_rao=MAX_SWAP_RAO,
+        store=store,
+        event_index=index,
+        from_chain='btc',
+        to_chain='tao',
+        window_start=now - 600,
+        window_end=now + 60,
+        rewardable_hotkeys={hka, hkb, hks},
+        min_swap_rao=MIN_SWAP_RAO,
+        max_swap_rao=MAX_SWAP_RAO,
     )
     assert set(crown) == {hka}
     assert crown[hka] > 0
@@ -186,8 +210,7 @@ def test_scoring_round_off_solana_events(env):
     # Round 2 — patch all eligible: the btc→tao pool is credited to crown holder A.
     # B (lower rate) and S (higher rate but unexecutable) both earn nothing — the
     # sentinel earning 0 proves the bounds reached the Config AND the gate fires.
-    with patch('allways.validator.scoring.build_eligibility',
-               return_value={hka: True, hkb: True, hks: True}):
+    with patch('allways.validator.scoring.build_eligibility', return_value={hka: True, hkb: True, hks: True}):
         rewards2, _ = calculate_miner_rewards(v, now + 60)
     assert rewards2[0] == pytest.approx(POOL_BTC_TAO, abs=1e-5)
     assert rewards2[1] == 0.0

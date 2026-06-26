@@ -33,7 +33,9 @@ class SolanaProvider(ChainProvider):
     Read path needs only an RPC URL; ``send_amount`` (the miner's dest leg) needs a keypair.
     """
 
-    def __init__(self, solana_rpc_url: Optional[str] = None, solana_keypair: Optional[Keypair] = None, timeout: int = 30):
+    def __init__(
+        self, solana_rpc_url: Optional[str] = None, solana_keypair: Optional[Keypair] = None, timeout: int = 30
+    ):
         self.rpc_url = solana_rpc_url or os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
         self.rpc = SolanaRpc(self.rpc_url, timeout=timeout)
         self.keypair = solana_keypair
@@ -216,7 +218,9 @@ class SolanaProvider(ChainProvider):
             from solders.transaction import Transaction
 
             ix = transfer(
-                TransferParams(from_pubkey=self.keypair.pubkey(), to_pubkey=Pubkey.from_string(to_address), lamports=int(amount))
+                TransferParams(
+                    from_pubkey=self.keypair.pubkey(), to_pubkey=Pubkey.from_string(to_address), lamports=int(amount)
+                )
             )
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} send_amount build failed: {e}')

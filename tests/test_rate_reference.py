@@ -20,6 +20,7 @@ def make_store(tmp_path: Path) -> ValidatorStateStore:
 
 # ─── _canonical_rate_and_weight ─────────────────────────────────────────
 
+
 class TestCanonicalRateAndWeight:
     def test_btc_to_tao_rate_and_btc_weight(self):
         # 0.001 BTC → 0.5 TAO ⇒ 500 TAO/BTC; weight = canonical-source (btc) native.
@@ -41,6 +42,7 @@ class TestCanonicalRateAndWeight:
 
 # ─── trimmed_reference ──────────────────────────────────────────────────
 
+
 def _uniform(n, rate, weight=1.0):
     return [(f'hk{i}', rate, weight) for i in range(n)]
 
@@ -55,11 +57,7 @@ class TestTrimmedReference:
     def test_trim_drops_both_tail_outliers(self):
         # 8 honest at 100, one wild-low, one wild-high; 10% weighted trim each
         # tail removes exactly the two outlier samples (1.0 weight each).
-        samples = (
-            [('low', 1.0, 1.0)]
-            + _uniform(8, 100.0)
-            + [('high', 10_000.0, 1.0)]
-        )
+        samples = [('low', 1.0, 1.0)] + _uniform(8, 100.0) + [('high', 10_000.0, 1.0)]
         assert trimmed_reference(samples, trim_frac=0.10, cap_frac=1.0) == pytest.approx(100.0)
 
     def test_per_miner_cap_blunts_a_wash_farmer(self):
@@ -77,9 +75,7 @@ class TestTrimmedReference:
         # A single miner's swaps: the per-miner cap scales every weight uniformly,
         # which leaves the weighted mean unchanged (cap ≠ censorship of one miner).
         samples = [('solo', 100.0, 3.0)] * 2 + [('solo', 130.0, 4.0)] * 3
-        assert trimmed_reference(samples, trim_frac=0.0, cap_frac=0.25) == pytest.approx(
-            (100.0 * 6 + 130.0 * 12) / 18
-        )
+        assert trimmed_reference(samples, trim_frac=0.0, cap_frac=0.25) == pytest.approx((100.0 * 6 + 130.0 * 12) / 18)
 
     def test_determinism_independent_of_input_order(self):
         samples = [
@@ -97,6 +93,7 @@ class TestTrimmedReference:
 
 
 # ─── build_direction_references ─────────────────────────────────────────
+
 
 class TestBuildDirectionReferences:
     def _seed(self, store, direction, swaps, base_time=1000):

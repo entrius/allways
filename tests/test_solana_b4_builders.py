@@ -114,7 +114,11 @@ def test_withdraw_treasury(client):
     [
         (lambda c: c.set_halted(True), 'set_halted', layouts.IX_BOOL_ARGS.build({'value': True})),
         (lambda c: c.set_consensus_threshold(67), 'set_consensus_threshold', layouts.IX_U8_ARGS.build({'value': 67})),
-        (lambda c: c.set_fulfillment_timeout(3600), 'set_fulfillment_timeout', layouts.IX_I64_ARGS.build({'value': 3600})),
+        (
+            lambda c: c.set_fulfillment_timeout(3600),
+            'set_fulfillment_timeout',
+            layouts.IX_I64_ARGS.build({'value': 3600}),
+        ),
         (lambda c: c.set_min_collateral(1_000), 'set_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': 1_000})),
         (lambda c: c.set_max_collateral(9_000), 'set_max_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': 9_000})),
         (lambda c: c.set_min_swap_amount(10), 'set_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 10})),

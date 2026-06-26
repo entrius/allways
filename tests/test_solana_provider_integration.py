@@ -56,9 +56,7 @@ def validator(tmp_path_factory):
 
 
 def _fund(pubkey: str, sol: int = 5):
-    subprocess.run(
-        ['solana', 'airdrop', str(sol), pubkey, '--url', RPC], check=True, capture_output=True, timeout=60
-    )
+    subprocess.run(['solana', 'airdrop', str(sol), pubkey, '--url', RPC], check=True, capture_output=True, timeout=60)
 
 
 def test_send_then_verify_real_transfer(validator):

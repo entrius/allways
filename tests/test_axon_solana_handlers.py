@@ -105,6 +105,7 @@ def run(coro):
 
 # ---- handle_miner_activate ----
 
+
 def test_activate_unbound_hotkey_rejects():
     client = FakeSolanaClient(binding=False)
     s = run(axon_handlers.handle_miner_activate(make_validator(client), activate_synapse()))
@@ -135,6 +136,7 @@ def test_activate_success_votes():
 
 # ---- handle_swap_confirm (claim relay) ----
 
+
 def _reservation(claimed=b'\x00' * 32, reserved_until=NOW + 600):
     return SimpleNamespace(
         reserved_until=reserved_until,
@@ -149,8 +151,13 @@ def _reservation(claimed=b'\x00' * 32, reserved_until=NOW + 600):
 
 def _fresh_tx():
     return TransactionInfo(
-        tx_hash='srctx', confirmed=True, sender='userBTC', recipient='minerBTC',
-        amount=500, block_number=800_000, block_time=NOW - 60,  # mined after created_at
+        tx_hash='srctx',
+        confirmed=True,
+        sender='userBTC',
+        recipient='minerBTC',
+        amount=500,
+        block_number=800_000,
+        block_time=NOW - 60,  # mined after created_at
     )
 
 
@@ -177,8 +184,13 @@ def test_confirm_tx_not_visible_rejects():
 
 def test_confirm_stale_deposit_rejects():
     stale = TransactionInfo(
-        tx_hash='srctx', confirmed=True, sender='userBTC', recipient='minerBTC',
-        amount=500, block_number=700_000, block_time=CREATED_AT - 1,  # predates the reservation
+        tx_hash='srctx',
+        confirmed=True,
+        sender='userBTC',
+        recipient='minerBTC',
+        amount=500,
+        block_number=700_000,
+        block_time=CREATED_AT - 1,  # predates the reservation
     )
     client = FakeSolanaClient(reservation=_reservation())
     s = run(axon_handlers.handle_swap_confirm(make_validator(client, FakeProvider(stale)), confirm_synapse()))

@@ -88,6 +88,7 @@ def test_decode_unknown_discriminator_returns_none():
 
 # ---- ingest cursor ----
 
+
 class FakeRpc:
     def __init__(self, pages):
         # pages: list of batches as the RPC would return them (newest-first within a call)

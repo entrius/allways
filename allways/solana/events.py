@@ -61,9 +61,7 @@ EVENT_LAYOUTS = {
         'updated_at' / I64,
         'update_fee' / U64,
     ),
-    'QuoteRemoved': CStruct(
-        'miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64
-    ),
+    'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
     'MinerDeactivated': CStruct('miner' / Pubkey32, 'at' / I64),
 }

@@ -40,8 +40,7 @@ async def forward(self: Validator) -> None:
     now = int(time.time())
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
-        f'forward step #{self.step} @ block {self.block}: '
-        f'solana swap loop processed {len(decisions)} live swap(s)'
+        f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'
     )
 
     # Fold new program events into the crown index before scoring reads it.

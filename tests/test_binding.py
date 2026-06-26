@@ -57,9 +57,7 @@ def test_hotkey_ss58_roundtrip():
 def test_build_attribution_maps_valid_bindings():
     m1, m2 = SolKeypair().pubkey(), SolKeypair().pubkey()
     hk1, hk2 = _hotkey(), _hotkey()
-    client = SimpleNamespace(
-        get_all=lambda name: [('pda1', _binding(m1, hk1)), ('pda2', _binding(m2, hk2))]
-    )
+    client = SimpleNamespace(get_all=lambda name: [('pda1', _binding(m1, hk1)), ('pda2', _binding(m2, hk2))])
     amap = binding.build_attribution(client)
     assert amap[str(m1)] == hk1.ss58_address
     assert amap[str(m2)] == hk2.ss58_address

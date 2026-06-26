@@ -1036,9 +1036,7 @@ class TestCalculateMinerRewards:
         """Plenty of successes but failures over the cap → ineligible → 0. A
         rolling strike count, mirrored from the on-chain MinerState counters."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(
-            tmp_path, hotkeys=hotkeys, miner_counters={'hk_a': (50, MAX_FAILED_SWAPS + 1)}
-        )
+        v = make_validator(tmp_path, hotkeys=hotkeys, miner_counters={'hk_a': (50, MAX_FAILED_SWAPS + 1)})
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -1494,9 +1492,7 @@ class TestHaltShortCircuit:
         v = make_validator(tmp_path, hotkeys)
         # The cache fails open to False on RPC error, so an Exception case is
         # modelled as halted()==False → scoring proceeds via the normal path.
-        v.solana_config_cache.halted.return_value = (
-            False if isinstance(halt_return, Exception) else halt_return
-        )
+        v.solana_config_cache.halted.return_value = False if isinstance(halt_return, Exception) else halt_return
         captured = {}
 
         def capture(rewards, miner_uids):
@@ -2385,6 +2381,7 @@ class TestHistoricalCollateralReplay:
         # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.625, atol=1e-6)
         v.state_store.close()
+
 
 class TestNonEarnerDiagnosis:
     """diagnose_non_earner must report the true reason: direction-aware outbid

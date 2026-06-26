@@ -271,7 +271,9 @@ class AllwaysSolanaClient:
         return self._send([self._ix(name, arg_bytes, metas)])
 
     def remove_validator(self, validator) -> str:
-        return self._admin_config('remove_validator', layouts.IX_PUBKEY_ARGS.build({'value': bytes(_as_pubkey(validator))}))
+        return self._admin_config(
+            'remove_validator', layouts.IX_PUBKEY_ARGS.build({'value': bytes(_as_pubkey(validator))})
+        )
 
     def set_consensus_threshold(self, percent: int) -> str:
         return self._admin_config('set_consensus_threshold', layouts.IX_U8_ARGS.build({'value': percent}))

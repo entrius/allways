@@ -147,7 +147,6 @@ class ValidatorStateStore:
             created_at=row['created_at'],
         )
 
-
     # ─── rate_events ────────────────────────────────────────────────────
 
     def insert_rate_event(
@@ -247,7 +246,6 @@ class ValidatorStateStore:
             (from_chain, to_chain, start_block, end_block),
         )
         return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
-
 
     # ─── crown event tables (Solana-sourced via SolanaEventIndex) ───────
 
@@ -363,8 +361,7 @@ class ValidatorStateStore:
             (start_time, end_time),
         )
         return [
-            {'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao']), 'block': r['block_num']}
-            for r in rows
+            {'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao']), 'block': r['block_num']} for r in rows
         ]
 
     def get_collaterals_at(self, at_time: int) -> Dict[str, int]:
@@ -498,7 +495,6 @@ class ValidatorStateStore:
             """,
             (cutoff_block,),
         )
-
 
     # ─── cross-table maintenance ────────────────────────────────────────
 

@@ -180,8 +180,7 @@ def is_eligible(miner_state) -> bool:
     eligible iff the miner has at least ``MIN_SUCCESSFUL_SWAPS`` successes and at
     most ``MAX_FAILED_SWAPS`` failures. Replaces ``success_rate³ × credibility``."""
     return (
-        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
-        and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
+        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
     )
 
 
@@ -259,9 +258,7 @@ def build_direction_volumes(
     return volumes
 
 
-def _canonical_rate_and_weight(
-    from_chain: str, to_chain: str, from_amount: int, to_amount: int
-) -> Tuple[float, int]:
+def _canonical_rate_and_weight(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> Tuple[float, int]:
     """Canonical 'dest per source' rate (TAO per BTC for the btc/tao pair) plus
     the swap's volume weight = the **canonical-source** native leg. Weighting a
     set of per-swap canonical rates by this leg makes the weighted mean equal the
@@ -357,9 +354,7 @@ def build_direction_references(state_store, current_time: int) -> Dict[Tuple[str
         miner_num: Dict[str, float] = {}
         miner_den: Dict[str, float] = {}
         for row in rows:
-            rate, weight = _canonical_rate_and_weight(
-                from_chain, to_chain, row['from_amount'], row['to_amount']
-            )
+            rate, weight = _canonical_rate_and_weight(from_chain, to_chain, row['from_amount'], row['to_amount'])
             if rate <= 0 or weight <= 0:
                 continue
             hk = row['hotkey']
@@ -510,9 +505,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         )
         total_crown_dir = sum(crown_blocks.values())
         vols_dir: Dict[str, DirectionVolume] = {
-            hk: dirs[(from_chain, to_chain)]
-            for hk, dirs in direction_volumes.items()
-            if (from_chain, to_chain) in dirs
+            hk: dirs[(from_chain, to_chain)] for hk, dirs in direction_volumes.items() if (from_chain, to_chain) in dirs
         }
         volumes_dir = {hk: dv.from_amount for hk, dv in vols_dir.items()}
         total_volume_dir = sum(volumes_dir.values())

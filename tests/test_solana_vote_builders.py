@@ -62,10 +62,7 @@ def test_ix_discriminators_match_anchor_global_formula():
 
 def test_swap_key_from_tx_hash_is_keccak256():
     # keccak256("") known vector — guards against a sha256/keccak mix-up.
-    assert (
-        swap_key_from_tx_hash('').hex()
-        == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
-    )
+    assert swap_key_from_tx_hash('').hex() == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
     assert len(swap_key_from_tx_hash('deadbeef')) == 32
 
 
@@ -110,9 +107,7 @@ def test_confirm_swap_ix(client):
     client.confirm_swap(SK, miner, 'BTC', 'tao')
     ix = _ix(client)
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['confirm_swap']
-    assert ix.data[8:] == layouts.IX_CONFIRM_SWAP_ARGS.build(
-        {'swap_key': SK, 'from_chain': 'BTC', 'to_chain': 'tao'}
-    )
+    assert ix.data[8:] == layouts.IX_CONFIRM_SWAP_ARGS.build({'swap_key': SK, 'from_chain': 'BTC', 'to_chain': 'tao'})
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),

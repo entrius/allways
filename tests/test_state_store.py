@@ -133,6 +133,7 @@ class TestReservationPinPurge:
         assert store.get_expired_reservation_pins() == []
         store.close()
 
+
 class TestReservationPinCrossTable:
     def test_delete_hotkey_clears_the_pin(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
