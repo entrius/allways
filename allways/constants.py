@@ -77,6 +77,22 @@ REWARD_WEIGHT_QUALITY_VOLUME: float = 0.0
 MIN_SUCCESSFUL_SWAPS: int = 2
 MAX_FAILED_SWAPS: int = 2
 
+# ─── Market-rate feed (Phase C) ──────────────────────────
+# Off-chain price feed backing the rate-quality scoring component. The contract
+# can't see prices, so the scoring validator derives TAO/BTC = BTC_usd / TAO_usd,
+# each leg averaged over whatever public sources respond. Best-effort: a
+# stale/dead feed degrades to neutral quality, never zeroes rewards or hands out
+# free reward (see allways/validator/market_rate.py).
+MARKET_RATE_TTL_SECS = 300  # refresh cadence — at most one fetch per scoring window
+MARKET_RATE_MAX_STALE_SECS = 3600  # serve last-good up to this; older → None (neutral)
+MARKET_RATE_HTTP_TIMEOUT_SECS = 8  # per-source request timeout
+# BTC/USD and TAO/USD source endpoints (each leg averages whatever responds).
+# Recipe mirrors the `allways-rates` tool. Parsers live next to these in market_rate.py.
+MARKET_RATE_BTC_USD_COINBASE_URL = 'https://api.coinbase.com/v2/prices/BTC-USD/spot'
+MARKET_RATE_BTC_USD_KRAKEN_URL = 'https://api.kraken.com/0/public/Ticker?pair=XBTUSD'
+MARKET_RATE_TAO_USD_COINGECKO_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd'
+MARKET_RATE_TAO_USD_MEXC_URL = 'https://api.mexc.com/api/v3/ticker/price?symbol=TAOUSDT'
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
