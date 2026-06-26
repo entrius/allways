@@ -5,7 +5,9 @@ collateral, quoted rate) through a small read interface. B1/B2 fed that interfac
 ``ContractEventWatcher``; B3.4 swaps the *writer*: ``SolanaEventIngest`` (B3.1) decodes program events and
 this index persists them into the ``state_store`` event tables, attributing each on-chain Solana pubkey to
 its bound Bittensor hotkey at write time (B3.2). The crown math is unchanged — it consumes the same
-``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed.
+``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed. ``SwapCompleted`` additionally
+persists its realized legs into ``clearing_rates`` (C-rev), the per-swap history the rate-quality reference
+is built from.
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
 blocks. Reservation pins are gone in the Solana model (the swap rate is pinned on-chain and a reserved miner
@@ -65,6 +67,18 @@ class SolanaEventIndex:
             return True
         if name in _BUSY_DELTA:
             self.state_store.insert_busy_event(block_time, hotkey, _BUSY_DELTA[name])
+            # SwapCompleted is the only busy event carrying realized legs — persist
+            # them as a clearing-rate sample for the C-rev quality reference, in
+            # addition to closing the busy interval above.
+            if name == 'SwapCompleted':
+                self.state_store.insert_clearing_rate(
+                    block_time,
+                    hotkey,
+                    self._chain(rec, 'from_chain'),
+                    self._chain(rec, 'to_chain'),
+                    int(rec.fields['from_amount']),
+                    int(rec.fields['to_amount']),
+                )
             return True
         if name in ('CollateralPosted', 'CollateralWithdrawn'):
             total = int(rec.fields['total'])

@@ -51,7 +51,15 @@ class TestIngestBusy:
         idx.ingest(
             [
                 rec('SwapInitiated', miner='pk_a', block_time=200),
-                rec('SwapCompleted', miner='pk_a', block_time=400),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
                 rec('SwapInitiated', miner='pk_a', block_time=600),
                 rec('SwapTimedOut', miner='pk_a', block_time=900),
             ],
@@ -128,6 +136,88 @@ class TestIngestRate:
         store.close()
 
 
+class TestIngestClearingRate:
+    def test_swap_completed_persists_clearing_rate_and_busy(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest(
+            [
+                rec('SwapInitiated', miner='pk_a', block_time=200),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
+            ],
+            ATTR,
+        )
+        # Both effects fire: the busy interval closes AND a clearing-rate sample lands.
+        assert idx.get_busy_miners_at(400) == {}
+        rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)
+        assert rows == [{'hotkey': 'hk_a', 'from_amount': 100_000, 'to_amount': 500_000_000, 'block': 400}]
+        store.close()
+
+    def test_u128_legs_survive_text_storage(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        big = (1 << 100) + 7  # well past signed-64 INTEGER
+        idx.ingest(
+            [rec('SwapCompleted', miner='pk_a', block_time=10, from_chain='btc', to_chain='tao',
+                 from_amount=big, to_amount=big - 1)],
+            ATTR,
+        )
+        rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 100)
+        assert rows[0]['from_amount'] == big and rows[0]['to_amount'] == big - 1
+        store.close()
+
+    def test_chain_strings_lowercased(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest(
+            [rec('SwapCompleted', miner='pk_a', block_time=10, from_chain='BTC', to_chain='TAO',
+                 from_amount=1, to_amount=2)],
+            ATTR,
+        )
+        assert store.get_clearing_rates_in_range('btc', 'tao', 0, 100)  # found under lowercased direction
+        store.close()
+
+    def test_unbound_and_unstamped_skip_clearing_rate(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest(
+            [
+                rec('SwapCompleted', miner='pk_c', block_time=10, from_chain='btc', to_chain='tao',
+                    from_amount=1, to_amount=2),  # unbound → dropped
+                rec('SwapCompleted', miner='pk_a', block_time=None, from_chain='btc', to_chain='tao',
+                    from_amount=1, to_amount=2),  # unstamped tip → skipped
+            ],
+            ATTR,
+        )
+        assert store.get_clearing_rates_in_range('btc', 'tao', 0, 100) == []
+        store.close()
+
+    def test_prune_drops_old_samples(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest(
+            [
+                rec('SwapCompleted', miner='pk_a', block_time=100, from_chain='btc', to_chain='tao',
+                    from_amount=1, to_amount=2),
+                rec('SwapCompleted', miner='pk_a', block_time=900, from_chain='btc', to_chain='tao',
+                    from_amount=3, to_amount=4),
+            ],
+            ATTR,
+        )
+        store.prune_clearing_rates(500)
+        blocks = [r['block'] for r in store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)]
+        assert blocks == [900]  # no anchor preservation — old sample is gone
+        store.close()
+
+
 class TestAttributionAndSkips:
     def test_unbound_pubkey_is_dropped(self, tmp_path: Path):
         store = make_store(tmp_path)
@@ -188,7 +278,8 @@ class TestIngestEndToEndCrown:
                     rate=200 * RATE_PRECISION, liquidity=0),
                 # A takes a swap mid-window — crown flips to B while busy.
                 rec('SwapInitiated', miner='pk_a', block_time=400),
-                rec('SwapCompleted', miner='pk_a', block_time=800),
+                rec('SwapCompleted', miner='pk_a', block_time=800, from_chain='btc', to_chain='tao',
+                    from_amount=100_000, to_amount=500_000_000),
             ],
             ATTR,
         )

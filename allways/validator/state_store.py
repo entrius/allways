@@ -3,7 +3,9 @@
 Tables: ``rate_events`` + ``active_events`` + ``busy_events`` +
 ``collateral_events`` (the crown-time event series, sourced from Solana program
 events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
-``solana_event_meta`` (the event-ingest cursor), and ``reservation_pins`` (the
+``clearing_rates`` (per-swap realized history from ``SwapCompleted``, backing the
+C-rev rate-quality reference), ``solana_event_meta`` (the event-ingest cursor),
+and ``reservation_pins`` (the
 axon reserve path's commitment snapshot, kept until the Phase-9 repoint). Single
 connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
@@ -381,6 +383,62 @@ class ValidatorStateStore:
         )
         return {r['hotkey']: int(r['collateral_rao']) for r in rows}
 
+    # ─── clearing_rates (per-swap realized history, C-rev) ──────────────
+
+    def insert_clearing_rate(
+        self,
+        block_num: int,
+        hotkey: str,
+        from_chain: str,
+        to_chain: str,
+        from_amount: int,
+        to_amount: int,
+    ) -> None:
+        """Persist one completed swap's realized legs. ``block_num`` is the unix
+        ``blockTime``; the legs are stored as decimal strings (u128-safe)."""
+        self._execute(
+            """
+            INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount))),
+        )
+
+    def get_clearing_rates_in_range(
+        self,
+        from_chain: str,
+        to_chain: str,
+        start_time: int,
+        end_time: int,
+    ) -> List[dict]:
+        """Completed-swap clearing rates in ``(start_time, end_time]`` for a
+        direction, oldest first. Legs are re-cast to int from their TEXT storage."""
+        rows = self._fetchall(
+            """
+            SELECT hotkey, from_amount, to_amount, block_num FROM clearing_rates
+            WHERE from_chain = ? AND to_chain = ? AND block_num > ? AND block_num <= ?
+            ORDER BY block_num ASC, id ASC
+            """,
+            (from_chain, to_chain, start_time, end_time),
+        )
+        return [
+            {
+                'hotkey': r['hotkey'],
+                'from_amount': int(r['from_amount']),
+                'to_amount': int(r['to_amount']),
+                'block': r['block_num'],
+            }
+            for r in rows
+        ]
+
+    def prune_clearing_rates(self, cutoff_block: int) -> None:
+        """Drop clearing-rate rows older than ``cutoff_block``. No anchor row is
+        preserved — each row is an independent sample, not a state-reconstruction
+        baseline (unlike rate/active/collateral events)."""
+        if cutoff_block <= 0:
+            return
+        self._execute('DELETE FROM clearing_rates WHERE block_num < ?', (cutoff_block,))
+
     def get_solana_event_cursor(self) -> Optional[str]:
         """Last ingested Solana tx signature (the SolanaEventIngest cursor).
         ``None`` on a fresh DB so the first poll starts from the prune horizon."""
@@ -590,6 +648,23 @@ class ValidatorStateStore:
                     ON collateral_events(block_num);
                 CREATE INDEX IF NOT EXISTS idx_collateral_events_hotkey
                     ON collateral_events(hotkey);
+
+                -- Per-swap realized clearing rates from SwapCompleted (C-rev).
+                -- One row per completed swap; the trimmed/volume-weighted/
+                -- per-miner-capped reference for the rate-quality reward is
+                -- computed off these. from_amount/to_amount are TEXT because the
+                -- on-chain legs are u128 and overflow SQLite's signed-64 INTEGER.
+                CREATE TABLE IF NOT EXISTS clearing_rates (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_num   INTEGER NOT NULL,
+                    hotkey      TEXT NOT NULL,
+                    from_chain  TEXT NOT NULL,
+                    to_chain    TEXT NOT NULL,
+                    from_amount TEXT NOT NULL,
+                    to_amount   TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
+                    ON clearing_rates(from_chain, to_chain, block_num);
 
                 CREATE TABLE IF NOT EXISTS solana_event_meta (
                     key     TEXT PRIMARY KEY,
