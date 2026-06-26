@@ -150,3 +150,11 @@ RESERVATION_TTL_BLOCKS = 50  # ~10 min
 # MAX_EXTENSIONS_PER_SWAP extensions each push the deadline up to MAX_EXTENSION_BLOCKS further (not cumulative).
 # A smaller margin can discard a still-active twice-extended swap and re-send on rediscovery (#461). ~550 ≈ 1.8h.
 SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+
+# ─── Unix-axis miner runways (B4 — Solana) ────────────────
+# The Solana swap deadline (`Swap.timeout_at`) is unix-seconds, not a block height. Port the two
+# block-denominated miner runways to seconds via the subtensor block time so they keep the same
+# wall-clock meaning. Edit these directly if validator extension cadence changes.
+SECS_PER_BLOCK = 12
+MINER_TIMEOUT_CUSHION_SECS = MINER_TIMEOUT_CUSHION_BLOCKS * SECS_PER_BLOCK
+SENT_CACHE_DISCARD_MARGIN_SECS = SENT_CACHE_DISCARD_MARGIN_BLOCKS * SECS_PER_BLOCK
