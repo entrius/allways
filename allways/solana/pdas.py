@@ -10,7 +10,7 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
 from solders.pubkey import Pubkey
 
 # IDL metadata.address — keep in sync with the deployed program.
-PROGRAM_ID = Pubkey.from_string('BtVm5a1hKvMrrEHQ876Ev23dYVZAkWpYkf86VZi3z1Li')
+PROGRAM_ID = Pubkey.from_string('AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU')
 
 # Fixed-point scale for the miner rate: stored u128 = display_rate * RATE_PRECISION (constants.rs).
 RATE_PRECISION = 1_000_000_000_000_000_000  # 1e18

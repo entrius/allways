@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-allways_swap_manager = "BtVm5a1hKvMrrEHQ876Ev23dYVZAkWpYkf86VZi3z1Li"
+allways_swap_manager = "AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU"
 
 [provider]
 cluster = "localnet"
