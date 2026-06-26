@@ -281,6 +281,35 @@ def from_rao(amount_rao: int) -> float:
     return amount_rao / TAO_TO_RAO
 
 
+LAMPORTS_PER_SOL = 1_000_000_000
+
+
+def to_lamports(amount_sol: float) -> int:
+    """Convert SOL to lamports."""
+    return int(amount_sol * LAMPORTS_PER_SOL)
+
+
+def from_lamports(amount_lamports: int) -> float:
+    """Convert lamports to SOL."""
+    return amount_lamports / LAMPORTS_PER_SOL
+
+
+def get_solana_cli_context(need_keypair: bool = True):
+    """Solana CLI setup for the B4-repointed miner/admin commands → (config, solana_client).
+
+    The miner/admin identity is the Solana keypair (SOLANA_KEYPAIR_PATH / ~/.solana/id.json), NOT the bt
+    wallet — collateral, quotes, and config are keyed by that pubkey on the program. The bt wallet is only
+    needed where a command links the two identities (`alw miner bind-hotkey`).
+    """
+    from allways.solana import keys
+    from allways.solana.client import AllwaysSolanaClient
+
+    config = get_effective_config()
+    rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+    keypair = keys.load_or_create() if need_keypair else None
+    return config, AllwaysSolanaClient(rpc_url, keypair=keypair)
+
+
 def load_cli_config() -> dict:
     """Load CLI configuration from ~/.allways/config.json."""
     if not CONFIG_FILE.exists():
