@@ -3,6 +3,7 @@ import asyncio
 import copy
 import threading
 import time
+import traceback
 from typing import List, Set, Union
 
 import bittensor as bt
@@ -112,7 +113,10 @@ class BaseValidatorNeuron(BaseNeuron):
                     raise
                 except Exception as step_err:
                     consecutive_errors += 1
-                    bt.logging.error(f'Step {self.step} error ({consecutive_errors} consecutive): {step_err}')
+                    origin = traceback.extract_tb(step_err.__traceback__)[-1] if step_err.__traceback__ else None
+                    where = f' at {origin.filename.split("/")[-1]}:{origin.lineno}' if origin else ''
+                    bt.logging.error(f'Step {self.step} error ({consecutive_errors} consecutive): {step_err}{where}')
+                    bt.logging.debug(traceback.format_exc())
                     try:
                         self.reconnect_subtensor()
                     except Exception as reconnect_err:
