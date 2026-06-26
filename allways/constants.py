@@ -85,9 +85,24 @@ MAX_FAILED_SWAPS: int = 2
 # deadband) scores 1.0 — the crown already rewards best-rate presence, so
 # above-market is not paid again here. Worse-than-market ramps linearly to
 # RATE_QUALITY_MIN at RATE_QUALITY_FLOOR_ADV. Tunable without code changes.
-RATE_QUALITY_TOLERANCE_BPS = 100  # 1% deadband around market (spread/timing noise) → quality 1.0
-RATE_QUALITY_FLOOR_ADV = -0.10  # at 10% worse than market, quality bottoms out
-RATE_QUALITY_MIN = 0.0  # floor multiplier once a rate is ≥ FLOOR_ADV worse than market
+RATE_QUALITY_TOLERANCE_BPS = 100  # 1% deadband around the reference (spread/timing noise) → quality 1.0
+RATE_QUALITY_FLOOR_ADV = -0.10  # at 10% worse than the reference, quality bottoms out
+RATE_QUALITY_MIN = 0.0  # floor multiplier once a rate is ≥ FLOOR_ADV worse than the reference
+
+# ─── On-chain rate-quality reference (C-rev) ─────────────
+# The reference the rate-quality curve compares a miner's realized rate against
+# is computed on-chain-deterministically — a trimmed, volume-weighted,
+# per-miner-capped average of completed-swap clearing rates per direction (read
+# off the clearing_rates table). This replaces the external market feed: no
+# network, no wall-clock-of-fetch, identical across validators given identical
+# ingested history. The trim + per-miner cap are the wash-resistance — a wash
+# farmer's outlier/self-swap rates get trimmed and capped, so they can't drag
+# the reference. Below the min-swap floor the reference is undefined → quality
+# degrades to neutral 1.0 (w_b then pays realized volume by raw share).
+RATE_REFERENCE_WINDOW_SECS = 86400  # 24h — wide enough that sparse completed-swap history clears the floor
+RATE_REFERENCE_TRIM_FRAC = 0.10  # drop the top & bottom 10% of weight before averaging
+RATE_REFERENCE_MINER_CAP_FRAC = 0.25  # cap any single miner at 25% of total reference weight
+RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ reference undefined ⇒ neutral
 
 # ─── Market-rate feed (Phase C) ──────────────────────────
 # Off-chain price feed backing the rate-quality scoring component. The contract

@@ -32,6 +32,10 @@ from allways.constants import (
     RATE_QUALITY_FLOOR_ADV,
     RATE_QUALITY_MIN,
     RATE_QUALITY_TOLERANCE_BPS,
+    RATE_REFERENCE_MIN_SWAPS,
+    RATE_REFERENCE_MINER_CAP_FRAC,
+    RATE_REFERENCE_TRIM_FRAC,
+    RATE_REFERENCE_WINDOW_SECS,
     RECYCLE_UID,
     REWARD_WEIGHT_CROWN,
     REWARD_WEIGHT_QUALITY_VOLUME,
@@ -258,21 +262,127 @@ def build_direction_volumes(solana_client, metagraph) -> Dict[str, Dict[Tuple[st
     return volumes
 
 
-def realized_canonical_rate(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> float:
-    """Realized executed rate in canonical 'dest per source' display units (TAO
-    per BTC for the btc/tao pair), derived from native-unit leg totals
-    (``MinerDirectionStats``). Orientation matches the crown's stored rates, so
-    it's directly comparable to the market feed. Non-positive legs ⇒ 0.0 (no
-    executed volume to price)."""
+def _canonical_rate_and_weight(
+    from_chain: str, to_chain: str, from_amount: int, to_amount: int
+) -> Tuple[float, int]:
+    """Canonical 'dest per source' rate (TAO per BTC for the btc/tao pair) plus
+    the swap's volume weight = the **canonical-source** native leg. Weighting a
+    set of per-swap canonical rates by this leg makes the weighted mean equal the
+    aggregate VWAP in *either* direction (the source leg is btc's native amount
+    for both btc→tao and tao→btc). Non-positive legs ⇒ ``(0.0, 0)``."""
     canon_source, canon_dest = canonical_pair(from_chain, to_chain)
     native = {from_chain: int(from_amount), to_chain: int(to_amount)}
     src_native = native.get(canon_source, 0)
     dst_native = native.get(canon_dest, 0)
     if src_native <= 0 or dst_native <= 0:
-        return 0.0
+        return 0.0, 0
     src_disp = src_native / (10 ** get_chain(canon_source).decimals)
     dst_disp = dst_native / (10 ** get_chain(canon_dest).decimals)
-    return dst_disp / src_disp
+    return dst_disp / src_disp, src_native
+
+
+def realized_canonical_rate(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> float:
+    """Realized executed rate in canonical 'dest per source' display units (TAO
+    per BTC for the btc/tao pair), derived from native-unit leg totals.
+    Orientation matches the crown's stored rates, so it's directly comparable to
+    the on-chain reference. Non-positive legs ⇒ 0.0 (no executed volume to price)."""
+    rate, _weight = _canonical_rate_and_weight(from_chain, to_chain, from_amount, to_amount)
+    return rate
+
+
+def trimmed_reference(
+    samples: List[Tuple[str, float, float]],
+    trim_frac: float = RATE_REFERENCE_TRIM_FRAC,
+    cap_frac: float = RATE_REFERENCE_MINER_CAP_FRAC,
+    min_swaps: int = RATE_REFERENCE_MIN_SWAPS,
+) -> Optional[float]:
+    """Deterministic per-direction reference from completed-swap clearing rates
+    (C-rev). ``samples`` is ``[(hotkey, rate, weight)]``.
+
+    Pipeline: (1) fewer than ``min_swaps`` positive-weight samples ⇒ ``None``;
+    (2) **per-miner cap** — scale any miner whose summed weight exceeds
+    ``cap_frac × total`` down to the cap (preserves its rate spread, limits its
+    pull, so a wash farmer's self-swaps can't dominate); (3) **weighted trim** —
+    sort by ``(rate, hotkey)`` and drop ``trim_frac`` of the (capped) weight from
+    each tail, with partial inclusion at the boundary samples; (4) weighted mean
+    of the survivors. Pure float ops in a fixed sorted order ⇒ identical across
+    validators given identical samples."""
+    pos = [(hk, float(r), float(w)) for hk, r, w in samples if r > 0 and w > 0]
+    if len(pos) < min_swaps:
+        return None
+    total_weight = sum(w for _, _, w in pos)
+    if total_weight <= 0:
+        return None
+
+    # Per-miner cap: hold each miner's total influence to cap_frac of the pool.
+    cap = cap_frac * total_weight
+    miner_weight: Dict[str, float] = {}
+    for hk, _, w in pos:
+        miner_weight[hk] = miner_weight.get(hk, 0.0) + w
+    scale = {hk: (cap / mw if mw > cap else 1.0) for hk, mw in miner_weight.items()}
+    capped = sorted(((hk, r, w * scale[hk]) for hk, r, w in pos), key=lambda s: (s[1], s[0]))
+    total_capped = sum(w for _, _, w in capped)
+    if total_capped <= 0:
+        return None
+
+    # Weighted trim: keep the central (1 - 2·trim_frac) of the weight by rate.
+    lo_cut = trim_frac * total_capped
+    hi_cut = (1.0 - trim_frac) * total_capped
+    cum = 0.0
+    num = 0.0
+    den = 0.0
+    for _hk, r, w in capped:
+        seg_start, seg_end = cum, cum + w
+        cum = seg_end
+        included = min(seg_end, hi_cut) - max(seg_start, lo_cut)
+        if included <= 0:
+            continue
+        num += r * included
+        den += included
+    if den <= 0:
+        return None
+    return num / den
+
+
+@dataclass
+class DirectionReference:
+    """Per-direction rate-quality reference (C-rev). ``reference`` is the trimmed
+    volume-weighted clearing rate (None when in-window history is too thin);
+    ``miner_rates`` is each miner's own windowed realized VWAP — the numerator the
+    quality curve compares against the reference, on the same windowed basis."""
+
+    reference: Optional[float] = None
+    miner_rates: Dict[str, float] = field(default_factory=dict)
+
+
+def build_direction_references(state_store, current_time: int) -> Dict[Tuple[str, str], DirectionReference]:
+    """``{(from,to): DirectionReference}`` for every scored direction, computed
+    purely from the on-chain ``clearing_rates`` history over
+    ``[current_time − RATE_REFERENCE_WINDOW_SECS, current_time]``. One query per
+    direction; the trimmed reference and each miner's windowed VWAP are both
+    derived from the same rows, so numerator and reference share a basis."""
+    window_start = current_time - RATE_REFERENCE_WINDOW_SECS
+    references: Dict[Tuple[str, str], DirectionReference] = {}
+    for from_chain, to_chain in DIRECTION_POOLS:
+        rows = state_store.get_clearing_rates_in_range(from_chain, to_chain, window_start, current_time)
+        samples: List[Tuple[str, float, float]] = []
+        miner_num: Dict[str, float] = {}
+        miner_den: Dict[str, float] = {}
+        for row in rows:
+            rate, weight = _canonical_rate_and_weight(
+                from_chain, to_chain, row['from_amount'], row['to_amount']
+            )
+            if rate <= 0 or weight <= 0:
+                continue
+            hk = row['hotkey']
+            samples.append((hk, rate, float(weight)))
+            miner_num[hk] = miner_num.get(hk, 0.0) + rate * weight
+            miner_den[hk] = miner_den.get(hk, 0.0) + weight
+        miner_rates = {hk: miner_num[hk] / miner_den[hk] for hk in miner_num if miner_den[hk] > 0}
+        references[(from_chain, to_chain)] = DirectionReference(
+            reference=trimmed_reference(samples), miner_rates=miner_rates
+        )
+    return references
 
 
 def rate_advantage(from_chain: str, to_chain: str, realized_rate: float, market_rate: float) -> float:
