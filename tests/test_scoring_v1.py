@@ -15,7 +15,7 @@ from allways.constants import (
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
 )
-from allways.utils.rate import is_executable_rate, min_executable_tao_leg
+from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
@@ -35,8 +35,8 @@ from allways.validator.scoring import (
 from allways.validator.state_store import ValidatorStateStore
 
 # Mirror production pool shares so these stay in sync if DIRECTION_POOLS changes.
-POOL_TAO_BTC = DIRECTION_POOLS[('tao', 'btc')]
-POOL_BTC_TAO = DIRECTION_POOLS[('btc', 'tao')]
+POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
+POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -65,8 +65,8 @@ class FakeSolanaClient:
         miner_hotkey: str,
         from_amount: int,
         to_amount: int,
-        from_chain: str = 'tao',
-        to_chain: str = 'btc',
+        from_chain: str = 'btc',
+        to_chain: str = 'sol',
     ) -> None:
         """Seed a ``MinerDirectionStats`` row — the on-chain realized-volume
         ledger that replaces the per-validator ``swap_outcomes`` table (B3.5)."""
@@ -324,12 +324,12 @@ class TestBuildDirectionVolumes:
     def test_maps_pubkey_to_hotkey_uid_per_direction(self):
         metagraph = make_metagraph(['hk_a', 'hk_b'])
         client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
-        client.add_direction_stats('hk_a', from_amount=300, to_amount=600, from_chain='tao', to_chain='btc')
-        client.add_direction_stats('hk_b', from_amount=100, to_amount=50, from_chain='btc', to_chain='tao')
+        client.add_direction_stats('hk_a', from_amount=300, to_amount=600, from_chain='btc', to_chain='sol')
+        client.add_direction_stats('hk_b', from_amount=100, to_amount=50, from_chain='sol', to_chain='btc')
         vols = build_direction_volumes(client, metagraph)
-        assert vols['hk_a'][('tao', 'btc')].from_amount == 300
-        assert vols['hk_a'][('tao', 'btc')].vwap == 2.0  # 600 / 300
-        assert vols['hk_b'][('btc', 'tao')].from_amount == 100
+        assert vols['hk_a'][('btc', 'sol')].from_amount == 300
+        assert vols['hk_a'][('btc', 'sol')].vwap == 2.0  # 600 / 300
+        assert vols['hk_b'][('sol', 'btc')].from_amount == 100
 
     def test_off_metagraph_miner_dropped(self):
         metagraph = make_metagraph(['hk_a'])
@@ -342,9 +342,9 @@ class TestBuildDirectionVolumes:
     def test_direction_is_lowercased(self):
         metagraph = make_metagraph(['hk_a'])
         client = FakeSolanaClient({'hk_a': (5, 0)})
-        client.add_direction_stats('hk_a', from_amount=10, to_amount=10, from_chain='TAO', to_chain='BTC')
+        client.add_direction_stats('hk_a', from_amount=10, to_amount=10, from_chain='BTC', to_chain='SOL')
         vols = build_direction_volumes(client, metagraph)
-        assert ('tao', 'btc') in vols['hk_a']
+        assert ('btc', 'sol') in vols['hk_a']
 
 
 class TestCrownHoldersHelper:
@@ -408,15 +408,15 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00015, 0),
+            ('hk_a', 'btc', 'sol', 0.00015, 0),
         )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -429,8 +429,8 @@ class TestReplayCrownTime:
         make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'btc', 'tao', 100.0, 0),
-            ('hk_b', 'btc', 'tao', 200.0, 0),
+            ('hk_a', 'sol', 'btc', 100.0, 0),
+            ('hk_b', 'sol', 'btc', 200.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -439,15 +439,15 @@ class TestReplayCrownTime:
         # Mid-window, A jumps to the top.
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 300.0, 600),
+            ('hk_a', 'sol', 'btc', 300.0, 600),
         )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -468,8 +468,8 @@ class TestReplayCrownTime:
         seed_collateral(watcher, 'hk_sane', 500_000_000, block=0)
         conn = store.require_connection()
         for row in (
-            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
-            ('hk_sane', 'btc', 'tao', 326.0, 0),
+            ('hk_sentinel', 'btc', 'sol', 1e10, 0),
+            ('hk_sane', 'btc', 'sol', 326.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -481,7 +481,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
@@ -502,7 +502,7 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+            ('hk_squat', 'btc', 'sol', 50000.0, 0),
         )
         conn.commit()
 
@@ -510,7 +510,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
@@ -529,8 +529,8 @@ class TestReplayCrownTime:
         seed_collateral(watcher, 'hk_funded', 500_000_000, block=0)
         conn = store.require_connection()
         for row in (
-            ('hk_squat', 'btc', 'tao', 50000.0, 0),  # best rate, can't fund
-            ('hk_funded', 'btc', 'tao', 326.0, 0),  # runner-up, can fund
+            ('hk_squat', 'btc', 'sol', 50000.0, 0),  # best rate, can't fund
+            ('hk_funded', 'btc', 'sol', 326.0, 0),  # runner-up, can fund
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -542,7 +542,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
@@ -561,15 +561,15 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+            ('hk_squat', 'sol', 'btc', 50000.0, 0),
         )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
@@ -589,7 +589,7 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_squat', 'btc', 'tao', 50000.0, 0),
+            ('hk_squat', 'btc', 'sol', 50000.0, 0),
         )
         conn.commit()
 
@@ -597,7 +597,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
@@ -630,7 +630,7 @@ class TestReplayCrownTime:
         # source in [0.1, 0.5] TAO (every sat maps above max).
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 1e10, 0),
+            ('hk_a', 'btc', 'sol', 1e10, 0),
         )
         conn.commit()
 
@@ -639,7 +639,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -652,7 +652,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=1100,
             window_end=2100,
             rewardable_hotkeys={'hk_a'},
@@ -667,7 +667,7 @@ class TestReplayCrownTime:
             store=store,
             event_index=SolanaEventIndex(store),
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -683,8 +683,8 @@ class TestReplayCrownTime:
         make_watcher(store, active={'hk_sentinel', 'hk_sane'})
         conn = store.require_connection()
         for row in (
-            ('hk_sentinel', 'btc', 'tao', 1e10, 0),
-            ('hk_sane', 'btc', 'tao', 326.0, 0),
+            ('hk_sentinel', 'sol', 'btc', 1e10, 0),
+            ('hk_sane', 'sol', 'btc', 326.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -695,8 +695,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
@@ -713,10 +713,10 @@ class TestReplayCrownTime:
         make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'btc', 'tao', 200.0, 0),
-            ('hk_b', 'btc', 'tao', 150.0, 0),
+            ('hk_a', 'sol', 'btc', 200.0, 0),
+            ('hk_b', 'sol', 'btc', 150.0, 0),
             # hk_a opts out mid-window — the zero terminator scoring now sees.
-            ('hk_a', 'btc', 'tao', 0.0, 600),
+            ('hk_a', 'sol', 'btc', 0.0, 600),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -727,8 +727,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -744,15 +744,15 @@ class TestReplayCrownTime:
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', 0.00020, 0),
+                (hk, 'btc', 'sol', 0.00020, 0),
             )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -767,15 +767,15 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 5_000),
+            ('hk_a', 'btc', 'sol', 0.00020, 5_000),
         )
         conn.commit()
 
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=10_000,
             window_end=11_000,
             rewardable_hotkeys={'hk_a'},
@@ -790,8 +790,8 @@ class TestReplayCrownTime:
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'btc', 'tao', 300.0, 0),  # A is best
-            ('hk_b', 'btc', 'tao', 200.0, 0),  # B is runner-up
+            ('hk_a', 'sol', 'btc', 300.0, 0),  # A is best
+            ('hk_b', 'sol', 'btc', 200.0, 0),  # B is runner-up
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -806,8 +806,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -825,7 +825,7 @@ class TestReplayCrownTime:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
 
@@ -835,8 +835,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -854,8 +854,8 @@ class TestReplayCrownTime:
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
         for row in (
-            ('hk_a', 'btc', 'tao', 300.0, 0),
-            ('hk_b', 'btc', 'tao', 200.0, 0),
+            ('hk_a', 'sol', 'btc', 300.0, 0),
+            ('hk_b', 'sol', 'btc', 200.0, 0),
         ):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -870,8 +870,8 @@ class TestReplayCrownTime:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -887,11 +887,13 @@ class TestSnapshotCurrentCrownHolders:
     scoring ledger: it reconstructs the same 5-tuple window state and applies
     the same boundary-squat gate."""
 
-    def _seed_rate(self, store: ValidatorStateStore, hotkey: str, rate: float) -> None:
+    def _seed_rate(
+        self, store: ValidatorStateStore, hotkey: str, rate: float, from_chain: str = 'sol', to_chain: str = 'btc'
+    ) -> None:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            (hotkey, 'btc', 'tao', rate, 0),
+            (hotkey, from_chain, to_chain, rate, 0),
         )
         conn.commit()
 
@@ -910,7 +912,7 @@ class TestSnapshotCurrentCrownHolders:
 
         rows = snapshot_current_crown_holders(v, v.block)
 
-        holders = [row[2] for row in rows[('btc', 'tao')]]
+        holders = [row[2] for row in rows[('sol', 'btc')]]
         assert holders == ['hk_funded']
         v.state_store.close()
 
@@ -925,12 +927,13 @@ class TestSnapshotCurrentCrownHolders:
             max_swap_amount=500_000_000,
             collaterals={'hk_squat': 150_000_000, 'hk_funded': 500_000_000},
         )
-        self._seed_rate(v.state_store, 'hk_squat', 50000.0)  # best rate, can't fund
-        self._seed_rate(v.state_store, 'hk_funded', 326.0)  # runner-up, can fund
+        # btc→sol (into the bounded SOL leg): the squat rate forces a 0.5-SOL leg the squatter can't fund.
+        self._seed_rate(v.state_store, 'hk_squat', 50000.0, 'btc', 'sol')  # best rate, can't fund
+        self._seed_rate(v.state_store, 'hk_funded', 326.0, 'btc', 'sol')  # runner-up, can fund
 
         rows = snapshot_current_crown_holders(v, v.block)
 
-        holders = [row[2] for row in rows[('btc', 'tao')]]
+        holders = [row[2] for row in rows[('btc', 'sol')]]
         assert holders == ['hk_funded']
         v.state_store.close()
 
@@ -957,16 +960,16 @@ class TestLedgerSnapshotAgreement:
         for hk, rate in (('hk_squat', 50000.0), ('hk_funded', 326.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', rate, 0),
+                (hk, 'btc', 'sol', rate, 0),
             )
         conn.commit()
 
-        snapshot_holders = [row[2] for row in snapshot_current_crown_holders(v, v.block)[('btc', 'tao')]]
+        snapshot_holders = [row[2] for row in snapshot_current_crown_holders(v, v.block)[('btc', 'sol')]]
         ledger = replay_crown_time_window(
             store=v.state_store,
             event_index=v.event_index,
             from_chain='btc',
-            to_chain='tao',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
@@ -1000,7 +1003,7 @@ class TestCalculateMinerRewards:
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys)
         conn = v.state_store.require_connection()
-        for direction in (('tao', 'btc'), ('btc', 'tao')):
+        for direction in (('btc', 'sol'), ('sol', 'btc')):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 ('hk_a', direction[0], direction[1], 0.00020, 0),
@@ -1009,7 +1012,7 @@ class TestCalculateMinerRewards:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC + POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1022,7 +1025,7 @@ class TestCalculateMinerRewards:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
 
@@ -1040,7 +1043,7 @@ class TestCalculateMinerRewards:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
 
@@ -1058,7 +1061,7 @@ class TestCalculateMinerRewards:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
 
@@ -1079,14 +1082,14 @@ class TestCalculateMinerRewards:
         for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', rate, 0),
+                (hk, 'sol', 'btc', rate, 0),
             )
         conn.commit()
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
@@ -1119,7 +1122,7 @@ class TestCalculateMinerRewards:
         conn.commit()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
 
@@ -1140,8 +1143,8 @@ class TestHistoricalActiveState:
         v,
         hotkey: str,
         rate: float,
-        from_chain: str = 'tao',
-        to_chain: str = 'btc',
+        from_chain: str = 'btc',
+        to_chain: str = 'sol',
         collateral: int = MIN_COLLATERAL,
     ) -> None:
         conn = v.state_store.require_connection()
@@ -1159,7 +1162,7 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         # Deactivate mid-window at block 600 (window is (100, 1100]).
@@ -1168,8 +1171,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -1185,7 +1188,7 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         watcher.apply_event(400, 'MinerActivated', {'miner': 'hk_a', 'active': True})
@@ -1193,8 +1196,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -1210,7 +1213,7 @@ class TestHistoricalActiveState:
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys, block=10_000)
         self.seed_one_miner(v, 'hk_a', 0.00020)
-        self.seed_one_miner(v, 'hk_a', 0.00020, from_chain='btc', to_chain='tao')
+        self.seed_one_miner(v, 'hk_a', 0.00020, from_chain='sol', to_chain='btc')
         # Deactivation happens *after* window_end (=10_000). The replay
         # window is (8_800, 10_000], so this transition is outside it.
         v.event_watcher.apply_event(10_500, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -1218,7 +1221,7 @@ class TestHistoricalActiveState:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # Full pool across both directions goes to hk_a (uid 0).
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC + POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1230,7 +1233,7 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         watcher.apply_event(300, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -1240,8 +1243,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -1258,7 +1261,7 @@ class TestHistoricalActiveState:
         for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', rate, 0),
+                (hk, 'sol', 'btc', rate, 0),
             )
         conn.commit()
         watcher.apply_event(500, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -1266,8 +1269,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -1283,7 +1286,7 @@ class TestHistoricalActiveState:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         # Deactivate inside the [block - SCORING_WINDOW_BLOCKS, block] window so
@@ -1295,7 +1298,7 @@ class TestHistoricalActiveState:
         # hk_a is the only miner with a rate, so it takes the entire tao→btc
         # pool for the blocks it held crown. btc→tao pool gets nothing (no
         # rates posted) and recycles.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         # Everything else recycles: btc→tao pool.
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
@@ -1308,7 +1311,7 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         # Pre-window activation at block 50.
@@ -1317,8 +1320,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -1334,7 +1337,7 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         watcher.apply_event(50, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -1342,8 +1345,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='tao',
-            to_chain='btc',
+            from_chain='btc',
+            to_chain='sol',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
@@ -1362,12 +1365,12 @@ class TestHistoricalActiveState:
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_b', 'btc', 'tao', 200.0, 0),
+            ('hk_b', 'sol', 'btc', 200.0, 0),
         )
         # A's rate posted at block 500 — same block as their activation.
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 300.0, 500),
+            ('hk_a', 'sol', 'btc', 300.0, 500),
         )
         conn.commit()
         watcher.apply_event(500, 'MinerActivated', {'miner': 'hk_a', 'active': True})
@@ -1375,8 +1378,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -1417,7 +1420,7 @@ class TestHistoricalActiveState:
         for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', rate, 0),
+                (hk, 'sol', 'btc', rate, 0),
             )
         conn.commit()
         # At block 500: A both deactivates and picks up a swap. Both events
@@ -1430,8 +1433,8 @@ class TestHistoricalActiveState:
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
-            from_chain='btc',
-            to_chain='tao',
+            from_chain='sol',
+            to_chain='btc',
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
@@ -1455,7 +1458,7 @@ class TestHistoricalActiveState:
         for hk, rate in (('hk_a', 300.0), ('hk_b', 200.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'btc', 'tao', rate, 0),
+                (hk, 'sol', 'btc', rate, 0),
             )
         conn.commit()
         v.event_watcher.apply_event(9_000, 'MinerActivated', {'miner': 'hk_a', 'active': False})
@@ -1463,7 +1466,7 @@ class TestHistoricalActiveState:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # hk_b (uid 0) is the only rewardable + active miner, earns btc→tao.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1633,11 +1636,11 @@ class TestVolumeFactorHelper:
 class TestCapacityWeighting:
     """End-to-end capacity weighting via calculate_miner_rewards."""
 
-    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+    def seed_sol_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            (hotkey, 'tao', 'btc', rate, 0),
+            (hotkey, 'btc', 'sol', rate, 0),
         )
         conn.commit()
 
@@ -1650,10 +1653,10 @@ class TestCapacityWeighting:
             max_swap_amount=500_000_000,
             collaterals={'hk_a': 500_000_000},
         )
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # hk_a holds 100% of tao→btc crown, full capacity, eligible, no volume penalty.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_quarter_capacity_pays_quarter(self, tmp_path: Path):
@@ -1665,13 +1668,13 @@ class TestCapacityWeighting:
             max_swap_amount=500_000_000,
             collaterals={'hk_a': 125_000_000},
         )
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.25, atol=1e-6)
-        # Pool conservation: hk_a got POOL_TAO_BTC*0.25; the rest of both buckets
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.25, atol=1e-6)
+        # Pool conservation: hk_a got POOL_BTC_SOL*0.25; the rest of both buckets
         # and the unallocated pool all recycle, so recycle = 1 - that share.
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_TAO_BTC * 0.25, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_SOL * 0.25, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1684,9 +1687,9 @@ class TestCapacityWeighting:
             max_swap_amount=500_000_000,
             collaterals={'hk_a': 1_000_000_000},
         )
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_zero_collateral_zeros_reward(self, tmp_path: Path):
@@ -1697,7 +1700,7 @@ class TestCapacityWeighting:
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)
         seed_collateral(v.event_watcher, 'hk_a', 0, block=0)  # present, known zero
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
         assert rewards[0] == 0.0
@@ -1717,14 +1720,14 @@ class TestCapacityWeighting:
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', 0.00020, 0),
+                (hk, 'btc', 'sol', 0.00020, 0),
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Both split crown 50/50. A's capacity = 1.0, B's = 0.2.
         # A earns pool * 0.5 * 1.0; B earns pool * 0.5 * 0.2.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5 * 1.0, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * 0.5 * 0.2, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5 * 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * 0.5 * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_cold_start_max_swap_zero_is_fail_safe(self, tmp_path: Path):
@@ -1732,10 +1735,10 @@ class TestCapacityWeighting:
         Critical: a freshly restarted validator must not zero every miner."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)  # defaults: max_swap=0, no collateral lookup
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Fail-safe path: capacity_factor = 1.0 regardless of collateral.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_unknown_collateral_fails_open(self, tmp_path: Path):
@@ -1747,9 +1750,9 @@ class TestCapacityWeighting:
         (the collateral-baseline bug). Absent != zero."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)  # no collaterals dict → absent
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_scoring_does_not_call_contract_for_collateral(self, tmp_path: Path):
@@ -1765,10 +1768,10 @@ class TestCapacityWeighting:
             collaterals={'hk_a': 500_000_000},
         )
         conn = v.state_store.require_connection()
-        for from_c, to_c in (('tao', 'btc'), ('btc', 'tao')):
+        for from_c, to_c in (('btc', 'sol'), ('sol', 'btc')):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                ('hk_a', from_c, to_c, 0.00020 if from_c == 'tao' else 200.0, 0),
+                ('hk_a', from_c, to_c, 0.00020 if (from_c, to_c) == ('btc', 'sol') else 200.0, 0),
             )
         conn.commit()
         # Scoring sources collateral from the per-block event series, never a
@@ -1784,10 +1787,10 @@ class TestCapacityWeighting:
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 100_000_000})
         v.solana_config_cache.max_swap_amount.side_effect = RuntimeError('rpc down')
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Fail-safe: capacity factor 1.0 → hk_a earns the full tao→btc pool.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
 
@@ -1848,11 +1851,11 @@ class TestWeightingTraceRecorders:
 class TestVolumeWeighting:
     """End-to-end volume weighting via calculate_miner_rewards."""
 
-    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+    def seed_sol_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            (hotkey, 'tao', 'btc', rate, 0),
+            (hotkey, 'btc', 'sol', rate, 0),
         )
         conn.commit()
 
@@ -1864,8 +1867,8 @@ class TestVolumeWeighting:
         swap_id: int = 1,  # retained for call-site compatibility; ignored (cumulative on-chain ledger)
         resolved_block: int = 9_900,  # ignored — MinerDirectionStats has no per-swap block window
         completed: bool = True,
-        from_chain: str = 'tao',
-        to_chain: str = 'btc',
+        from_chain: str = 'btc',
+        to_chain: str = 'sol',
         to_amount: int | None = None,
     ) -> None:
         """Seed realized per-direction volume on the on-chain ``MinerDirectionStats``
@@ -1886,24 +1889,24 @@ class TestVolumeWeighting:
         """Total network volume = 0 → factor 1.0 for all crown earners."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # No swaps → factor = 1.0 → full crown reward.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_idle_crown_holder_loses_alpha(self, tmp_path: Path):
         """A holds 100% crown, B serves 100% volume → A factor = (1 - α)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         # B doesn't post a rate → never holds crown.
         self.insert_volume(v, 'hk_b', tao_amount=1_000_000_000, swap_id=1)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A's vol_share = 0, crown_share = 1.0 → participation = 0 → vol_factor = 0.5.
         # Volume>0 in this direction → w_a=0.8/w_b=0.2; A's qv_share is 0, so
         # A = 0.8·(pool·0.5). B has crown_share = 0 → no crown reward to multiply.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.8 * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
@@ -1917,15 +1920,15 @@ class TestVolumeWeighting:
         for hk in ('hk_a', 'hk_b'):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hk, 'tao', 'btc', 0.00020, 0),
+                (hk, 'btc', 'sol', 0.00020, 0),
             )
         conn.commit()
         self.insert_volume(v, 'hk_a', tao_amount=500_000_000, swap_id=1)
         self.insert_volume(v, 'hk_b', tao_amount=500_000_000, swap_id=2)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Both 50/50 on crown and volume → participation 1.0 → factor 1.0 each.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.5, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_TAO_BTC * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_over_serving_capped_no_bonus(self, tmp_path: Path):
@@ -1938,19 +1941,19 @@ class TestVolumeWeighting:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 200.0, 0),
+            ('hk_a', 'sol', 'btc', 200.0, 0),
         )
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_b', 'btc', 'tao', 100.0, 0),
+            ('hk_b', 'sol', 'btc', 100.0, 0),
         )
         conn.commit()
-        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='btc', to_chain='tao')
-        self.insert_volume(v, 'hk_b', tao_amount=900_000_000, swap_id=2, from_chain='btc', to_chain='tao')
+        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', tao_amount=900_000_000, swap_id=2, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → vol_factor = 0.55.
         # w_a=0.8/w_b=0.2: 0.8·(pool·0.55) + 0.2·(pool·0.1) = pool·0.46.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.46, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.46, atol=1e-6)
         # B: crown_share = 0 → factor moot, no reward to multiply.
         assert rewards[1] == 0.0
         v.state_store.close()
@@ -1964,11 +1967,11 @@ class TestVolumeWeighting:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 200.0, 0),
+            ('hk_a', 'sol', 'btc', 200.0, 0),
         )
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_b', 'btc', 'tao', 150.0, 0),
+            ('hk_b', 'sol', 'btc', 150.0, 0),
         )
         conn.commit()
         # Window is (9700, 10000]. A busy block 9_800..9_860 (60 blocks within
@@ -1978,22 +1981,22 @@ class TestVolumeWeighting:
         # outcome and the busy delta directly.
         v.event_watcher.apply_busy_delta(9_800, 'hk_a', +1)
         v.event_watcher.apply_busy_delta(9_860, 'hk_a', -1)
-        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='btc', to_chain='tao')
-        self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='btc', to_chain='tao')
+        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
         # A participation = 0.2/0.8 = 0.25 → vol_factor 0.625; B → vol_factor 1.0.
         # w_a=0.8/w_b=0.2 (volume>0): A = 0.8·(0.8·0.625) + 0.2·0.2 = 0.44·pool.
         #                              B = 0.8·(0.2·1.0)  + 0.2·0.8 = 0.32·pool.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO * 0.44, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_TAO * 0.32, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.44, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_SOL_BTC * 0.32, atol=1e-6)
         v.state_store.close()
 
     def test_timed_out_swaps_dont_count_as_volume(self, tmp_path: Path):
         """A timed-out swap contributes no volume — only completed swaps do."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         self.insert_volume(
             v,
             'hk_a',
@@ -2006,7 +2009,7 @@ class TestVolumeWeighting:
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Eligible solo crown holder, zero counted volume → idle-network
         # short-circuit → factor 1.0 → full tao→btc pool.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_volume_split_per_direction(self, tmp_path: Path):
@@ -2015,12 +2018,12 @@ class TestVolumeWeighting:
         direction's ``from_amount`` is read independently off MinerDirectionStats."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
-        self.seed_tao_btc_crown(v, 'hk_a')
-        self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1, from_chain='tao', to_chain='btc')
-        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2, from_chain='btc', to_chain='tao')
+        self.seed_sol_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1, from_chain='btc', to_chain='sol')
+        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2, from_chain='sol', to_chain='btc')
         vols = build_direction_volumes(v.solana_client, v.metagraph)
-        assert vols['hk_a'][('tao', 'btc')].from_amount == 300_000_000
-        assert vols['hk_a'][('btc', 'tao')].from_amount == 200_000_000
+        assert vols['hk_a'][('btc', 'sol')].from_amount == 300_000_000
+        assert vols['hk_a'][('sol', 'btc')].from_amount == 200_000_000
         v.state_store.close()
 
     def test_per_direction_volume_isolates_markets(self, tmp_path: Path):
@@ -2033,17 +2036,17 @@ class TestVolumeWeighting:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'tao', 200.0, 0),
+            ('hk_a', 'sol', 'btc', 200.0, 0),
         )
         conn.commit()
         # A serves all of btc→tao. B floods tao→btc but earns no crown there.
-        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='btc', to_chain='tao')
-        self.insert_volume(v, 'hk_b', tao_amount=9_000_000_000, swap_id=2, from_chain='tao', to_chain='btc')
+        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', tao_amount=9_000_000_000, swap_id=2, from_chain='btc', to_chain='sol')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Old direction-blind logic: A vol_share = 0.011 of total network,
-        # crown_share = 1.0 → factor 0.5055 → reward ≈ POOL_BTC_TAO * 0.5055.
+        # crown_share = 1.0 → factor 0.5055 → reward ≈ POOL_SOL_BTC * 0.5055.
         # New per-direction logic: A is sole btc→tao server, factor = 1.0.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
@@ -2052,10 +2055,10 @@ class TestVolumeWeighting:
         carries the direction but contributes no volume (vol_share stays 0)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
-        v.solana_client.add_direction_stats('hk_a', from_amount=0, to_amount=0, from_chain='tao', to_chain='btc')
+        v.solana_client.add_direction_stats('hk_a', from_amount=0, to_amount=0, from_chain='btc', to_chain='sol')
         vols = build_direction_volumes(v.solana_client, v.metagraph)
-        assert vols['hk_a'][('tao', 'btc')].from_amount == 0
-        assert vols['hk_a'][('tao', 'btc')].vwap == 0.0  # zero from-leg → guarded
+        assert vols['hk_a'][('btc', 'sol')].from_amount == 0
+        assert vols['hk_a'][('btc', 'sol')].vwap == 0.0  # zero from-leg → guarded
         v.state_store.close()
 
 
@@ -2072,11 +2075,11 @@ class TestRewardShapeWeights:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         v.solana_client.add_direction_stats(
-            'hk_a', from_amount=500_000_000, to_amount=100_000, from_chain='tao', to_chain='btc'
+            'hk_a', from_amount=500_000_000, to_amount=100_000, from_chain='btc', to_chain='sol'
         )
         return v
 
@@ -2086,7 +2089,7 @@ class TestRewardShapeWeights:
         components equal the pool — it earns the whole pool, same as crown-only."""
         v = self._solo_crown_with_volume(tmp_path)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_wb_positive_shifts_weight_toward_volume(self, tmp_path: Path, monkeypatch):
@@ -2109,7 +2112,7 @@ class TestRewardShapeWeights:
 
         # Crown share 1.0, vol_share 1.0 → qv component = pool. Adds 0.5·pool.
         assert weighted[0] > baseline[0]
-        np.testing.assert_allclose(weighted[0], baseline[0] + 0.5 * POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(weighted[0], baseline[0] + 0.5 * POOL_BTC_SOL, atol=1e-6)
 
 
 class TestCrevReference:
@@ -2132,13 +2135,13 @@ class TestCrevReference:
         v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
         # The holder's OWN windowed realized clearing rate = 500.
         f, t = self._legs(self.REALIZED)
-        v.state_store.insert_clearing_rate(0, 'hk_a', 'tao', 'btc', f, t)
+        v.state_store.insert_clearing_rate(0, 'hk_a', 'btc', 'sol', f, t)
         # A cluster of other-miner swaps at the target rate. With ≥9 of them the
         # holder's lone 500 lands in the trimmed tail, so the reference == target.
         if reference_rate is not None:
             rf, rt = self._legs(reference_rate)
             for i in range(n_ref):
-                v.state_store.insert_clearing_rate(0, f'ref{i}', 'tao', 'btc', rf, rt)
+                v.state_store.insert_clearing_rate(0, f'ref{i}', 'btc', 'sol', rf, rt)
         return v
 
     def test_below_reference_volume_penalized(self, tmp_path: Path):
@@ -2147,11 +2150,11 @@ class TestCrevReference:
         reference = 480.0  # tao→btc: clearing at 500 vs reference 480 is worse for takers
         v = self._solo(tmp_path, reference)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        q = scoring_mod.quality_curve(scoring_mod.rate_advantage('tao', 'btc', self.REALIZED, reference))
+        q = scoring_mod.quality_curve(scoring_mod.rate_advantage('btc', 'sol', self.REALIZED, reference))
         assert 0.0 < q < 1.0  # in the ramp, not floored
-        expected = POOL_TAO_BTC * (0.8 + 0.2 * q)
+        expected = POOL_BTC_SOL * (0.8 + 0.2 * q)
         np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
-        assert rewards[0] < POOL_TAO_BTC
+        assert rewards[0] < POOL_BTC_SOL
         v.state_store.close()
 
     def test_above_reference_capped_full_pool(self, tmp_path: Path):
@@ -2159,7 +2162,7 @@ class TestCrevReference:
         crown already rewards good rates), so the holder earns the full pool."""
         v = self._solo(tmp_path, 550.0)  # clearing at 500 vs reference 550 is better
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_thin_history_pays_volume_at_par(self, tmp_path: Path):
@@ -2169,7 +2172,7 @@ class TestCrevReference:
         the old stale-feed path had."""
         v = self._solo(tmp_path, None)  # no reference cluster → 1 sample < min_swaps
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_quality_penalty_recycles_remainder(self, tmp_path: Path):
@@ -2179,7 +2182,7 @@ class TestCrevReference:
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         # Below-pool reward → strictly positive recycle on top of the idle btc→tao pool.
-        assert rewards[RECYCLE_UID] > POOL_BTC_TAO
+        assert rewards[RECYCLE_UID] > POOL_SOL_BTC
         v.state_store.close()
 
     def test_reference_is_deterministic_across_runs(self, tmp_path: Path):
@@ -2210,17 +2213,17 @@ class TestCapacityVolumeInteraction:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'tao', 'btc', 0.00020, 0),
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
         # B serves some volume in A's market (tao→btc) so A's vol_share = 0.
         v.solana_client.add_direction_stats(
-            'hk_b', from_amount=500_000_000, to_amount=500_000_000, from_chain='tao', to_chain='btc'
+            'hk_b', from_amount=500_000_000, to_amount=500_000_000, from_chain='btc', to_chain='sol'
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: w_a 0.8 × pool × crown 1.0 × eligible 1 × capacity 0.5 × volume_factor 0.5.
         # A serves no volume (B does), so A's w_b slice is 0 → only the crown term.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.8 * 1.0 * 0.5 * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 1.0 * 0.5 * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2234,14 +2237,14 @@ class TestCapacityVolumeInteraction:
         )
         conn = v.state_store.require_connection()
         for hk, rate in (('hk_a', 0.00020), ('hk_b', 200.0)):
-            from_c, to_c = ('tao', 'btc') if rate < 1 else ('btc', 'tao')
+            from_c, to_c = ('btc', 'sol') if rate < 1 else ('sol', 'btc')
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hk, from_c, to_c, rate, 0),
             )
         conn.commit()
         v.solana_client.add_direction_stats(
-            'hk_b', from_amount=400_000_000, to_amount=400_000_000, from_chain='btc', to_chain='tao'
+            'hk_b', from_amount=400_000_000, to_amount=400_000_000, from_chain='sol', to_chain='btc'
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
@@ -2260,7 +2263,7 @@ class TestEligibilityGateEndToEnd:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            (hotkey, 'btc', 'tao', rate, 0),
+            (hotkey, 'sol', 'btc', rate, 0),
         )
         conn.commit()
 
@@ -2280,7 +2283,7 @@ class TestEligibilityGateEndToEnd:
         v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS, 0)})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_at_failure_cap_still_eligible(self, tmp_path: Path):
@@ -2290,7 +2293,7 @@ class TestEligibilityGateEndToEnd:
         v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (8, MAX_FAILED_SWAPS)})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_TAO, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_one_past_failure_cap_zero_reward(self, tmp_path: Path):
@@ -2324,11 +2327,11 @@ class TestHistoricalCollateralReplay:
     retroactively boost the capacity multiplier on crown they've already
     earned."""
 
-    def seed_tao_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
+    def seed_sol_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            (hotkey, 'tao', 'btc', rate, 0),
+            (hotkey, 'btc', 'sol', rate, 0),
         )
         conn.commit()
 
@@ -2344,7 +2347,7 @@ class TestHistoricalCollateralReplay:
             max_swap_amount=500_000_000,
             collaterals={'hk_a': 100_000_000},  # held throughout the window
         )
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         # Top-up fires *after* window_end (= 10_000). Window is (9_700, 10_000].
         v.event_watcher.apply_event(
             10_500,
@@ -2353,7 +2356,7 @@ class TestHistoricalCollateralReplay:
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         # capacity_factor = 100M / 500M = 0.2; pool 0.5 → reward 0.1.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.2, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_mid_window_topup_blends_capacity(self, tmp_path: Path):
@@ -2369,7 +2372,7 @@ class TestHistoricalCollateralReplay:
             max_swap_amount=500_000_000,
             collaterals={'hk_a': 125_000_000},  # window-start anchor
         )
-        self.seed_tao_btc_crown(v, 'hk_a')
+        self.seed_sol_btc_crown(v, 'hk_a')
         # SCORING_WINDOW_BLOCKS = 300 → window is (9_700, 10_000]. Midpoint
         # 9_850 splits credit 150/150 between low and full capacity.
         v.event_watcher.apply_event(
@@ -2379,7 +2382,7 @@ class TestHistoricalCollateralReplay:
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
-        np.testing.assert_allclose(rewards[0], POOL_TAO_BTC * 0.625, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.625, atol=1e-6)
         v.state_store.close()
 
 
@@ -2402,10 +2405,10 @@ class TestNonEarnerDiagnosis:
         # collateral is a known 0 → insufficient_collateral, NOT outbid.
         reason = diagnose_non_earner(
             'hk',
-            {('tao', 'btc'): 279.3},
+            {('btc', 'sol'): 279.3},
             eligible=True,
             ever_active={'hk'},
-            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 0},
             min_swap_rao=100_000_000,
             max_swap_rao=500_000_000,
@@ -2417,10 +2420,10 @@ class TestNonEarnerDiagnosis:
 
         reason = diagnose_non_earner(
             'hk',
-            {('tao', 'btc'): 279.3},
+            {('btc', 'sol'): 279.3},
             eligible=True,
             ever_active={'hk'},
-            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={},  # absent → unknown
             min_swap_rao=100_000_000,
             max_swap_rao=500_000_000,
@@ -2433,10 +2436,10 @@ class TestNonEarnerDiagnosis:
         # tao→btc lower-wins: own 281 is worse than best 280 → outbid.
         reason = diagnose_non_earner(
             'hk',
-            {('tao', 'btc'): 281.0},
+            {('btc', 'sol'): 281.0},
             eligible=True,
             ever_active={'hk'},
-            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
             min_swap_rao=100_000_000,
             max_swap_rao=500_000_000,
@@ -2448,10 +2451,10 @@ class TestNonEarnerDiagnosis:
 
         reason = diagnose_non_earner(
             'hk',
-            {('tao', 'btc'): 279.3},
+            {('btc', 'sol'): 279.3},
             eligible=True,
             ever_active={'hk'},
-            direction_traces={('tao', 'btc'): self._trace(280.0)},
+            direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
             min_swap_rao=100_000_000,
             max_swap_rao=500_000_000,
@@ -2517,7 +2520,7 @@ class TestCrownPredicateParity:
 
     # 0.1 / 0.5 TAO — the live on-chain swap bounds.
     BOUNDS = [(0, 0), (100_000_000, 500_000_000)]
-    DIRECTIONS = [('btc', 'tao'), ('tao', 'btc')]
+    DIRECTIONS = [('sol', 'btc'), ('btc', 'sol')]
     RATES = [0.00015, 1.0, 345.0, 50_000_000.0, 1e10, 0.0, -1.0, float('inf')]
 
     def _reference(self, from_chain, to_chain, min_rao, max_rao, collaterals):
@@ -2527,7 +2530,7 @@ class TestCrownPredicateParity:
         def fund_ref(hotkey, rate):
             if hotkey not in collaterals:
                 return True
-            min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_rao, max_rao)
+            min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_rao, max_rao)
             return min_leg == 0 or collaterals[hotkey] >= min_leg
 
         return exec_ref, fund_ref
@@ -2551,16 +2554,16 @@ class TestCrownPredicateParity:
 
     def test_fail_open_on_absent_collateral(self):
         # absent != zero — a miner with no recorded baseline must not be dropped.
-        _, can_fund = make_crown_predicates('btc', 'tao', 100_000_000, 500_000_000, {})
+        _, can_fund = make_crown_predicates('sol', 'btc', 100_000_000, 500_000_000, {})
         assert can_fund('hk_unknown', 345.0) is True
 
     def test_drops_holder_whose_collateral_cannot_fund_min_leg(self):
         # 1-rao collateral can't cover any real in-band leg → boundary-squat drop;
         # a richly-funded miner at the same rate passes.
         collaterals = {'hk_poor': 1, 'hk_rich': 10_000_000_000}
-        _, can_fund = make_crown_predicates('btc', 'tao', 100_000_000, 500_000_000, collaterals)
+        _, can_fund = make_crown_predicates('sol', 'btc', 100_000_000, 500_000_000, collaterals)
         rate = 345.0
-        min_leg = min_executable_tao_leg(rate, 'btc', 'tao', 100_000_000, 500_000_000)
+        min_leg = min_executable_sol_leg(rate, 'sol', 'btc', 100_000_000, 500_000_000)
         assert min_leg > 0  # rate is executable, so the gate is live
         assert can_fund('hk_poor', rate) is False
         assert can_fund('hk_rich', rate) is True

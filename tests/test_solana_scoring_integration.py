@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parents[1]
 SO = REPO / 'smart-contracts/solana/target/deploy/allways_swap_manager.so'
 PROG_KP = REPO / 'smart-contracts/solana/target/deploy/allways_swap_manager-keypair.json'
 RPC = 'http://127.0.0.1:8899'
-POOL_BTC_TAO = DIRECTION_POOLS[('btc', 'tao')]
+POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
 # Non-zero swap bounds so is_executable_rate actually fires (0/0 fails open).
 MIN_SWAP_RAO = 1_000_000
 MAX_SWAP_RAO = 100_000_000
@@ -127,7 +127,7 @@ def _activate_miner(admin, validators, rate_int):
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
     collateral = MAX_SWAP_RAO  # == max_swap → capacity_factor 1.0
     mclient.post_collateral(collateral)
-    mclient.set_quote('btc', 'tao', 'minerBTC', 'minerTAO', rate_int, 1_000)
+    mclient.set_quote('sol', 'btc', 'minerBTC', 'minerTAO', rate_int, 1_000)
     hk = _hotkey()
     mclient.bind_hotkey(bytes.fromhex(hk.public_key.hex()), hk.sign(bytes(miner.pubkey())))
     validators[0].vote_activate(miner.pubkey())
@@ -183,8 +183,8 @@ def test_scoring_round_off_solana_events(env):
     crown = replay_crown_time_window(
         store=store,
         event_index=index,
-        from_chain='btc',
-        to_chain='tao',
+        from_chain='sol',
+        to_chain='btc',
         window_start=now - 600,
         window_end=now + 60,
         rewardable_hotkeys={hka, hkb, hks},
@@ -212,7 +212,7 @@ def test_scoring_round_off_solana_events(env):
     # sentinel earning 0 proves the bounds reached the Config AND the gate fires.
     with patch('allways.validator.scoring.build_eligibility', return_value={hka: True, hkb: True, hks: True}):
         rewards2, _ = calculate_miner_rewards(v, now + 60)
-    assert rewards2[0] == pytest.approx(POOL_BTC_TAO, abs=1e-5)
+    assert rewards2[0] == pytest.approx(POOL_SOL_BTC, abs=1e-5)
     assert rewards2[1] == 0.0
     assert rewards2[2] == 0.0
     store.close()

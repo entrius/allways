@@ -54,8 +54,10 @@ SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    ('tao', 'btc'): 0.25,
-    ('btc', 'tao'): 0.25,
+    ('sol', 'btc'): 0.25,
+    ('btc', 'sol'): 0.25,
+    ('sol', 'tao'): 0.25,
+    ('tao', 'sol'): 0.25,
 }
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5

@@ -111,34 +111,34 @@ class TestBuildDirectionReferences:
 
     def test_clean_history_reference_is_the_clearing_rate(self, tmp_path: Path):
         store = make_store(tmp_path)
-        # 5 swaps btc→tao all at 500 TAO/BTC (0.001 BTC ↔ 0.5 TAO) ⇒ reference 500.
-        self._seed(store, ('btc', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)])
-        ref = build_direction_references(store, current_time=10_000)[('btc', 'tao')]
-        assert ref.reference == pytest.approx(500.0, rel=1e-6)
-        assert all(v == pytest.approx(500.0) for v in ref.miner_rates.values())
+        # 5 swaps sol→tao; both 9-dec ⇒ rate = to/from = 5e8/1e5 = 5000 TAO/SOL ⇒ reference 5000.
+        self._seed(store, ('sol', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)])
+        ref = build_direction_references(store, current_time=10_000)[('sol', 'tao')]
+        assert ref.reference == pytest.approx(5000.0, rel=1e-6)
+        assert all(v == pytest.approx(5000.0) for v in ref.miner_rates.values())
         store.close()
 
     def test_per_miner_vwap_is_volume_weighted(self, tmp_path: Path):
         store = make_store(tmp_path)
         # Enough swaps to clear the floor; hk0 trades twice at different rates.
-        self._seed(store, ('btc', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)])
-        store.insert_clearing_rate(2000, 'hk0', 'btc', 'tao', 100_000, 400_000_000)
-        ref = build_direction_references(store, current_time=10_000)[('btc', 'tao')]
-        # hk0: (0.5 + 0.4) tao / (0.001 + 0.001) btc = 450 TAO/BTC; others unchanged.
-        assert ref.miner_rates['hk0'] == pytest.approx(450.0)
-        assert ref.miner_rates['hk1'] == pytest.approx(500.0)
+        self._seed(store, ('sol', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)])
+        store.insert_clearing_rate(2000, 'hk0', 'sol', 'tao', 100_000, 400_000_000)
+        ref = build_direction_references(store, current_time=10_000)[('sol', 'tao')]
+        # hk0: (5e8 + 4e8) tao / (1e5 + 1e5) sol = 4500 TAO/SOL; others unchanged at 5000.
+        assert ref.miner_rates['hk0'] == pytest.approx(4500.0)
+        assert ref.miner_rates['hk1'] == pytest.approx(5000.0)
         store.close()
 
     def test_window_excludes_old_samples(self, tmp_path: Path):
         store = make_store(tmp_path)
         # Five fresh swaps inside the window + five ancient ones outside it.
-        self._seed(store, ('btc', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)], base_time=9000)
-        self._seed(store, ('btc', 'tao'), [(f'old{i}', 100_000, 100_000_000) for i in range(5)], base_time=1)
+        self._seed(store, ('sol', 'tao'), [(f'hk{i}', 100_000, 500_000_000) for i in range(5)], base_time=9000)
+        self._seed(store, ('sol', 'tao'), [(f'old{i}', 100_000, 100_000_000) for i in range(5)], base_time=1)
         # current_time 9100, 24h window ⇒ start 9100-86400 < 1, so all included here;
         # use a current_time far enough out that the ancient rows fall off.
         refs = build_direction_references(store, current_time=90_000)
-        ref = refs[('btc', 'tao')]
-        # Only the 5 fresh swaps (rate 500) survive the window; the ancient 1000-rate
-        # rows at block 1..5 are before 90000-86400=3600.
-        assert ref.reference == pytest.approx(500.0, rel=1e-3)
+        ref = refs[('sol', 'tao')]
+        # Only the 5 fresh swaps (rate 5000) survive the window; the ancient rows
+        # at block 1..5 are before 90000-86400=3600.
+        assert ref.reference == pytest.approx(5000.0, rel=1e-3)
         store.close()

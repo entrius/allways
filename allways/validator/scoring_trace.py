@@ -15,7 +15,7 @@ from allways.constants import (
     RECYCLE_UID,
     TAO_TO_RAO,
 )
-from allways.utils.rate import min_executable_tao_leg
+from allways.utils.rate import min_executable_sol_leg
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace
@@ -220,7 +220,7 @@ def diagnose_non_earner(
         # qualification gate dropped this miner. Collateral is the usual cause.
         if hotkey not in collaterals:
             return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
-        min_leg = min_executable_tao_leg(own, from_c, to_c, min_swap_rao, max_swap_rao)
+        min_leg = min_executable_sol_leg(own, from_c, to_c, min_swap_rao, max_swap_rao)
         have = collaterals[hotkey]
         if min_leg > 0 and have < min_leg:
             return (

@@ -46,7 +46,7 @@ from allways.constants import (
     SCORING_WINDOW_SECS,
     VOLUME_WEIGHT_ALPHA,
 )
-from allways.utils.rate import is_executable_rate, min_executable_tao_leg
+from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -784,12 +784,13 @@ def merge_replay_events(
 
 
 def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_rao, max_swap_rao, collaterals):
-    """Boundary-squat gate: a miner whose own rate forces a TAO leg larger than
-    their collateral earns no crown. Fail open on unknown collateral (absent !=
-    zero) so a missing baseline doesn't silently drop them."""
+    """Boundary-squat gate: a miner whose own rate forces a SOL leg larger than
+    their collateral earns no crown (collateral and the bounded leg are both SOL).
+    Fail open on unknown collateral (absent != zero) so a missing baseline doesn't
+    silently drop them."""
     if hotkey not in collaterals:
         return True
-    min_leg = min_executable_tao_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
+    min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_swap_rao, max_swap_rao)
     return min_leg == 0 or collaterals[hotkey] >= min_leg
 
 

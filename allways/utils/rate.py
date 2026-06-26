@@ -129,21 +129,19 @@ def is_executable_rate(
 ) -> bool:
     """True iff the rate is fundably routable in its declared direction.
 
-    Crown-eligibility gate against rates that no user can route. Routable means
-    a source >= the source chain's ``min_onchain_amount`` (dust / existential
-    deposit) maps a TAO leg into ``[min_swap_rao, max_swap_rao]`` — a rate whose
-    only in-bounds source is sub-dust (e.g. 1 sat -> 0.5 TAO at 5e7 TAO/BTC) is
-    unfundable, so unexecutable.
+    Crown-eligibility gate against rates that no user can route. The on-chain swap bounds
+    (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg** (``sol_amount``), so SOL is the
+    bounded asset and ``min_swap_rao``/``max_swap_rao`` are SOL lamports. Routable means a source >= the
+    source chain's ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
 
-    * BTC→TAO: high-side rates — even the smallest fundable sat maps above
-      ``max_swap_rao``, so no fundable source produces an in-bounds TAO leg.
-    * TAO→BTC: low-side rates — the TAO leg IS the source, so it trivially fits
-      any bounds, but the destination payout is absurd. Caught by the symmetric
-      check on ``1/rate``: if the inverse direction has no fundable source, the
-      original rate is at an extreme of the executable spectrum.
+    * X→SOL: high-side rates — even the smallest fundable source maps above ``max``, so no fundable
+      source produces an in-bounds SOL leg.
+    * SOL→X: the SOL leg IS the source, so it trivially fits any bounds, but absurd rates imply absurd
+      destinations. Caught by the symmetric check on ``1/rate``: if the inverse direction has no fundable
+      source, the original rate is at an extreme of the executable spectrum.
 
-    A bound at ``0`` is the contract's "unset" sentinel and disables that
-    side; both at 0 → permissive (no on-chain bounds yet).
+    A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 → permissive.
+    Non-SOL pairs (no SOL leg) have no bound to enforce → permissive.
     """
     if not math.isfinite(rate) or rate <= 0:
         return False
@@ -151,67 +149,59 @@ def is_executable_rate(
         return True
 
     def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
-        # For a "src → tao" direction at ``forward_rate`` (tao per src), is
-        # there an src amount that is fundable on-chain (>= the chain's
-        # min_onchain_amount) whose TAO leg lands in bounds?
+        # For a "src → sol" direction at ``forward_rate`` (sol per src), is there an src amount that is
+        # fundable on-chain (>= the chain's min_onchain_amount) whose SOL leg lands in bounds?
         src = get_chain(src_chain)
-        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain('sol').decimals - src.decimals)
         denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
-            # rate × decimal_factor overflowed (e.g. 1.797e308 × 10) → smallest
-            # positive integer source already maps above any finite max bound.
+            # rate × decimal_factor overflowed → smallest positive integer source already maps above max.
             return False
-        # Floor at the source chain's dust/existential minimum: a rate whose only
-        # in-bounds source is below it (e.g. 1 sat) is unfundable, so unexecutable.
+        # Floor at the source chain's dust/existential minimum: a rate whose only in-bounds source is
+        # below it (e.g. 1 sat) is unfundable, so unexecutable.
         min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_rao) / denom))
         if max_swap_rao <= 0:
             return True
         max_source = math.floor(max_swap_rao / denom)
         return min_source <= max_source
 
-    if to_chain == 'tao':
-        # Forward into TAO: dest_rao = source_units × rate × 10**(tao_dec - src_dec).
+    if to_chain == 'sol':
+        # Forward into SOL: sol_lamports = source_units × rate × 10**(sol_dec - src_dec).
         return _has_integer_routable_source(rate, from_chain)
 
-    if from_chain == 'tao' and to_chain != 'tao':
-        # Reverse out of TAO: the TAO leg is the source itself, so any positive
-        # rao in [min, max] is trivially in bounds — but absurd-low rates
-        # (e.g. 1e-8 TAO/BTC) imply destinations so large no rational user
-        # would route, and the miner can post them just to win the
-        # lowest-rate-wins crown. Treat ``1/rate`` as a ``to_chain → tao`` rate
-        # and apply the same integer-routability check by symmetry: if the
-        # inverse direction has no routable source either, the original rate
-        # is at an extreme of the executable spectrum.
-        if rate <= 0:
-            return False
+    if from_chain == 'sol' and to_chain != 'sol':
+        # Reverse out of SOL: the SOL leg is the source itself, so any positive lamport in [min, max] is
+        # trivially in bounds — but absurd rates imply destinations so large no rational user would route,
+        # and the miner can post them just to win the lowest-rate-wins crown. Treat ``1/rate`` as a
+        # ``to_chain → sol`` rate and apply the same integer-routability check by symmetry.
         inverse = 1.0 / rate
         if not math.isfinite(inverse) or inverse <= 0:
             return False
         return _has_integer_routable_source(inverse, to_chain)
 
-    # Non-TAO pairs have no TAO-leg bound to enforce.
+    # Non-SOL pairs have no SOL-leg bound to enforce.
     return True
 
 
-def min_executable_tao_leg(
+def min_executable_sol_leg(
     rate: float,
     from_chain: str,
     to_chain: str,
     min_swap_rao: int,
     max_swap_rao: int,
 ) -> int:
-    """Smallest TAO leg (rao) the rate produces among in-band fundable swaps.
+    """Smallest SOL leg (lamports) the rate produces among in-band fundable swaps.
 
-    Shares band math with is_executable_rate. Returns 0 when no in-band
-    fundable swap exists (rate unexecutable) — caller treats as "no constraint".
+    Shares band math with is_executable_rate; SOL is the bounded asset (``sol_amount``). Returns 0 when
+    no in-band fundable swap exists (rate unexecutable) — caller treats as "no constraint".
     """
     if not is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao):
         return 0
-    if from_chain == 'tao':
-        return max(get_chain('tao').min_onchain_amount, max(0, min_swap_rao))
-    if to_chain == 'tao':
+    if from_chain == 'sol':
+        return max(get_chain('sol').min_onchain_amount, max(0, min_swap_rao))
+    if to_chain == 'sol':
         src = get_chain(from_chain)
-        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain('sol').decimals - src.decimals)
         denom = rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0
