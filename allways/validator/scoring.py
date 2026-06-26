@@ -5,10 +5,11 @@ where ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState``
 counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. The crown
 component is ``pool × crown_share × capacity × volume_factor``; the
 quality-volume component is the pool's realized-volume share (sourced from the
-on-chain ``MinerDirectionStats`` accounts) gated by a rate-vs-market quality
-curve. ``w_b=0`` until Phase C wires the market-rate feed, so the distributed
-weights currently match the B3.3 crown-only reward. Any shortfall recycles to
-``RECYCLE_UID``. Entry point is ``score_and_reward_miners(validator)``.
+on-chain ``MinerDirectionStats`` accounts) gated by the rate-vs-market
+``rate_quality`` curve. Phase C set ``w_a=0.8 / w_b=0.2`` and wired the
+off-chain market-rate feed; a stale feed makes ``rate_quality`` neutral (1.0),
+so ``w_b`` still pays realized volume by raw share rather than zeroing anyone.
+Any shortfall recycles to ``RECYCLE_UID``. Entry is ``score_and_reward_miners``.
 """
 
 from __future__ import annotations
@@ -135,6 +136,21 @@ def contract_is_halted(self: Validator) -> bool:
     except Exception as e:
         bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
         return False
+
+
+def fetch_market_rate(self: Validator) -> Optional[float]:
+    """Best-effort live TAO/BTC for the rate-quality curve (Phase C). A missing
+    feed or any fetch failure returns None, which ``rate_quality`` treats as
+    neutral (1.0) — a dead feed must not zero rewards (matches
+    ``contract_is_halted``'s fail-open posture)."""
+    feed = getattr(self, 'market_rate_feed', None)
+    if feed is None:
+        return None
+    try:
+        return feed.tao_per_btc()
+    except Exception as e:
+        bt.logging.warning(f'market-rate fetch failed, quality neutral: {e}')
+        return None
 
 
 def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
@@ -343,9 +359,9 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # MinerDirectionStats accounts (B3.5), replacing the per-validator
     # swap_outcomes ledger. Built once, sliced per direction below.
     direction_volumes = build_direction_volumes(self.solana_client, self.metagraph)
-    # Live market rate for the rate-quality curve (Phase C). Wired to the
-    # validator's MarketRateFeed in C3; None here keeps quality neutral (1.0).
-    market_rate: Optional[float] = None
+    # Live market rate for the rate-quality curve (Phase C), fetched once per
+    # round. None (no feed / stale / failure) keeps quality neutral (1.0).
+    market_rate = fetch_market_rate(self)
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -404,6 +420,14 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             miner_crown_total[hk] = miner_crown_total.get(hk, 0.0) + blk
         network_crown_total += total_crown_dir
 
+        # W_B falls back to crown for a direction with no realized volume: the
+        # quality-volume slice has nothing to distribute, so handing it to crown
+        # keeps a quiet direction at full pool rather than recycling 20% (Phase C).
+        if total_volume_dir > 0:
+            w_a, w_b = REWARD_WEIGHT_CROWN, REWARD_WEIGHT_QUALITY_VOLUME
+        else:
+            w_a, w_b = 1.0, 0.0
+
         bt.logging.debug(
             f'V1 scoring [{from_chain}→{to_chain}]: '
             f'total_crown={total_crown_dir:.1f} blk, total_volume_rao={total_volume_dir}'
@@ -431,9 +455,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             vol_dir = volumes_dir.get(hotkey, 0)
             vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
-            # Reward = eligible × [w_a·crown + w_b·quality_volume] (B3.5). crown is
-            # the B3.3 reward (pool·share·cap·vol_factor); quality_volume is the
-            # pool's volume share × rate-quality (Phase-C stub→1.0, w_b=0 for now).
+            # Reward = eligible × [w_a·crown + w_b·quality_volume] (Phase C). crown
+            # is the B3.3 reward (pool·share·cap·vol_factor); quality_volume is the
+            # pool's volume share × rate-quality (vs the live market). w_a/w_b are
+            # the direction's effective weights (0.8/0.2, or 1.0/0.0 if idle).
             crown_component = pool * crown_share_dir * cap * vol_factor
             qv = vols_dir.get(hotkey)
             q_from = qv.from_amount if qv is not None else 0
@@ -441,13 +466,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             quality_volume_component = (
                 pool * vol_share_dir * rate_quality(from_chain, to_chain, q_from, q_to, market_rate)
             )
-            base = eligible * (
-                REWARD_WEIGHT_CROWN * crown_component
-                + REWARD_WEIGHT_QUALITY_VOLUME * quality_volume_component
-            )
+            base = eligible * (w_a * crown_component + w_b * quality_volume_component)
             # Trace baseline is the pre-volume crown reward (dashboard attributes
             # the volume penalty off the gap to the final weighted reward).
-            unweighted_rewards[uid] += eligible * REWARD_WEIGHT_CROWN * pool * crown_share_dir * cap
+            unweighted_rewards[uid] += eligible * w_a * pool * crown_share_dir * cap
             rewards[uid] += base
             if vol_factor < 1.0:
                 bt.logging.debug(
