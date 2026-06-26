@@ -229,6 +229,9 @@ IX_DISCRIMINATORS = {
     'set_min_swap_amount': bytes([189, 59, 139, 62, 167, 12, 58, 88]),
     'set_reservation_ttl': bytes([108, 189, 90, 167, 113, 34, 82, 140]),
     'withdraw_treasury': bytes([40, 63, 122, 158, 144, 216, 83, 96]),
+    # Phase 9 — swap intake (reservation-lottery pool).
+    'open_or_request': bytes([174, 133, 208, 178, 0, 117, 73, 12]),
+    'resolve_pool': bytes([191, 164, 190, 142, 178, 198, 162, 249]),  # no args (empty body)
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -260,6 +263,17 @@ IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
 IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String)
+# Phase 9 — open_or_request arg body (resolve_pool takes none). Order = handler param order.
+IX_OPEN_OR_REQUEST_ARGS = CStruct(
+    'from_chain' / String,
+    'to_chain' / String,
+    'user' / Pubkey32,
+    'user_from_addr' / String,
+    'user_to_addr' / String,
+    'sol_amount' / U64,
+    'from_amount' / U128,
+    'to_amount' / U128,
+)
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
