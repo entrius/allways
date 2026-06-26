@@ -243,8 +243,9 @@ class BaseValidatorNeuron(BaseNeuron):
             return
 
         bt.logging.info('Metagraph updated, re-syncing hotkeys and moving averages')
-        for uid, hotkey in enumerate(self.hotkeys):
-            if hotkey != self.metagraph.hotkeys[uid]:
+        # zip truncates to the shorter list: a shrunk metagraph would otherwise overrun metagraph.hotkeys[uid].
+        for uid, (hotkey, new_hotkey) in enumerate(zip(self.hotkeys, self.metagraph.hotkeys)):
+            if hotkey != new_hotkey:
                 self.scores[uid] = 0
 
         if len(self.hotkeys) < len(self.metagraph.hotkeys):
