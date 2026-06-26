@@ -176,24 +176,39 @@ async def handle_swap_reserve(
     validator: 'Validator',
     synapse: SwapReserveSynapse,
 ) -> SwapReserveSynapse:
-    """Reservation intake moved on-chain to Solana — STUB until Phase 9.
+    """User asks a validator to enter the on-chain reservation lottery on their behalf — FCFS stub.
 
-    The substrate ``vote_reserve`` path is decommissioned. On Solana a user reserves a
-    miner through the contract's reservation pool (``open_or_request`` → permissionless
-    stake-weighted ``resolve_pool`` draw), not a validator axon vote, so this handler
-    rejects until that taker intake is wired.
+    The lottery (`open_or_request` → permissionless stake-weighted `resolve_pool`) is open to anyone, but
+    a high-stake validator entering for a user gives that user far better odds than entering alone. So the
+    product flow is user → validator → on-behalf-of contract entry → validator wins the reservation for the
+    user. This handler is that user→validator entry point.
+
+    Intentionally simple for now: first-come-first-served, reject if the miner is unbound / inactive / busy;
+    otherwise accept. The actual on-behalf-of `open_or_request` call and the future request-window selection
+    (pick one of many in-window user requests) are deliberately NOT built here — no queue.
     """
-    # TODO(phase9): wire the Solana reservation-pool intake here, or retire this synapse.
     miner = synapse.miner_hotkey
     label = miner_label(validator, miner)
     direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
     ctx = f'[{label}] SwapReserve {direction}'
-    reject_synapse(
-        synapse,
-        'Reservations have moved to the Solana reservation pool (lands in Phase 9); '
-        'the substrate reserve path is retired.',
-        ctx,
-    )
+    try:
+        miner_pk = resolve_miner_pubkey(validator, miner)
+        if miner_pk is None:
+            reject_synapse(synapse, 'Miner hotkey is not bound to a Solana miner', ctx)
+            return synapse
+        miner_state = validator.solana_client.get_miner_state(miner_pk)
+        if miner_state is None or not miner_state.active:
+            reject_synapse(synapse, 'Miner is not active', ctx)
+            return synapse
+        if miner_state.has_active_swap:
+            reject_synapse(synapse, 'Miner is busy with another swap; try again shortly', ctx)
+            return synapse
+        # FCFS accept. On-behalf-of lottery entry (open_or_request) + window selection land later.
+        synapse.accepted = True
+        bt.logging.info(f'{ctx}: accepted (FCFS stub — on-chain lottery entry pending)')
+    except Exception as e:
+        bt.logging.error(f'{ctx} failed: {e}')
+        reject_synapse(synapse, str(e))
     return synapse
 
 
