@@ -105,6 +105,11 @@ RATE_REFERENCE_TRIM_FRAC = 0.10  # drop the top & bottom 10% of weight before av
 RATE_REFERENCE_MINER_CAP_FRAC = 0.25  # cap any single miner at 25% of total reference weight
 RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ reference undefined ⇒ neutral
 
+# ─── Collateral ──────────────────────────────────────────
+# Collateral a miner must post to back a swap = sol_amount × this/10_000. Mirrors the contract's
+# COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
+COLLATERAL_REQUIREMENT_BPS = 11_000
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
