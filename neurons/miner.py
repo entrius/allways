@@ -44,7 +44,15 @@ class Miner(BaseMinerNeuron):
         solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         self.solana_pubkey = self.solana_client.keypair.pubkey()
-        self.chain_providers = create_chain_providers(check=True, subtensor=self.subtensor, wallet=self.wallet)
+        # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer
+        # user↔miner transfer; separate from the program client that never custodies swap assets).
+        self.chain_providers = create_chain_providers(
+            check=True,
+            subtensor=self.subtensor,
+            wallet=self.wallet,
+            solana_rpc_url=solana_rpc_url,
+            solana_keypair=self.solana_client.keypair,
+        )
 
         # Bind the bt hotkey ↔ Solana pubkey so on-chain state (keyed by pubkey) attributes to this UID.
         self.ensure_hotkey_bound()

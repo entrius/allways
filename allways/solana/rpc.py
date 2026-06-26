@@ -64,6 +64,13 @@ class SolanaRpc:
         res = self._call('getProgramAccounts', [str(program_id), cfg])
         return [(item['pubkey'], base64.b64decode(item['account']['data'][0])) for item in res]
 
+    def get_slot(self, commitment: str = 'confirmed') -> int:
+        return int(self._call('getSlot', [{'commitment': commitment}]))
+
+    def get_balance(self, pubkey, commitment: str = 'confirmed') -> int:
+        res = self._call('getBalance', [str(pubkey), {'commitment': commitment}])
+        return int(res['value'])
+
     def get_latest_blockhash(self, commitment: str = 'confirmed') -> str:
         res = self._call('getLatestBlockhash', [{'commitment': commitment}])
         return res['value']['blockhash']
