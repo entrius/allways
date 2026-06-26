@@ -1,6 +1,6 @@
 """AllwaysSolanaClient — read PDAs, build/send instructions, ingest events for allways_swap_manager.
 
-Hand-rolled + sync. Replaces the ink!/Substrate `AllwaysContractClient`. B0 ships all account readers +
+Hand-rolled + sync. The validator's sole on-chain client (the old ink!/Substrate client is gone). B0 ships all account readers +
 getProgramAccounts discovery + the tx build/sign/send pipeline + a representative write set (bind_hotkey,
 set_quote, post/withdraw_collateral) + an event-log ingest skeleton. The remaining ~25 instruction
 builders land in B1/B2 as the loop needs them.

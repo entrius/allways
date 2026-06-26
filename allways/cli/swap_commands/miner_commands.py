@@ -17,7 +17,6 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import RATE_PRECISION
-from allways.contract_client import ContractError
 from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
 
 
@@ -139,24 +138,34 @@ def miner_activate():
 
     from allways.synapses import MinerActivateSynapse
 
-    config, wallet, subtensor, client = get_cli_context()
+    config, wallet, subtensor, _ = get_cli_context(need_client=False)
+    _, client = get_solana_cli_context()
     netuid = config['netuid']
     hotkey = wallet.hotkey.ss58_address
+
+    def _is_active() -> bool:
+        """Resolve active flag off Solana: hotkey → bound pubkey (HotkeyBinding) → MinerState."""
+        try:
+            hk_bytes = bytes.fromhex(bt.Keypair(ss58_address=hotkey).public_key.hex())
+            binding = client.get_hotkey_binding(hk_bytes)
+            if binding is None:
+                return False
+            ms = client.get_miner_state(binding.miner)
+            return bool(ms and ms.active)
+        except Exception:
+            return False
 
     console.print(f'\n[bold]Miner Activate: {hotkey[:16]}...[/bold]\n')
 
     # Pre-flight: check if already active
-    try:
-        if client.get_miner_active_flag(hotkey):
-            console.print('[yellow]Miner is already active.[/yellow]\n')
-            return
-    except ContractError:
-        pass
+    if _is_active():
+        console.print('[yellow]Miner is already active.[/yellow]\n')
+        return
 
-    # Discover whitelisted validators from metagraph
+    # Discover serving validators from metagraph (on-chain whitelist enforced at vote time)
     dendrite = bt.Dendrite(wallet=wallet)
     with loading('Discovering validators...'):
-        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+        validator_axons = discover_validators(subtensor, netuid)
 
     if not validator_axons:
         console.print('[red]No validators found on metagraph[/red]\n')
@@ -200,12 +209,9 @@ def miner_activate():
     with loading('Checking on-chain activation...'):
         for _ in range(15):
             time.sleep(2)
-            try:
-                if client.get_miner_active_flag(hotkey):
-                    activated = True
-                    break
-            except ContractError:
-                pass
+            if _is_active():
+                activated = True
+                break
 
     if activated:
         console.print('[green]Miner activated successfully[/green]\n')

@@ -26,7 +26,6 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
 )
-from allways.contract_client import AllwaysContractClient
 from allways.solana import keys
 from allways.solana.client import AllwaysSolanaClient
 from allways.solana.events import SolanaEventIngest
@@ -41,7 +40,7 @@ from allways.validator.axon_handlers import (
     priority_swap_confirm,
     priority_swap_reserve,
 )
-from allways.validator.bounds_cache import BoundsCache, SolanaConfigCache
+from allways.validator.bounds_cache import SolanaConfigCache
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.forward import forward
 from allways.validator.solana_swap_loop import SolanaSwapLoop
@@ -120,25 +119,13 @@ class Validator(BaseValidatorNeuron):
         self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
         self.last_scored_time = max(0, int(time.time()) - SCORING_WINDOW_SECS)
 
-        # Separate subtensor/contract/providers for axon handlers (thread safety).
-        # axon_lock serialises every call on axon_subtensor's websocket so two
-        # threads can't both land in recv. Reentrant: handlers hold it, then
-        # nest a bounds_cache read (which re-acquires it via axon_contract_client).
+        # Separate subtensor + chain providers for the axon handlers (thread safety).
+        # axon_lock serialises every call on axon_subtensor's websocket so two handler
+        # threads can't both land in recv. The miner-activate / swap-confirm handlers
+        # read registration + source chains off these; scoring bounds come off Solana.
         self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_contract_client = AllwaysContractClient(
-            subtensor=self.axon_subtensor,
-            reconnect_subtensor=self.reconnect_axon_subtensor,
-            substrate_lock=self.axon_lock,
-        )
         self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
-        # Read block/bounds via axon_subtensor; the forward loop calls this too,
-        # so it shares axon_lock rather than colliding with handler threads.
-        self.bounds_cache = BoundsCache(
-            self.axon_contract_client,
-            self.axon_subtensor.get_current_block,
-            lock=self.axon_lock,
-        )
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon
@@ -189,7 +176,6 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info('Reconnecting axon subtensor...')
         old = self.axon_subtensor
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_contract_client.subtensor = self.axon_subtensor
         try:
             old.close()
         except Exception:

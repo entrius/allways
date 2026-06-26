@@ -1,22 +1,12 @@
-"""alw status - Quick dashboard showing network, wallet, and swap state."""
+"""alw status - Quick dashboard showing network, wallet, and swap state.
+
+Phase-9 stub: the pending-reservation/swap dashboard reads the on-chain
+reservation pool (Solana); the taker CLI intake is not wired yet."""
 
 import click
-from rich.table import Table
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import (
-    blocks_to_minutes_str,
-    console,
-    from_rao,
-    get_cli_context,
-    hydrate_pending_swap,
-    load_pending_swap,
-    loading,
-    probe_pending_reservation,
-    read_miner_commitments,
-)
-from allways.constants import NETUID_FINNEY
-from allways.contract_client import ContractError
+from allways.cli.swap_commands.helpers import phase9_unavailable
 
 
 @click.command('status', cls=StyledCommand)
@@ -29,113 +19,4 @@ def status_command():
     [dim]Examples:
         $ alw status[/dim]
     """
-    config, wallet, subtensor, client = get_cli_context()
-    # --netuid is handled as a global flag in main.py (apply_global_flags);
-    # by the time we get here, config['netuid'] already reflects CLI override
-    # → config file → NETUID_FINNEY fallback. No need for a per-command opt.
-    netuid = int(config.get('netuid', NETUID_FINNEY))
-
-    network = config.get('network', 'finney')
-    hotkey = wallet.hotkey.ss58_address
-
-    console.print('\n[bold]Allways Status[/bold]\n')
-
-    table = Table(show_header=False, pad_edge=False, box=None)
-    table.add_column(style='cyan', min_width=20)
-    table.add_column(style='green')
-
-    with loading('Loading status...'):
-        # Network
-        try:
-            current_block = subtensor.get_current_block()
-            table.add_row('Network', f'{network} (block {current_block})')
-        except Exception:
-            table.add_row('Network', network)
-
-        # Wallet
-        table.add_row('Wallet', f'{wallet.name} / {wallet.hotkey_str}')
-        try:
-            account_info = subtensor.substrate.query('System', 'Account', [wallet.coldkey.ss58_address])
-            account_data = account_info.value if hasattr(account_info, 'value') else account_info
-            free_balance = account_data.get('data', {}).get('free', 0)
-            table.add_row('TAO Balance', f'{from_rao(free_balance):.4f} TAO')
-        except Exception:
-            table.add_row('TAO Balance', '[dim]unable to read[/dim]')
-
-        # Active swaps
-        try:
-            active_swaps = client.get_active_swaps()
-            my_swaps = [s for s in active_swaps if s.user_hotkey == wallet.coldkey.ss58_address]
-            if my_swaps:
-                table.add_row('Your Active Swaps', str(len(my_swaps)))
-                for s in my_swaps:
-                    table.add_row(
-                        '',
-                        f'  #{s.id} send {s.from_chain.upper()} → receive {s.to_chain.upper()} [{s.status.name}]',
-                    )
-            else:
-                table.add_row('Your Active Swaps', 'None')
-        except ContractError:
-            table.add_row('Your Active Swaps', '[dim]unable to read[/dim]')
-
-        # Pending reservation
-        pending = load_pending_swap()
-        if pending:
-            hydrate_pending_swap(pending, client)
-            current_block = subtensor.get_current_block()
-            res_status = probe_pending_reservation(client, pending, current_block)
-            if res_status.kind == 'ours_active':
-                remaining = max(0, res_status.reserved_until - current_block)
-                table.add_row(
-                    'Pending Reservation',
-                    f'send {pending.from_chain.upper()} → receive {pending.to_chain.upper()} '
-                    f'({blocks_to_minutes_str(remaining)} left)',
-                )
-            elif res_status.kind == 'our_swap':
-                table.add_row(
-                    'Pending Reservation',
-                    f'[dim]became swap #{res_status.swap.id} ({res_status.swap.status.name})[/dim]',
-                )
-            elif res_status.kind == 'rpc_error':
-                table.add_row('Pending Reservation', '[dim]unable to verify[/dim]')
-            else:  # 'replaced' or 'expired'
-                table.add_row('Pending Reservation', '[dim]Expired[/dim]')
-        else:
-            table.add_row('Pending Reservation', 'None')
-
-        # Miner status
-        try:
-            collateral, is_active, has_swap, _, _ = client.get_miner_snapshot(hotkey)
-            if collateral > 0:
-                status_str = '[green]Active[/green]' if is_active else '[red]Inactive[/red]'
-                if has_swap:
-                    status_str += ' (has active swap)'
-                table.add_row('Miner Status', status_str)
-                table.add_row('Miner Collateral', f'{from_rao(collateral):.4f} TAO')
-
-                pairs = read_miner_commitments(subtensor, netuid)
-                my_pairs = [p for p in pairs if p.hotkey == hotkey]
-                if my_pairs:
-                    for p in my_pairs:
-                        src_up, dst_up = p.from_chain.upper(), p.to_chain.upper()
-                        # Direction line uses the same "send N X to get 1 Y" phrasing
-                        # as `alw miner post` and `alw swap now` so all three reports
-                        # read consistently. counter_rate=N for rev direction means
-                        # "send N dst to get 1 src" (see miner_commands.py:89).
-                        if p.rate > 0 and p.counter_rate > 0:
-                            if p.rate_str != p.counter_rate_str:
-                                rate_display = (
-                                    f'1 {src_up} → {p.rate:g} {dst_up}  |  {p.counter_rate:g} {dst_up} → 1 {src_up}'
-                                )
-                            else:
-                                rate_display = f'1 {src_up} ↔ {p.rate:g} {dst_up}'
-                        elif p.rate > 0:
-                            rate_display = f'1 {src_up} → {p.rate:g} {dst_up}'
-                        else:
-                            rate_display = f'{p.counter_rate:g} {dst_up} → 1 {src_up}'
-                        table.add_row('Miner Pair', rate_display)
-        except ContractError:
-            table.add_row('Miner Status', '[dim]unable to read[/dim]')
-
-    console.print(table)
-    console.print()
+    phase9_unavailable('Swap status dashboard')

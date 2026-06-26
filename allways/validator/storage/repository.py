@@ -54,7 +54,7 @@ class Repository(BaseRepository):
         rows: List[Tuple[str, str, str, float, int]],
         commit: bool = True,
     ) -> int:
-        """Upsert rate commitments. Rows: (hotkey, from_chain, to_chain, rate, block)."""
+        """Upsert rate quotes. Rows: (hotkey, from_chain, to_chain, rate, block)."""
         if not rows:
             return 0
         try:
