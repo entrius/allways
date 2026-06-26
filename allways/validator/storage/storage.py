@@ -67,7 +67,7 @@ class DatabaseStorage:
     ) -> StorageResult:
         """All-or-nothing flush for one scoring window.
 
-        - `rate_rows`: new rate commitments seen this round.
+        - `rate_rows`: new rate quotes seen this round.
         - `crown_rows_by_direction`: recomputed crown rows, keyed by (from, to).
         - `crown_window_bounds_by_direction`: [lo, hi) block range to wipe
           before re-upserting, keyed by (from, to). Must match the rows above.

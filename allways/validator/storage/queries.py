@@ -6,7 +6,7 @@
 # rows shaped exactly like what the daemon writes today so the dashboard's
 # read path is unchanged.
 
-# rate_history: per-miner on-chain rate commitments, append-only by (hotkey,
+# rate_history: per-miner on-chain rate quotes, append-only by (hotkey,
 # direction, block). Last-write-wins on the rate column if the same block is
 # re-emitted (matches existing sync-daemon behavior).
 BULK_UPSERT_RATE_HISTORY = """

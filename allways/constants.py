@@ -47,26 +47,61 @@ BTC_FEE_RATE_SAFETY_MULTIPLIER = 1.25
 
 # ─── Scoring ─────────────────────────────────────────────
 SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and window width
-# Cap on how far back one scoring round replays after a stall: just resume a
-# couple hours back, don't try to recover a long outage (the event-watcher only
-# reconstructs ~one window back anyway). >1 window so overshoot can't re-gap.
-MAX_SCORING_BACKFILL_BLOCKS = 2 * SCORING_WINDOW_BLOCKS  # ~2 hours at 12s/block
+# Unix-second axis for the Solana-sourced crown (B3.4): events carry blockTime,
+# not block numbers, so the crown replay window + interval crediting are in
+# seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
+SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
+MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
-CREDIBILITY_WINDOW_BLOCKS = 216_000  # ~30 days
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
     ('tao', 'btc'): 0.25,
     ('btc', 'tao'): 0.25,
 }
-# 100% → 1.0, 90% → 0.729, 80% → 0.512, 50% → 0.125
-SUCCESS_EXPONENT: int = 3
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
-# Closed swaps required for full credibility (0 → 100% linear ramp).
-CREDIBILITY_RAMP_OBSERVATIONS: int = 10
-# More than this many timed-out swaps within CREDIBILITY_WINDOW_BLOCKS hard-zeros
-# a miner's credibility (and thus their whole reward) until the old timeouts age
-# out of the rolling window. 0-2 tolerated; the 3rd timeout zeros credibility.
-CREDIBILITY_MAX_TIMEOUTS: int = 2
+# Reward-shape weights (B3.5): reward = eligible × [w_a·crown + w_b·quality_volume].
+# w_a weights the crown-time component (best-rate presence × capacity), w_b the
+# realized-volume share × rate-quality (executed throughput at fair rates). Phase C
+# turns w_b on at a conservative 0.2 so crown stays the primary driver while real
+# throughput at good rates earns weight. Kept w_a + w_b = 1 so the total distributed
+# envelope is unchanged. Too-thin on-chain clearing-rate history ⇒ rate_quality neutral
+# (1.0), so w_b still pays realized volume by raw share — it never zeroes everyone.
+REWARD_WEIGHT_CROWN: float = 0.8
+REWARD_WEIGHT_QUALITY_VOLUME: float = 0.2
+# Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
+# replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
+# it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
+# failures — a binary 0/1 multiplier, no ramp.
+MIN_SUCCESSFUL_SWAPS: int = 2
+MAX_FAILED_SWAPS: int = 2
+
+# ─── Rate-quality curve (Phase C) ────────────────────────
+# One-sided clamp mapping realized-VWAP-vs-market advantage → a quality
+# multiplier on the quality-volume reward. At/above market (within a tolerance
+# deadband) scores 1.0 — the crown already rewards best-rate presence, so
+# above-market is not paid again here. Worse-than-market ramps linearly to
+# RATE_QUALITY_MIN at RATE_QUALITY_FLOOR_ADV. Tunable without code changes.
+RATE_QUALITY_TOLERANCE_BPS = 100  # 1% deadband around the reference (spread/timing noise) → quality 1.0
+# Tightened for C-rev: both the miner's number and the reference are now REALIZED
+# clearing rates (they cluster tighter than posted rates), so a 5%-worse realized
+# rate is already a strong signal worth zeroing the w_b slice. Tunable, flagged.
+RATE_QUALITY_FLOOR_ADV = -0.05  # at 5% worse than the reference, quality bottoms out
+RATE_QUALITY_MIN = 0.0  # floor multiplier once a rate is ≥ FLOOR_ADV worse than the reference
+
+# ─── On-chain rate-quality reference (C-rev) ─────────────
+# The reference the rate-quality curve compares a miner's realized rate against
+# is computed on-chain-deterministically — a trimmed, volume-weighted,
+# per-miner-capped average of completed-swap clearing rates per direction (read
+# off the clearing_rates table). This replaces the external market feed: no
+# network, no wall-clock-of-fetch, identical across validators given identical
+# ingested history. The trim + per-miner cap are the wash-resistance — a wash
+# farmer's outlier/self-swap rates get trimmed and capped, so they can't drag
+# the reference. Below the min-swap floor the reference is undefined → quality
+# degrades to neutral 1.0 (w_b then pays realized volume by raw share).
+RATE_REFERENCE_WINDOW_SECS = 86400  # 24h — wide enough that sparse completed-swap history clears the floor
+RATE_REFERENCE_TRIM_FRAC = 0.10  # drop the top & bottom 10% of weight before averaging
+RATE_REFERENCE_MINER_CAP_FRAC = 0.25  # cap any single miner at 25% of total reference weight
+RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ reference undefined ⇒ neutral
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
@@ -141,3 +176,11 @@ RESERVATION_TTL_BLOCKS = 50  # ~10 min
 # MAX_EXTENSIONS_PER_SWAP extensions each push the deadline up to MAX_EXTENSION_BLOCKS further (not cumulative).
 # A smaller margin can discard a still-active twice-extended swap and re-send on rediscovery (#461). ~550 ≈ 1.8h.
 SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
+
+# ─── Unix-axis miner runways (B4 — Solana) ────────────────
+# The Solana swap deadline (`Swap.timeout_at`) is unix-seconds, not a block height. Port the two
+# block-denominated miner runways to seconds via the subtensor block time so they keep the same
+# wall-clock meaning. Edit these directly if validator extension cadence changes.
+SECS_PER_BLOCK = 12
+MINER_TIMEOUT_CUSHION_SECS = MINER_TIMEOUT_CUSHION_BLOCKS * SECS_PER_BLOCK
+SENT_CACHE_DISCARD_MARGIN_SECS = SENT_CACHE_DISCARD_MARGIN_BLOCKS * SECS_PER_BLOCK

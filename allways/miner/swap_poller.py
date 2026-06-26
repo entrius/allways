@@ -1,36 +1,35 @@
-"""Polls the smart contract for new swaps assigned to this miner using incremental scanning."""
+"""Polls the Solana program for swaps assigned to this miner.
 
-from typing import Dict, List, Set, Tuple
+Solana keys swaps by `swap_key` (== keccak(from_tx_hash)) and exposes them through a single
+`getProgramAccounts` snapshot per status, so there is no incremental cursor and no per-id transient
+miss to defend against (the old ink! poller scanned `get_swap(id)` one id at a time): each poll is an
+atomic, authoritative view. Whether a swap has already been handled is tracked by ``SwapFulfiller``'s
+persistent send cache — this poller reports raw on-chain state only.
+"""
+
+from typing import List, Set, Tuple
 
 import bittensor as bt
 
-from allways.classes import Swap, SwapStatus
-from allways.contract_client import AllwaysContractClient
+from allways.solana.client import SolanaSwap, _as_pubkey, swap_from_solana
 
-RESCAN_WINDOW = 16
-ACTIVE_STATUSES = (SwapStatus.ACTIVE, SwapStatus.FULFILLED)
-MAX_REFRESH_MISSES = 3
+# Statuses the miner acts on: ACTIVE needs fulfillment; FULFILLED is awaiting validator confirm but is
+# still reported so the fulfiller retains its send-cache entry until the swap closes on-chain.
+ACTIVE_STATUSES = ('Active', 'Fulfilled')
 
 
 class SwapPoller:
-    """Incrementally polls the contract for swaps assigned to this miner.
+    """Enumerates the program's swaps and returns the ones assigned to this miner."""
 
-    Uses a cursor to avoid O(N) full scans. Only fetches new swap IDs
-    since last poll, then refreshes the active set. Whether a swap has
-    already been handled is tracked by ``SwapFulfiller``'s persistent
-    send cache — this poller reports raw contract state only.
-    """
-
-    def __init__(self, contract_client: AllwaysContractClient, miner_hotkey: str):
-        self.client = contract_client
-        self.miner_hotkey = miner_hotkey
-        self.last_scanned_id = 0
-        self.active: Dict[int, Swap] = {}
-        self.active_miss_counts: Dict[int, int] = {}
+    def __init__(self, solana_client, miner_pubkey):
+        self.client = solana_client
+        self.miner_pubkey = _as_pubkey(miner_pubkey)
+        self.known: Set[str] = set()  # swap_key hexes already logged as discovered (cosmetic)
         self.last_poll_ok: bool = True
 
-    def poll(self) -> Tuple[List[Swap], List[Swap]]:
-        """Incremental poll. Returns (active, fulfilled) for this miner."""
+    def poll(self) -> Tuple[List[SolanaSwap], List[SolanaSwap]]:
+        """Snapshot poll. Returns (active, fulfilled) for this miner. On RPC failure returns ([], [])
+        with ``last_poll_ok`` False so the caller skips send-cache cleanup against an empty set."""
         try:
             result = self.poll_inner()
             self.last_poll_ok = True
@@ -40,58 +39,25 @@ class SwapPoller:
             self.last_poll_ok = False
             return [], []
 
-    def poll_inner(self) -> Tuple[List[Swap], List[Swap]]:
-        # 1. Discover new swaps since last scan
-        fresh: Set[int] = set()
-        next_id = self.client.get_next_swap_id()
-        start = max(1, min(self.last_scanned_id + 1, next_id - RESCAN_WINDOW))
-        for swap_id in range(start, next_id):
-            try:
-                swap = self.client.get_swap(swap_id)
-            except Exception as e:
-                bt.logging.debug(f'SwapPoller discovery({swap_id}) failed, will retry: {e}')
+    def _mine(self, status: str) -> List[SolanaSwap]:
+        out = []
+        for _pubkey, acct in self.client.get_swaps(status=status):
+            if _as_pubkey(acct.miner) != self.miner_pubkey:
                 continue
-            if swap and swap.miner_hotkey == self.miner_hotkey:
-                if swap.status in ACTIVE_STATUSES:
-                    if swap.id not in self.active:
-                        bt.logging.info(
-                            f'Discovered swap {swap.id}: {swap.from_chain} -> {swap.to_chain}, '
-                            f'tao_amount={swap.tao_amount}, status={swap.status.name}'
-                        )
-                    self.active[swap.id] = swap
-                    self.active_miss_counts.pop(swap.id, None)
-                    fresh.add(swap.id)
-        if next_id > 1:
-            self.last_scanned_id = next_id - 1
+            swap = swap_from_solana(acct)
+            if swap.key_hex not in self.known:
+                bt.logging.info(
+                    f'Discovered swap {swap.key_hex[:16]}: {swap.from_chain} -> {swap.to_chain}, '
+                    f'sol_amount={swap.sol_amount}, status={swap.status}'
+                )
+                self.known.add(swap.key_hex)
+            out.append(swap)
+        return out
 
-        # 2. Refresh active set — skip freshly discovered swaps, remove resolved
-        resolved: list[tuple[int, str]] = []
-        for swap_id in list(self.active):
-            if swap_id in fresh:
-                continue
-            try:
-                swap = self.client.get_swap(swap_id)
-            except Exception as e:
-                bt.logging.debug(f'SwapPoller refresh({swap_id}) failed, will retry: {e}')
-                continue
-            if swap is None:
-                misses = self.active_miss_counts.get(swap_id, 0) + 1
-                self.active_miss_counts[swap_id] = misses
-                if misses >= MAX_REFRESH_MISSES:
-                    resolved.append((swap_id, f'GONE_AFTER_{misses}_MISSES'))
-                continue
-            if swap.status not in ACTIVE_STATUSES:
-                terminal = swap.status.name
-                resolved.append((swap_id, terminal))
-            else:
-                self.active[swap_id] = swap
-                self.active_miss_counts.pop(swap_id, None)
-        for sid, terminal in resolved:
-            self.active.pop(sid, None)
-            self.active_miss_counts.pop(sid, None)
-            bt.logging.info(f'Swap {sid}: dropped from active (status={terminal})')
-
-        # 3. Return categorized by contract status
-        active_swaps = [s for s in self.active.values() if s.status == SwapStatus.ACTIVE]
-        fulfilled = [s for s in self.active.values() if s.status == SwapStatus.FULFILLED]
-        return active_swaps, fulfilled
+    def poll_inner(self) -> Tuple[List[SolanaSwap], List[SolanaSwap]]:
+        active = self._mine('Active')
+        fulfilled = self._mine('Fulfilled')
+        # Forget keys no longer present so a reused-tx swap re-logs; bounded to the live set.
+        live = {s.key_hex for s in active} | {s.key_hex for s in fulfilled}
+        self.known &= live
+        return active, fulfilled

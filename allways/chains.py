@@ -24,6 +24,10 @@ class ChainDefinition:
     # Smallest amount that can actually exist/move on-chain, in native units
     # (BTC dust floor, TAO existential deposit). 1 = no floor.
     min_onchain_amount: int = 1
+    # Replay-freshness grace (seconds): a tx is fresh iff block_time > floor - grace.
+    # Default 0 (strict >). Absorbs honest miner clock skew; MUST stay well under
+    # reservation_ttl_secs — the replay window is exactly this wide (B2).
+    replay_grace_secs: int = 0
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -49,10 +53,26 @@ CHAIN_TAO = ChainDefinition(
     # Existential deposit: accounts below this are reaped.
     min_onchain_amount=500,
 )
+CHAIN_SOL = ChainDefinition(
+    id='sol',
+    name='Solana',
+    native_unit='lamport',
+    decimals=9,
+    env_prefix='SOL',
+    # ~400ms slots; int-rounded up to 1 (the only consumers are the substrate-era
+    # extension helpers, which the Solana validator no longer drives).
+    seconds_per_block=1,
+    # Confirmations are slots here; ~32 slots ≈ finalization (~13s), the swap-leg finality floor.
+    min_confirmations=32,
+    # Rent-exempt minimum for a 0-data System account — the SOL analog of TAO's
+    # existential deposit (a credit below this can't keep a fresh account alive).
+    min_onchain_amount=890880,
+)
 
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
+    'sol': CHAIN_SOL,
 }
 
 

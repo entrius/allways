@@ -1,12 +1,15 @@
-"""alw post - Post a trading pair commitment to chain."""
+"""alw post - Publish a trading pair as on-chain Solana quotes."""
 
 import click
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, get_cli_context, loading
-from allways.constants import COMMITMENT_VERSION
-from allways.utils.rate import normalize_rate
+from allways.cli.swap_commands.helpers import console, get_cli_context, get_solana_cli_context, loading
+from allways.constants import RATE_PRECISION
+from allways.solana.client import SolanaClientError
+
+# Default per-direction liquidity (u128) posted with a quote; the taker discovery path is Phase 9.
+DEFAULT_QUOTE_LIQUIDITY = 0
 
 
 def prompt_chain(label: str, exclude: str | None = None) -> str:
@@ -148,27 +151,15 @@ def post_pair(
         if rates_from_args:
             rate, counter_rate = counter_rate, rate
 
-    config, wallet, subtensor, _ = get_cli_context(need_client=False)
-    netuid = config['netuid']
-
-    rate_str = normalize_rate(rate)
-    counter_rate_str = normalize_rate(counter_rate)
-    commitment_data = (
-        f'v{COMMITMENT_VERSION}:{src_chain}:{src_addr}:{dst_chain}:{dst_addr}:{rate_str}:{counter_rate_str}'
-    )
-
-    data_bytes = commitment_data.encode('utf-8')
-    if len(data_bytes) > 128:
-        console.print(
-            f'[red]Commitment too long ({len(data_bytes)} bytes, max 128). '
-            f'Try a shorter address format (e.g. P2WPKH instead of P2TR).[/red]'
-        )
-        return
+    # The bt wallet is only needed for the running-miner refresh flag (keyed by hotkey); the quote
+    # write is signed by the Solana keypair.
+    _, wallet, _, _ = get_cli_context(need_client=False)
+    _, client = get_solana_cli_context()
 
     src_up, dst_up = src_chain.upper(), dst_chain.upper()
     src_name, dst_name = SUPPORTED_CHAINS[src_chain].name, SUPPORTED_CHAINS[dst_chain].name
 
-    console.print('\n[bold]Posting trading pair commitment[/bold]\n')
+    console.print('\n[bold]Publishing trading pair quotes[/bold]\n')
     console.print(f'  [cyan]{src_name}[/cyan]:  {src_addr}')
     console.print(f'  [cyan]{dst_name}[/cyan]:  {dst_addr}')
     if rate == counter_rate and rate > 0:
@@ -182,49 +173,39 @@ def post_pair(
             console.print(f'  {dst_up} → {src_up}: [green]1 {src_up} = {counter_rate:g} {dst_up}[/green]')
         else:
             console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
-    console.print(f'  Netuid:     {netuid}')
-    console.print(f'  Data:       [dim]{commitment_data}[/dim]\n')
+    console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
-    if dst_chain == 'tao' and dst_addr == wallet.hotkey.ss58_address:
-        console.print(
-            f'[yellow]Warning: TAO send address is your hotkey. Standard miners sign TAO transfers '
-            f'with the coldkey ({wallet.coldkey.ss58_address}); validators reject fulfillments whose '
-            f'sender does not match the committed address. Commit the coldkey unless you run a '
-            f'customized miner that signs from the hotkey.[/yellow]\n'
-        )
-        if not yes and not click.confirm('Post with hotkey as TAO send address anyway?', default=False):
-            console.print('[yellow]Cancelled[/yellow]')
-            return
-
-    if not yes and not click.confirm('Confirm posting this pair?'):
+    if not yes and not click.confirm('Confirm publishing this pair?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
-    try:
-        with loading('Submitting commitment...'):
-            call = subtensor.substrate.compose_call(
-                call_module='Commitments',
-                call_function='set_commitment',
-                call_params={
-                    'netuid': netuid,
-                    'info': {
-                        'fields': [[{f'Raw{len(data_bytes)}': '0x' + data_bytes.hex()}]],
-                    },
-                },
-            )
-            extrinsic = subtensor.substrate.create_signed_extrinsic(call=call, keypair=wallet.hotkey)
-            receipt = subtensor.substrate.submit_extrinsic(
-                extrinsic, wait_for_inclusion=True, wait_for_finalization=False
-            )
+    # One MinerQuote PDA per offered direction (rate 0 = not offered → no quote). rate stored as
+    # fixed-point u128 = display_rate * RATE_PRECISION (what the validator decodes back).
+    directions = []
+    if rate > 0:
+        directions.append((src_chain, dst_chain, src_addr, dst_addr, rate))
+    if counter_rate > 0:
+        directions.append((dst_chain, src_chain, dst_addr, src_addr, counter_rate))
 
-        if receipt.is_success:
-            console.print('[green]Pair posted successfully![/green]')
-            write_rate_posted_flag(wallet.hotkey.ss58_address)
-        else:
-            console.print(f'[red]Failed to post pair: {receipt.error_message}[/red]')
+    posted = 0
+    for from_chain, to_chain, from_addr, to_addr, r in directions:
+        try:
+            with loading(f'Publishing {from_chain.upper()} → {to_chain.upper()} quote...'):
+                client.set_quote(
+                    from_chain,
+                    to_chain,
+                    from_addr,
+                    to_addr,
+                    int(r * RATE_PRECISION),
+                    DEFAULT_QUOTE_LIQUIDITY,
+                )
+            posted += 1
+        except SolanaClientError as e:
+            console.print(f'[red]Failed to publish {from_chain.upper()} → {to_chain.upper()}: {e}[/red]')
 
-    except Exception as e:
-        console.print(f'[red]Error: {e}[/red]')
+    if posted:
+        console.print(f'[green]Published {posted} quote direction(s)![/green]')
+        write_rate_posted_flag(wallet.hotkey.ss58_address)
 
 
 def write_rate_posted_flag(hotkey: str) -> None:

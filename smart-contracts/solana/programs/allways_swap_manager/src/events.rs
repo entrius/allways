@@ -150,6 +150,22 @@ pub struct HotkeyBound {
     pub bound_at: i64,
 }
 
+/// Miner active-state transitions. Emitted so validators can replay the per-instant `active` history for
+/// the crown capacity integral from deterministic logs alone (the `MinerState.active` flag carries no
+/// history). `MinerActivated` fires on `vote_activate` quorum; `MinerDeactivated` on `vote_deactivate`
+/// quorum or self-`deactivate`.
+#[event]
+pub struct MinerActivated {
+    pub miner: Pubkey,
+    pub at: i64,
+}
+
+#[event]
+pub struct MinerDeactivated {
+    pub miner: Pubkey,
+    pub at: i64,
+}
+
 // --- Phase 9: reservation lottery (pool keyed per miner) ---
 
 #[event]

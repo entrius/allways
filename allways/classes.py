@@ -11,7 +11,7 @@ class SwapStatus(IntEnum):
 
 @dataclass
 class MinerPair:
-    """A miner's posted exchange pair from on-chain commitments.
+    """A miner's posted exchange pair from on-chain quotes.
 
     After normalization, from_chain/to_chain are in canonical order.
     rate is for source→dest swaps, counter_rate is for dest→source swaps.
