@@ -2116,45 +2116,62 @@ class TestRewardShapeWeights:
         np.testing.assert_allclose(weighted[0], baseline[0] + 0.5 * POOL_TAO_BTC, atol=1e-6)
 
 
-class TestPhaseCMarketRate:
-    """C3 — the wired market-rate feed gates the quality-volume slice. The solo
-    holder in ``_solo_crown_with_volume`` executes tao→btc at a realized 500
-    TAO/BTC (from 500_000_000 rao for 100_000 sat), so the market rate placed
-    relative to 500 controls the rate-quality multiplier."""
+class TestCrevReference:
+    """C-rev — the on-chain trimmed reference gates the quality-volume slice,
+    replacing the external feed. The solo holder executes tao→btc at a realized
+    500 TAO/BTC; seeding the network's clearing-rate history around 500 sets the
+    reference (the 500 outlier is trimmed when other rates dominate), and the
+    holder's own clearing row sets its realized rate."""
 
-    REALIZED = 500.0  # tao→btc canonical rate the seeded volume executed at
+    REALIZED = 500.0  # tao→btc canonical rate the holder's own swap executed at
 
-    def _solo(self, tmp_path: Path, market_rate):
+    @staticmethod
+    def _legs(rate: float) -> tuple[int, int]:
+        # tao→btc legs (from_rao, to_sat) clearing at `rate` TAO/BTC for 0.001 BTC
+        # (100_000 sat) worth — equal btc weight per swap, so the per-miner cap is
+        # only ever triggered by repeating a hotkey, not by these distinct refs.
+        return int(rate * 0.001 * 1e9), 100_000
+
+    def _solo(self, tmp_path: Path, reference_rate, n_ref: int = 20):
         v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
-        v.market_rate_feed = SimpleNamespace(tao_per_btc=lambda: market_rate)
+        # The holder's OWN windowed realized clearing rate = 500.
+        f, t = self._legs(self.REALIZED)
+        v.state_store.insert_clearing_rate(0, 'hk_a', 'tao', 'btc', f, t)
+        # A cluster of other-miner swaps at the target rate. With ≥9 of them the
+        # holder's lone 500 lands in the trimmed tail, so the reference == target.
+        if reference_rate is not None:
+            rf, rt = self._legs(reference_rate)
+            for i in range(n_ref):
+                v.state_store.insert_clearing_rate(0, f'ref{i}', 'tao', 'btc', rf, rt)
         return v
 
-    def test_below_market_volume_penalized(self, tmp_path: Path):
-        """Realized rate worse than market shaves the w_b slice via rate_quality,
-        so the solo holder earns strictly less than the full pool."""
-        market = 480.0  # tao→btc: paying 500 vs market 480 is worse for the taker
-        v = self._solo(tmp_path, market)
+    def test_below_reference_volume_penalized(self, tmp_path: Path):
+        """Realized rate worse than the reference shaves the w_b slice via
+        rate_quality, so the solo holder earns strictly less than the full pool."""
+        reference = 480.0  # tao→btc: clearing at 500 vs reference 480 is worse for takers
+        v = self._solo(tmp_path, reference)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        q = scoring_mod.quality_curve(scoring_mod.rate_advantage('tao', 'btc', self.REALIZED, market))
+        q = scoring_mod.quality_curve(scoring_mod.rate_advantage('tao', 'btc', self.REALIZED, reference))
         assert 0.0 < q < 1.0  # in the ramp, not floored
         expected = POOL_TAO_BTC * (0.8 + 0.2 * q)
         np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
         assert rewards[0] < POOL_TAO_BTC
         v.state_store.close()
 
-    def test_above_market_capped_full_pool(self, tmp_path: Path):
-        """Realized rate better than market is capped at quality 1.0 (the crown
-        already rewards good rates), so the holder earns the full pool — not more."""
-        v = self._solo(tmp_path, 550.0)  # paying 500 vs market 550 is better
+    def test_above_reference_capped_full_pool(self, tmp_path: Path):
+        """Realized rate better than the reference is capped at quality 1.0 (the
+        crown already rewards good rates), so the holder earns the full pool."""
+        v = self._solo(tmp_path, 550.0)  # clearing at 500 vs reference 550 is better
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
 
-    def test_stale_feed_pays_volume_at_par(self, tmp_path: Path):
-        """Feed returns None (stale/unreachable) → rate_quality neutral 1.0 → the
-        w_b slice still pays the holder's volume share, so a solo holder earns the
-        full pool. A dead feed never zeroes the volume reward."""
-        v = self._solo(tmp_path, None)
+    def test_thin_history_pays_volume_at_par(self, tmp_path: Path):
+        """Too few in-window clearing rates (only the holder's own swap) → reference
+        undefined → rate_quality neutral 1.0 → the w_b slice still pays the holder's
+        volume share, so a solo holder earns the full pool. Same safe degradation
+        the old stale-feed path had."""
+        v = self._solo(tmp_path, None)  # no reference cluster → 1 sample < min_swaps
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards[0], POOL_TAO_BTC, atol=1e-6)
         v.state_store.close()
@@ -2168,6 +2185,18 @@ class TestPhaseCMarketRate:
         # Below-pool reward → strictly positive recycle on top of the idle btc→tao pool.
         assert rewards[RECYCLE_UID] > POOL_BTC_TAO
         v.state_store.close()
+
+    def test_reference_is_deterministic_across_runs(self, tmp_path: Path):
+        """The whole point of dropping the external feed: identical ingested
+        clearing-rate history ⇒ identical reference ⇒ identical rewards, with no
+        wall-clock-of-fetch or network in the path."""
+        a = self._solo(tmp_path / 'a', 480.0)
+        b = self._solo(tmp_path / 'b', 480.0)
+        ra, _ = calculate_miner_rewards(a, a.block)
+        rb, _ = calculate_miner_rewards(b, b.block)
+        np.testing.assert_array_equal(ra, rb)  # exact equality — determinism
+        a.state_store.close()
+        b.state_store.close()
 
 
 class TestCapacityVolumeInteraction:

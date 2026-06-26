@@ -104,44 +104,42 @@ def test_curve_is_monotonic_nonincreasing():
     assert all(RATE_QUALITY_MIN <= q <= 1.0 for q in qs)
 
 
-# ── rate_quality: end-to-end wrapper + neutral fail-safes ──
+# ── rate_quality: realized-vs-reference wrapper + neutral fail-safes ──
+# Signature is (from_chain, to_chain, realized_rate, reference_rate); both
+# numbers are canonical TAO/BTC realized clearing rates (C-rev). The
+# native→canonical conversion is realized_canonical_rate, tested above.
 
 
-def test_quality_none_market_is_neutral():
-    f, t = btc_tao_legs(200.0)
-    assert rate_quality('btc', 'tao', f, t, market_rate=None) == 1.0
+def test_quality_none_reference_is_neutral():
+    assert rate_quality('btc', 'tao', 200.0, reference_rate=None) == 1.0
 
 
-def test_quality_zero_market_is_neutral():
-    f, t = btc_tao_legs(200.0)
-    assert rate_quality('btc', 'tao', f, t, market_rate=0.0) == 1.0
+def test_quality_zero_reference_is_neutral():
+    assert rate_quality('btc', 'tao', 200.0, reference_rate=0.0) == 1.0
 
 
-def test_quality_zero_volume_is_neutral():
-    assert rate_quality('btc', 'tao', 0, 0, market_rate=250.0) == 1.0
+def test_quality_zero_realized_is_neutral():
+    # No realized rate for this miner in-window ⇒ nothing to judge ⇒ neutral.
+    assert rate_quality('btc', 'tao', 0.0, reference_rate=250.0) == 1.0
 
 
-def test_quality_at_market_full_both_directions():
-    bf, bt_ = btc_tao_legs(250.0)
-    tf, tt = tao_btc_legs(250.0)
-    assert rate_quality('btc', 'tao', bf, bt_, market_rate=250.0) == 1.0
-    assert rate_quality('tao', 'btc', tf, tt, market_rate=250.0) == 1.0
+def test_quality_at_reference_full_both_directions():
+    assert rate_quality('btc', 'tao', 250.0, reference_rate=250.0) == 1.0
+    assert rate_quality('tao', 'btc', 250.0, reference_rate=250.0) == 1.0
 
 
-def test_quality_above_market_capped_at_one():
-    # Selling BTC at 300 vs market 250 — great deal, but crown already pays it.
-    f, t = btc_tao_legs(300.0)
-    assert rate_quality('btc', 'tao', f, t, market_rate=250.0) == 1.0
+def test_quality_above_reference_capped_at_one():
+    # Selling BTC at 300 vs reference 250 — great deal, but crown already pays it.
+    assert rate_quality('btc', 'tao', 300.0, reference_rate=250.0) == 1.0
 
 
-def test_quality_below_market_penalized():
-    # Selling BTC at 240 vs market 250: adv -0.04 → ramp below 1.0.
-    f, t = btc_tao_legs(240.0)
-    q = rate_quality('btc', 'tao', f, t, market_rate=250.0)
+def test_quality_below_reference_penalized():
+    # Selling BTC at 240 vs reference 250: adv -0.04 → ramp below 1.0.
+    q = rate_quality('btc', 'tao', 240.0, reference_rate=250.0)
     assert RATE_QUALITY_MIN < q < 1.0
     assert q == pytest.approx(quality_curve(-0.04))
 
 
-def test_quality_far_below_market_hits_floor():
-    f, t = btc_tao_legs(200.0)  # 20% worse than 250
-    assert rate_quality('btc', 'tao', f, t, market_rate=250.0) == RATE_QUALITY_MIN
+def test_quality_far_below_reference_hits_floor():
+    # 20% worse than the reference — well past the floor advantage.
+    assert rate_quality('btc', 'tao', 200.0, reference_rate=250.0) == RATE_QUALITY_MIN

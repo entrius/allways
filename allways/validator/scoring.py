@@ -5,11 +5,14 @@ where ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState``
 counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. The crown
 component is ``pool × crown_share × capacity × volume_factor``; the
 quality-volume component is the pool's realized-volume share (sourced from the
-on-chain ``MinerDirectionStats`` accounts) gated by the rate-vs-market
-``rate_quality`` curve. Phase C set ``w_a=0.8 / w_b=0.2`` and wired the
-off-chain market-rate feed; a stale feed makes ``rate_quality`` neutral (1.0),
-so ``w_b`` still pays realized volume by raw share rather than zeroing anyone.
-Any shortfall recycles to ``RECYCLE_UID``. Entry is ``score_and_reward_miners``.
+on-chain ``MinerDirectionStats`` accounts) gated by the ``rate_quality`` curve.
+The curve compares a miner's realized rate against an on-chain reference (C-rev):
+a trimmed, volume-weighted, per-miner-capped average of completed-swap clearing
+rates per direction (``build_direction_references``), computed deterministically
+from ingested events — no external feed. ``w_a=0.8 / w_b=0.2``; a direction with
+too-thin in-window history makes ``rate_quality`` neutral (1.0), so ``w_b`` still
+pays realized volume by raw share rather than zeroing anyone. Any shortfall
+recycles to ``RECYCLE_UID``. Entry is ``score_and_reward_miners``.
 """
 
 from __future__ import annotations
@@ -142,21 +145,6 @@ def contract_is_halted(self: Validator) -> bool:
         return False
 
 
-def fetch_market_rate(self: Validator) -> Optional[float]:
-    """Best-effort live TAO/BTC for the rate-quality curve (Phase C). A missing
-    feed or any fetch failure returns None, which ``rate_quality`` treats as
-    neutral (1.0) — a dead feed must not zero rewards (matches
-    ``contract_is_halted``'s fail-open posture)."""
-    feed = getattr(self, 'market_rate_feed', None)
-    if feed is None:
-        return None
-    try:
-        return feed.tao_per_btc()
-    except Exception as e:
-        bt.logging.warning(f'market-rate fetch failed, quality neutral: {e}')
-        return None
-
-
 def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
     """During a halt, no miner earns crown; the full pool recycles."""
     n_uids = self.metagraph.n.item()
@@ -181,6 +169,10 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_active_events(cutoff)
     self.state_store.prune_busy_events(cutoff)
     self.state_store.prune_collateral_events(cutoff)
+    # clearing_rates feeds the rate-quality reference over a wider (24h) window,
+    # so it has its own, later horizon — pruning it at the 1h crown cutoff would
+    # starve the reference.
+    self.state_store.prune_clearing_rates(current_time - RATE_REFERENCE_WINDOW_SECS)
 
 
 def is_eligible(miner_state) -> bool:
@@ -385,19 +377,19 @@ def build_direction_references(state_store, current_time: int) -> Dict[Tuple[str
     return references
 
 
-def rate_advantage(from_chain: str, to_chain: str, realized_rate: float, market_rate: float) -> float:
-    """Taker-oriented relative advantage of a realized rate vs market, signed so
-    positive = better-than-market for the swapper. Direction-aware: in the
-    canonical direction (btc→tao) a higher TAO/BTC is better; in the reverse
-    (tao→btc) a lower TAO/BTC is better — the same orientation the crown uses
-    (``lower_rate_wins``)."""
-    if market_rate <= 0:
+def rate_advantage(from_chain: str, to_chain: str, realized_rate: float, reference_rate: float) -> float:
+    """Taker-oriented relative advantage of a realized rate vs the reference,
+    signed so positive = better-than-reference for the swapper. Direction-aware:
+    in the canonical direction (btc→tao) a higher TAO/BTC is better; in the
+    reverse (tao→btc) a lower TAO/BTC is better — the same orientation the crown
+    uses (``lower_rate_wins``)."""
+    if reference_rate <= 0:
         return 0.0
     canon_source, _ = canonical_pair(from_chain, to_chain)
     higher_is_better = from_chain == canon_source
     if higher_is_better:
-        return (realized_rate - market_rate) / market_rate
-    return (market_rate - realized_rate) / market_rate
+        return (realized_rate - reference_rate) / reference_rate
+    return (reference_rate - realized_rate) / reference_rate
 
 
 def quality_curve(advantage: float) -> float:
@@ -419,20 +411,21 @@ def quality_curve(advantage: float) -> float:
 def rate_quality(
     from_chain: str,
     to_chain: str,
-    from_amount: int,
-    to_amount: int,
-    market_rate: Optional[float] = None,
+    realized_rate: float,
+    reference_rate: Optional[float] = None,
 ) -> float:
     """Quality multiplier for a miner's realized volume in a direction: how good
-    the executed rate was versus the live market (Phase C). ``market_rate``
-    None/≤0 (feed stale or unwired) ⇒ 1.0 neutral, so a dead feed never zeroes
-    everyone or hands out free reward. No executed volume to price ⇒ 1.0."""
-    if market_rate is None or market_rate <= 0:
+    its realized rate was versus the on-chain reference (C-rev). Both numbers are
+    realized clearing rates over the same window (``build_direction_references``),
+    so they share a basis. A ``reference_rate`` of None/≤0 (in-window history too
+    thin) ⇒ 1.0 neutral — a missing reference never zeroes everyone or hands out
+    free reward, w_b then pays realized volume by raw share. No realized rate for
+    this miner in-window ⇒ 1.0 (nothing to judge)."""
+    if reference_rate is None or reference_rate <= 0:
         return 1.0
-    realized = realized_canonical_rate(from_chain, to_chain, from_amount, to_amount)
-    if realized <= 0:
+    if realized_rate <= 0:
         return 1.0
-    return quality_curve(rate_advantage(from_chain, to_chain, realized, market_rate))
+    return quality_curve(rate_advantage(from_chain, to_chain, realized_rate, reference_rate))
 
 
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
@@ -469,9 +462,11 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # MinerDirectionStats accounts (B3.5), replacing the per-validator
     # swap_outcomes ledger. Built once, sliced per direction below.
     direction_volumes = build_direction_volumes(self.solana_client, self.metagraph)
-    # Live market rate for the rate-quality curve (Phase C), fetched once per
-    # round. None (no feed / stale / failure) keeps quality neutral (1.0).
-    market_rate = fetch_market_rate(self)
+    # On-chain rate-quality reference (C-rev): trimmed volume-weighted clearing
+    # rate per direction + each miner's windowed realized VWAP, built once per
+    # round from the ingested clearing_rates history. Deterministic — no feed, no
+    # network. A direction with too-thin history yields reference None ⇒ neutral.
+    references = build_direction_references(self.state_store, current_time)
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -570,11 +565,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             # pool's volume share × rate-quality (vs the live market). w_a/w_b are
             # the direction's effective weights (0.8/0.2, or 1.0/0.0 if idle).
             crown_component = pool * crown_share_dir * cap * vol_factor
-            qv = vols_dir.get(hotkey)
-            q_from = qv.from_amount if qv is not None else 0
-            q_to = qv.to_amount if qv is not None else 0
+            # Quality compares the miner's OWN windowed realized rate against the
+            # direction reference — same windowed clearing-rate basis (C-rev).
+            ref = references.get((from_chain, to_chain))
+            reference_rate = ref.reference if ref is not None else None
+            realized_rate = ref.miner_rates.get(hotkey, 0.0) if ref is not None else 0.0
             quality_volume_component = (
-                pool * vol_share_dir * rate_quality(from_chain, to_chain, q_from, q_to, market_rate)
+                pool * vol_share_dir * rate_quality(from_chain, to_chain, realized_rate, reference_rate)
             )
             base = eligible * (w_a * crown_component + w_b * quality_volume_component)
             # Trace baseline is the pre-volume crown reward (dashboard attributes

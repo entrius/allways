@@ -44,7 +44,6 @@ from allways.validator.axon_handlers import (
 from allways.validator.bounds_cache import BoundsCache, SolanaConfigCache
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.forward import forward
-from allways.validator.market_rate import MarketRateFeed
 from allways.validator.solana_swap_loop import SolanaSwapLoop
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.storage import DatabaseStorage
@@ -109,10 +108,6 @@ class Validator(BaseValidatorNeuron):
         self.event_ingest = SolanaEventIngest(self.solana_client)
         self.event_index = SolanaEventIndex(self.state_store)
         self.solana_config_cache = SolanaConfigCache(self.solana_client)
-        # Off-chain TAO/BTC feed backing the Phase-C rate-quality reward
-        # component. Best-effort + TTL-cached; a stale/dead feed degrades to
-        # neutral quality (never zeroes rewards). Read once per scoring round.
-        self.market_rate_feed = MarketRateFeed()
 
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
