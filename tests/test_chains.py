@@ -44,6 +44,18 @@ class TestCanonicalPair:
         assert canonical_pair('eth', 'btc') == ('btc', 'eth')
         assert canonical_pair('btc', 'eth') == ('btc', 'eth')
 
+    def test_sol_always_source(self):
+        # SOL is the hub: always canonical source, outranking the TAO-dest rule.
+        assert canonical_pair('sol', 'btc') == ('sol', 'btc')
+        assert canonical_pair('btc', 'sol') == ('sol', 'btc')
+        assert canonical_pair('sol', 'tao') == ('sol', 'tao')
+        assert canonical_pair('tao', 'sol') == ('sol', 'tao')
+
+    def test_non_sol_pairs_unchanged(self):
+        # Re-anchor must not perturb the active tao<->btc directions.
+        assert canonical_pair('btc', 'tao') == ('btc', 'tao')
+        assert canonical_pair('tao', 'btc') == ('btc', 'tao')
+
 
 class TestConfirmationsToSubtensorBlocks:
     def test_btc(self):
