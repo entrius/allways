@@ -7,10 +7,14 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
 """
 
+import os
+
 from solders.pubkey import Pubkey
 
-# IDL metadata.address — keep in sync with the deployed program.
-PROGRAM_ID = Pubkey.from_string('AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU')
+# Program address. Defaults to the committed DEV program id (reproducible local builds); testnet/mainnet set
+# ALLWAYS_PROGRAM_ID so the deployed address is never baked into code. Must match the deployed program.
+DEV_PROGRAM_ID = 'AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU'
+PROGRAM_ID = Pubkey.from_string(os.environ.get('ALLWAYS_PROGRAM_ID', DEV_PROGRAM_ID))
 
 # Fixed-point scale for the miner rate: stored u128 = display_rate * RATE_PRECISION (constants.rs).
 RATE_PRECISION = 1_000_000_000_000_000_000  # 1e18
