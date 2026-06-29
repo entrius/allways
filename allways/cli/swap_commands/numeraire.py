@@ -19,7 +19,7 @@ import click
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import console, get_cli_context, get_solana_cli_context, loading
 from allways.cli.swap_commands.pair import write_rate_posted_flag
-from allways.constants import RATE_PRECISION
+from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.solana.client import SolanaClientError
 
 
@@ -46,10 +46,10 @@ def derive_sol_numeraire_quotes(
     s = spread_bps / 10_000
     specs: List[QuoteSpec] = []
     for chain, (price, addr) in chain_specs.items():
-        if chain == 'sol' or price <= 0:
+        if chain == NUMERAIRE_CHAIN or price <= 0:
             continue
-        specs.append(QuoteSpec('sol', chain, sol_address, addr, price * (1 - s)))  # sol -> X
-        specs.append(QuoteSpec(chain, 'sol', addr, sol_address, price * (1 + s)))  # X -> sol
+        specs.append(QuoteSpec(NUMERAIRE_CHAIN, chain, sol_address, addr, price * (1 - s)))  # hub -> X
+        specs.append(QuoteSpec(chain, NUMERAIRE_CHAIN, addr, sol_address, price * (1 + s)))  # X -> hub
     return specs
 
 

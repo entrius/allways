@@ -6,7 +6,7 @@ from typing import Tuple
 
 from allways.chains import canonical_pair, get_chain
 from allways.classes import Swap
-from allways.constants import RATE_PRECISION, RATE_SIG_FIGS
+from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, RATE_SIG_FIGS
 
 
 def normalize_rate(rate: float) -> str:
@@ -138,7 +138,7 @@ def is_executable_rate(
         # For a "src → sol" direction at ``forward_rate`` (sol per src), is there an src amount that is
         # fundable on-chain (>= the chain's min_onchain_amount) whose SOL leg lands in bounds?
         src = get_chain(src_chain)
-        decimal_factor = 10 ** (get_chain('sol').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             # rate × decimal_factor overflowed → smallest positive integer source already maps above max.
@@ -151,11 +151,11 @@ def is_executable_rate(
         max_source = math.floor(max_swap_lamports / denom)
         return min_source <= max_source
 
-    if to_chain == 'sol':
+    if to_chain == NUMERAIRE_CHAIN:
         # Forward into SOL: sol_lamports = source_units × rate × 10**(sol_dec - src_dec).
         return _has_integer_routable_source(rate, from_chain)
 
-    if from_chain == 'sol' and to_chain != 'sol':
+    if from_chain == NUMERAIRE_CHAIN and to_chain != NUMERAIRE_CHAIN:
         # Reverse out of SOL: the SOL leg is the source itself, so any positive lamport in [min, max] is
         # trivially in bounds — but absurd rates imply destinations so large no rational user would route,
         # and the miner can post them just to win the lowest-rate-wins crown. Treat ``1/rate`` as a
@@ -183,11 +183,11 @@ def min_executable_sol_leg(
     """
     if not is_executable_rate(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports):
         return 0
-    if from_chain == 'sol':
-        return max(get_chain('sol').min_onchain_amount, max(0, min_swap_lamports))
-    if to_chain == 'sol':
+    if from_chain == NUMERAIRE_CHAIN:
+        return max(get_chain(NUMERAIRE_CHAIN).min_onchain_amount, max(0, min_swap_lamports))
+    if to_chain == NUMERAIRE_CHAIN:
         src = get_chain(from_chain)
-        decimal_factor = 10 ** (get_chain('sol').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0

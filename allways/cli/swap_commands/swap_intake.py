@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain
-from allways.constants import COLLATERAL_REQUIREMENT_BPS, RATE_PRECISION
+from allways.constants import COLLATERAL_REQUIREMENT_BPS, NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.utils.rate import calculate_to_amount, is_executable_rate, normalize_rate
 
 
@@ -42,14 +42,14 @@ def compute_intake_amounts(from_chain: str, to_chain: str, from_amount: int, rat
 
     ``rate_display`` is the miner's canonical 'dest per 1 SOL' rate. Requires one leg to be SOL.
     """
-    if 'sol' not in (from_chain, to_chain):
-        raise ValueError(f'{from_chain}->{to_chain}: a SOL leg is required (launch pairs are sol<->btc / sol<->tao)')
+    if NUMERAIRE_CHAIN not in (from_chain, to_chain):
+        raise ValueError(f'{from_chain}->{to_chain}: a {NUMERAIRE_CHAIN} leg is required (every launch pair is hub<->spoke)')
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(
         from_amount, rate_display, is_reverse, get_chain(canon_to).decimals, get_chain(canon_from).decimals
     )
-    sol_amount = from_amount if from_chain == 'sol' else to_amount
+    sol_amount = from_amount if from_chain == NUMERAIRE_CHAIN else to_amount
     return IntakeAmounts(sol_amount=sol_amount, from_amount=from_amount, to_amount=to_amount)
 
 
