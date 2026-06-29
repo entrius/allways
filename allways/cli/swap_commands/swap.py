@@ -59,17 +59,6 @@ def _poll_reservation(client, miner, timeout_secs: int):
 @click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 @click.option(
-    '--slippage',
-    'slippage',
-    type=float,
-    default=2.0,
-    help=(
-        'Maximum rate slippage as a percent (e.g. 2.0 means 2%) between your quote and '
-        "the reservation. The reservation is rejected if the miner's current rate would "
-        'give you more than this percentage less than your quoted amount. Default: 2.0%.'
-    ),
-)
-@click.option(
     '--btc-fee-rate',
     'btc_fee_rate_opt',
     type=click.IntRange(min=1),
@@ -90,7 +79,6 @@ def swap_now_command(
     from_tx_hash_opt: Optional[str],
     auto_select: bool,
     skip_confirm: bool,
-    slippage: float,
     btc_fee_rate_opt: Optional[int],
 ):
     """Originate a swap: reserve a miner on-chain, then send source funds.
@@ -139,7 +127,7 @@ def swap_now_command(
 
     console.print(
         f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
-        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL, slippage {slippage}%)\n'
+        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
     )
     if not skip_confirm and not click.confirm('  Reserve this miner on-chain?', default=False):
         return

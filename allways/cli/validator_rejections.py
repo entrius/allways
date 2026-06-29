@@ -94,15 +94,6 @@ _RULES: list[_Rule] = [
         ),
     ),
     (
-        'rate_moved',
-        'quoted amount is below your slippage band',
-        True,
-        lambda ctx: (
-            f'Miner UID {_ctx_get(ctx, "miner_uid")} changed its rate after you got your quote. '
-            'Re-run the swap to get a fresh quote at the current rate, then retry.'
-        ),
-    ),
-    (
         'wrong_direction',
         'miner does not support this swap direction',
         True,

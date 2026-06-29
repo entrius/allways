@@ -92,20 +92,6 @@ def apply_fee_deduction(to_amount: int, fee_divisor: int) -> int:
     return to_amount - to_amount // fee_divisor
 
 
-def quote_within_slippage(quoted: int, recomputed: int, slippage_bps: int) -> bool:
-    """True if `recomputed` is no more than `slippage_bps` below `quoted`.
-
-    One-sided (DEX 'minimum received'): a favorable move — recomputed >= quoted —
-    always passes. Pure integer math for determinism across validators. When
-    slippage_bps >= 10_000 the threshold is non-positive, so it always passes.
-    """
-    if quoted <= 0 or recomputed <= 0:
-        return False
-    if recomputed >= quoted:
-        return True
-    return recomputed * 10_000 >= quoted * (10_000 - slippage_bps)
-
-
 def is_executable_rate(
     rate: float,
     from_chain: str,
