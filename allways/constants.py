@@ -53,9 +53,16 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
+# Numéraire / hub asset: the subnet is hub-and-spoke — every launch pair is hub↔spoke, so a rate reads
+# uniformly as 'dest per 1 hub'. SOL by construction (the contract lives on Solana: collateral, fee, and the
+# sol_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
+NUMERAIRE_CHAIN = 'sol'
+LAUNCH_SPOKES = ('btc', 'tao')  # chains paired against the hub; add a chain here to launch its pair
+# Emission pool per direction, split evenly across every hub↔spoke direction (both ways).
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    ('tao', 'btc'): 0.25,
-    ('btc', 'tao'): 0.25,
+    pair: 1.0 / (2 * len(LAUNCH_SPOKES))
+    for spoke in LAUNCH_SPOKES
+    for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
 }
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
@@ -102,6 +109,11 @@ RATE_REFERENCE_WINDOW_SECS = 86400  # 24h — wide enough that sparse completed-
 RATE_REFERENCE_TRIM_FRAC = 0.10  # drop the top & bottom 10% of weight before averaging
 RATE_REFERENCE_MINER_CAP_FRAC = 0.25  # cap any single miner at 25% of total reference weight
 RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ reference undefined ⇒ neutral
+
+# ─── Collateral ──────────────────────────────────────────
+# Collateral a miner must post to back a swap = sol_amount × this/10_000. Mirrors the contract's
+# COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
+COLLATERAL_REQUIREMENT_BPS = 11_000
 
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID

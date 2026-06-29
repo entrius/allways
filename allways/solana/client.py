@@ -22,6 +22,7 @@ from allways.solana import layouts, pdas
 from allways.solana.rpc import SolanaRpc
 
 SYSTEM_PROGRAM = Pubkey.from_string('11111111111111111111111111111111')
+SLOT_HASHES = Pubkey.from_string('SysvarS1otHashes111111111111111111111111111')  # RNG seed source for resolve_pool
 
 
 def swap_key_from_tx_hash(from_tx_hash: str) -> bytes:
@@ -515,6 +516,65 @@ class AllwaysSolanaClient:
         ]
         args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at})
         return self._send([self._ix('extend_reservation', args, metas)])
+
+    # ---------- swap intake (Phase 9: reservation-lottery pool) ----------
+    def open_or_request(
+        self,
+        miner,
+        from_chain: str,
+        to_chain: str,
+        user,
+        user_from_addr: str,
+        user_to_addr: str,
+        sol_amount: int,
+        from_amount: int,
+        to_amount: int,
+    ) -> str:
+        """Open (or join) a miner's reservation pool for a pair. Signer/payer = this client's keypair
+        (the router); pays the flat reservation fee. `user` is the taker identity pinned into the request."""
+        router = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        args = layouts.IX_OPEN_OR_REQUEST_ARGS.build(
+            {
+                'from_chain': from_chain,
+                'to_chain': to_chain,
+                'user': bytes(_as_pubkey(user)),
+                'user_from_addr': user_from_addr,
+                'user_to_addr': user_to_addr,
+                'sol_amount': sol_amount,
+                'from_amount': from_amount,
+                'to_amount': to_amount,
+            }
+        )
+        metas = [
+            AccountMeta(router, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.quote_pda(m, from_chain, to_chain, self.program_id), False, False),
+            AccountMeta(pdas.pool_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.treasury_pda(self.program_id), False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('open_or_request', args, metas)])
+
+    def resolve_pool(self, miner) -> str:
+        """Permissionless crank: after the pool window closes, run the stake-weighted draw and write the
+        winner's Reservation. Signer/payer = this client's keypair (funds the reservation rent)."""
+        caller = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(caller, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.pool_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(SLOT_HASHES, False, False),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('resolve_pool', b'', metas)])
 
     # ---------- event-log ingest skeleton (full decode-by-discriminator in B3) ----------
     def get_program_signatures(

@@ -5,6 +5,7 @@ from allways.constants import (
     EXTENSION_BUCKET_BLOCKS,
     EXTENSION_PADDING_SECONDS,
     MAX_EXTENSION_BLOCKS,
+    NUMERAIRE_CHAIN,
 )
 
 SUBTENSOR_BLOCK_SECONDS = 12
@@ -86,10 +87,16 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
 
     Determines the rate unit: rate is always 'dest per 1 source' in this ordering.
 
-    Ordering rules:
-    1. If TAO is in the pair, TAO is always dest — rates are denominated in TAO.
-    2. Otherwise, alphabetical — deterministic fallback for non-TAO pairs (e.g. BTC-ETH).
+    Ordering rules (priority):
+    1. The hub (`NUMERAIRE_CHAIN`) is always the canonical SOURCE, so every launch pair reads uniformly as
+       'dest per 1 hub' (e.g. TAO per SOL, BTC per SOL).
+    2. Else if TAO is in the pair, TAO is dest — legacy denomination for non-hub pairs.
+    3. Else alphabetical — deterministic fallback (e.g. BTC-ETH).
     """
+    if chain_a == NUMERAIRE_CHAIN:
+        return (chain_a, chain_b)
+    if chain_b == NUMERAIRE_CHAIN:
+        return (chain_b, chain_a)
     if chain_b == 'tao':
         return (chain_a, chain_b)
     if chain_a == 'tao':

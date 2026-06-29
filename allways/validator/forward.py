@@ -38,6 +38,10 @@ async def forward(self: Validator) -> None:
     # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks.
     # run_once casts on-chain votes (network I/O), so run it off the event loop.
     now = int(time.time())
+    # Permissionless crank: turn closed reservation pools into winner Reservations before processing swaps.
+    resolved = await asyncio.to_thread(self.solana_swap_loop.resolve_pools_once, now)
+    if resolved:
+        bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'

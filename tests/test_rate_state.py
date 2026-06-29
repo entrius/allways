@@ -16,7 +16,7 @@ class TestValidatorStateStoreSchema:
         conn = store.require_connection()
 
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {'rate_events', 'active_events', 'busy_events', 'collateral_events', 'reservation_pins'}.issubset(tables)
+        assert {'rate_events', 'active_events', 'busy_events', 'collateral_events'}.issubset(tables)
 
         indexes = {
             row[0]

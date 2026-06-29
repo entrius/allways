@@ -383,8 +383,8 @@ class TestIngestEndToEndCrown:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_swap_rao=100_000_000,
-            max_swap_rao=500_000_000,
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
         )
         # A: (100,400] + (800,1100] = 600. B: (400,800] = 400.
         assert crown == {'hk_a': 600.0, 'hk_b': 400.0}

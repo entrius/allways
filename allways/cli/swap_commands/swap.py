@@ -1,21 +1,52 @@
 """alw swap - Execute and manage cross-chain swaps.
 
-Phase-9 stub: the full taker swap flow (reserve → deposit → confirm/initiate) moves
-on-chain to Solana with the reservation pool (open_or_request/resolve_pool +
-submit_swap_claim). The taker CLI intake is not wired yet, so `swap now` is stubbed;
-the group is kept so `post-tx`/`quote`/`resume-reservation` still register under it."""
+Origination is on-chain on Solana: the taker opens a per-miner reservation pool (`open_or_request`), a
+permissionless stake-weighted draw (`resolve_pool`, run by the validator crank) picks the winning request,
+then the taker sends source funds to the winning miner's address. `swap now` wires the scripted origination
+slice (select miner → compute amounts → open_or_request → poll for the reservation). Fund-sending + post-tx
+(`swap post-tx`) land next."""
 
-from typing import Optional
+import time
+from typing import List, Optional
 
 import click
 
+from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import console, get_solana_cli_context
+from allways.cli.swap_commands.swap_intake import (
+    MinerCandidate,
+    rate_display_from_fixed,
+    select_best_miner,
+    to_smallest_units,
+)
 
 
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
 def swap_group():
     """Execute and manage cross-chain swaps."""
+
+
+def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
+    """All miners with a posted quote for this exact direction, with their collateral attached."""
+    out: List[MinerCandidate] = []
+    for _pk, q in client.get_all('MinerQuote'):
+        if q.from_chain != from_chain or q.to_chain != to_chain:
+            continue
+        collateral = client.get_collateral_lamports(q.miner) or 0
+        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
+    return out
+
+
+def _poll_reservation(client, miner, timeout_secs: int):
+    """Poll the per-miner Reservation until the draw populates it (reserved_until != 0) or we time out."""
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        resv = client.get_reservation(miner)
+        if resv is not None and int(getattr(resv, 'reserved_until', 0)) != 0:
+            return resv
+        time.sleep(3)
+    return None
 
 
 @swap_group.command('now', show_disclaimer=True)
@@ -62,15 +93,78 @@ def swap_now_command(
     slippage: float,
     btc_fee_rate_opt: Optional[int],
 ):
-    """Guided interactive swap - step by step.
+    """Originate a swap: reserve a miner on-chain, then send source funds.
 
-    [dim]Walks through a complete swap from start to finish:
-    - Select swap direction and miner
-    - Enter amount and addresses
-    - Funds are sent automatically when possible
-    - Transaction hash is posted to validators automatically[/dim]
-
-    [dim]Interactive mode:
-        $ alw swap now[/dim]
+    [dim]Scripted form (interactive prompts + auto fund-sending land next):
+        alw swap now --from sol --to btc --amount 1.0 --receive-address <btc-addr> --yes[/dim]
     """
-    phase9_unavailable('Guided swap (`swap now`)')
+    from_chain = (from_chain_opt or '').lower()
+    to_chain = (to_chain_opt or '').lower()
+    if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
+        console.print(f'[red]--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}[/red]')
+        return
+    if from_chain == to_chain or 'sol' not in (from_chain, to_chain):
+        console.print('[red]A launch swap must have a SOL leg (sol<->btc or sol<->tao).[/red]')
+        return
+    if amount_opt is None or amount_opt <= 0:
+        console.print('[red]--amount (source-chain units) is required.[/red]')
+        return
+    if not receive_address_opt:
+        console.print('[red]--receive-address (destination chain) is required.[/red]')
+        return
+
+    _config, client = get_solana_cli_context(need_keypair=True)
+    user = client.keypair.pubkey()
+    user_from_addr = str(user) if from_chain == 'sol' else (from_address_opt or '')
+    if not user_from_addr:
+        console.print('[red]--from-address (your source-chain address) is required for a non-SOL source.[/red]')
+        return
+
+    cfg = client.get_config()
+    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
+    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
+
+    from_amount = to_smallest_units(amount_opt, from_chain)
+    candidates = _candidate_miners(client, from_chain, to_chain)
+    if not candidates:
+        console.print(f'[yellow]No miners quoting {from_chain}->{to_chain} right now.[/yellow]')
+        return
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+    if best is None:
+        console.print('[yellow]No miner can fund an executable swap for that amount within bounds.[/yellow]')
+        return
+    cand, amts = best
+    recv = amts.to_amount / 10 ** get_chain(to_chain).decimals
+
+    console.print(
+        f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
+        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL, slippage {slippage}%)\n'
+    )
+    if not skip_confirm and not click.confirm('  Reserve this miner on-chain?', default=False):
+        return
+
+    sig = client.open_or_request(
+        cand.miner,
+        from_chain,
+        to_chain,
+        user,
+        user_from_addr,
+        receive_address_opt,
+        amts.sol_amount,
+        amts.from_amount,
+        amts.to_amount,
+    )
+    console.print(f'[green]  Reservation requested[/green] (tx {sig[:16]}…). Waiting for the draw to resolve…')
+
+    resv = _poll_reservation(client, cand.miner, timeout_secs=pool_window + 60)
+    if resv is None:
+        console.print('[yellow]  Pool not resolved yet — check `alw view reservation` shortly.[/yellow]')
+        return
+    if str(resv.user) != str(user):
+        console.print("[yellow]  Another taker won this miner's draw. Re-run to try again.[/yellow]")
+        return
+    console.print(
+        f'[green]  Reserved.[/green] Send [cyan]{amount_opt} {from_chain.upper()}[/cyan] to '
+        f'[cyan]{resv.miner_from_addr}[/cyan], then run [bold]alw swap post-tx[/bold] with the tx hash.'
+    )

@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parents[1]
 SO = REPO / 'smart-contracts/solana/target/deploy/allways_swap_manager.so'
 PROG_KP = REPO / 'smart-contracts/solana/target/deploy/allways_swap_manager-keypair.json'
 RPC = 'http://127.0.0.1:8899'
-POOL_BTC_TAO = DIRECTION_POOLS[('btc', 'tao')]
+POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 # Non-zero swap bounds so is_executable_rate actually fires (0/0 fails open).
 MIN_SWAP_RAO = 1_000_000
 MAX_SWAP_RAO = 100_000_000
@@ -120,14 +120,14 @@ def _hotkey():
 
 
 def _activate_miner(admin, validators, rate_int):
-    """Fund, quote (btc→tao), bind a fresh hotkey, and vote-activate a new miner.
+    """Fund, quote (btc→sol), bind a fresh hotkey, and vote-activate a new miner.
     Returns (miner_pubkey, hotkey_keypair, collateral)."""
     miner = Keypair()
     _airdrop(miner.pubkey(), 10)
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
     collateral = MAX_SWAP_RAO  # == max_swap → capacity_factor 1.0
     mclient.post_collateral(collateral)
-    mclient.set_quote('btc', 'tao', 'minerBTC', 'minerTAO', rate_int, 1_000)
+    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', rate_int, 1_000)
     hk = _hotkey()
     mclient.bind_hotkey(bytes.fromhex(hk.public_key.hex()), hk.sign(bytes(miner.pubkey())))
     validators[0].vote_activate(miner.pubkey())
@@ -153,11 +153,11 @@ def test_scoring_round_off_solana_events(env):
         admin.add_validator(kp.pubkey(), 1)
         validators.append(AllwaysSolanaClient(RPC, keypair=kp))
 
-    # A quotes the better btc→tao rate (TAO-per-BTC, higher = better deal → wins).
-    # S quotes the highest rate of all, but it's unexecutable (boundary-squat) —
-    # the executable-rate gate must keep it out of the crown despite the better deal.
-    miner_a, hk_a, coll_a = _activate_miner(admin, validators, 400 * RATE_PRECISION)
-    miner_b, hk_b, coll_b = _activate_miner(admin, validators, 345 * RATE_PRECISION)
+    # btc→sol is reverse-canonical (SOL is the canonical source), so the LOWER rate wins: A's 345 beats
+    # B's 400. S quotes a far-higher rate — the best-looking number — but it's unexecutable against the SOL
+    # swap bounds (boundary-squat), so the executable-rate gate must keep it out of the crown entirely.
+    miner_a, hk_a, coll_a = _activate_miner(admin, validators, 345 * RATE_PRECISION)
+    miner_b, hk_b, coll_b = _activate_miner(admin, validators, 400 * RATE_PRECISION)
     miner_s, hk_s, coll_s = _activate_miner(admin, validators, SENTINEL_RATE * RATE_PRECISION)
     hka, hkb, hks = hk_a.ss58_address, hk_b.ss58_address, hk_s.ss58_address
 
@@ -184,12 +184,12 @@ def test_scoring_round_off_solana_events(env):
         store=store,
         event_index=index,
         from_chain='btc',
-        to_chain='tao',
+        to_chain='sol',
         window_start=now - 600,
         window_end=now + 60,
         rewardable_hotkeys={hka, hkb, hks},
-        min_swap_rao=MIN_SWAP_RAO,
-        max_swap_rao=MAX_SWAP_RAO,
+        min_swap_lamports=MIN_SWAP_RAO,
+        max_swap_lamports=MAX_SWAP_RAO,
     )
     assert set(crown) == {hka}
     assert crown[hka] > 0
@@ -207,12 +207,12 @@ def test_scoring_round_off_solana_events(env):
     assert rewards[0] == 0.0 and rewards[1] == 0.0 and rewards[2] == 0.0  # A, B, S
     assert rewards[RECYCLE_UID] == pytest.approx(1.0, abs=1e-5)
 
-    # Round 2 — patch all eligible: the btc→tao pool is credited to crown holder A.
+    # Round 2 — patch all eligible: the btc→sol pool is credited to crown holder A.
     # B (lower rate) and S (higher rate but unexecutable) both earn nothing — the
     # sentinel earning 0 proves the bounds reached the Config AND the gate fires.
     with patch('allways.validator.scoring.build_eligibility', return_value={hka: True, hkb: True, hks: True}):
         rewards2, _ = calculate_miner_rewards(v, now + 60)
-    assert rewards2[0] == pytest.approx(POOL_BTC_TAO, abs=1e-5)
+    assert rewards2[0] == pytest.approx(POOL_BTC_SOL, abs=1e-5)
     assert rewards2[1] == 0.0
     assert rewards2[2] == 0.0
     store.close()

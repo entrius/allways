@@ -4,10 +4,8 @@ Tables: ``rate_events`` + ``active_events`` + ``busy_events`` +
 ``collateral_events`` (the crown-time event series, sourced from Solana program
 events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 ``clearing_rates`` (per-swap realized history from ``SwapCompleted``, backing the
-C-rev rate-quality reference), ``solana_event_meta`` (the event-ingest cursor),
-and ``reservation_pins`` (the
-axon reserve path's commitment snapshot, kept until the Phase-9 repoint). Single
-connection guarded by one lock; opened with ``check_same_thread=False``.
+C-rev rate-quality reference), and ``solana_event_meta`` (the event-ingest cursor).
+Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
 brief exclusive lock that concurrent openers would otherwise hit as "database is
 locked" — the local dev env runs two validators against the same file.
@@ -15,34 +13,8 @@ locked" — the local dev env runs two validators against the same file.
 
 import sqlite3
 import threading
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
-
-
-@dataclass
-class ReservationPin:
-    """A snapshot of a miner's commitment as of the block its reservation was
-    created. ``handle_swap_confirm`` resolves the swap's rate and addresses
-    from this pin instead of the live commitment, so a miner moving its rate
-    or deposit address after the user reserves cannot shortchange or rob the
-    user.
-
-    Stores the full commitment — ``MinerReserved`` does not reveal the swap
-    direction, so direction is resolved later from the requested chains.
-    """
-
-    miner_hotkey: str
-    reserve_block: int
-    from_chain: str
-    to_chain: str
-    rate_str: str
-    counter_rate_str: str
-    miner_from_address: str
-    miner_to_address: str
-    reserved_until: int
-    created_at: float = field(default_factory=time.time)
 
 
 class ValidatorStateStore:
@@ -63,89 +35,6 @@ class ValidatorStateStore:
         self.conn.row_factory = sqlite3.Row
         self.current_block_fn = current_block_fn
         self.init_db()
-
-    # ─── reservation_pins ───────────────────────────────────────────────
-
-    def upsert_reservation_pin(self, pin: ReservationPin) -> None:
-        """Persist (or overwrite) the commitment snapshot for a miner's
-        reservation. Keyed on ``miner_hotkey`` — a miner has at most one live
-        reservation, so a fresh ``MinerReserved`` replaces any stale pin."""
-        self._execute(
-            """
-            INSERT OR REPLACE INTO reservation_pins (
-                miner_hotkey, reserve_block, from_chain, to_chain,
-                rate_str, counter_rate_str, miner_from_address,
-                miner_to_address, reserved_until, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                pin.miner_hotkey,
-                pin.reserve_block,
-                pin.from_chain,
-                pin.to_chain,
-                pin.rate_str,
-                pin.counter_rate_str,
-                pin.miner_from_address,
-                pin.miner_to_address,
-                pin.reserved_until,
-                pin.created_at,
-            ),
-        )
-
-    def get_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
-        row = self._fetchone(
-            'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
-            (miner_hotkey,),
-        )
-        return self.row_to_reservation_pin(row) if row is not None else None
-
-    def remove_reservation_pin(self, miner_hotkey: str) -> Optional[ReservationPin]:
-        row = self._fetch_and_delete(
-            'SELECT * FROM reservation_pins WHERE miner_hotkey = ?',
-            'DELETE FROM reservation_pins WHERE miner_hotkey = ?',
-            (miner_hotkey,),
-        )
-        return self.row_to_reservation_pin(row) if row is not None else None
-
-    def get_expired_reservation_pins(self) -> List[ReservationPin]:
-        """Pins whose reservation has lapsed as of the current block.
-
-        Read before ``purge_expired_reservation_pins`` so the caller can emit a
-        scoring pin-end event per expired pin — otherwise the crown overlay's
-        'start' outlives the on-chain reservation and keeps earning crown at the
-        pinned rate after expiry.
-        """
-        if self.current_block_fn is None:
-            return []
-        rows = self._fetchall(
-            'SELECT * FROM reservation_pins WHERE reserved_until < ?',
-            (self.current_block_fn(),),
-        )
-        return [self.row_to_reservation_pin(row) for row in rows]
-
-    def purge_expired_reservation_pins(self) -> int:
-        """Drop pins whose reservation has already expired."""
-        if self.current_block_fn is None:
-            return 0
-        return self._execute_returning_rowcount(
-            'DELETE FROM reservation_pins WHERE reserved_until < ?',
-            (self.current_block_fn(),),
-        )
-
-    @staticmethod
-    def row_to_reservation_pin(row: sqlite3.Row) -> ReservationPin:
-        return ReservationPin(
-            miner_hotkey=row['miner_hotkey'],
-            reserve_block=row['reserve_block'],
-            from_chain=row['from_chain'],
-            to_chain=row['to_chain'],
-            rate_str=row['rate_str'],
-            counter_rate_str=row['counter_rate_str'],
-            miner_from_address=row['miner_from_address'],
-            miner_to_address=row['miner_to_address'],
-            reserved_until=row['reserved_until'],
-            created_at=row['created_at'],
-        )
 
     # ─── rate_events ────────────────────────────────────────────────────
 
@@ -502,7 +391,6 @@ class ValidatorStateStore:
         with self.lock:
             conn = self.require_connection()
             conn.execute('DELETE FROM rate_events WHERE hotkey = ?', (hotkey,))
-            conn.execute('DELETE FROM reservation_pins WHERE miner_hotkey = ?', (hotkey,))
             conn.commit()
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
@@ -595,21 +483,6 @@ class ValidatorStateStore:
                     ON rate_events(from_chain, to_chain, block);
                 CREATE INDEX IF NOT EXISTS idx_rate_events_hotkey
                     ON rate_events(hotkey);
-
-                CREATE TABLE IF NOT EXISTS reservation_pins (
-                    miner_hotkey        TEXT PRIMARY KEY,
-                    reserve_block       INTEGER NOT NULL,
-                    from_chain          TEXT NOT NULL,
-                    to_chain            TEXT NOT NULL,
-                    rate_str            TEXT NOT NULL,
-                    counter_rate_str    TEXT NOT NULL,
-                    miner_from_address  TEXT NOT NULL,
-                    miner_to_address    TEXT NOT NULL,
-                    reserved_until      INTEGER NOT NULL,
-                    created_at          REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_reservation_pins_reserved_until
-                    ON reservation_pins(reserved_until);
 
                 CREATE TABLE IF NOT EXISTS active_events (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
