@@ -14,13 +14,22 @@ RESV_CREATED_AT = 1200  # source-freshness floor
 FRESH = 5000  # block_time comfortably after both floors
 
 
-def make_swap(status='Fulfilled', to_amount=1000, from_amount=500, timeout_at=2000, key=b'\x01' * 32):
+def make_swap(
+    status='Fulfilled',
+    to_amount=1000,
+    from_amount=500,
+    timeout_at=2000,
+    key=b'\x01' * 32,
+    rate='5',
+    from_chain='btc',
+    to_chain='sol',
+):
     return SimpleNamespace(
         swap_key=key,
         miner='minerPK',
         status=status,
-        from_chain='btc',
-        to_chain='sol',
+        from_chain=from_chain,
+        to_chain=to_chain,
         from_tx_hash='srctx',
         to_tx_hash='dsttx',
         miner_from_addr='minerBTC',
@@ -28,6 +37,7 @@ def make_swap(status='Fulfilled', to_amount=1000, from_amount=500, timeout_at=20
         user_to_addr='userSOL',
         from_amount=from_amount,
         to_amount=to_amount,
+        rate=rate,
         from_tx_block=0,
         to_tx_block=0,
         timeout_at=timeout_at,
@@ -142,6 +152,58 @@ def test_pending_attestation_grace_allows_slightly_old_deposit():
     providers['btc'].grace = 300
     providers['btc'].block_time = RESV_CREATED_AT - 100  # within grace of the floor
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500) == SwapDecision.ATTEST
+
+
+def test_pending_attestation_honest_sol_to_btc_attests():
+    # Forward direction (is_reverse=False): rate 5 → 1 SOL (1e9 lamports) maps to 5e8 sats.
+    loop, _ = loop_with(result=True)
+    swap = make_swap(
+        status='PendingAttestation', from_chain='sol', to_chain='btc', from_amount=1_000_000_000, to_amount=500_000_000
+    )
+    assert loop.decide(swap, now=1500) == SwapDecision.ATTEST
+
+
+def test_pending_attestation_honest_btc_to_sol_reverse_attests():
+    loop, _ = loop_with(result=True)
+    assert loop.decide(make_swap(status='PendingAttestation', to_amount=1000), now=1500) == SwapDecision.ATTEST
+
+
+def test_pending_attestation_absurd_to_amount_rejected():
+    loop, _ = loop_with(result=True)
+    swap = make_swap(status='PendingAttestation', to_amount=1000 * 10_000)  # expected 1000
+    assert loop.decide(swap, now=1500) == SwapDecision.REJECT
+
+
+def test_pending_attestation_to_amount_off_by_two_rejected():
+    loop, _ = loop_with(result=True)
+    assert loop.decide(make_swap(status='PendingAttestation', to_amount=1002), now=1500) == SwapDecision.REJECT
+
+
+def test_pending_attestation_to_amount_off_by_one_attests():
+    loop, _ = loop_with(result=True)
+    assert loop.decide(make_swap(status='PendingAttestation', to_amount=1001), now=1500) == SwapDecision.ATTEST
+
+
+def test_pending_attestation_garbage_rate_zero_expected_rejected():
+    loop, _ = loop_with(result=True)
+    swap = make_swap(status='PendingAttestation', rate='0', to_amount=1000)  # expected_to == 0
+    assert loop.decide(swap, now=1500) == SwapDecision.REJECT
+
+
+def test_pending_attestation_zero_to_amount_rejected():
+    loop, _ = loop_with(result=True)
+    assert loop.decide(make_swap(status='PendingAttestation', to_amount=0), now=1500) == SwapDecision.REJECT
+
+
+def test_reject_casts_no_vote():
+    swaps = [('pk1', make_swap(status='PendingAttestation', to_amount=1000 * 10_000, key=b'\x07' * 32))]
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
+    client = VoteRecordingClient(swaps)
+    loop = SolanaSwapLoop(client, providers, fee_divisor=100)
+    loop.run_once(now=1500)
+    assert client.calls == []  # rate-inconsistent claim → no on-chain vote
+    assert loop._cast_vote(swaps[0][1], SwapDecision.REJECT) is False
+    assert client.calls == []
 
 
 def test_active_timed_out_vs_waiting():
