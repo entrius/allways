@@ -1,6 +1,6 @@
 """alw view - Inspect miners, rates, swaps, validators, and reservations.
 
-Phase-9 stub: every view read drew miner quotes/reservations/swaps from the old ink!
+Stub: every view read drew miner quotes/reservations/swaps from the old ink!
 contract surface. Their Solana-backed taker views (MinerQuote aggregation, on-chain
 swaps/Config/Reservation) are not wired yet, so each subcommand is stubbed. The group
 + subcommands are kept so `alw view --help` and command registration are unchanged."""
@@ -8,7 +8,7 @@ swaps/Config/Reservation) are not wired yet, so each subcommand is stubbed. The 
 import click
 
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import taker_view_unavailable
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
 MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
@@ -49,7 +49,7 @@ def view_group():
 )
 def view_miners(full, sort_by, status_filter, min_capacity, search):
     """List active miners with their posted directions and status."""
-    phase9_unavailable('`view miners`')
+    taker_view_unavailable('`view miners`')
 
 
 @view_group.command('rates')
@@ -74,7 +74,7 @@ def view_miners(full, sort_by, status_filter, min_capacity, search):
 )
 def view_rates(pair, full, sort_by, min_capacity, search):
     """Show posted miner rates per direction."""
-    phase9_unavailable('`view rates`')
+    taker_view_unavailable('`view rates`')
 
 
 @view_group.command('active-swaps')
@@ -86,7 +86,7 @@ def view_rates(pair, full, sort_by, min_capacity, search):
 )
 def view_active_swaps(status: str):
     """List swaps currently tracked on-chain."""
-    phase9_unavailable('`view active-swaps`')
+    taker_view_unavailable('`view active-swaps`')
 
 
 @view_group.command('swap')
@@ -94,22 +94,22 @@ def view_active_swaps(status: str):
 @click.option('--watch', '-w', is_flag=True, help='Poll and refresh until swap completes or times out')
 def view_swap(swap_id: int, watch: bool):
     """Inspect a single swap by id."""
-    phase9_unavailable('`view swap`')
+    taker_view_unavailable('`view swap`')
 
 
 @view_group.command('contract')
 def view_contract():
     """Show contract config (bounds, fees, timeouts)."""
-    phase9_unavailable('`view contract`')
+    taker_view_unavailable('`view contract`')
 
 
 @view_group.command('validators')
 def view_validators():
     """List the registered validators and their weights."""
-    phase9_unavailable('`view validators`')
+    taker_view_unavailable('`view validators`')
 
 
 @view_group.command('reservation')
 def view_reservation():
     """Show your current pending reservation, if any."""
-    phase9_unavailable('`view reservation`')
+    taker_view_unavailable('`view reservation`')

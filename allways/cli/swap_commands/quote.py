@@ -1,11 +1,11 @@
 """alw swap quote - Preview rates and estimated receive amounts before swapping.
 
-Phase-9 stub: the rate preview reads miner quotes from the old ink! commitment
+Stub: the rate preview reads miner quotes from the old ink! commitment
 surface; its Solana MinerQuote-backed taker view is not wired yet."""
 
 import click
 
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import taker_view_unavailable
 
 
 @click.command('quote')
@@ -25,4 +25,4 @@ def quote_command(from_chain: str, to_chain: str, amount: float):
         alw swap quote --from btc --to tao --amount 0.1
         alw swap quote --from tao --to btc --amount 50
     """
-    phase9_unavailable('Swap quote preview')
+    taker_view_unavailable('Swap quote preview')

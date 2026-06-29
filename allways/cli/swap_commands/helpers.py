@@ -25,15 +25,15 @@ class CliError(Exception):
     """Local CLI/Solana error type — replaces the deleted ink! contract error."""
 
 
-def phase9_unavailable(what: str) -> None:
-    """Stub for taker reservation/swap-intake commands pending the Phase-9 port.
+def taker_view_unavailable(what: str) -> None:
+    """Stub for the taker READ/relay views (preview, dashboard, resume, post-tx) still on the old ink! surface.
 
-    The on-chain reservation flow (open_or_request/resolve_pool lottery) replaces the
-    old ink! reserve→confirm path; the taker CLI intake is not wired yet."""
+    Swap origination (`alw swap now`) is live on Solana. What remains stubbed are the read-only aggregation
+    views that drew from the ink! contract surface and need a Solana MinerQuote/Reservation-backed re-port."""
     console.print(
         f'[yellow]{what} is not available yet.[/yellow]\n'
-        '[dim]Reservations and swap intake moved on-chain to Solana and land with the Phase 9 '
-        'reservation pool (open_or_request/resolve_pool). The taker CLI for it is not wired yet.[/dim]'
+        '[dim]Swap origination (`alw swap now`) is live on Solana; this read/relay view still needs its '
+        'Solana-backed re-port (MinerQuote aggregation, on-chain swaps/reservations).[/dim]'
     )
 
 

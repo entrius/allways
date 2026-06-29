@@ -1,13 +1,13 @@
 """alw swap post-tx - Submit source transaction hash for a pending swap reservation.
 
-Phase-9 stub: the reserve→deposit→confirm relay moves on-chain to Solana
+Stub: the reserve→deposit→confirm relay moves on-chain to Solana
 (submit_swap_claim against an on-chain Reservation); the taker CLI intake is not
 wired yet."""
 
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import taker_view_unavailable
 
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
@@ -34,4 +34,4 @@ def post_tx_command(tx_hash: str, tx_block: int):
         $ alw swap post-tx abc123def... --block 12345   (escape hatch)
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
-    phase9_unavailable('Swap post-tx')
+    taker_view_unavailable('Swap post-tx')

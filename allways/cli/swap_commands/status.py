@@ -1,12 +1,12 @@
 """alw status - Quick dashboard showing network, wallet, and swap state.
 
-Phase-9 stub: the pending-reservation/swap dashboard reads the on-chain
-reservation pool (Solana); the taker CLI intake is not wired yet."""
+Stub: the pending-reservation/swap dashboard reads the on-chain
+reservation pool (Solana); its Solana-backed re-port is pending (`alw swap now` origination is live)."""
 
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import taker_view_unavailable
 
 
 @click.command('status', cls=StyledCommand)
@@ -19,4 +19,4 @@ def status_command():
     [dim]Examples:
         $ alw status[/dim]
     """
-    phase9_unavailable('Swap status dashboard')
+    taker_view_unavailable('Swap status dashboard')

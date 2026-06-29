@@ -1,13 +1,13 @@
 """alw swap resume-reservation - Recover an interrupted pre-initiate reservation flow.
 
-Phase-9 stub: the reserve→deposit→initiate flow moves on-chain to Solana with the
-reservation pool; the taker CLI intake is not wired yet."""
+Stub: the reserve→deposit→initiate flow moves on-chain to Solana with the
+reservation pool; its Solana-backed re-port is pending (`alw swap now` origination is live)."""
 
 from typing import Optional
 
 import click
 
-from allways.cli.swap_commands.helpers import phase9_unavailable
+from allways.cli.swap_commands.helpers import taker_view_unavailable
 
 
 @click.command('resume-reservation')
@@ -37,4 +37,4 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
         alw swap resume-reservation --from-tx-hash abc123... --yes
         alw swap resume-reservation --send --yes
     """
-    phase9_unavailable('Swap resume-reservation')
+    taker_view_unavailable('Swap resume-reservation')
