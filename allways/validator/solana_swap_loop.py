@@ -11,11 +11,13 @@ validator verifies the dest leg delivered `apply_fee_deduction(to_amount, FEE_DI
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import bittensor as bt
 
 from allways.chain_providers.base import ProviderUnreachableError
+from allways.chains import compute_extension_target_secs
+from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
@@ -25,9 +27,34 @@ class SwapDecision(Enum):
     ATTEST = 'attest'  # PendingAttestation: source deposit verified -> would vote_initiate
     CONFIRM = 'confirm'  # Fulfilled: both legs verified -> would confirm_swap
     TIMEOUT = 'timeout'  # Active past its deadline -> would timeout_swap
+    EXTEND_RESERVATION = 'extend_reservation'  # source valid-but-unconfirmed near expiry -> slide reserved_until
+    EXTEND_TIMEOUT = 'extend_timeout'  # dest valid-but-unconfirmed near timeout -> slide timeout_at
     WAIT = 'wait'  # in-flight, nothing to do yet
     SKIP = 'skip'  # provider unreachable / unverifiable this round
     REJECT = 'reject'  # to_amount inconsistent with pinned rate -> never attest (terminal no-op)
+
+
+class SwapAction(NamedTuple):
+    """A decision plus the extension target it implies (``target_at`` is None for non-extend decisions)."""
+
+    decision: SwapDecision
+    target_at: Optional[int] = None
+
+
+# Decisions that drive an on-chain write this pass.
+ACTIONABLE = frozenset(
+    {
+        SwapDecision.ATTEST,
+        SwapDecision.CONFIRM,
+        SwapDecision.TIMEOUT,
+        SwapDecision.EXTEND_RESERVATION,
+        SwapDecision.EXTEND_TIMEOUT,
+    }
+)
+
+# Contract errors / lost races that make an extension a benign no-op (another validator already slid it,
+# or we're at the ceiling) — log quietly, never propagate.
+_BENIGN_EXTEND_MARKERS = ('ExtensionNotLater', 'ExtensionExceedsCeiling')
 
 
 def _status_name(swap: Any) -> str:
@@ -38,6 +65,11 @@ def _status_name(swap: Any) -> str:
 
 def _swap_key_hex(key: Any) -> str:
     return key.hex() if isinstance(key, (bytes, bytearray)) else str(key)
+
+
+def _is_benign_extension(e: Exception) -> bool:
+    """A contract ceiling hit or a lost extension race — expected, not an error."""
+    return any(m in str(e) for m in _BENIGN_EXTEND_MARKERS)
 
 
 def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
@@ -80,8 +112,9 @@ class SolanaSwapLoop:
     def _fetch_leg(
         self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: str = ''
     ) -> Tuple[str, Any]:
-        """Return ('ok', info) for a confirmed match, ('no', None) if absent/unconfirmed/no-provider,
-        ('down', None) if the provider was unreachable this round."""
+        """Tri-state leg status: ('ok', info) confirmed match, ('pending', info) all details match but
+        awaiting confirmations (extendable), ('no', None) absent/mismatch/no-provider (slash-eligible),
+        ('down', None) provider unreachable this round."""
         provider = self.providers.get(chain)
         if provider is None:
             bt.logging.warning(f'no chain provider for {chain}; cannot verify')
@@ -98,8 +131,10 @@ class SolanaSwapLoop:
             )
         except ProviderUnreachableError:
             return ('down', None)
-        if info is None or not info.confirmed:
+        if info is None:
             return ('no', None)
+        if not info.confirmed:
+            return ('pending', info)
         return ('ok', info)
 
     def _is_fresh(self, info: Any, floor_unix: int, chain: str, label: str) -> bool:
@@ -125,9 +160,38 @@ class SolanaSwapLoop:
             bt.logging.warning(f'reservation read failed for miner: {e}')
             return None
 
-    def verify_fulfillment(self, swap: Any) -> Optional[bool]:
-        """Verify source (user funded miner) + dest (miner delivered 99% to user, fresh). None = provider
-        down. Source freshness was gated at attestation; dest freshness (vs swap.initiated_at) is here."""
+    def _extend_target(self, chain: str, info: Any, deadline: int, ceiling: int, now: int) -> Optional[int]:
+        """Unix-seconds target to extend `deadline` to, or None when no extension is warranted. Gates
+        (shared by reservation + timeout): the deadline must be live, near expiry (within
+        EXTENSION_PADDING_SECONDS), below the contract ceiling, and the bucketed target strictly later."""
+        if deadline <= 0:
+            return None  # no live reservation/deadline
+        if deadline - now > EXTENSION_PADDING_SECONDS:
+            return None  # plenty of runway — don't extend prematurely
+        if deadline >= ceiling:
+            return None  # no room below the contract ceiling (max_extend_at)
+        target = compute_extension_target_secs(chain, int(info.confirmations), now, ceiling)
+        return target if target > deadline else None
+
+    def _extend_reservation_action(self, swap: Any, info: Any, now: int) -> SwapAction:
+        """Source leg valid-but-unconfirmed near reservation expiry → slide reserved_until, else WAIT."""
+        reservation = self._get_reservation(swap.miner)
+        if reservation is None:
+            return SwapAction(SwapDecision.WAIT)
+        target = self._extend_target(
+            swap.from_chain, info, int(reservation.reserved_until), int(reservation.max_extend_at), now
+        )
+        return SwapAction(SwapDecision.EXTEND_RESERVATION, target) if target else SwapAction(SwapDecision.WAIT)
+
+    def _extend_timeout_action(self, swap: Any, info: Any, now: int) -> SwapAction:
+        """Dest leg valid-but-unconfirmed near swap timeout → slide timeout_at, else WAIT."""
+        target = self._extend_target(swap.to_chain, info, int(swap.timeout_at), int(swap.max_extend_at), now)
+        return SwapAction(SwapDecision.EXTEND_TIMEOUT, target) if target else SwapAction(SwapDecision.WAIT)
+
+    def _decide_fulfilled(self, swap: Any, now: int, overdue: bool) -> SwapAction:
+        """Verify source (user funded miner) + dest (miner delivered 99% to user, fresh). CONFIRM when both
+        verify; EXTEND_TIMEOUT a valid-but-unconfirmed dest near timeout; TIMEOUT an overdue swap whose dest
+        is absent/mismatched (the contract slashes Fulfilled too). Source freshness was gated at attestation."""
         s_status, _ = self._fetch_leg(
             swap.from_chain,
             swap.from_tx_hash,
@@ -136,9 +200,7 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
         )
         if s_status == 'down':
-            return None
-        if s_status != 'ok':
-            return False
+            return SwapAction(SwapDecision.SKIP)
         d_status, d_info = self._fetch_leg(
             swap.to_chain,
             swap.to_tx_hash,
@@ -148,13 +210,22 @@ class SolanaSwapLoop:
             sender=swap.miner_to_addr,
         )
         if d_status == 'down':
-            return None
-        if d_status != 'ok':
-            return False
+            return SwapAction(SwapDecision.SKIP)
+        if d_status == 'pending':
+            # Valid-but-unconfirmed payout near timeout → extend; if extension is exhausted/not yet due,
+            # fall through to the same overdue rule (at the ceiling + overdue still slashes).
+            action = self._extend_timeout_action(swap, d_info, now)
+            if action.decision == SwapDecision.EXTEND_TIMEOUT:
+                return action
         # Dest freshness: payout must be mined after the swap was initiated on-chain (replay defense).
-        if not self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap)):
-            return False
-        return True
+        elif (
+            s_status == 'ok'
+            and d_status == 'ok'
+            and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
+        ):
+            return SwapAction(SwapDecision.CONFIRM)
+        # Unverifiable/stale dest + overdue ⇒ TIMEOUT; else wait for the leg.
+        return SwapAction(SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT)
 
     def _reject_logged(self, swap: Any, expected_to: int) -> None:
         """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
@@ -167,52 +238,56 @@ class SolanaSwapLoop:
             f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
         )
 
-    def decide(self, swap: Any, now: int) -> SwapDecision:
-        """Per-status decision. Verifies legs where needed; reads chain providers + the Reservation PDA."""
-        status = _status_name(swap)
-        if status == 'PendingAttestation':
-            # Refuse to attest if to_amount is inconsistent with the pinned (unforgeable) miner rate.
-            expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
-            if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
-                self._reject_logged(swap, expected_to)
-                return SwapDecision.REJECT
-            # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
-            s_status, info = self._fetch_leg(
-                swap.from_chain,
-                swap.from_tx_hash,
-                swap.miner_from_addr,
-                int(swap.from_amount),
-                block_hint=int(getattr(swap, 'from_tx_block', 0)),
-            )
-            if s_status == 'down':
-                return SwapDecision.SKIP
-            if s_status != 'ok':
-                return SwapDecision.WAIT
-            reservation = self._get_reservation(swap.miner)
-            if reservation is None:
-                bt.logging.warning(f'{self._label(swap)}: no reservation read — cannot check freshness, waiting')
-                return SwapDecision.WAIT
-            # Source freshness: deposit must be mined after the reservation was created (replay defense).
-            if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
-                return SwapDecision.WAIT  # replayed/stale deposit — never attest
-            return SwapDecision.ATTEST
-        overdue = now >= int(swap.timeout_at)
-        if status == 'Active':
-            return SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT
-        if status == 'Fulfilled':
-            ok = self.verify_fulfillment(swap)
-            if ok is None:
-                return SwapDecision.SKIP
-            if ok:
-                return SwapDecision.CONFIRM
-            # Unverifiable dest + overdue ⇒ TIMEOUT (contract slashes Fulfilled too); else wait for the leg.
-            return SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT
-        return SwapDecision.WAIT
+    def _decide_pending_attestation(self, swap: Any, now: int) -> SwapAction:
+        # D1: refuse to attest if to_amount is inconsistent with the pinned (unforgeable) miner rate.
+        expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
+        if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
+            self._reject_logged(swap, expected_to)
+            return SwapAction(SwapDecision.REJECT)
+        # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
+        s_status, info = self._fetch_leg(
+            swap.from_chain,
+            swap.from_tx_hash,
+            swap.miner_from_addr,
+            int(swap.from_amount),
+            block_hint=int(getattr(swap, 'from_tx_block', 0)),
+        )
+        if s_status == 'down':
+            return SwapAction(SwapDecision.SKIP)
+        if s_status == 'pending':
+            # Valid-but-unconfirmed deposit near reservation expiry → extend so the honest miner isn't slashed.
+            return self._extend_reservation_action(swap, info, now)
+        if s_status != 'ok':
+            return SwapAction(SwapDecision.WAIT)
+        reservation = self._get_reservation(swap.miner)
+        if reservation is None:
+            bt.logging.warning(f'{self._label(swap)}: no reservation read — cannot check freshness, waiting')
+            return SwapAction(SwapDecision.WAIT)
+        # Source freshness: deposit must be mined after the reservation was created (replay defense).
+        if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
+            return SwapAction(SwapDecision.WAIT)  # replayed/stale deposit — never attest
+        return SwapAction(SwapDecision.ATTEST)
 
-    def _cast_vote(self, swap: Any, decision: SwapDecision) -> bool:
-        """Submit the on-chain consensus vote for an actionable decision. Pre-checks the VoteRound so we
-        don't re-submit a vote already cast; treats a lost race (swap already closed) as a no-op. Never
-        raises — one bad swap must not break the pass."""
+    def decide(self, swap: Any, now: int) -> SwapAction:
+        """Per-status decision (+extension target where applicable). Verifies legs where needed; reads
+        chain providers + the Reservation PDA."""
+        status = _status_name(swap)
+        overdue = now >= int(swap.timeout_at)
+        if status == 'PendingAttestation':
+            return self._decide_pending_attestation(swap, now)
+        if status == 'Active':
+            # Never extend: no mark_fulfilled = no broadcast evidence, so an overdue Active is slash-eligible.
+            return SwapAction(SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT)
+        if status == 'Fulfilled':
+            return self._decide_fulfilled(swap, now, overdue)
+        return SwapAction(SwapDecision.WAIT)
+
+    def _cast_vote(self, swap: Any, action: SwapAction) -> bool:
+        """Submit the on-chain write for an actionable decision. Pre-checks the VoteRound so we don't
+        re-submit a vote already cast; treats a lost race (swap already closed) as a no-op. Extensions
+        tolerate the contract ceiling / lost extension races as no-ops. Never raises — one bad swap must
+        not break the pass."""
+        decision = action.decision
         swap_key = swap_key_from_tx_hash(swap.from_tx_hash)
         voter = self.client.keypair.pubkey()
         label = self._label(swap)
@@ -229,14 +304,19 @@ class SolanaSwapLoop:
                 if self.client.has_voted(pdas.REQ_TIMEOUT, swap_key, voter):
                     return False
                 self.client.timeout_swap(swap_key, swap.miner, swap.user)
-            elif decision == SwapDecision.REJECT:
-                return False  # rate-inconsistent claim: cast no vote, leave it to go stale and reap
+            elif decision == SwapDecision.EXTEND_RESERVATION:
+                self.client.extend_reservation(swap.miner, action.target_at)
+            elif decision == SwapDecision.EXTEND_TIMEOUT:
+                self.client.extend_timeout(swap_key, swap.miner, action.target_at)
             else:
-                return False
+                return False  # REJECT / non-actionable: cast nothing
         except Exception as e:
-            bt.logging.error(f'{label}: {decision.value} vote failed: {e}')
+            if decision in (SwapDecision.EXTEND_RESERVATION, SwapDecision.EXTEND_TIMEOUT) and _is_benign_extension(e):
+                bt.logging.debug(f'{label}: {decision.value} no-op ({e})')
+                return False
+            bt.logging.error(f'{label}: {decision.value} failed: {e}')
             return False
-        bt.logging.success(f'{label}: {decision.value} vote submitted')
+        bt.logging.success(f'{label}: {decision.value} submitted')
         return True
 
     def resolve_pools_once(self, now: int) -> List[str]:
@@ -271,14 +351,14 @@ class SolanaSwapLoop:
         for pubkey, swap in self.client.get_swaps():
             key = _swap_key_hex(getattr(swap, 'swap_key', pubkey))
             try:
-                decision = self.decide(swap, now)
+                action = self.decide(swap, now)
             except Exception as e:  # one bad swap must not break the pass
                 bt.logging.error(f'swap {key}: decide failed: {e}')
                 continue
-            if decision in (SwapDecision.ATTEST, SwapDecision.CONFIRM, SwapDecision.TIMEOUT):
+            if action.decision in ACTIONABLE:
                 if self.read_only:
-                    bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {decision.value} (read-only)')
+                    bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {action.decision.value} (read-only)')
                 else:
-                    self._cast_vote(swap, decision)
-            out.append((key, decision))
+                    self._cast_vote(swap, action)
+            out.append((key, action.decision))
         return out

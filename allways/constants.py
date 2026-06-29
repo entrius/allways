@@ -129,7 +129,11 @@ MAX_RESERVATIONS_PER_ADDRESS = 1
 # (block time, confirmations) lives in allways/chains.py; the contract enforces
 # its own MAX_EXTENSION_BLOCKS independently.
 EXTENSION_PADDING_SECONDS = 300  # safety buffer on top of confirmation time
-EXTENSION_BUCKET_BLOCKS = 30  # round target up so validator views converge
+# Validator-view convergence: extension targets snap up to this native-seconds grid so validators
+# computing `now + confirmation_runway` at slightly different wall-clock moments agree on one target_at.
+# Seconds, never blocks (the deadline axis is unix-seconds); >= the slowest chain's block time so a
+# bucket always spans at least one source block.
+EXTENSION_BUCKET_SECONDS = 600  # 10 min
 MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
 # Mirrors the contract's CHALLENGE_WINDOW_BLOCKS — must stay in sync with
 # smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally

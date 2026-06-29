@@ -1,8 +1,8 @@
 """Swap fulfillment engine - verifies receipt and sends funds (Solana-sourced).
 
 Fee model = Option A: the miner delivers **99% of the pinned ``to_amount``** (``apply_fee_deduction``);
-the protocol's 1% is skimmed from the miner's SOL collateral by ``confirm_swap``. The validator's
-``verify_fulfillment`` checks the dest leg delivered exactly this 99%, so the miner MUST match it. The
+the protocol's 1% is skimmed from the miner's SOL collateral by ``confirm_swap``. The validator's swap
+loop checks the dest leg delivered exactly this 99%, so the miner MUST match it. The
 fee saved on the dest leg offsets the collateral skim → the user bears the fee, the miner is a
 pass-through. ``mark_fulfilled`` records only the dest tx hash/block (``to_amount`` is pinned on-chain).
 Deadlines are unix-seconds (``Swap.timeout_at``).
