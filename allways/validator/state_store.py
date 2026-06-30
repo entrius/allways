@@ -372,15 +372,16 @@ class ValidatorStateStore:
     def prune_activity_events(self, cutoff_block: int) -> None:
         """Drop activity transitions older than ``cutoff_block`` except for hotkeys
         still mid-reservation/swap (reduced state != AVAILABLE) — their full
-        timeline is kept so a later FULFILL_END / RESERVE_EXPIRE isn't orphaned."""
+        timeline is kept so a later FULFILL_END / RESERVE_EXPIRE isn't orphaned.
+        Read + reduce + delete under one lock so no writer interleaves."""
         if cutoff_block <= 0:
             return
-        all_rows = self._fetchall(
-            'SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, kind ASC, id ASC'
-        )
-        open_hotkeys = set(self._reduce_activity(all_rows))
         with self.lock:
             conn = self.require_connection()
+            all_rows = conn.execute(
+                'SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, kind ASC, id ASC'
+            ).fetchall()
+            open_hotkeys = set(self._reduce_activity(all_rows))
             if open_hotkeys:
                 placeholders = ','.join('?' * len(open_hotkeys))
                 conn.execute(
