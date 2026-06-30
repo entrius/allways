@@ -89,28 +89,6 @@ def test_halt_skips_when_already_halted(monkeypatch):
     client.set_halted.assert_not_called()
 
 
-def test_set_halted_on_calls_set_halted_true(monkeypatch):
-    client = MagicMock()
-    client.get_config.return_value = _config(halted=False)
-    _patch_client(monkeypatch, client)
-
-    result = CliRunner().invoke(admin.admin_group, ['set-halted', 'on'], input='y\n')
-
-    assert result.exit_code == 0, result.output
-    client.set_halted.assert_called_once_with(True)
-
-
-def test_set_halted_off_calls_set_halted_false(monkeypatch):
-    client = MagicMock()
-    client.get_config.return_value = _config(halted=True)
-    _patch_client(monkeypatch, client)
-
-    result = CliRunner().invoke(admin.admin_group, ['set-halted', 'off'], input='y\n')
-
-    assert result.exit_code == 0, result.output
-    client.set_halted.assert_called_once_with(False)
-
-
 def test_set_reservation_fee_converts_sol_to_lamports(monkeypatch):
     client = MagicMock()
     client.get_config.return_value = _config(reservation_fee_lamports=0)

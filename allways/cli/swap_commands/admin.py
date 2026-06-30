@@ -183,29 +183,6 @@ def set_max_extension(secs: int):
     )
 
 
-@admin_group.command('set-halted', show_disclaimer=True)
-@click.argument('state', type=click.Choice(['on', 'off'], case_sensitive=False))
-def set_halted(state: str):
-    """Halt (on) or resume (off) value entry — blocks new deposits, activations, and reservation pools.
-
-    [dim]Existing in-flight swaps continue through their lifecycle.
-
-    Examples:
-        $ alw admin set-halted on
-        $ alw admin set-halted off[/dim]
-    """
-    halted = state.lower() == 'on'
-    _run_setter(
-        title='Halt System' if halted else 'Resume System',
-        getter=lambda c: c.get_config().halted,
-        setter=lambda c: c.set_halted(halted),
-        noun='halt state',
-        format_current=lambda v: 'halted' if v else 'running',
-        new_display='halted' if halted else 'running',
-        success_msg='System is now halted' if halted else 'System resumed',
-    )
-
-
 @admin_group.command('set-min-collateral', show_disclaimer=True)
 @click.argument('amount_sol', type=float)
 def set_min_collateral(amount_sol: float):
