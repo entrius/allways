@@ -4,6 +4,7 @@ bound hotkey at write time."""
 
 from pathlib import Path
 
+from allways.classes import MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
 from allways.validator.event_index import SolanaEventIndex
@@ -12,6 +13,7 @@ from allways.validator.state_store import ValidatorStateStore
 
 # pubkey str -> hotkey ss58 (what binding.build_attribution returns).
 ATTR = {'pk_a': 'hk_a', 'pk_b': 'hk_b'}
+RESERVATION_TTL = 300
 
 
 def rec(name: str, *, miner: str = 'pk_a', block_time, slot: int = 0, **fields) -> EventRecord:
@@ -21,6 +23,12 @@ def rec(name: str, *, miner: str = 'pk_a', block_time, slot: int = 0, **fields) 
 
 def make_store(tmp_path: Path) -> ValidatorStateStore:
     return ValidatorStateStore(db_path=tmp_path / 'state.db')
+
+
+def make_index(store: ValidatorStateStore, ttl: int = RESERVATION_TTL) -> SolanaEventIndex:
+    """Index wired with a constant reservation TTL (the config-cache getter in
+    production) so PoolResolved can synthesize RESERVE_EXPIRE."""
+    return SolanaEventIndex(store, reservation_ttl_fn=lambda: ttl)
 
 
 class TestIngestActive:
@@ -44,13 +52,14 @@ class TestIngestActive:
         store.close()
 
 
-class TestIngestBusy:
-    def test_swap_lifecycle_drives_busy(self, tmp_path: Path):
+class TestIngestActivity:
+    def test_reservation_then_swap_lifecycle_drives_activity(self, tmp_path: Path):
         store = make_store(tmp_path)
-        idx = SolanaEventIndex(store)
+        idx = make_index(store, ttl=1000)
         idx.ingest(
             [
-                rec('SwapInitiated', miner='pk_a', block_time=200),
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('SwapInitiated', miner='pk_a', block_time=250),
                 rec(
                     'SwapCompleted',
                     miner='pk_a',
@@ -60,18 +69,53 @@ class TestIngestBusy:
                     from_amount=100_000,
                     to_amount=500_000_000,
                 ),
-                rec('SwapInitiated', miner='pk_a', block_time=600),
-                rec('SwapTimedOut', miner='pk_a', block_time=900),
             ],
             ATTR,
         )
-        assert idx.get_busy_miners_at(100) == {}
-        assert idx.get_busy_miners_at(200) == {'hk_a': 1}
-        assert idx.get_busy_miners_at(400) == {}  # completed nets to 0
-        assert idx.get_busy_miners_at(600) == {'hk_a': 1}
-        assert idx.get_busy_miners_at(900) == {}  # timed out nets to 0
-        deltas = [(e['block'], e['delta']) for e in idx.get_busy_events_in_range(0, 1000)]
-        assert deltas == [(200, 1), (400, -1), (600, 1), (900, -1)]
+        assert idx.get_activity_state_at(100) == {}  # AVAILABLE before the reservation
+        assert idx.get_activity_state_at(200) == {'hk_a': MinerActivity.RESERVED}
+        assert idx.get_activity_state_at(250) == {'hk_a': MinerActivity.FULFILLING}
+        assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
+        store.close()
+
+    def test_pool_resolved_synthesizes_reserve_expire(self, tmp_path: Path):
+        """A reservation with no swap forfeits the crown until block_time + ttl,
+        then RESERVE_EXPIRE returns the miner to AVAILABLE."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=300)
+        idx.ingest(
+            [rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1)],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(200) == {'hk_a': MinerActivity.RESERVED}
+        assert idx.get_activity_state_at(499) == {'hk_a': MinerActivity.RESERVED}
+        assert idx.get_activity_state_at(500) == {}  # 200 + 300 ttl → AVAILABLE
+        kinds = [e['kind'] for e in idx.get_activity_events_in_range(0, 1000)]
+        assert kinds == [1, 3]  # RESERVE_START then synthetic RESERVE_EXPIRE
+        store.close()
+
+    def test_busy_miner_is_the_reserved_miner_not_the_router(self, tmp_path: Path):
+        """PoolResolved.miner (not .winner, the router) is busy-gated."""
+        store = make_store(tmp_path)
+        idx = make_index(store)
+        idx.ingest(
+            [rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_b', user='pk_user', requests=1)],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': MinerActivity.RESERVED}  # not hk_b
+        store.close()
+
+    def test_pool_resolved_dropped_without_ttl_source(self, tmp_path: Path):
+        """No TTL getter wired → PoolResolved is dropped (a reservation never
+        opens without its matching expiry)."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)  # no reservation_ttl_fn
+        n = idx.ingest(
+            [rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_b', user='pk_user', requests=1)],
+            ATTR,
+        )
+        assert n == 0
+        assert idx.get_activity_state_at(250) == {}
         store.close()
 
 
@@ -162,11 +206,12 @@ class TestIngestRate:
 
 
 class TestIngestClearingRate:
-    def test_swap_completed_persists_clearing_rate_and_busy(self, tmp_path: Path):
+    def test_swap_completed_persists_clearing_rate_and_activity(self, tmp_path: Path):
         store = make_store(tmp_path)
-        idx = SolanaEventIndex(store)
+        idx = make_index(store, ttl=1000)
         idx.ingest(
             [
+                rec('PoolResolved', miner='pk_a', block_time=150, winner='pk_router', user='pk_user', requests=1),
                 rec('SwapInitiated', miner='pk_a', block_time=200),
                 rec(
                     'SwapCompleted',
@@ -180,8 +225,8 @@ class TestIngestClearingRate:
             ],
             ATTR,
         )
-        # Both effects fire: the busy interval closes AND a clearing-rate sample lands.
-        assert idx.get_busy_miners_at(400) == {}
+        # Both effects fire: FULFILL_END returns AVAILABLE AND a clearing-rate sample lands.
+        assert idx.get_activity_state_at(400) == {}
         rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)
         assert rows == [{'hotkey': 'hk_a', 'from_amount': 100_000, 'to_amount': 500_000_000, 'block': 400}]
         store.close()
@@ -310,8 +355,8 @@ class TestAttributionAndSkips:
 
     def test_unknown_event_name_is_ignored(self, tmp_path: Path):
         store = make_store(tmp_path)
-        idx = SolanaEventIndex(store)
-        n = idx.ingest([rec('PoolResolved', miner='pk_a', block_time=100)], ATTR)
+        idx = make_index(store)
+        n = idx.ingest([rec('ValidatorWeightsUpdated', miner='pk_a', block_time=100)], ATTR)
         assert n == 0
         store.close()
 
@@ -335,7 +380,7 @@ class TestIngestEndToEndCrown:
         """The full B3.4 path: decode-shaped records → index persistence →
         scoring's crown replay credits the active, funded, best-rate miner."""
         store = make_store(tmp_path)
-        idx = SolanaEventIndex(store)
+        idx = make_index(store, ttl=1000)
         idx.ingest(
             [
                 # Both miners active + funded from t=0; btc→tao (higher rate wins).
@@ -361,7 +406,8 @@ class TestIngestEndToEndCrown:
                     rate=200 * RATE_PRECISION,
                     liquidity=0,
                 ),
-                # A takes a swap mid-window — crown flips to B while busy.
+                # A is reserved then takes a swap mid-window — crown flips to B while busy.
+                rec('PoolResolved', miner='pk_a', block_time=400, winner='pk_router', user='pk_user', requests=1),
                 rec('SwapInitiated', miner='pk_a', block_time=400),
                 rec(
                     'SwapCompleted',

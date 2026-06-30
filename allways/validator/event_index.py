@@ -1,6 +1,6 @@
 """SolanaEventIndex — crown-time miner state sourced from Solana program events (B3.4).
 
-The crown algorithm in ``scoring.py`` reads per-instant miner state (active set, busy counts, posted
+The crown algorithm in ``scoring.py`` reads per-instant miner state (active set, activity state, posted
 collateral, quoted rate) through a small read interface. B1/B2 fed that interface from the substrate
 ``ContractEventWatcher``; B3.4 swaps the *writer*: ``SolanaEventIngest`` (B3.1) decodes program events and
 this index persists them into the ``state_store`` event tables, attributing each on-chain Solana pubkey to
@@ -10,32 +10,40 @@ persists its realized legs into ``clearing_rates`` (C-rev), the per-swap history
 is built from.
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
-blocks. Reservation pins are gone in the Solana model (the swap rate is pinned on-chain and a reserved miner
-is busy-gated out of the crown), so no pin stream is written.
+blocks. Reservation + swap lifecycle drive a per-miner ``MinerActivity`` machine (D4): ``PoolResolved``
+opens a RESERVE_START plus a synthetic RESERVE_EXPIRE at ``block_time + reservation_ttl_secs``, and the swap
+events drive FULFILL_START/END. The crown credits a miner only while its activity ∈ ``REWARD_MINER_STATES``.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import bittensor as bt
 
+from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
 from allways.validator.state_store import ValidatorStateStore
 
-# Busy delta per swap-lifecycle event: a miner is busy (excluded from crown) while the running sum is > 0.
-# Reservation-busy (the pool window's busy_until) has no per-instant event and is intentionally not ingested
-# here — swap-lifecycle busy only (B3.4 decision; PoolResolved→busy-start deferred).
-_BUSY_DELTA = {'SwapInitiated': +1, 'SwapCompleted': -1, 'SwapTimedOut': -1}
+# Swap-lifecycle events → MinerActivity edges. A reserved miner enters FULFILLING on
+# SwapInitiated and returns to AVAILABLE on completion/timeout (see classes.MinerActivity).
+_FULFILL_TRANSITIONS = {
+    'SwapInitiated': ActivityTransition.FULFILL_START,
+    'SwapCompleted': ActivityTransition.FULFILL_END,
+    'SwapTimedOut': ActivityTransition.FULFILL_END,
+}
 
 
 class SolanaEventIndex:
     """Persists decoded Solana program events into the validator state store and exposes the crown's
-    per-instant read interface over them. One instance per validator; backed by ``ValidatorStateStore``."""
+    per-instant read interface over them. One instance per validator; backed by ``ValidatorStateStore``.
+    ``reservation_ttl_fn`` (the solana config cache getter) supplies the TTL used to synthesize each
+    reservation's RESERVE_EXPIRE, since ``reserved_until`` isn't carried on the ``PoolResolved`` event."""
 
-    def __init__(self, state_store: ValidatorStateStore):
+    def __init__(self, state_store: ValidatorStateStore, reservation_ttl_fn: Optional[Callable[[], int]] = None):
         self.state_store = state_store
+        self._reservation_ttl_fn = reservation_ttl_fn
 
     # ─── write path ─────────────────────────────────────────────────────
 
@@ -65,11 +73,13 @@ class SolanaEventIndex:
         if name in ('MinerActivated', 'MinerDeactivated'):
             self.state_store.insert_active_event(block_time, hotkey, name == 'MinerActivated')
             return True
-        if name in _BUSY_DELTA:
-            self.state_store.insert_busy_event(block_time, hotkey, _BUSY_DELTA[name])
-            # SwapCompleted is the only busy event carrying realized legs — persist
+        if name == 'PoolResolved':
+            return self._apply_reservation(hotkey, block_time)
+        if name in _FULFILL_TRANSITIONS:
+            self.state_store.insert_activity_event(block_time, hotkey, _FULFILL_TRANSITIONS[name])
+            # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the C-rev quality reference, in
-            # addition to closing the busy interval above.
+            # addition to closing the fulfillment above.
             if name == 'SwapCompleted':
                 self.state_store.insert_clearing_rate(
                     block_time,
@@ -98,6 +108,29 @@ class SolanaEventIndex:
             return True
         return False  # not a crown-relevant event
 
+    def _apply_reservation(self, hotkey: str, block_time: int) -> bool:
+        """PoolResolved → RESERVE_START now + a synthetic RESERVE_EXPIRE at
+        ``block_time + reservation_ttl_secs`` (``reserved_until`` isn't on the
+        event). Dropped if no TTL source is wired, so the reservation never opens
+        without its matching expiry."""
+        ttl = self._reservation_ttl()
+        if ttl is None:
+            bt.logging.warning('SolanaEventIndex: no reservation_ttl; dropping PoolResolved')
+            return False
+        self.state_store.insert_activity_event(block_time, hotkey, ActivityTransition.RESERVE_START)
+        self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE)
+        return True
+
+    def _reservation_ttl(self) -> Optional[int]:
+        if self._reservation_ttl_fn is None:
+            return None
+        try:
+            ttl = int(self._reservation_ttl_fn())
+        except Exception as e:
+            bt.logging.warning(f'SolanaEventIndex: reservation_ttl read failed: {e}')
+            return None
+        return ttl if ttl > 0 else None
+
     @staticmethod
     def _miner_str(rec: EventRecord) -> Optional[str]:
         try:
@@ -115,8 +148,8 @@ class SolanaEventIndex:
     def get_active_miners_at(self, at_time: int) -> Set[str]:
         return self.state_store.get_active_state_at(at_time)
 
-    def get_busy_miners_at(self, at_time: int) -> Dict[str, int]:
-        return self.state_store.get_busy_counts_at(at_time)
+    def get_activity_state_at(self, at_time: int) -> Dict[str, MinerActivity]:
+        return self.state_store.get_activity_state_at(at_time)
 
     def get_miner_collaterals_at(self, at_time: int) -> Dict[str, int]:
         return self.state_store.get_collaterals_at(at_time)
@@ -124,8 +157,8 @@ class SolanaEventIndex:
     def get_active_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         return self.state_store.get_active_events_in_range(start_time, end_time)
 
-    def get_busy_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
-        return self.state_store.get_busy_events_in_range(start_time, end_time)
+    def get_activity_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+        return self.state_store.get_activity_events_in_range(start_time, end_time)
 
     def get_collateral_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         return self.state_store.get_collateral_events_in_range(start_time, end_time)

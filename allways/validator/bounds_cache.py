@@ -48,6 +48,9 @@ class SolanaConfigCache:
     def fulfillment_timeout_secs(self) -> int:
         return int(self._fresh_config().fulfillment_timeout_secs)
 
+    def reservation_ttl_secs(self) -> int:
+        return int(self._fresh_config().reservation_ttl_secs)
+
     def halted(self) -> bool:
         """Shorter-TTL halt read. Fails open to last-known (or False) so a
         flaky RPC can't zero every miner's reward — matches

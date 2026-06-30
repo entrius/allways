@@ -2,14 +2,14 @@
 
 Anchor self-CPI events are emitted as base64 `Program data:` log lines = 8-byte event discriminator +
 borsh(body). Discriminators + field order copied verbatim from target/idl/allways_swap_manager.json. The
-validator replays these to reconstruct per-instant miner state (collateral, busy, rate, active) for the
+validator replays these to reconstruct per-instant miner state (collateral, activity, rate, active) for the
 crown — replacing the old substrate event_watcher. Only the crown-relevant events are decoded here.
 """
 
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from borsh_construct import I64, U64, U128, CStruct, String
+from borsh_construct import I64, U8, U64, U128, CStruct, String
 from solders.pubkey import Pubkey
 
 from allways.solana.layouts import Hash32, Pubkey32
@@ -25,6 +25,7 @@ EVENT_DISCRIMINATORS = {
     'QuoteRemoved': bytes([52, 211, 141, 65, 95, 43, 64, 32]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
+    'PoolResolved': bytes([37, 148, 82, 156, 128, 131, 201, 171]),
 }
 
 # Borsh bodies (post-discriminator), field order locked to events.rs.
@@ -64,6 +65,8 @@ EVENT_LAYOUTS = {
     'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
     'MinerDeactivated': CStruct('miner' / Pubkey32, 'at' / I64),
+    # The reserved miner is `miner` (not `winner`, the router). Drives RESERVE_START.
+    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'user' / Pubkey32, 'requests' / U8),
 }
 
 # Fields to convert from raw 32 bytes → solders Pubkey after parse.
@@ -77,6 +80,7 @@ EVENT_PUBKEY_FIELDS = {
     'QuoteRemoved': ['miner'],
     'MinerActivated': ['miner'],
     'MinerDeactivated': ['miner'],
+    'PoolResolved': ['miner', 'winner', 'user'],
 }
 
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}

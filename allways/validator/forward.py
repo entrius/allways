@@ -78,7 +78,7 @@ def clear_provider_caches(self: Validator) -> None:
 
 def ingest_solana_events(self: Validator) -> None:
     """Poll program events newer than the stored cursor and fold them into the
-    crown ``SolanaEventIndex`` (active/busy/collateral/rate tables), attributing
+    crown ``SolanaEventIndex`` (active/activity/collateral/rate tables), attributing
     each event's miner Solana pubkey → bound hotkey via the sr25519 binding. The
     cursor advances only after a successful poll, so a transient RPC failure
     re-reads the same window next step instead of skipping events."""
