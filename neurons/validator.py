@@ -67,7 +67,12 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        self.chain_providers = create_chain_providers(check=True, require_send=False, subtensor=self.subtensor)
+        # One rpc-url source of truth shared by every SOL consumer: the chain
+        # providers (source-leg verification) and the solana_client below.
+        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        self.chain_providers = create_chain_providers(
+            check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
+        )
         self.fee_divisor = FEE_DIVISOR
 
         # Single store owning every validator-local table (crown event tables +
@@ -92,7 +97,6 @@ class Validator(BaseValidatorNeuron):
         # (getProgramAccounts), decides per status, verifies both legs with
         # replay-freshness gates, and casts the on-chain consensus vote. This
         # subsumes the old substrate swap_tracker discovery + verifier.
-        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
         # Safety hatch for staged rollout: SOLANA_VALIDATOR_READONLY=1 logs "WOULD …" without voting.
         solana_read_only = os.environ.get('SOLANA_VALIDATOR_READONLY', '0') == '1'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
@@ -127,7 +131,7 @@ class Validator(BaseValidatorNeuron):
         # read registration + source chains off these; scoring bounds come off Solana.
         self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor)
+        self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor, solana_rpc_url=solana_rpc_url)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon
