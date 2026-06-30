@@ -158,7 +158,7 @@ class SolanaSwapLoop:
 
     def _reject_logged(self, swap: Any, expected_to: int) -> None:
         """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
-        key = self._swap_key(swap)
+        key = _swap_key_hex(swap.swap_key)
         if key in self.reject_warned:
             return
         self.reject_warned.add(key)
@@ -166,12 +166,6 @@ class SolanaSwapLoop:
             f'{self._label(swap)}: REJECT — to_amount {swap.to_amount} inconsistent with pinned rate '
             f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
         )
-
-    def _swap_key(self, swap: Any) -> str:
-        try:
-            return swap_key_from_tx_hash(swap.from_tx_hash).hex()
-        except Exception:
-            return '?'
 
     def decide(self, swap: Any, now: int) -> SwapDecision:
         """Per-status decision. Verifies legs where needed; reads chain providers + the Reservation PDA."""
