@@ -102,16 +102,6 @@ pub mod allways_swap_manager {
     pub fn set_max_total_extension(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_max_total_extension(ctx, secs)
     }
-    /// Set a validator's draw weight (admin bootstrap/fallback; superseded for routine use
-    /// by the consensus path below).
-    pub fn set_validator_weight(
-        ctx: Context<AdminConfig>,
-        validator: Pubkey,
-        weight: u64,
-    ) -> Result<()> {
-        admin::set_validator_weight(ctx, validator, weight)
-    }
-
     // --- Consensus-governed validator weights ---
     /// A validator submits the full weight vector (index-aligned to `Config.validators`); on quorum
     /// the weights are saved. Validators read stake off-chain and converge on one snapshot.
