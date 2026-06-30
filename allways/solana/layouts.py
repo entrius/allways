@@ -229,6 +229,11 @@ IX_DISCRIMINATORS = {
     'set_min_swap_amount': bytes([189, 59, 139, 62, 167, 12, 58, 88]),
     'set_reservation_ttl': bytes([108, 189, 90, 167, 113, 34, 82, 140]),
     'withdraw_treasury': bytes([40, 63, 122, 158, 144, 216, 83, 96]),
+    # D6 — remaining admin levers (single scalar each, reusing IX_AMOUNT_ARGS u64 / IX_I64_ARGS i64).
+    'set_reservation_fee': bytes([58, 32, 204, 143, 35, 61, 70, 115]),
+    'set_pool_window': bytes([250, 90, 55, 0, 118, 48, 94, 204]),
+    'set_weights_update_min_interval': bytes([185, 134, 117, 75, 73, 184, 80, 123]),
+    'set_max_total_extension': bytes([185, 183, 148, 252, 204, 128, 7, 24]),
     # Phase 9 — swap intake (reservation-lottery pool).
     'open_or_request': bytes([174, 133, 208, 178, 0, 117, 73, 12]),
     'resolve_pool': bytes([191, 164, 190, 142, 178, 198, 162, 249]),  # no args (empty body)

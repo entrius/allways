@@ -300,6 +300,18 @@ class AllwaysSolanaClient:
     def set_reservation_ttl(self, secs: int) -> str:
         return self._admin_config('set_reservation_ttl', layouts.IX_I64_ARGS.build({'value': secs}))
 
+    def set_reservation_fee(self, lamports: int) -> str:
+        return self._admin_config('set_reservation_fee', layouts.IX_AMOUNT_ARGS.build({'amount': lamports}))
+
+    def set_pool_window(self, secs: int) -> str:
+        return self._admin_config('set_pool_window', layouts.IX_I64_ARGS.build({'value': secs}))
+
+    def set_weights_update_min_interval(self, secs: int) -> str:
+        return self._admin_config('set_weights_update_min_interval', layouts.IX_I64_ARGS.build({'value': secs}))
+
+    def set_max_total_extension(self, secs: int) -> str:
+        return self._admin_config('set_max_total_extension', layouts.IX_I64_ARGS.build({'value': secs}))
+
     def withdraw_treasury(self, recipient, amount: int) -> str:
         """Admin: move accrued protocol fees from the Treasury PDA to `recipient`."""
         admin = self.keypair.pubkey()

@@ -276,6 +276,11 @@ def from_lamports(amount_lamports: int) -> float:
     return amount_lamports / LAMPORTS_PER_SOL
 
 
+def secs_str(secs: int) -> str:
+    """Render a seconds duration as `<n>s (~<m>m)` — shared by admin setters and view dumps."""
+    return f'{secs}s (~{secs // 60}m)'
+
+
 def get_solana_cli_context(need_keypair: bool = True):
     """Solana CLI setup for the B4-repointed miner/admin commands → (config, solana_client).
 
