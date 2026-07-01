@@ -8,7 +8,7 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 from types import SimpleNamespace
 
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.validator.solana_swap_loop import SolanaSwapLoop, SwapAction, SwapDecision
+from allways.validator.solana_swap_loop import SolanaSwapLoop, SwapAction, SwapDecision, _is_benign_resolve
 
 INITIATED_AT = 1000  # dest-freshness floor
 RESV_CREATED_AT = 1200  # source-freshness floor
@@ -485,3 +485,22 @@ def test_resolve_pools_one_failure_does_not_break_sweep():
     client = Boom([make_pool(miner='bad'), make_pool(miner='good')])
     loop = SolanaSwapLoop(client, {}, fee_divisor=100)
     assert loop.resolve_pools_once(now=500) == ['good']
+
+
+def test_is_benign_resolve_classifies_lost_race():
+    assert _is_benign_resolve(RuntimeError('custom program error: NoRequests'))
+    assert _is_benign_resolve(RuntimeError('PoolNotClosed'))
+    assert not _is_benign_resolve(RuntimeError('rpc down'))
+
+
+def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():
+    # A peer resolved the pool between our read and our tx → benign NoRequests, swallowed quietly.
+    class Raced(PoolRecordingClient):
+        def resolve_pool(self, miner):
+            if miner == 'raced':
+                raise RuntimeError('custom program error: NoRequests')
+            return super().resolve_pool(miner)
+
+    client = Raced([make_pool(miner='raced'), make_pool(miner='mine')])
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop.resolve_pools_once(now=500) == ['mine']  # loser not counted, sweep unbroken
