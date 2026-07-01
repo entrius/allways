@@ -2,13 +2,10 @@ import math
 from dataclasses import dataclass
 
 from allways.constants import (
-    EXTENSION_BUCKET_BLOCKS,
+    EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
-    MAX_EXTENSION_BLOCKS,
     NUMERAIRE_CHAIN,
 )
-
-SUBTENSOR_BLOCK_SECONDS = 12
 
 
 @dataclass(frozen=True)
@@ -104,28 +101,14 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)
 
 
-def confirmations_to_subtensor_blocks(chain_id: str) -> int:
-    """How many subtensor blocks a chain's min_confirmations take."""
-    chain = get_chain(chain_id)
-    return math.ceil(chain.min_confirmations * chain.seconds_per_block / SUBTENSOR_BLOCK_SECONDS)
+def compute_extension_target_secs(chain_id: str, confirmations: int, now_unix: int, ceiling_unix: int) -> int:
+    """Unix-seconds deadline to extend a valid-but-unconfirmed leg to.
 
-
-def compute_extension_target(
-    from_chain_id: str,
-    remaining_blocks: int,
-    current_subnet_block: int,
-) -> int:
-    """Subtensor block to extend a reservation/timeout to.
-
-    Covers ``remaining_blocks`` source-chain blocks plus a padding buffer,
-    bucket-rounded so validators converge, capped at MAX_EXTENSION_BLOCKS.
+    Covers the leg's remaining confirmations plus a padding buffer, bucket-rounded (in seconds) so
+    validators converge, then clamped to the contract ceiling (``max_extend_at``).
     """
-    chain = get_chain(from_chain_id)
-    seconds_needed = remaining_blocks * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
-    blocks_needed = math.ceil(seconds_needed / SUBTENSOR_BLOCK_SECONDS)
-    blocks_needed = math.ceil(blocks_needed / EXTENSION_BUCKET_BLOCKS) * EXTENSION_BUCKET_BLOCKS
-    blocks_needed = min(blocks_needed, MAX_EXTENSION_BLOCKS)
-    # Anchor on current, not deadline: contract caps ``target - current_at_exec``
-    # at MAX_EXTENSION_BLOCKS (lib.rs:670, :1090), so a deadline anchor blows
-    # the cap whenever propose fires before the deadline.
-    return current_subnet_block + blocks_needed
+    chain = get_chain(chain_id)
+    remaining = max(0, chain.min_confirmations - confirmations)
+    target = now_unix + remaining * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
+    target = math.ceil(target / EXTENSION_BUCKET_SECONDS) * EXTENSION_BUCKET_SECONDS
+    return min(target, ceiling_unix)
