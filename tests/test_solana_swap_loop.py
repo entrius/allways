@@ -254,7 +254,7 @@ def test_fetch_leg_tristate():
 
 
 def test_source_pending_near_expiry_extends_reservation():
-    # BTC source pending at 0/2 confs: target = now + 2*600 + 300 = 3000 → 600s bucket lands on 3000.
+    # BTC source pending at 0/2 confs: raw = now + 2*600 + 120 = 2820 → 600s bucket lands on 3000.
     resv = make_reservation(reserved_until=1600, max_extend_at=10_000)
     loop, _ = loop_with(result=False, reservation=resv)
     action = loop.decide(make_swap(status='PendingAttestation'), now=1500)
@@ -281,13 +281,13 @@ def test_source_pending_no_reservation_waits():
 
 
 def test_dest_pending_near_timeout_extends_timeout():
-    # SOL dest pending at 0/32 confs: target = now + 32*1 + 300 = 1832 → 600s bucket up to 2400 (<ceiling).
+    # SOL dest pending at 0/32 confs: raw = now + 32*1 + 120 = 1652 → 600s bucket up to 1800 (<ceiling).
     loop, providers = loop_with(result=True)
     providers['sol'].result = False
     swap = make_swap(status='Fulfilled', timeout_at=1600, max_extend_at=10_000)
     action = loop.decide(swap, now=1500)
     assert action.decision == SwapDecision.EXTEND_TIMEOUT
-    assert action.target_at == 2400
+    assert action.target_at == 1800
 
 
 def test_dest_pending_far_from_timeout_waits():

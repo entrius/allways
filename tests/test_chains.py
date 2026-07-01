@@ -54,26 +54,26 @@ class TestCanonicalPair:
 
 
 class TestComputeExtensionTargetSecs:
-    # Unix-seconds target = now + max(0, min_confirmations - confs) * seconds_per_block + 300s padding,
+    # Unix-seconds target = now + max(0, min_confirmations - confs) * seconds_per_block + 120s padding,
     # bucketed up to the native 600s grid, clamped to the contract ceiling (max_extend_at).
     NOW = 10_000
     CEILING = 10_000_000
 
     def test_btc_zero_confs(self):
-        # BTC needs 2 confs: remaining=2, raw = 10000 + 2*600 + 300 = 11500, bucket up to 12000.
-        assert compute_extension_target_secs('btc', 0, self.NOW, self.CEILING) == 12_000
+        # BTC needs 2 confs: remaining=2, raw = 10000 + 2*600 + 120 = 11320, bucket up to 11400.
+        assert compute_extension_target_secs('btc', 0, self.NOW, self.CEILING) == 11_400
 
     def test_btc_one_conf(self):
-        # remaining=1, raw = 10000 + 600 + 300 = 10900, bucket up to 11400.
-        assert compute_extension_target_secs('btc', 1, self.NOW, self.CEILING) == 11_400
+        # remaining=1, raw = 10000 + 600 + 120 = 10720, bucket up to 10800.
+        assert compute_extension_target_secs('btc', 1, self.NOW, self.CEILING) == 10_800
 
     def test_btc_fully_confirmed_only_padding(self):
-        # remaining clamps to 0: raw = 10000 + 300 = 10300, bucket up to 10800.
-        assert compute_extension_target_secs('btc', 5, self.NOW, self.CEILING) == 10_800
+        # remaining clamps to 0: raw = 10000 + 120 = 10120, bucket up to 10200.
+        assert compute_extension_target_secs('btc', 5, self.NOW, self.CEILING) == 10_200
 
     def test_tao_remaining_confs(self):
-        # TAO needs 6 confs, 12s each: remaining=6, raw = 10000 + 72 + 300 = 10372, bucket up to 10800.
-        assert compute_extension_target_secs('tao', 0, self.NOW, self.CEILING) == 10_800
+        # TAO needs 6 confs, 12s each: remaining=6, raw = 10000 + 72 + 120 = 10192, bucket up to 10200.
+        assert compute_extension_target_secs('tao', 0, self.NOW, self.CEILING) == 10_200
 
     def test_target_is_strictly_after_now(self):
         target = compute_extension_target_secs('btc', 0, self.NOW, self.CEILING)

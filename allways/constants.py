@@ -128,7 +128,7 @@ MAX_RESERVATIONS_PER_ADDRESS = 1
 # Tunables for the propose/challenge/finalize extension flow. Per-chain timing
 # (block time, confirmations) lives in allways/chains.py; the contract enforces
 # its own MAX_EXTENSION_BLOCKS independently.
-EXTENSION_PADDING_SECONDS = 300  # safety buffer on top of confirmation time
+EXTENSION_PADDING_SECONDS = 120  # safety buffer on top of confirmation time
 # Validator-view convergence: extension targets snap up to this native-seconds grid so validators
 # computing `now + confirmation_runway` at slightly different wall-clock moments agree on one target_at.
 # Seconds, never blocks (the deadline axis is unix-seconds); >= the slowest chain's block time so a
