@@ -19,6 +19,10 @@ def _config(**over):
         min_swap_amount=0,
         max_swap_amount=0,
         halted=False,
+        reservation_fee_lamports=0,
+        pool_window_secs=60,
+        weights_update_min_interval_secs=1200,
+        max_total_extension_secs=3600,
         validators=[],
     )
     fields.update(over)
@@ -83,3 +87,47 @@ def test_halt_skips_when_already_halted(monkeypatch):
     assert result.exit_code == 0
     assert 'already halted' in result.output
     client.set_halted.assert_not_called()
+
+
+def test_set_reservation_fee_converts_sol_to_lamports(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(reservation_fee_lamports=0)
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(admin.admin_group, ['set-reservation-fee', '0.001'], input='y\n')
+
+    assert result.exit_code == 0, result.output
+    client.set_reservation_fee.assert_called_once_with(1_000_000)
+
+
+def test_set_pool_window_passes_seconds(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(pool_window_secs=60)
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(admin.admin_group, ['set-pool-window', '120'], input='y\n')
+
+    assert result.exit_code == 0, result.output
+    client.set_pool_window.assert_called_once_with(120)
+
+
+def test_set_weights_interval_passes_seconds(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(weights_update_min_interval_secs=1200)
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(admin.admin_group, ['set-weights-interval', '900'], input='y\n')
+
+    assert result.exit_code == 0, result.output
+    client.set_weights_update_min_interval.assert_called_once_with(900)
+
+
+def test_set_max_extension_passes_seconds(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(max_total_extension_secs=3600)
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(admin.admin_group, ['set-max-extension', '7200'], input='y\n')
+
+    assert result.exit_code == 0, result.output
+    client.set_max_total_extension.assert_called_once_with(7200)

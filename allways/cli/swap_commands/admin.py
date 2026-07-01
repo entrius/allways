@@ -9,13 +9,10 @@ from allways.cli.swap_commands.helpers import (
     from_lamports,
     get_solana_cli_context,
     loading,
+    secs_str,
     to_lamports,
 )
 from allways.solana.client import SolanaClientError
-
-
-def _secs_str(secs: int) -> str:
-    return f'{secs}s (~{secs // 60}m)'
 
 
 def _parse_pubkey(s: str):
@@ -69,9 +66,9 @@ def set_timeout(secs: int):
         getter=lambda c: c.get_config().fulfillment_timeout_secs,
         setter=lambda c: c.set_fulfillment_timeout(secs),
         noun='fulfillment timeout',
-        format_current=lambda v: _secs_str(v),
-        new_display=_secs_str(secs),
-        success_msg=f'Fulfillment timeout set to {_secs_str(secs)}',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Fulfillment timeout set to {secs_str(secs)}',
     )
 
 
@@ -91,9 +88,98 @@ def set_reservation_ttl(secs: int):
         getter=lambda c: c.get_config().reservation_ttl_secs,
         setter=lambda c: c.set_reservation_ttl(secs),
         noun='reservation TTL',
-        format_current=lambda v: _secs_str(v),
-        new_display=_secs_str(secs),
-        success_msg=f'Reservation TTL set to {_secs_str(secs)}',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Reservation TTL set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-reservation-fee', show_disclaimer=True)
+@click.argument('amount_sol', type=float)
+def set_reservation_fee(amount_sol: float):
+    """Set the flat per-request reservation fee (in SOL).
+
+    [dim]Examples:
+        $ alw admin set-reservation-fee 0.001[/dim]
+    """
+    if amount_sol < 0:
+        console.print('[red]Amount must be non-negative[/red]')
+        return
+    lamports = to_lamports(amount_sol)
+    _run_setter(
+        title='Set Reservation Fee',
+        getter=lambda c: c.get_config().reservation_fee_lamports,
+        setter=lambda c: c.set_reservation_fee(lamports),
+        noun='reservation fee',
+        format_current=lambda v: f'{from_lamports(v):.6f} SOL',
+        new_display=f'{amount_sol:.6f} SOL',
+        success_msg=f'Reservation fee set to {amount_sol:.6f} SOL',
+    )
+
+
+@admin_group.command('set-pool-window', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_pool_window(secs: int):
+    """Set the reservation-pool window in seconds (how long a pool collects requests before the draw).
+
+    [dim]Examples:
+        $ alw admin set-pool-window 60[/dim]
+    """
+    if secs <= 0:
+        console.print('[red]Seconds must be positive[/red]')
+        return
+    _run_setter(
+        title='Set Pool Window',
+        getter=lambda c: c.get_config().pool_window_secs,
+        setter=lambda c: c.set_pool_window(secs),
+        noun='pool window',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Pool window set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-weights-interval', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_weights_interval(secs: int):
+    """Set the minimum interval between validator weight updates (seconds).
+
+    [dim]Examples:
+        $ alw admin set-weights-interval 1200[/dim]
+    """
+    if secs <= 0:
+        console.print('[red]Seconds must be positive[/red]')
+        return
+    _run_setter(
+        title='Set Weights Update Interval',
+        getter=lambda c: c.get_config().weights_update_min_interval_secs,
+        setter=lambda c: c.set_weights_update_min_interval(secs),
+        noun='weights update interval',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Weights update interval set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-max-extension', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_max_extension(secs: int):
+    """Set the max total timeout/reservation extension a single swap may accrue (seconds).
+
+    [dim]Examples:
+        $ alw admin set-max-extension 3600[/dim]
+    """
+    if secs < 0:
+        console.print('[red]Seconds must be non-negative[/red]')
+        return
+    _run_setter(
+        title='Set Max Total Extension',
+        getter=lambda c: c.get_config().max_total_extension_secs,
+        setter=lambda c: c.set_max_total_extension(secs),
+        noun='max total extension',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Max total extension set to {secs_str(secs)}',
     )
 
 
