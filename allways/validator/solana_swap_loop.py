@@ -56,6 +56,12 @@ ACTIONABLE = frozenset(
 # or we're at the ceiling) — log quietly, never propagate.
 _BENIGN_EXTEND_MARKERS = ('ExtensionNotLater', 'ExtensionExceedsCeiling')
 
+# resolve_pool is permissionless, so every validator cranks every closed pool and the contract's
+# first-wins idempotency handles the race. A loser's tx fails with one of these — a peer already
+# resolved it (NoRequests: opened_at zeroed), or the on-chain clock hasn't crossed closes_at yet
+# (PoolNotClosed, clock skew) — both expected, retried next pass. Real failures still surface.
+_BENIGN_RESOLVE_MARKERS = ('NoRequests', 'PoolNotClosed')
+
 
 def _status_name(swap: Any) -> str:
     """Borsh enum decodes to an instance whose type name is the variant (Active/Fulfilled/...)."""
@@ -70,6 +76,11 @@ def _swap_key_hex(key: Any) -> str:
 def _is_benign_extension(e: Exception) -> bool:
     """A contract ceiling hit or a lost extension race — expected, not an error."""
     return any(m in str(e) for m in _BENIGN_EXTEND_MARKERS)
+
+
+def _is_benign_resolve(e: Exception) -> bool:
+    """A lost resolve_pool race — a peer already resolved it, or the clock hasn't crossed closes_at."""
+    return any(m in str(e) for m in _BENIGN_RESOLVE_MARKERS)
 
 
 def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
@@ -320,13 +331,15 @@ class SolanaSwapLoop:
         return True
 
     def resolve_pools_once(self, now: int) -> List[str]:
-        """Permissionless crank: resolve every pool whose window has closed into a winner Reservation.
-        Idempotent — `resolve_pool` zeroes `opened_at` + clears requests, so a resolved pool is skipped
-        next pass. One bad pool never breaks the sweep. Returns the miners whose pools we resolved."""
+        """Permissionless crank: resolve every closed, non-empty, unresolved pool into a winner
+        Reservation. `resolve_pool` is idempotent (first-wins: it zeroes `opened_at` + clears requests),
+        so racing validators are safe — a loser's tx is a benign no-op, logged quietly. One bad pool never
+        breaks the sweep. Returns the miners whose pools we resolved. (A per-pool cranker assignment to
+        avoid the redundant losing txs is a deferred optimization — D-CRANK.)"""
         resolved: List[str] = []
         for _pubkey, pool in self.client.get_all('Pool'):
             if int(getattr(pool, 'opened_at', 0)) == 0:
-                continue  # available/empty slot
+                continue  # available/empty slot — already resolved or never opened
             if now <= int(pool.closes_at):
                 continue  # window still open
             if not getattr(pool, 'requests', None):
@@ -338,6 +351,9 @@ class SolanaSwapLoop:
             try:
                 self.client.resolve_pool(miner)
             except Exception as e:  # one bad pool must not break the pass
+                if _is_benign_resolve(e):
+                    bt.logging.debug(f'pool {miner}: resolve_pool no-op (peer won the race): {e}')
+                    continue
                 bt.logging.error(f'pool {miner}: resolve_pool failed: {e}')
                 continue
             bt.logging.success(f'pool {miner}: resolved ({len(pool.requests)} req)')
