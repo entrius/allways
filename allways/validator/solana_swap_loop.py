@@ -11,14 +11,14 @@ validator verifies the dest leg delivered `apply_fee_deduction(to_amount, FEE_DI
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
-from allways.utils.rate import apply_fee_deduction
+from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
 
 
 class SwapDecision(Enum):
@@ -27,6 +27,7 @@ class SwapDecision(Enum):
     TIMEOUT = 'timeout'  # Active past its deadline -> would timeout_swap
     WAIT = 'wait'  # in-flight, nothing to do yet
     SKIP = 'skip'  # provider unreachable / unverifiable this round
+    REJECT = 'reject'  # to_amount inconsistent with pinned rate -> never attest (terminal no-op)
 
 
 def _status_name(swap: Any) -> str:
@@ -63,6 +64,7 @@ class SolanaSwapLoop:
         self.providers = chain_providers
         self.fee_divisor = fee_divisor
         self.read_only = read_only
+        self.reject_warned: Set[str] = set()  # dedupe rate-reject warnings, one per swap key
 
     def expected_user_receives(self, swap: Any) -> int:
         """Dest amount the miner must deliver = 99% of the pinned to_amount (Option A)."""
@@ -154,10 +156,26 @@ class SolanaSwapLoop:
             return False
         return True
 
+    def _reject_logged(self, swap: Any, expected_to: int) -> None:
+        """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
+        key = _swap_key_hex(swap.swap_key)
+        if key in self.reject_warned:
+            return
+        self.reject_warned.add(key)
+        bt.logging.warning(
+            f'{self._label(swap)}: REJECT — to_amount {swap.to_amount} inconsistent with pinned rate '
+            f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
+        )
+
     def decide(self, swap: Any, now: int) -> SwapDecision:
         """Per-status decision. Verifies legs where needed; reads chain providers + the Reservation PDA."""
         status = _status_name(swap)
         if status == 'PendingAttestation':
+            # Refuse to attest if to_amount is inconsistent with the pinned (unforgeable) miner rate.
+            expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
+            if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
+                self._reject_logged(swap, expected_to)
+                return SwapDecision.REJECT
             # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
             s_status, info = self._fetch_leg(
                 swap.from_chain,
@@ -211,6 +229,8 @@ class SolanaSwapLoop:
                 if self.client.has_voted(pdas.REQ_TIMEOUT, swap_key, voter):
                     return False
                 self.client.timeout_swap(swap_key, swap.miner, swap.user)
+            elif decision == SwapDecision.REJECT:
+                return False  # rate-inconsistent claim: cast no vote, leave it to go stale and reap
             else:
                 return False
         except Exception as e:
