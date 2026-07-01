@@ -1,5 +1,7 @@
 import os
 
+from allways.classes import MinerActivity
+
 # ─── Network ───────────────────────────────────────────────
 NETUID_FINNEY = 7
 NETUID_LOCAL = 2
@@ -53,6 +55,10 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
+# Crown reward-state policy (D4): the only place that decides which MinerActivity
+# states earn crown. "All busy forfeits" = only AVAILABLE; add MinerActivity.FULFILLING
+# here to reward in-flight miners, with no other logic change.
+REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Numéraire / hub asset: the subnet is hub-and-spoke — every launch pair is hub↔spoke, so a rate reads
 # uniformly as 'dest per 1 hub'. SOL by construction (the contract lives on Solana: collateral, fee, and the
 # sol_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.

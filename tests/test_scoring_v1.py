@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
@@ -122,23 +123,36 @@ class CrownSeeder:
         if name in ('MinerActivated', 'MinerDeactivated'):
             active = fields.get('active', name == 'MinerActivated')
             self.state_store.insert_active_event(block, miner, bool(active))
+        elif name == 'PoolResolved':
+            # RESERVE_START now + RESERVE_EXPIRE at block+ttl (default beyond any
+            # test window, so a swap's FULFILL_END is what returns to AVAILABLE).
+            ttl = fields.get('ttl', 10**9)
+            self.state_store.insert_activity_event(block, miner, ActivityTransition.RESERVE_START)
+            self.state_store.insert_activity_event(block + ttl, miner, ActivityTransition.RESERVE_EXPIRE)
         elif name == 'SwapInitiated':
-            self.state_store.insert_busy_event(block, miner, +1)
+            self.state_store.insert_activity_event(block, miner, ActivityTransition.FULFILL_START)
         elif name in ('SwapCompleted', 'SwapTimedOut'):
-            self.state_store.insert_busy_event(block, miner, -1)
+            self.state_store.insert_activity_event(block, miner, ActivityTransition.FULFILL_END)
         elif name in ('CollateralPosted', 'CollateralWithdrawn'):
             self.state_store.insert_collateral_event(block, miner, int(fields['total']))
         else:
             raise ValueError(f'CrownSeeder: unsupported event {name}')
 
-    def apply_busy_delta(self, block: int, hotkey: str, delta: int) -> None:
-        self.state_store.insert_busy_event(block, hotkey, delta)
+    def reserve_then_swap(
+        self, miner: str, reserve_block: int, init_block: int, end_block: int, end='SwapCompleted', ttl: int = 10**9
+    ):
+        """Realistic busy span: PoolResolved → SwapInitiated → completion. The
+        reservation's RESERVE_EXPIRE is parked at reserve_block + ttl (default
+        beyond the window)."""
+        self.apply_event(reserve_block, 'PoolResolved', {'miner': miner, 'ttl': ttl})
+        self.apply_event(init_block, 'SwapInitiated', {'miner': miner})
+        self.apply_event(end_block, end, {'miner': miner})
 
     def get_active_miners_at(self, at_time: int) -> set[str]:
         return self.state_store.get_active_state_at(at_time)
 
-    def get_busy_miners_at(self, at_time: int) -> dict[str, int]:
-        return self.state_store.get_busy_counts_at(at_time)
+    def get_activity_state_at(self, at_time: int) -> dict[str, MinerActivity]:
+        return self.state_store.get_activity_state_at(at_time)
 
     def get_miner_collaterals_at(self, at_time: int) -> dict[str, int]:
         return self.state_store.get_collaterals_at(at_time)
@@ -362,25 +376,26 @@ class TestCrownHoldersHelper:
         assert holders == {'a', 'b'}
 
     def test_busy_best_rate_loses_to_idle_runner_up(self):
-        """Miner A has the best rate but is mid-swap — crown goes to B."""
+        """Miner A has the best rate but is mid-swap (not in the rewardable-by-
+        state set) — crown goes to B."""
         rates = {'a': 0.00030, 'b': 0.00020}
-        holders = crown_holders_at_instant(rates, {'a', 'b'}, busy={'a'})
+        holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state={'b'})
         assert holders == ['b']
 
     def test_all_busy_returns_empty(self):
-        """Every eligible miner is busy → no crown → pool recycles."""
+        """No miner is in a rewardable state → no crown → pool recycles."""
         rates = {'a': 0.00030, 'b': 0.00020}
-        holders = crown_holders_at_instant(rates, {'a', 'b'}, busy={'a', 'b'})
+        holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state=set())
         assert holders == []
 
     def test_lower_rate_wins_flips_sort(self):
         """For tao→btc the rate is TAO per BTC and lower = better. The
         helper picks the smallest qualifying rate, falling through to the
-        next-smallest when the smallest is busy."""
+        next-smallest when the smallest isn't rewardable."""
         rates = {'a': 250.0, 'b': 251.0}
         assert crown_holders_at_instant(rates, {'a', 'b'}, lower_rate_wins=True) == ['a']
         # Smallest miner is busy → next-smallest takes the crown.
-        assert crown_holders_at_instant(rates, {'a', 'b'}, busy={'a'}, lower_rate_wins=True) == ['b']
+        assert crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state={'b'}, lower_rate_wins=True) == ['b']
 
     def test_executable_check_drops_sentinel_and_falls_through(self):
         """Regression for #392: a miner posting 1e10 TAO/BTC wins the rate
@@ -784,8 +799,8 @@ class TestReplayCrownTime:
         store.close()
 
     def test_best_rate_miner_goes_busy_credit_flows_to_runner_up(self, tmp_path: Path):
-        """A holds the best rate but takes a swap at block 400 that resolves
-        at block 800. During [400, 800] the crown flips to idle runner-up B."""
+        """A holds the best rate but is reserved+swapping over [400, 800]. During
+        that span A is FULFILLING (forfeits crown) and it flips to runner-up B."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
@@ -799,9 +814,8 @@ class TestReplayCrownTime:
             )
         conn.commit()
 
-        # A goes busy with a swap at 400, completes at 800.
-        watcher.apply_event(400, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
-        watcher.apply_event(800, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        # A is reserved then initiates a swap at 400, completing at 800.
+        watcher.reserve_then_swap('hk_a', reserve_block=400, init_block=400, end_block=800)
 
         crown = replay_crown_time_window(
             store=store,
@@ -829,8 +843,7 @@ class TestReplayCrownTime:
         )
         conn.commit()
 
-        watcher.apply_event(400, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
-        watcher.apply_event(900, 'SwapTimedOut', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.reserve_then_swap('hk_a', reserve_block=400, init_block=400, end_block=900, end='SwapTimedOut')
 
         crown = replay_crown_time_window(
             store=store,
@@ -848,8 +861,9 @@ class TestReplayCrownTime:
         store.close()
 
     def test_busy_state_at_window_start_is_reconstructed(self, tmp_path: Path):
-        """Miner A's SwapInitiated fires before window_start and doesn't
-        resolve until mid-window — replay must see A as busy from the start."""
+        """Miner A's reservation+swap opens before window_start and doesn't
+        resolve until mid-window — reconstruction must see A as FULFILLING at the
+        window edge."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_a', 'hk_b'})
         conn = store.require_connection()
@@ -864,9 +878,10 @@ class TestReplayCrownTime:
         conn.commit()
 
         # A's swap started BEFORE the window opens and completes inside it.
-        watcher.apply_event(50, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
-        watcher.apply_event(500, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.reserve_then_swap('hk_a', reserve_block=50, init_block=50, end_block=500)
 
+        # Window-start state shows A FULFILLING (open swap spans the edge).
+        assert store.get_activity_state_at(100) == {'hk_a': MinerActivity.FULFILLING}
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
@@ -877,8 +892,116 @@ class TestReplayCrownTime:
             rewardable_hotkeys={'hk_a', 'hk_b'},
         )
         # From window_start=100 A is already busy (reconstructed from pre-window
-        # SwapInitiated). B earns (100,500] = 400; A earns (500,1100] = 600.
+        # swap). B earns (100,500] = 400; A earns (500,1100] = 600.
         assert crown == {'hk_b': 400.0, 'hk_a': 600.0}
+        store.close()
+
+
+class TestCrownRewardStates:
+    """D4 — a reserved/fulfilling miner forfeits crown (activity ∉
+    REWARD_MINER_STATES), on top of the existing active/rate/executable gates."""
+
+    def _seed_solo(self, tmp_path: Path, rate: float = 300.0):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'sol', 'btc', rate, 0),
+        )
+        conn.commit()
+        return store, watcher
+
+    def _replay(self, store, **kw):
+        return replay_crown_time_window(
+            store=store,
+            event_index=SolanaEventIndex(store),
+            from_chain='sol',
+            to_chain='btc',
+            window_start=100,
+            window_end=1100,
+            **kw,
+        )
+
+    def test_reserved_not_initiated_forfeits_then_earns_after_expiry(self, tmp_path: Path):
+        """A bare reservation (no swap) forfeits crown for [resolve, resolve+ttl],
+        then RESERVE_EXPIRE returns the miner to AVAILABLE and it earns again."""
+        store, watcher = self._seed_solo(tmp_path)
+        watcher.apply_event(300, 'PoolResolved', {'miner': 'hk_a', 'ttl': 400})  # expire @ 700
+        crown = self._replay(store, rewardable_hotkeys={'hk_a'})
+        # AVAILABLE (100,300]=200 + (700,1100]=400 = 600; RESERVED (300,700] forfeited (solo → recycles).
+        assert crown == {'hk_a': 600.0}
+        store.close()
+
+    def test_reserved_then_initiated_then_completed_forfeits_whole_span(self, tmp_path: Path):
+        """A is reserved at 300 and the swap runs to 800 — the entire
+        [300, 800] span (RESERVED then FULFILLING) forfeits to runner-up B."""
+        store, watcher = self._seed_solo(tmp_path)
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_b', 'sol', 'btc', 200.0, 0),
+        )
+        conn.commit()
+        seed_active(watcher, 'hk_b', active=True, block=0)
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=350, end_block=800)
+        crown = self._replay(store, rewardable_hotkeys={'hk_a', 'hk_b'})
+        # A: (100,300]=200 + (800,1100]=300 = 500. B holds the forfeited (300,800]=500.
+        assert crown == {'hk_a': 500.0, 'hk_b': 500.0}
+        store.close()
+
+    def test_swap_completes_before_reserved_until_has_no_false_tail(self, tmp_path: Path):
+        """The interval model's win over the old delta tail: a swap completing
+        before the reservation's TTL returns the miner to AVAILABLE immediately —
+        no forfeited tail out to reserved_until."""
+        store, watcher = self._seed_solo(tmp_path)
+        # Reserved @300 with ttl 600 (reserved_until = 900), but the swap completes @500.
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=350, end_block=500, ttl=600)
+        # Mid-span between completion and the original reserved_until: AVAILABLE, not RESERVED.
+        assert store.get_activity_state_at(700) == {}
+        crown = self._replay(store, rewardable_hotkeys={'hk_a'})
+        # Forfeits only (300,500]=200; earns (100,300]=200 + (500,1100]=600 = 800. No tail to 900.
+        assert crown == {'hk_a': 800.0}
+        store.close()
+
+    def test_window_start_reconstruction_shows_reserved_at_edge(self, tmp_path: Path):
+        """A reservation open before window_start shows RESERVED at the edge."""
+        store, watcher = self._seed_solo(tmp_path)
+        watcher.apply_event(50, 'PoolResolved', {'miner': 'hk_a', 'ttl': 400})  # expire @ 450
+        assert store.get_activity_state_at(100) == {'hk_a': MinerActivity.RESERVED}
+        crown = self._replay(store, rewardable_hotkeys={'hk_a'})
+        # RESERVED (100,450] forfeited (solo); earns (450,1100] = 650.
+        assert crown == {'hk_a': 650.0}
+        store.close()
+
+    def test_reserve_expire_during_fulfilling_is_a_no_op(self, tmp_path: Path):
+        """RESERVE_EXPIRE landing mid-swap is a no-op — the miner stays FULFILLING
+        until FULFILL_END, forfeiting the whole swap span."""
+        store, watcher = self._seed_solo(tmp_path)
+        # ttl 100 → RESERVE_EXPIRE @ 400, but the swap runs 350..800.
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=350, end_block=800, ttl=100)
+        assert store.get_activity_state_at(500) == {'hk_a': MinerActivity.FULFILLING}  # past the expire, still busy
+        crown = self._replay(store, rewardable_hotkeys={'hk_a'})
+        # Forfeits (300,800]; earns (100,300]=200 + (800,1100]=300 = 500.
+        assert crown == {'hk_a': 500.0}
+        store.close()
+
+    def test_reward_states_set_is_the_only_policy_knob(self, tmp_path: Path, monkeypatch):
+        """Flipping REWARD_MINER_STATES to include FULFILLING makes a fulfilling
+        miner earn — with no other change. RESERVED still forfeits, proving the
+        frozenset is the sole policy lever."""
+        store, watcher = self._seed_solo(tmp_path)
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=350, end_block=800)
+        # Default: only AVAILABLE earns. RESERVED (300,350] + FULFILLING (350,800] forfeit.
+        base = self._replay(store, rewardable_hotkeys={'hk_a'})
+        assert base == {'hk_a': 500.0}  # (100,300]=200 + (800,1100]=300
+
+        monkeypatch.setattr(
+            scoring_mod, 'REWARD_MINER_STATES', frozenset({MinerActivity.AVAILABLE, MinerActivity.FULFILLING})
+        )
+        flipped = self._replay(store, rewardable_hotkeys={'hk_a'})
+        # FULFILLING (350,800]=450 now earns; RESERVED (300,350]=50 still forfeits.
+        assert flipped == {'hk_a': 950.0}
         store.close()
 
 
@@ -1410,8 +1533,8 @@ class TestHistoricalActiveState:
         holders = crown_holders_at_instant(rates, rewardable={'a', 'b'}, active=set())
         assert holders == []
 
-    def test_active_transition_plus_busy_transition_at_same_block(self, tmp_path: Path):
-        """ACTIVE (kind=0) orders before BUSY (kind=1). A deactivates and
+    def test_active_transition_plus_activity_transition_at_same_block(self, tmp_path: Path):
+        """ACTIVE (kind=0) orders before ACTIVITY (kind=1). A deactivates and
         goes busy at the same block — the interval ending at that block
         included A. After the block, A is out both ways."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
@@ -1423,12 +1546,11 @@ class TestHistoricalActiveState:
                 (hk, 'sol', 'btc', rate, 0),
             )
         conn.commit()
-        # At block 500: A both deactivates and picks up a swap. Both events
-        # apply; both end A's crown credit. A remains out until deactivation
-        # reverses (it doesn't).
+        # At block 500: A both deactivates and picks up a reserved swap. Both
+        # events apply; both end A's crown credit. A remains out until
+        # deactivation reverses (it doesn't).
         watcher.apply_event(500, 'MinerActivated', {'miner': 'hk_a', 'active': False})
-        watcher.apply_event(500, 'SwapInitiated', {'swap_id': 1, 'miner': 'hk_a'})
-        watcher.apply_event(800, 'SwapCompleted', {'swap_id': 1, 'miner': 'hk_a'})
+        watcher.reserve_then_swap('hk_a', reserve_block=500, init_block=500, end_block=800)
 
         crown = replay_crown_time_window(
             store=store,
@@ -1477,13 +1599,13 @@ class TestEventKindOrdering:
     now that the crown reads the state_store event tables directly."""
 
     def test_event_kind_ordering_at_same_block(self, tmp_path: Path):
-        """ACTIVE < BUSY < RATE. At a shared block the credit_interval
+        """ACTIVE < ACTIVITY < RATE. At a shared block the credit_interval
         *ending* at that block is evaluated before any of these transitions
         applies. Ordering matters: active-flag flip at block N must gate
         block N+1 regardless of any other same-block transition."""
         from allways.validator.scoring import EventKind
 
-        assert int(EventKind.ACTIVE) < int(EventKind.BUSY) < int(EventKind.RATE)
+        assert int(EventKind.ACTIVE) < int(EventKind.ACTIVITY) < int(EventKind.RATE)
 
 
 class TestHaltShortCircuit:
@@ -1974,13 +2096,11 @@ class TestVolumeWeighting:
             ('hk_b', 'sol', 'btc', 150.0, 0),
         )
         conn.commit()
-        # Window is (9700, 10000]. A busy block 9_800..9_860 (60 blocks within
-        # the window) so B holds crown 20% of window. We can't use a
-        # SwapCompleted event here because the direction lookup needs an
-        # active swap entry in the tracker — easier to just record the
-        # outcome and the busy delta directly.
-        v.event_watcher.apply_busy_delta(9_800, 'hk_a', +1)
-        v.event_watcher.apply_busy_delta(9_860, 'hk_a', -1)
+        # Window is (9700, 10000]. A is reserved 9_800..9_860 (60 blocks within
+        # the window) so B holds crown 20% of window. A bare PoolResolved (no
+        # swap) with a 60s TTL forfeits the crown for exactly the reserved span,
+        # then RESERVE_EXPIRE returns A to AVAILABLE.
+        v.event_watcher.apply_event(9_800, 'PoolResolved', {'miner': 'hk_a', 'ttl': 60})
         self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='sol', to_chain='btc')
         self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)

@@ -1,6 +1,6 @@
 """SQLite-backed store for all validator-local state.
 
-Tables: ``rate_events`` + ``active_events`` + ``busy_events`` +
+Tables: ``rate_events`` + ``active_events`` + ``activity_events`` +
 ``collateral_events`` (the crown-time event series, sourced from Solana program
 events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 ``clearing_rates`` (per-swap realized history from ``SwapCompleted``, backing the
@@ -14,7 +14,9 @@ locked" — the local dev env runs two validators against the same file.
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+
+from allways.classes import ActivityTransition, MinerActivity, next_activity
 
 
 class ValidatorStateStore:
@@ -144,24 +146,21 @@ class ValidatorStateStore:
             (block_num, hotkey, 1 if active else 0),
         )
 
-    def insert_busy_event(self, block_num: int, hotkey: str, delta: int, swap_id: Optional[int] = None) -> None:
+    def insert_activity_event(self, block_num: int, hotkey: str, transition: ActivityTransition) -> None:
+        """Record one edge of a miner's ``MinerActivity`` machine (RESERVE_START,
+        FULFILL_START, FULFILL_END, or the synthetic RESERVE_EXPIRE)."""
         self._execute(
-            'INSERT INTO busy_events (block_num, hotkey, delta, swap_id) VALUES (?, ?, ?, ?)',
-            (block_num, hotkey, delta, swap_id),
+            'INSERT INTO activity_events (block_num, hotkey, kind) VALUES (?, ?, ?)',
+            (block_num, hotkey, int(transition)),
         )
 
     def load_all_active_events(self) -> List[dict]:
         rows = self._fetchall('SELECT block_num, hotkey, active FROM active_events ORDER BY block_num ASC, id ASC')
         return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'active': bool(r['active'])} for r in rows]
 
-    def load_all_busy_events(self) -> List[dict]:
-        rows = self._fetchall(
-            'SELECT block_num, hotkey, delta, swap_id FROM busy_events ORDER BY block_num ASC, id ASC'
-        )
-        return [
-            {'block_num': r['block_num'], 'hotkey': r['hotkey'], 'delta': r['delta'], 'swap_id': r['swap_id']}
-            for r in rows
-        ]
+    def load_all_activity_events(self) -> List[dict]:
+        rows = self._fetchall('SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, id ASC')
+        return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'kind': r['kind']} for r in rows]
 
     def insert_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int) -> None:
         self._execute(
@@ -180,7 +179,7 @@ class ValidatorStateStore:
 
     # ─── crown read interface (B3.4 SolanaEventIndex) ───────────────────
     #
-    # At-time + in-range queries over the active/busy/collateral event tables,
+    # At-time + in-range queries over the active/activity/collateral event tables,
     # the SQL twins of the rate_events readers above. ``block_num`` here is a
     # unix ``blockTime`` (seconds), not a substrate block — the Solana crown
     # axis. ``SolanaEventIndex`` wraps these into the read interface scoring's
@@ -213,30 +212,45 @@ class ValidatorStateStore:
         )
         return {r['hotkey'] for r in rows if r['active']}
 
-    def get_busy_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
-        """Busy ±1 deltas in ``(start_time, end_time]``, oldest first."""
+    def get_activity_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+        """Activity transitions in ``(start_time, end_time]``. Ordered ``block_num,
+        kind`` so coincident-instant edges replay in machine-precedence order
+        (closers/openers before a reservation lapse)."""
         rows = self._fetchall(
             """
-            SELECT id, block_num, hotkey, delta FROM busy_events
+            SELECT id, block_num, hotkey, kind FROM activity_events
             WHERE block_num > ? AND block_num <= ?
-            ORDER BY block_num ASC, id ASC
+            ORDER BY block_num ASC, kind ASC, id ASC
             """,
             (start_time, end_time),
         )
-        return [{'hotkey': r['hotkey'], 'delta': r['delta'], 'block': r['block_num']} for r in rows]
+        return [{'hotkey': r['hotkey'], 'kind': r['kind'], 'block': r['block_num']} for r in rows]
 
-    def get_busy_counts_at(self, at_time: int) -> Dict[str, int]:
-        """Per-hotkey open-swap count at ``at_time`` (running sum of deltas),
-        keeping only hotkeys still busy (sum > 0)."""
+    def get_activity_state_at(self, at_time: int) -> Dict[str, MinerActivity]:
+        """Per-hotkey ``MinerActivity`` at ``at_time``, reduced over each miner's
+        transition timeline. Only non-AVAILABLE miners are returned (callers
+        default the rest to AVAILABLE)."""
         rows = self._fetchall(
             """
-            SELECT hotkey, SUM(delta) AS total FROM busy_events
+            SELECT block_num, hotkey, kind FROM activity_events
             WHERE block_num <= ?
-            GROUP BY hotkey HAVING total > 0
+            ORDER BY block_num ASC, kind ASC, id ASC
             """,
             (at_time,),
         )
-        return {r['hotkey']: int(r['total']) for r in rows}
+        return self._reduce_activity(rows)
+
+    @staticmethod
+    def _reduce_activity(rows: Sequence[sqlite3.Row]) -> Dict[str, MinerActivity]:
+        """Fold ordered transition rows into ``{hotkey: state}`` for non-AVAILABLE
+        miners. An undefined transition holds the current state (defensive)."""
+        states: Dict[str, MinerActivity] = {}
+        for r in rows:
+            hk = r['hotkey']
+            cur = states.get(hk, MinerActivity.AVAILABLE)
+            nxt = next_activity(cur, ActivityTransition(r['kind']))
+            states[hk] = cur if nxt is None else nxt
+        return {hk: st for hk, st in states.items() if st is not MinerActivity.AVAILABLE}
 
     def get_collateral_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         """Collateral transitions in ``(start_time, end_time]``, oldest first.
@@ -355,20 +369,28 @@ class ValidatorStateStore:
             (cutoff_block,),
         )
 
-    def prune_busy_events(self, cutoff_block: int) -> None:
-        """Drop busy events older than ``cutoff_block`` except for hotkeys whose
-        SUM(delta) > 0 — those still have an open swap, so we keep their full
-        +1/-1 history so a future SwapCompleted's -1 isn't orphaned."""
+    def prune_activity_events(self, cutoff_block: int) -> None:
+        """Drop activity transitions older than ``cutoff_block`` except for hotkeys
+        still mid-reservation/swap (reduced state != AVAILABLE) — their full
+        timeline is kept so a later FULFILL_END / RESERVE_EXPIRE isn't orphaned.
+        Read + reduce + delete under one lock so no writer interleaves."""
         if cutoff_block <= 0:
             return
-        self._execute(
-            """
-            DELETE FROM busy_events
-            WHERE block_num < ?
-              AND hotkey NOT IN (SELECT hotkey FROM busy_events GROUP BY hotkey HAVING SUM(delta) > 0)
-            """,
-            (cutoff_block,),
-        )
+        with self.lock:
+            conn = self.require_connection()
+            all_rows = conn.execute(
+                'SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, kind ASC, id ASC'
+            ).fetchall()
+            open_hotkeys = set(self._reduce_activity(all_rows))
+            if open_hotkeys:
+                placeholders = ','.join('?' * len(open_hotkeys))
+                conn.execute(
+                    f'DELETE FROM activity_events WHERE block_num < ? AND hotkey NOT IN ({placeholders})',
+                    (cutoff_block, *open_hotkeys),
+                )
+            else:
+                conn.execute('DELETE FROM activity_events WHERE block_num < ?', (cutoff_block,))
+            conn.commit()
 
     def prune_collateral_events(self, cutoff_block: int) -> None:
         """Drop collateral events older than ``cutoff_block``, preserving the
@@ -495,17 +517,19 @@ class ValidatorStateStore:
                 CREATE INDEX IF NOT EXISTS idx_active_events_hotkey
                     ON active_events(hotkey);
 
-                CREATE TABLE IF NOT EXISTS busy_events (
+                -- MinerActivity transitions (D4): kind is an ActivityTransition
+                -- value; the crown replay reduces these into per-instant state so
+                -- a reserved/fulfilling miner forfeits crown (REWARD_MINER_STATES).
+                CREATE TABLE IF NOT EXISTS activity_events (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     block_num   INTEGER NOT NULL,
                     hotkey      TEXT NOT NULL,
-                    delta       INTEGER NOT NULL,
-                    swap_id     INTEGER
+                    kind        INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_busy_events_block
-                    ON busy_events(block_num);
-                CREATE INDEX IF NOT EXISTS idx_busy_events_hotkey
-                    ON busy_events(hotkey);
+                CREATE INDEX IF NOT EXISTS idx_activity_events_block
+                    ON activity_events(block_num);
+                CREATE INDEX IF NOT EXISTS idx_activity_events_hotkey
+                    ON activity_events(hotkey);
 
                 CREATE TABLE IF NOT EXISTS collateral_events (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,

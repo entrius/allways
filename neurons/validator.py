@@ -105,8 +105,10 @@ class Validator(BaseValidatorNeuron):
         # tables, and scoring replays those tables. `solana_config_cache` serves
         # swap bounds + halt off the Config account (replacing substrate reads).
         self.event_ingest = SolanaEventIngest(self.solana_client)
-        self.event_index = SolanaEventIndex(self.state_store)
         self.solana_config_cache = SolanaConfigCache(self.solana_client)
+        # event_index synthesizes each reservation's RESERVE_EXPIRE at
+        # block_time + reservation_ttl_secs, read off the config cache (D4).
+        self.event_index = SolanaEventIndex(self.state_store, self.solana_config_cache.reservation_ttl_secs)
 
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
