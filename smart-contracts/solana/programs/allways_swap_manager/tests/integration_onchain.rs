@@ -928,15 +928,6 @@ fn remove_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str) -> Instruction 
     )
 }
 
-fn set_validator_weight_ix(admin: &Pubkey, v: Pubkey, weight: u64) -> Instruction {
-    Instruction::new_with_bytes(
-        pid(),
-        &allways_swap_manager::instruction::SetValidatorWeight { validator: v, weight }.data(),
-        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
-            .to_account_metas(None),
-    )
-}
-
 #[test]
 #[ignore = "requires a live solana-test-validator with the program deployed"]
 fn onchain_set_quote_creates_pda() {
@@ -987,21 +978,4 @@ fn onchain_bind_hotkey() {
     assert_eq!(b.hotkey, hotkey);
     assert_eq!(b.hotkey_sig, sig);
     assert!(b.bound_at > 0, "bound_at set from on-chain clock");
-}
-
-#[test]
-#[ignore = "requires a live solana-test-validator with the program deployed"]
-fn onchain_set_validator_weight() {
-    let _ = shared();
-    let rpc = rpc();
-    let admin = admin_keypair();
-    let v = Keypair::new();
-
-    // Add a fresh validator with weight 5, then bump it to 9 via set_validator_weight.
-    send(&rpc, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add (weight 1)");
-    send(&rpc, set_validator_weight_ix(&admin.pubkey(), v.pubkey(), 9), &admin.pubkey(), &admin).expect("set weight");
-
-    let cfg = read_config(&rpc);
-    let w = cfg.validators.iter().find(|x| x.key == v.pubkey()).map(|x| x.weight);
-    assert_eq!(w, Some(9), "validator weight updated to 9");
 }

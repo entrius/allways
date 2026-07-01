@@ -35,20 +35,6 @@ pub fn remove_validator(ctx: Context<AdminConfig>, validator: Pubkey) -> Result<
     Ok(())
 }
 
-/// Set a validator's draw weight (the seam a future stake oracle writes through). Consensus is
-/// count-based, so this only affects the Phase 9 lottery draw.
-pub fn set_validator_weight(ctx: Context<AdminConfig>, validator: Pubkey, weight: u64) -> Result<()> {
-    let config = &mut ctx.accounts.config;
-    let entry = config
-        .validators
-        .iter_mut()
-        .find(|v| v.key == validator)
-        .ok_or(ErrorCode::ValidatorNotFound)?;
-    entry.weight = weight;
-    msg!("validator weight: {} = {}", validator, weight);
-    Ok(())
-}
-
 pub fn set_consensus_threshold(ctx: Context<AdminConfig>, percent: u8) -> Result<()> {
     crate::validate::consensus_threshold(percent)?;
     ctx.accounts.config.consensus_threshold_percent = percent;
