@@ -11,6 +11,10 @@ services:
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
       - ./data/allways:/root/.allways
+      # Solana keypair (miner identity + collateral payer). Pre-provision
+      # ./data/solana/id.json and fund it; ro so a missing file errors loudly at startup
+      # instead of load_or_create silently minting a throwaway key.
+      - ./data/solana:/root/.solana:ro
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 

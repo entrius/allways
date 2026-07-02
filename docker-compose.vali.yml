@@ -13,30 +13,13 @@ services:
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
       - ./data/allways:/root/.allways
+      - ./data/solana:/root/.solana:ro
     # optional: uncomment to write dashboard rows from the validator
     # (requires STORE_DB_RESULTS=true and DB_* vars in .env)
     # networks:
     #   - allways_network
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-
-  btc-node:
-    image: bitcoin/bitcoin:28
-    container_name: aw-btc
-    restart: unless-stopped
-    mem_limit: "512m" # set to "4g" for initial BTC sync, then revert
-    # mem_limit: "4g"       # initial BTC sync — revert to 512m after sync completes
-    command:
-      - bitcoind
-      - -server
-      - -prune=5000 # keep ~5g worth of data on disk
-      - -rpcuser=${BTC_RPC_USER}
-      - -rpcpassword=${BTC_RPC_PASS}
-      - -rpcallowip=0.0.0.0/0
-      - -rpcbind=0.0.0.0
-      - -rpcport=8332
-    volumes:
-      - ./data/btc:/home/bitcoin/.bitcoin
 
   watchtower:
     image: nickfedor/watchtower
