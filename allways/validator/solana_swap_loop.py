@@ -19,7 +19,7 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
-from allways.solana.client import swap_key_from_tx_hash
+from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
 
 
@@ -84,15 +84,17 @@ def _is_benign_resolve(e: Exception) -> bool:
 
 
 def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
-    """Replay defense: the tx must be mined AFTER the on-chain floor (unix seconds).
+    """Replay defense: the tx must be mined AT OR AFTER the on-chain floor (unix seconds).
 
-    Fresh iff block_time > floor - grace. Compares block_time, NOT block height (the floor is unix
-    seconds). Fails closed when block_time is missing. Shared by the loop's CONFIRM/ATTEST gates and the
-    axon claim relay so they agree."""
+    Fresh iff block_time >= floor - grace. A deposit sent immediately after reserving lands in the same
+    unix second as the floor (block_time granularity is seconds), so a strict `>` would wrongly reject an
+    honest same-second deposit; only a tx that *predates* the floor is a replay. Compares block_time, NOT
+    block height (the floor is unix seconds). Fails closed when block_time is missing. Shared by the loop's
+    CONFIRM/ATTEST gates and the axon claim relay so they agree."""
     block_time = getattr(info, 'block_time', None)
     if block_time is None:
         return False
-    return block_time > floor_unix - grace
+    return block_time >= floor_unix - grace
 
 
 class SolanaSwapLoop:
@@ -149,16 +151,16 @@ class SolanaSwapLoop:
         return ('ok', info)
 
     def _is_fresh(self, info: Any, floor_unix: int, chain: str, label: str) -> bool:
-        """Replay defense: the tx must be mined AFTER the on-chain floor (unix seconds).
+        """Replay defense: the tx must be mined AT OR AFTER the on-chain floor (unix seconds).
 
         Compares block_time, NOT block height (the floor is unix seconds, so a height-vs-seconds compare
-        would silently always-pass). Fresh iff block_time > floor - grace; a per-chain GRACE (default 0)
+        would silently always-pass). Fresh iff block_time >= floor - grace; a per-chain GRACE (default 0)
         absorbs honest clock skew. Fails closed if block_time is missing."""
         provider = self.providers.get(chain)
         grace = getattr(provider.get_chain(), 'replay_grace_secs', 0) if provider else 0
         if not is_tx_fresh(info, floor_unix, grace):
             bt.logging.warning(
-                f'{label}: {chain} tx block_time {getattr(info, "block_time", None)} not after floor '
+                f'{label}: {chain} tx block_time {getattr(info, "block_time", None)} predates floor '
                 f'{floor_unix} (grace {grace}s) — replay/stale, rejecting'
             )
             return False
@@ -364,8 +366,11 @@ class SolanaSwapLoop:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""
         out: List[Tuple[str, SwapDecision]] = []
-        for pubkey, swap in self.client.get_swaps():
-            key = _swap_key_hex(getattr(swap, 'swap_key', pubkey))
+        for _pubkey, acct in self.client.get_swaps():
+            # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
+            # views (carrying swap_key) pass through.
+            swap = acct if hasattr(acct, 'swap_key') else swap_from_solana(acct)
+            key = _swap_key_hex(swap.swap_key)
             try:
                 action = self.decide(swap, now)
             except Exception as e:  # one bad swap must not break the pass

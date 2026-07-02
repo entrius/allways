@@ -22,9 +22,9 @@ class ChainDefinition:
     # Smallest amount that can actually exist/move on-chain, in native units
     # (BTC dust floor, TAO existential deposit). 1 = no floor.
     min_onchain_amount: int = 1
-    # Replay-freshness grace (seconds): a tx is fresh iff block_time > floor - grace.
-    # Default 0 (strict >). Absorbs honest miner clock skew; MUST stay well under
-    # reservation_ttl_secs — the replay window is exactly this wide (B2).
+    # Replay-freshness grace (seconds): a tx is fresh iff block_time >= floor - grace.
+    # Default 0 (at-or-after the floor; only a tx that predates it is a replay). Absorbs honest miner
+    # clock skew; MUST stay well under reservation_ttl_secs — the replay window is exactly this wide (B2).
     replay_grace_secs: int = 0
 
 

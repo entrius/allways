@@ -48,7 +48,7 @@ class SolanaSwap:
     user_to_addr: str
     miner_from_addr: str
     miner_to_addr: str
-    rate: int
+    rate: int  # u128 fixed-point, as stored on-chain
     sol_amount: int
     from_amount: int
     to_amount: int
@@ -82,7 +82,7 @@ def swap_from_solana(acct, swap_key: Optional[bytes] = None) -> SolanaSwap:
         user_to_addr=acct.user_to_addr,
         miner_from_addr=acct.miner_from_addr,
         miner_to_addr=acct.miner_to_addr,
-        rate=acct.rate,
+        rate=acct.rate,  # u128 fixed-point, as stored on-chain; calculate_to_amount takes the int directly
         sol_amount=acct.sol_amount,
         from_amount=acct.from_amount,
         to_amount=acct.to_amount,
@@ -212,7 +212,10 @@ class AllwaysSolanaClient:
                 return sig
             except Exception as e:  # transient stale-blockhash on a fresh/lagging RPC → re-fetch + resend
                 msg = str(e).lower()
-                if 'blockhash' not in msg:
+                # Match the actual staleness signature only — NOT the substring 'blockhash', which also
+                # appears in the `replacementBlockhash` field of every program-error payload (that would
+                # retry a deterministic contract rejection 5× and bury it as a "blockhash retries" error).
+                if 'blockhash not found' not in msg and 'block height exceeded' not in msg:
                     raise
                 last_err = e
                 time.sleep(0.5)
@@ -588,23 +591,22 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('resolve_pool', b'', metas)])
 
-    # ---------- event-log ingest skeleton (full decode-by-discriminator in B3) ----------
+    # ---------- event-log ingest (decode-by-discriminator) ----------
     def get_program_signatures(
         self, before: Optional[str] = None, until: Optional[str] = None, limit: int = 100
     ) -> List[dict]:
         return self.rpc.get_signatures_for_address(self.program_id, before=before, until=until, limit=limit)
 
     def get_event_logs(self, signature: str) -> List[bytes]:
-        """Extract the base64 `Program data:` payloads from a tx's logs (Anchor self-CPI events)."""
+        """Base64-decoded `Program data:` payloads from a tx's logs (Anchor self-CPI events). The canonical
+        event ingest (allways/solana/events.py, used by the validator crown) decodes these."""
         tx = self.rpc.get_transaction(signature)
         if not tx:
             return []
         logs = (tx.get('meta') or {}).get('logMessages') or []
-        out = []
-        for line in logs:
-            if line.startswith('Program data: '):
-                out.append(base64.b64decode(line[len('Program data: ') :]))
-        return out
+        return [
+            base64.b64decode(line[len('Program data: ') :]) for line in logs if line.startswith('Program data: ')
+        ]
 
     # ---------- dev helper ----------
     def airdrop(self, pubkey, lamports: int) -> str:

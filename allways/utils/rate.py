@@ -16,28 +16,25 @@ def normalize_rate(rate: float) -> str:
 
 def calculate_to_amount(
     from_amount: int,
-    rate: str,
+    rate,
     is_reverse: bool,
     to_decimals: int,
     from_decimals: int,
 ) -> int:
     """Calculate to_amount from from_amount and committed rate using fixed-point arithmetic.
 
-    Rate is 'canonical_dest per 1 canonical_source' in display units (e.g. 345 means 1 BTC = 345 TAO).
-    Uses Decimal for rate conversion to avoid IEEE 754 float rounding artifacts.
-    The rate parameter should be the raw string from the miner's commitment.
-
-    Used by miner (fulfillment), validator (verification), and CLI (display).
-    All three MUST use this function to guarantee identical results.
+    ``rate`` accepts either the on-chain u128 fixed-point int (rate × RATE_PRECISION) OR a display string
+    ('0.0021', '345') — both resolve to the same rate_fixed, so on-chain (int) and CLI/commitment (str)
+    callers agree byte-for-byte. Used by miner (fulfillment), validator (verification), and CLI (display).
 
     Args:
         from_amount: Amount in smallest units (sat, rao, wei, etc.)
-        rate: Canonical dest per 1 canonical source as a string (e.g. '345')
+        rate: u128 fixed-point int, or a 'canonical dest per 1 canonical source' display string
         is_reverse: True when swap direction is opposite of canonical order
         to_decimals: Decimal places for canonical dest chain (e.g. 9 for TAO)
         from_decimals: Decimal places for canonical source chain (e.g. 8 for BTC)
     """
-    rate_fixed = int(Decimal(rate) * RATE_PRECISION)
+    rate_fixed = int(rate) if isinstance(rate, int) else int(Decimal(rate) * RATE_PRECISION)
     if rate_fixed == 0:
         return 0
 
