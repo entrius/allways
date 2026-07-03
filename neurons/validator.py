@@ -43,6 +43,7 @@ from allways.validator.axon_handlers import (
 from allways.validator.bounds_cache import SolanaConfigCache
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.forward import forward
+from allways.validator.seam_http import maybe_start_seam
 from allways.validator.solana_swap_loop import SolanaSwapLoop
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.storage import DatabaseStorage
@@ -137,6 +138,10 @@ class Validator(BaseValidatorNeuron):
         # Attach synapse handlers to axon
         self.attach_axon_handlers()
 
+        # Optional localhost seam for a product offering to enter reservations on-behalf (off unless
+        # ALLWAYS_SEAM_SECRET is set). Generic validators run without it.
+        self.seam_server = maybe_start_seam(self)
+
         bt.logging.info(f'Validator initialized: hotkey={self.wallet.hotkey.ss58_address}')
 
         # wandb captures the validator's console output for the run; no per-step
@@ -195,6 +200,8 @@ class Validator(BaseValidatorNeuron):
         try:
             super().__exit__(exc_type, exc_value, traceback)
         finally:
+            if getattr(self, 'seam_server', None) is not None:
+                self.seam_server.shutdown()
             self.state_store.close()
             self.database_storage.close()
 

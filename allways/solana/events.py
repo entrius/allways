@@ -9,79 +9,12 @@ crown — replacing the old substrate event_watcher. Only the crown-relevant eve
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from borsh_construct import I64, U8, U64, U128, CStruct, String
 from solders.pubkey import Pubkey
 
-from allways.solana.layouts import Hash32, Pubkey32
-
-# 8-byte event discriminators (IDL `events[].discriminator` = sha256("event:<Name>")[:8]).
-EVENT_DISCRIMINATORS = {
-    'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
-    'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
-    'SwapInitiated': bytes([88, 197, 100, 28, 189, 82, 98, 2]),
-    'SwapCompleted': bytes([118, 93, 218, 77, 215, 165, 112, 76]),
-    'SwapTimedOut': bytes([216, 21, 45, 129, 255, 250, 107, 166]),
-    'QuoteSet': bytes([216, 112, 83, 84, 181, 53, 176, 105]),
-    'QuoteRemoved': bytes([52, 211, 141, 65, 95, 43, 64, 32]),
-    'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
-    'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
-    'PoolResolved': bytes([37, 148, 82, 156, 128, 131, 201, 171]),
-}
-
-# Borsh bodies (post-discriminator), field order locked to events.rs.
-EVENT_LAYOUTS = {
-    'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
-    'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
-    'SwapInitiated': CStruct(
-        'swap_key' / Hash32,
-        'user' / Pubkey32,
-        'miner' / Pubkey32,
-        'sol_amount' / U64,
-        'from_amount' / U128,
-        'to_amount' / U128,
-        'initiated_at' / I64,
-    ),
-    'SwapCompleted': CStruct(
-        'swap_key' / Hash32,
-        'miner' / Pubkey32,
-        'sol_amount' / U64,
-        'fee' / U64,
-        'from_chain' / String,
-        'to_chain' / String,
-        'from_amount' / U128,
-        'to_amount' / U128,
-        'rate' / U128,
-    ),
-    'SwapTimedOut': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'sol_amount' / U64, 'slash' / U64),
-    'QuoteSet': CStruct(
-        'miner' / Pubkey32,
-        'from_chain' / String,
-        'to_chain' / String,
-        'rate' / U128,
-        'liquidity' / U128,
-        'updated_at' / I64,
-        'update_fee' / U64,
-    ),
-    'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
-    'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
-    'MinerDeactivated': CStruct('miner' / Pubkey32, 'at' / I64),
-    # The reserved miner is `miner` (not `winner`, the router). Drives RESERVE_START.
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'user' / Pubkey32, 'requests' / U8),
-}
-
-# Fields to convert from raw 32 bytes → solders Pubkey after parse.
-EVENT_PUBKEY_FIELDS = {
-    'CollateralPosted': ['miner'],
-    'CollateralWithdrawn': ['miner'],
-    'SwapInitiated': ['user', 'miner'],
-    'SwapCompleted': ['miner'],
-    'SwapTimedOut': ['miner'],
-    'QuoteSet': ['miner'],
-    'QuoteRemoved': ['miner'],
-    'MinerActivated': ['miner'],
-    'MinerDeactivated': ['miner'],
-    'PoolResolved': ['miner', 'winner', 'user'],
-}
+# One source of truth for event discriminators + borsh layouts (all program events) lives in layouts.py,
+# alongside the account layouts. The validator crown ingests only the subset it cares about (event_index.py
+# dispatches by name and ignores the rest); the dashboard indexer decodes the full set from the same tables.
+from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PUBKEY_FIELDS
 
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
 

@@ -61,9 +61,9 @@ if TYPE_CHECKING:
 @dataclass
 class DirectionTrace:
     pool: float = 0.0
-    crown_blocks: Dict[str, float] = field(default_factory=dict)
-    cap_weighted_blocks: Dict[str, float] = field(default_factory=dict)
-    unfilled_blocks: int = 0
+    crown_time: Dict[str, float] = field(default_factory=dict)
+    cap_weighted_time: Dict[str, float] = field(default_factory=dict)
+    unfilled_time: int = 0
     best_rate: float = 0.0
 
 
@@ -126,7 +126,7 @@ def _flush_halt_window(self: Validator, current_time: int) -> None:
         directions=directions,
         window_start=window_start,
         window_end=window_end,
-        max_block=window_end - 1,
+        max_ts=window_end,
     )
     # Empty rows per direction → upsert_current_crown_snapshot's
     # delete-then-insert flow clears them.
@@ -492,7 +492,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain)] = intervals
-        crown_blocks = replay_crown_time_window(
+        crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
             from_chain=from_chain,
@@ -505,7 +505,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             min_swap_lamports=min_swap_amount,
             max_swap_lamports=max_swap_amount,
         )
-        total_crown_dir = sum(crown_blocks.values())
+        total_crown_dir = sum(crown_time.values())
         vols_dir: Dict[str, DirectionVolume] = {
             hk: dirs[(from_chain, to_chain)] for hk, dirs in direction_volumes.items() if (from_chain, to_chain) in dirs
         }
@@ -514,8 +514,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         for hk, v in volumes_dir.items():
             miner_volume_total[hk] = miner_volume_total.get(hk, 0) + int(v)
         network_volume_total += int(total_volume_dir)
-        for hk, blk in crown_blocks.items():
-            miner_crown_total[hk] = miner_crown_total.get(hk, 0.0) + blk
+        for hk, secs in crown_time.items():
+            miner_crown_total[hk] = miner_crown_total.get(hk, 0.0) + secs
         network_crown_total += total_crown_dir
 
         # W_B falls back to crown for a direction with no realized volume: the
@@ -528,28 +528,28 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
 
         bt.logging.debug(
             f'V1 scoring [{from_chain}→{to_chain}]: '
-            f'total_crown={total_crown_dir:.1f} blk, total_volume_rao={total_volume_dir}'
+            f'total_crown={total_crown_dir:.1f}s, total_volume_rao={total_volume_dir}'
         )
 
         if total_crown_dir == 0:
             continue  # empty bucket — pool recycles via the remainder below
 
-        for hotkey, blocks in crown_blocks.items():
+        for hotkey, secs in crown_time.items():
             uid = hotkey_to_uid.get(hotkey)
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
-            # Capacity is integrated per-block during the replay, so the
+            # Capacity is integrated over time during the replay, so the
             # effective multiplier is the time-weighted average over the
             # miner's crown intervals. Reading current collateral here
             # would let a post-window top-up retroactively boost credit
             # already earned (#409).
-            cap_blocks = trace.cap_weighted_blocks.get(hotkey, 0.0)
-            cap = (cap_blocks / blocks) if blocks > 0 else 0.0
+            cap_secs = trace.cap_weighted_time.get(hotkey, 0.0)
+            cap = (cap_secs / secs) if secs > 0 else 0.0
             eligible = 1.0 if eligibility.get(hotkey, False) else 0.0
             wt = weighting_traces.setdefault(hotkey, WeightingTrace())
             wt.record_capacity(factor=cap)
             wt.record_eligibility(eligible=bool(eligible))
-            crown_share_dir = blocks / total_crown_dir
+            crown_share_dir = secs / total_crown_dir
             vol_dir = volumes_dir.get(hotkey, 0)
             vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
             vol_factor = volume_factor(vol_dir, total_volume_dir, crown_share_dir)
@@ -609,25 +609,24 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     )
 
     if storage_enabled:
-        # Expand uniform-state intervals to per-block crown_holders rows.
+        # Persist the crown intervals directly (no per-tick expansion).
         # `flush_scoring_window` deletes [window_start, window_end) per
         # direction before upserting, so the wipe matches the data exactly.
-        crown_rows_by_dir = {d: expand_intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()}
+        crown_rows_by_dir = {d: intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()}
         rate_rows: List[Tuple[str, str, str, float, int]] = []
         for from_chain, to_chain in DIRECTION_POOLS:
             for e in self.state_store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
+                # e['block'] is the event's unix blockTime (see state_store).
                 rate_rows.append((e['hotkey'], from_chain, to_chain, float(e['rate']), e['block']))
-        # Range delete + insert covers [window_start, window_end) exclusive
-        # of window_end, so the last block actually written is window_end - 1.
-        # Cursor advances to that — claiming through window_end would lie
-        # to readers about what's flushed.
-        cursor_block = max(0, window_end - 1)
+        # Crown intervals tile [window_start, window_end); the last one ends at
+        # window_end, so the freshness cursor is "as of window_end" (unix secs).
+        cursor_ts = max(0, window_end)
         self.database_storage.flush_scoring_window(
             rate_rows=rate_rows,
             crown_rows_by_direction=crown_rows_by_dir,
             crown_window_bounds_by_direction={d: (window_start, window_end) for d in DIRECTION_POOLS},
-            rate_snapshot_max_block=cursor_block,
-            crown_holders_max_block=cursor_block,
+            rate_snapshot_max_ts=cursor_ts,
+            crown_holders_max_ts=cursor_ts,
         )
 
     return rewards, set(range(n_uids))
@@ -847,7 +846,7 @@ def replay_crown_time_window(
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
 ) -> Dict[str, float]:
-    """Walk the merged event stream, return ``{hotkey: crown_blocks_float}``.
+    """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
     Ties at the same rate split credit evenly. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
     that instant, in a rewardable activity state (∈ REWARD_MINER_STATES — a
@@ -862,8 +861,8 @@ def replay_crown_time_window(
     Bounds at 0 disable the executability filter (matches the contract's
     "unset" sentinel); the rate-positive floor still applies.
 
-    When ``trace`` is supplied, ``trace.cap_weighted_blocks`` is populated
-    alongside ``trace.crown_blocks``. The weighted series multiplies each
+    When ``trace`` is supplied, ``trace.cap_weighted_time`` is populated
+    alongside ``trace.crown_time``. The weighted series multiplies each
     interval's split by ``capacity_factor(collateral_at_block, max_swap_lamports)``
     so a post-window collateral boost cannot retroactively scale credit
     already earned (closes #409)."""
@@ -882,9 +881,9 @@ def replay_crown_time_window(
         from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals
     )
 
-    crown_blocks: Dict[str, float] = {}
-    cap_weighted_blocks: Dict[str, float] = {}
-    prev_block = window_start
+    crown_time: Dict[str, float] = {}
+    cap_weighted_time: Dict[str, float] = {}
+    prev_ts = window_start
 
     bounds_set = min_swap_lamports > 0 or max_swap_lamports > 0
 
@@ -907,7 +906,7 @@ def replay_crown_time_window(
         )
         if not holders:
             if trace is not None:
-                trace.unfilled_blocks += duration
+                trace.unfilled_time += duration
             return
         winner_rate = rates_for_instant.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
@@ -916,11 +915,11 @@ def replay_crown_time_window(
             intervals_out.append((interval_start, interval_end, list(holders), winner_rate))
         split = duration / len(holders)
         for hk in holders:
-            crown_blocks[hk] = crown_blocks.get(hk, 0.0) + split
+            crown_time[hk] = crown_time.get(hk, 0.0) + split
             # Unknown collateral (no event recorded) → capacity 1.0, matching
             # can_fund's fail-open. Only a known value scales capacity down.
             cap = capacity_factor(collaterals[hk], max_swap_lamports) if hk in collaterals else 1.0
-            cap_weighted_blocks[hk] = cap_weighted_blocks.get(hk, 0.0) + split * cap
+            cap_weighted_time[hk] = cap_weighted_time.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:
         if event.kind is EventKind.RATE:
@@ -944,15 +943,15 @@ def replay_crown_time_window(
                 active_set.discard(event.hotkey)
 
     for event in replay_events:
-        credit_interval(prev_block, event.block)
+        credit_interval(prev_ts, event.block)
         apply_event(event)
-        prev_block = event.block
+        prev_ts = event.block
 
-    credit_interval(prev_block, window_end)
+    credit_interval(prev_ts, window_end)
     if trace is not None:
-        trace.crown_blocks = dict(crown_blocks)
-        trace.cap_weighted_blocks = dict(cap_weighted_blocks)
-    return crown_blocks
+        trace.crown_time = dict(crown_time)
+        trace.cap_weighted_time = dict(cap_weighted_time)
+    return crown_time
 
 
 def snapshot_current_crown_holders(
@@ -962,11 +961,11 @@ def snapshot_current_crown_holders(
     """Cheap "who holds the crown right now" per direction. Used by the
     per-forward-step live-crown writer.
 
-    Reconstructs rates/activity/active at the current block and evaluates
+    Reconstructs rates/activity/active at the current time and evaluates
     ``crown_holders_at_instant`` once per direction — no event-stream walk,
     so cost is O(rewardable_hotkeys) per direction, sub-millisecond in
     practice. Returns rows in ``DatabaseStorage.upsert_current_crown_snapshot``
-    shape: ``(from_chain, to_chain, hotkey, credit, rate, block)`` keyed
+    shape: ``(from_chain, to_chain, hotkey, credit, rate, ts)`` keyed
     by direction. An empty list for a direction means "no qualifying
     holder right now" — instructs the storage layer to clear that
     direction's rows.
@@ -979,7 +978,7 @@ def snapshot_current_crown_holders(
     contract_events) signal the recycle state to users."""
     # The live crown reads per-instant state at "now" on the unix-time
     # (blockTime) axis the event tables use. Tests pass an explicit instant.
-    block = int(time.time()) if at_time is None else at_time
+    ts = int(time.time()) if at_time is None else at_time
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     # Match the scoring path's executability filter so the live table never
     # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
@@ -998,7 +997,7 @@ def snapshot_current_crown_holders(
             self.event_index,
             from_chain,
             to_chain,
-            block,
+            ts,
             rewardable_hotkeys,
         )
         canon_from, _ = canonical_pair(from_chain, to_chain)
@@ -1027,31 +1026,32 @@ def snapshot_current_crown_holders(
             share = 1.0 / len(holders)
             rate = rates.get(holders[0], 0.0)
             rows_by_direction[(from_chain, to_chain)] = [
-                (from_chain, to_chain, hk, share, rate, block) for hk in holders
+                (from_chain, to_chain, hk, share, rate, ts) for hk in holders
             ]
         else:
             rows_by_direction[(from_chain, to_chain)] = []
     return rows_by_direction
 
 
-def expand_intervals_to_crown_rows(
+def intervals_to_crown_rows(
     intervals: List[Tuple[int, int, List[str], float]],
     from_chain: str,
     to_chain: str,
-) -> List[Tuple[int, str, str, str, float, float]]:
-    """Expand uniform-state intervals to per-block crown_holders rows.
+) -> List[Tuple[int, int, str, str, str, float, float]]:
+    """Convert uniform-state crown intervals to crown_holders rows.
 
-    For each (lo, hi, holders, rate) emit (hi - lo) * len(holders) rows,
-    each with credit = 1/len(holders). The per-block per-direction credits
-    therefore sum to 1.0, matching the validator's fair-tie semantics."""
-    rows: List[Tuple[int, str, str, str, float, float]] = []
+    For each (started_at, ended_at, holders, rate) emit one row per holder
+    with credit = 1/len(holders), so the per-interval per-direction credits
+    sum to 1.0 — the validator's fair-tie semantics. A holder's crown *time*
+    over a window is then ``SUM((ended_at - started_at) * credit)``, matching
+    the duration the scoring replay already integrates (no per-tick expansion)."""
+    rows: List[Tuple[int, int, str, str, str, float, float]] = []
     for lo, hi, holders, rate in intervals:
         if not holders or hi <= lo:
             continue
         share = 1.0 / len(holders)
-        for block in range(lo, hi):
-            for hotkey in holders:
-                rows.append((block, from_chain, to_chain, hotkey, share, rate))
+        for hotkey in holders:
+            rows.append((lo, hi, from_chain, to_chain, hotkey, share, rate))
     return rows
 
 

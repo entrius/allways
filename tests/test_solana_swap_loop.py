@@ -159,6 +159,14 @@ def test_pending_attestation_no_reservation_waits():
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.WAIT
 
 
+def test_pending_attestation_same_second_deposit_attests():
+    # A deposit sent immediately after reserving lands in the same unix second as the floor; block_time
+    # granularity is seconds, so `block_time == floor` is honest, not a replay.
+    loop, providers = loop_with(result=True)
+    providers['btc'].block_time = RESV_CREATED_AT
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
+
+
 def test_pending_attestation_grace_allows_slightly_old_deposit():
     loop, providers = loop_with(result=True)
     providers['btc'].grace = 300

@@ -9,42 +9,20 @@ These are attached to the validator's axon via functools.partial
 to inject the validator context.
 """
 
-import time
 from typing import TYPE_CHECKING, Tuple
 
 import bittensor as bt
-from bittensor import Keypair
 
-from allways.chain_providers.base import ProviderUnreachableError
-from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
-from allways.validator.binding import verify_binding
-from allways.validator.solana_swap_loop import is_tx_fresh
+from allways.validator.reserve_engine import (
+    confirm_deposit,
+    reserve_on_behalf,
+    resolve_miner_pubkey,
+)
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
-
-EMPTY_SWAP_KEY = b'\x00' * 32
-
-
-def resolve_miner_pubkey(validator: 'Validator', miner_hotkey: str):
-    """Map a Bittensor hotkey (ss58) → the miner's bound Solana pubkey via the HotkeyBinding PDA (A5).
-
-    Returns None if unbound or if the sr25519 sig fails to verify. The contract stores the sig unverified
-    (too costly on-chain), so we verify here — same as scoring's `build_attribution` — else an attacker could
-    squat a victim's set-once marker with a garbage sig."""
-    hotkey_bytes = bytes.fromhex(Keypair(ss58_address=miner_hotkey).public_key.hex())
-    hk_binding = validator.solana_client.get_hotkey_binding(hotkey_bytes)
-    if hk_binding is None:
-        return None
-    binding = validator.solana_client.get_binding(hk_binding.miner)
-    if binding is None or bytes(binding.hotkey) != hotkey_bytes:
-        return None
-    if not verify_binding(hk_binding.miner, binding.hotkey, binding.hotkey_sig):
-        bt.logging.warning(f'binding for {miner_hotkey}: invalid sr25519 sig, refusing to resolve')
-        return None
-    return hk_binding.miner
 
 
 def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
@@ -176,36 +154,31 @@ async def handle_swap_reserve(
     validator: 'Validator',
     synapse: SwapReserveSynapse,
 ) -> SwapReserveSynapse:
-    """User asks a validator to enter the on-chain reservation lottery on their behalf — FCFS stub.
+    """Enter a miner's reservation pool on the caller's behalf (validator = router → high win odds).
 
-    The lottery (`open_or_request` → permissionless stake-weighted `resolve_pool`) is open to anyone, but
-    a high-stake validator entering for a user gives that user far better odds than entering alone. So the
-    product flow is user → validator → on-behalf-of contract entry → validator wins the reservation for the
-    user. This handler is that user→validator entry point.
-
-    Intentionally simple for now: first-come-first-served, reject if the miner is unbound / inactive / busy;
-    otherwise accept. The actual on-behalf-of `open_or_request` call and the future request-window selection
-    (pick one of many in-window user requests) are deliberately NOT built here — no queue.
-    """
+    Thin transport wrapper over the shared `reserve_on_behalf` kernel op (same op the HTTP seam calls) —
+    it validates eligibility + rate-consistency and submits open_or_request (open or free upsert)."""
     miner = synapse.miner_hotkey
     label = miner_label(validator, miner)
     direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
     ctx = f'[{label}] SwapReserve {direction}'
     try:
-        miner_pk = resolve_miner_pubkey(validator, miner)
-        if miner_pk is None:
-            reject_synapse(synapse, 'Miner hotkey is not bound to a Solana miner', ctx)
+        result = reserve_on_behalf(
+            validator,
+            miner,
+            synapse.from_chain,
+            synapse.to_chain,
+            synapse.user_pubkey,
+            synapse.user_from_addr,
+            synapse.user_to_addr,
+            synapse.from_amount,
+        )
+        if not result.ok:
+            reject_synapse(synapse, result.reason, ctx)
             return synapse
-        miner_state = validator.solana_client.get_miner_state(miner_pk)
-        if miner_state is None or not miner_state.active:
-            reject_synapse(synapse, 'Miner is not active', ctx)
-            return synapse
-        if miner_state.has_active_swap:
-            reject_synapse(synapse, 'Miner is busy with another swap; try again shortly', ctx)
-            return synapse
-        # FCFS accept. On-behalf-of lottery entry (open_or_request) + window selection land later.
         synapse.accepted = True
-        bt.logging.info(f'{ctx}: accepted (FCFS stub — on-chain lottery entry pending)')
+        synapse.pool_closes_at = result.pool_closes_at
+        bt.logging.info(f'{ctx}: entered pool on-behalf (closes_at={result.pool_closes_at}, tx={result.sig[:16]}…)')
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
@@ -240,89 +213,21 @@ async def handle_swap_confirm(
     validator: 'Validator',
     synapse: SwapConfirmSynapse,
 ) -> SwapConfirmSynapse:
-    """Claim relay: the user flags down a validator with their source-tx hash; the validator verifies the
-    deposit against the pinned on-chain Reservation and relays submit_swap_claim, creating the Swap in
-    PendingAttestation. Validators then attest (vote_initiate) via the swap loop.
-
-    All swap terms (amounts, addresses, payout) are pinned in the immutable Reservation — submit_swap_claim
-    copies them on-chain, so the relay only needs the source-tx hash + block. We still verify the deposit
-    here (recipient/amount/sender against the reservation, plus replay-freshness) to avoid relaying a junk
-    claim that would only need close_stale_claim later. If the tx isn't visible/confirmed yet, reject so
-    the user resends once it confirms (no pending-confirm queue)."""
-    miner_hotkey = synapse.reservation_id  # reservation_id is the miner hotkey (reservation keyed by miner)
-    client = validator.solana_client
+    """Claim relay: verify the user's source deposit against the pinned Reservation, relay submit_swap_claim
+    (→ PendingAttestation). Thin wrapper over the shared `confirm_deposit` kernel op (same op the HTTP seam
+    calls). reservation_id is the miner hotkey (reservations are keyed by miner)."""
+    miner_hotkey = synapse.reservation_id
     label = miner_label(validator, miner_hotkey)
     ctx = f'[{label}] SwapConfirm'
-    bt.logging.info(
-        f'{ctx}: REQUEST received (user claims source tx sent) — '
-        f'from_tx={synapse.from_tx_hash} from_tx_block_hint={synapse.from_tx_block}'
-    )
-
+    bt.logging.info(f'{ctx}: REQUEST (from_tx={synapse.from_tx_hash} block_hint={synapse.from_tx_block})')
     try:
-        if not synapse.from_tx_hash:
-            reject_synapse(synapse, 'Missing source tx hash', ctx)
+        result = confirm_deposit(validator, miner_hotkey, synapse.from_tx_hash, synapse.from_tx_block)
+        if not result.ok:
+            reject_synapse(synapse, result.reason, ctx)
             return synapse
-
-        miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
-        if miner_pk is None:
-            reject_synapse(synapse, 'Hotkey not bound to a Solana miner', ctx)
-            return synapse
-
-        reservation = client.get_reservation(miner_pk)
-        if reservation is None:
-            reject_synapse(synapse, 'No reservation for this miner', ctx)
-            return synapse
-        now = int(time.time())
-        if reservation.reserved_until == 0 or reservation.reserved_until < now:
-            reject_synapse(synapse, 'Reservation is not active', ctx)
-            return synapse
-        if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
-            reject_synapse(synapse, 'Reservation already has a claimed swap', ctx)
-            return synapse
-
-        provider = validator.axon_chain_providers.get(reservation.from_chain)
-        if provider is None:
-            reject_synapse(synapse, f'Unsupported source chain: {reservation.from_chain}', ctx)
-            return synapse
-
-        # Verify the user's deposit against the pinned reservation terms. expected_sender =
-        # reservation.from_addr defends user-snipes-miner (claiming a third-party tx of the right amount).
-        try:
-            tx_info = provider.verify_transaction(
-                tx_hash=synapse.from_tx_hash,
-                expected_recipient=reservation.miner_from_addr,
-                expected_amount=int(reservation.from_amount),
-                block_hint=synapse.from_tx_block,
-                expected_sender=reservation.from_addr,
-            )
-        except ProviderUnreachableError:
-            reject_synapse(synapse, 'Source-chain provider unreachable; resend shortly', ctx)
-            return synapse
-
-        if tx_info is None or not tx_info.confirmed:
-            reject_synapse(
-                synapse,
-                'Source tx not yet visible/confirmed — resend once it has enough confirmations',
-                ctx,
-            )
-            return synapse
-
-        # Source freshness: the deposit must be mined after the reservation was created (replay defense).
-        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
-        if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
-            reject_synapse(synapse, 'Source tx fails freshness — stale/replayed deposit', ctx)
-            return synapse
-
-        swap_key = swap_key_from_tx_hash(synapse.from_tx_hash)
-        client.submit_swap_claim(miner_pk, swap_key, synapse.from_tx_hash, tx_info.block_number or 0)
         synapse.accepted = True
-        bt.logging.info(
-            f'{ctx}: CLAIM relayed (swap_key={swap_key.hex()[:16]}..., tx={synapse.from_tx_hash[:16]}...); '
-            f'validators will attest'
-        )
-
+        bt.logging.info(f'{ctx}: CLAIM relayed (swap_key={result.swap_key[:16]}…, tx={synapse.from_tx_hash[:16]}…)')
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))
-
     return synapse
