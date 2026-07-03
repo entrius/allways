@@ -60,19 +60,19 @@ class DatabaseStorage:
     def flush_scoring_window(
         self,
         rate_rows: List[Tuple[str, str, str, float, int]],
-        crown_rows_by_direction: Dict[Tuple[str, str], List[Tuple[int, str, str, str, float, float]]],
+        crown_rows_by_direction: Dict[Tuple[str, str], List[Tuple[int, int, str, str, str, float, float]]],
         crown_window_bounds_by_direction: Dict[Tuple[str, str], Tuple[int, int]],
-        rate_snapshot_max_block: int,
-        crown_holders_max_block: int,
+        rate_snapshot_max_ts: int,
+        crown_holders_max_ts: int,
     ) -> StorageResult:
         """All-or-nothing flush for one scoring window.
 
         - `rate_rows`: new rate quotes seen this round.
         - `crown_rows_by_direction`: recomputed crown rows, keyed by (from, to).
-        - `crown_window_bounds_by_direction`: [lo, hi) block range to wipe
+        - `crown_window_bounds_by_direction`: [lo, hi) unix-second range to wipe
           before re-upserting, keyed by (from, to). Must match the rows above.
-        - The two `_max_block` values advance the corresponding sync_cursor
-          watermarks so the dashboard can render an "as-of block N" freshness
+        - The two `_max_ts` values advance the corresponding sync_cursor
+          watermarks so the dashboard can render an "as-of <unix ts>" freshness
           signal.
 
         Failure on any write rolls back the whole window — the cursor is
@@ -98,8 +98,8 @@ class DatabaseStorage:
                     crown_inserted += self.repo.store_crown_holders_bulk(rows, commit=False)
                 result.stored_counts['crown_holders'] = crown_inserted
 
-                self.repo.set_sync_cursor('rate_snapshot_max_block', rate_snapshot_max_block, commit=False)
-                self.repo.set_sync_cursor('crown_holders_max_block', crown_holders_max_block, commit=False)
+                self.repo.set_sync_cursor('rate_snapshot_max_ts', rate_snapshot_max_ts, commit=False)
+                self.repo.set_sync_cursor('crown_holders_max_ts', crown_holders_max_ts, commit=False)
 
             self.db_connection.commit()
             self.db_connection.autocommit = True
@@ -120,7 +120,7 @@ class DatabaseStorage:
         directions: List[Tuple[str, str]],
         window_start: int,
         window_end: int,
-        max_block: int,
+        max_ts: int,
     ) -> StorageResult:
         """Halt-aware counterpart to flush_scoring_window.
 
@@ -133,8 +133,8 @@ class DatabaseStorage:
         them either, and rate_history during a recycle has no scoring
         meaning.
 
-        ``[window_start, window_end)`` is the block range to clear per
-        direction. ``max_block`` advances both sync_cursor watermarks.
+        ``[window_start, window_end)`` is the unix-second range to clear per
+        direction. ``max_ts`` advances both sync_cursor watermarks.
         """
         if not self.is_enabled():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
@@ -147,8 +147,8 @@ class DatabaseStorage:
             with self.db_connection.pipeline():
                 for from_chain, to_chain in directions:
                     self.repo.delete_crown_in_range(from_chain, to_chain, window_start, window_end, commit=False)
-                self.repo.set_sync_cursor('rate_snapshot_max_block', max_block, commit=False)
-                self.repo.set_sync_cursor('crown_holders_max_block', max_block, commit=False)
+                self.repo.set_sync_cursor('rate_snapshot_max_ts', max_ts, commit=False)
+                self.repo.set_sync_cursor('crown_holders_max_ts', max_ts, commit=False)
 
             self.db_connection.commit()
             self.db_connection.autocommit = True
@@ -175,11 +175,11 @@ class DatabaseStorage:
 
         Called per forward step (~12s) — the dashboard's live "who holds
         the crown right now" surface. Distinct cadence from
-        ``flush_scoring_window``, which writes the historical per-block
+        ``flush_scoring_window``, which writes the historical interval
         ledger at round end (~1h).
 
         Row format per direction: ``(from_chain, to_chain, hotkey, credit,
-        rate, block)``. Empty list for a direction means "no qualifying
+        rate, ts)``. Empty list for a direction means "no qualifying
         holder right now" — that direction's rows are cleared.
         """
         if not self.is_enabled():

@@ -82,18 +82,18 @@ def log_scoring_trace(
 
     for (from_c, to_c), trace in direction_traces.items():
         holders = ', '.join(
-            f'UID{hotkey_to_uid[hk]}: {blk:.0f} blk'
-            for hk, blk in sorted(trace.crown_blocks.items(), key=lambda kv: -kv[1])
+            f'UID{hotkey_to_uid[hk]}: {secs:.0f}s'
+            for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
             if hk in hotkey_to_uid
         )
         lines.append(
-            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_blocks} blk'
+            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s'
         )
 
     for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
-        crown_blk = sum(t.crown_blocks.get(hk, 0.0) for t in direction_traces.values())
-        if uid == recycle_uid and crown_blk == 0:
+        crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
+        if uid == recycle_uid and crown_secs == 0:
             continue
         crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
         eligible = eligibility.get(hk, False)
@@ -106,7 +106,7 @@ def log_scoring_trace(
                 f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
             )
         lines.append(
-            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
+            f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
         )
 
     # Collateral as-of window_start mirrors the scoring replay's starting
@@ -131,9 +131,9 @@ def log_scoring_trace(
 
     if recycled > 0:
         parts = [
-            f'{t.unfilled_blocks} unfilled blk in {f}→{to}'
+            f'{t.unfilled_time}s unfilled in {f}→{to}'
             for (f, to), t in direction_traces.items()
-            if t.unfilled_blocks > 0
+            if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
@@ -175,7 +175,7 @@ def non_earner_lines(
         reason = diagnose_non_earner(
             hk, latest_rates, eligible, ever_active, direction_traces, collaterals, min_swap_lamports, max_swap_lamports
         )
-        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" eligible={eligible}')
+        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_s=0 reason="{reason}" eligible={eligible}')
         if len(out) >= NON_EARNER_LINE_CAP:
             break
     return out
