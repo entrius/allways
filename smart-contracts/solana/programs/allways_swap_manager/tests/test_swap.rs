@@ -120,6 +120,14 @@ fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
             .to_account_metas(None),
     )
 }
+fn set_halted_ix(admin: &Pubkey, halted: bool) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetHalted { halted }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
+            .to_account_metas(None),
+    )
+}
 fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -378,6 +386,13 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
 /// As `setup`, but the miner posts an arbitrary collateral amount. Must be ≥ 1.10× SOL_AMOUNT or the
 /// in-setup `open` is rejected by the over-collateralization entry gate.
 fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
+    let (svm, _admin, vals, miner, rent) = setup_full(collateral);
+    (svm, vals, miner, rent)
+}
+
+/// As `setup_with_collateral`, but also returns the admin keypair — needed to drive admin-only
+/// instructions (e.g. set_halted) in tests.
+fn setup_full(collateral: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
     set_clock(&mut svm, BASE_TS);
@@ -413,7 +428,7 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
     set_clock(&mut svm, BASE_TS);
 
-    (svm, vals, miner, rent_reserve)
+    (svm, admin, vals, miner, rent_reserve)
 }
 
 /// Claim the source tx on-chain, then attest it to quorum (PendingAttestation → Active).
@@ -635,6 +650,63 @@ fn test_timeout_slash_refund_and_invariant() {
 
 fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, tx: &str) -> Result<(), String> {
     send(svm, timeout_ix(&v.pubkey(), miner, user, tx), &v.pubkey(), v)
+}
+
+#[test]
+fn test_halt_blocks_new_entry_and_lifts_on_unhalt() {
+    // PRs 8/482/458: halting the subnet must block NEW entry — post_collateral, vote_activate, and pool
+    // open all revert SystemHalted — so no fresh capital or reservations enter while paused. Unhalting
+    // restores entry. (In-flight finalization is covered by test_halt_allows_inflight_confirm.)
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    set_clock(&mut svm, BASE_TS);
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, init_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("init");
+    let v = Keypair::new();
+    svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add val");
+
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("halt");
+
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    assert!(
+        send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).is_err(),
+        "post_collateral must revert SystemHalted while halted"
+    );
+
+    // Lift the halt → the same entry now succeeds.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), false), &admin.pubkey(), &admin).expect("unhalt");
+    send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post after unhalt");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+
+    // Re-halt → activation entry is blocked too.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("re-halt");
+    assert!(
+        send(&mut svm, vote_activate_ix(&v.pubkey(), &miner.pubkey()), &v.pubkey(), &v).is_err(),
+        "vote_activate must revert SystemHalted while halted"
+    );
+}
+
+#[test]
+fn test_halt_allows_inflight_confirm() {
+    // PRs 8/482/458 (precedence half): a halt pauses new entry but must NOT strand an in-flight swap —
+    // confirm_swap deliberately ignores `halted`. A swap already Active/Fulfilled when the subnet halts
+    // can still reach confirm quorum and complete.
+    let (mut svm, admin, vals, miner, rent) = setup_full(COLLATERAL);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+
+    // Halt AFTER the swap is in flight.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("halt");
+
+    // In-flight confirm still reaches quorum while halted.
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0 while halted");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1 while halted");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "in-flight swap confirmed despite halt");
+    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "vault invariant after halted confirm");
 }
 
 #[test]
