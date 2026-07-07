@@ -31,6 +31,7 @@ data/
 CLAUDE.md
 
 # Local tooling / scratch
+.full-e2e/
 .mcp.json
 *.md
 .vouch/
