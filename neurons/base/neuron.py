@@ -12,30 +12,12 @@ from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
 
-_dev_mode_warned = False
-
-
 def validator_dev_mode() -> bool:
     """Dev / testnet mode: the validator observes but takes no binding actions — it does NOT
     submit Solana consensus votes (the swap loop logs "WOULD …") and does NOT set Bittensor
     weights. Enable with VALIDATOR_DEV_MODE=1.
-
-    SOLANA_VALIDATOR_READONLY is the deprecated alias: still honored so existing configs keep
-    working, but it only ever gated Solana votes — prefer VALIDATOR_DEV_MODE, which also skips
-    weight-setting. Emits a one-time deprecation warning.
     """
-    global _dev_mode_warned
-    if os.environ.get('VALIDATOR_DEV_MODE', '0') == '1':
-        return True
-    if os.environ.get('SOLANA_VALIDATOR_READONLY', '0') == '1':
-        if not _dev_mode_warned:
-            bt.logging.warning(
-                'SOLANA_VALIDATOR_READONLY is deprecated; use VALIDATOR_DEV_MODE=1 '
-                '(dev mode also skips set_weights, not just Solana votes).'
-            )
-            _dev_mode_warned = True
-        return True
-    return False
+    return os.environ.get('VALIDATOR_DEV_MODE', '0') == '1'
 
 
 class BaseNeuron(ABC):
