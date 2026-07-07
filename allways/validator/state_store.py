@@ -515,6 +515,10 @@ class ValidatorStateStore:
     def init_db(self) -> None:
         with self.lock:
             conn = self.require_connection()
+            # The pre-B3.5 scoring ledger squatted this name; IF NOT EXISTS keeps its dead schema.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
+            if cols and 'outcome' not in cols:
+                conn.execute('DROP TABLE swap_outcomes')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
