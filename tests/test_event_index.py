@@ -385,6 +385,23 @@ class TestIngestSwapOutcomes:
         assert store.get_swap_outcome(key.hex()) == 'timed_out'
         store.close()
 
+    def test_legacy_b35_table_is_dropped_and_recreated(self, tmp_path: Path):
+        # A long-lived state.db still carries the pre-B3.5 scoring ledger under the same name;
+        # CREATE IF NOT EXISTS keeps it and every outcome lookup dies on 'no such column: outcome'.
+        import sqlite3
+
+        db = tmp_path / 'state.db'
+        conn = sqlite3.connect(db)
+        conn.execute(
+            'CREATE TABLE swap_outcomes (swap_id INTEGER, miner_hotkey TEXT, completed INTEGER, resolved_block INTEGER)'
+        )
+        conn.commit()
+        conn.close()
+        store = ValidatorStateStore(db_path=db)
+        store.record_swap_outcome('ab' * 32, 'timed_out', 100)
+        assert store.get_swap_outcome('ab' * 32) == 'timed_out'
+        store.close()
+
     def test_prune_drops_old_outcomes(self, tmp_path: Path):
         store = make_store(tmp_path)
         old, recent = b'\x01' * 32, b'\x02' * 32

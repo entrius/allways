@@ -515,6 +515,12 @@ class ValidatorStateStore:
     def init_db(self) -> None:
         with self.lock:
             conn = self.require_connection()
+            # The pre-B3.5 scoring ledger used the swap_outcomes name with a different shape
+            # (swap_id/completed/resolved_block). CREATE IF NOT EXISTS silently keeps it, so a
+            # long-lived state.db breaks the seam's outcome lookups — drop the dead schema first.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
+            if cols and 'outcome' not in cols:
+                conn.execute('DROP TABLE swap_outcomes')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
