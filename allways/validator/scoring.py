@@ -46,6 +46,7 @@ from allways.constants import (
     REWARD_WEIGHT_QUALITY_VOLUME,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
+    SWAP_OUTCOME_RETENTION_SECS,
     VOLUME_WEIGHT_ALPHA,
 )
 from allways.utils.rate import is_executable_rate, min_executable_sol_leg
@@ -175,6 +176,7 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     # so it has its own, later horizon — pruning it at the 1h crown cutoff would
     # starve the reference.
     self.state_store.prune_clearing_rates(current_time - RATE_REFERENCE_WINDOW_SECS)
+    self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
 def is_eligible(miner_state) -> bool:
@@ -1025,9 +1027,7 @@ def snapshot_current_crown_holders(
         if holders:
             share = 1.0 / len(holders)
             rate = rates.get(holders[0], 0.0)
-            rows_by_direction[(from_chain, to_chain)] = [
-                (from_chain, to_chain, hk, share, rate, ts) for hk in holders
-            ]
+            rows_by_direction[(from_chain, to_chain)] = [(from_chain, to_chain, hk, share, rate, ts) for hk in holders]
         else:
             rows_by_direction[(from_chain, to_chain)] = []
     return rows_by_direction

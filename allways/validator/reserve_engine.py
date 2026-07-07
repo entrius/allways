@@ -262,6 +262,15 @@ def _miner_hotkey_for(validator, miner_pk) -> Optional[str]:
 
 @dataclass
 class SwapStatus:
+    """Seam ``/status`` payload. ``stage`` is the offering-facing lifecycle enum:
+
+    none → reserved → claimed → active → fulfilled → { completed | timed_out }
+
+    ``completed`` and ``timed_out`` are terminal. ``timed_out`` means the miner was slashed;
+    it is sourced from the live PDA status or, after the terminal PDA closes, from the
+    validator's ``swap_outcomes`` event index. A closed PDA whose swap_key is absent from
+    that index degrades to ``completed`` (see ``_swap_stage``)."""
+
     stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out
     reserved_until: int = 0
     user: str = ''
@@ -290,7 +299,8 @@ def swap_status(validator, miner_hotkey: str) -> SwapStatus:
     if swap_key == EMPTY_SWAP_KEY:
         return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
     swap = client.get_swap(swap_key)
-    return SwapStatus(_swap_stage(swap), reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+    stage = _swap_stage(validator, swap, swap_key)
+    return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
 
 
 # On-chain Swap.status is a borsh enum object; map by its variant name (not int()).
@@ -303,9 +313,14 @@ _STAGE_BY_NAME = {
 }
 
 
-def _swap_stage(swap) -> str:
-    # A claimed swap whose PDA has closed is terminal — treat as completed (happy path; slash/timeout
-    # disambiguation via miner counters is a later refinement).
+def _swap_stage(validator, swap, swap_key: bytes) -> str:
+    """Stage for a claimed swap. A closed PDA is terminal, but Completed and TimedOut swaps both
+    close on-chain, so the on-chain account alone can't tell a completion from a slash — the
+    validator's own event index (``swap_outcomes``, written on SwapCompleted/SwapTimedOut ingest)
+    disambiguates. An unknown swap_key (validator restarted with no local history and the RPC
+    pruned the signatures before ingest) falls back to ``completed``: the overwhelmingly common
+    terminal outcome, and the seam must return *some* terminal stage so the offering stops polling."""
     if swap is None:
-        return 'completed'
+        outcome = validator.state_store.get_swap_outcome(swap_key.hex())
+        return outcome or 'completed'
     return _STAGE_BY_NAME.get(type(getattr(swap, 'status', None)).__name__, 'claimed')

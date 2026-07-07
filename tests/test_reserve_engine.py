@@ -104,8 +104,8 @@ def test_contract_rejection_returns_reject_not_raise():
 
     def _raise(*_a, **_k):
         raise RuntimeError(
-            "send failed: AnchorError ... Error Code: MinerReserved. Error Number: 6022. "
-            "Error Message: Miner already has an active reservation. custom program error: 0x1786"
+            'send failed: AnchorError ... Error Code: MinerReserved. Error Number: 6022. '
+            'Error Message: Miner already has an active reservation. custom program error: 0x1786'
         )
 
     client.open_or_request = _raise
@@ -150,3 +150,59 @@ def test_join_uses_pinned_pool_rate_not_live_quote():
     _, sol_amount, _, to_amount, _, _, _ = client.calls[0]
     # to_amount derived from pinned 0.0021 (≈ 0.0021 BTC for 1 SOL = 210000 sat), not the 0.0099 live quote.
     assert to_amount == 210_000
+
+
+# ─── _swap_stage: closed-PDA terminal disambiguation ────────────────────────
+# Terminal swaps (Completed AND TimedOut) close their PDA on-chain, so a None swap
+# account alone can't tell a completion from a slash — the validator's own
+# swap_outcomes index (written on SwapCompleted/SwapTimedOut ingest) must.
+
+
+def _stage_validator(tmp_path):
+    from allways.validator.state_store import ValidatorStateStore
+
+    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+    return SimpleNamespace(state_store=store), store
+
+
+def test_closed_pda_with_recorded_slash_reports_timed_out(tmp_path):
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x01' * 32
+    store.record_swap_outcome(key.hex(), 'timed_out', 100)
+    assert _swap_stage(validator, None, key) == 'timed_out'
+    store.close()
+
+
+def test_closed_pda_with_recorded_completion_reports_completed(tmp_path):
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x02' * 32
+    store.record_swap_outcome(key.hex(), 'completed', 100)
+    assert _swap_stage(validator, None, key) == 'completed'
+    store.close()
+
+
+def test_closed_pda_with_unknown_key_falls_back_to_completed(tmp_path):
+    # Validator restarted with no local history + RPC pruned before ingest: the seam
+    # still returns a terminal stage so the offering stops polling.
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    assert _swap_stage(validator, None, b'\x03' * 32) == 'completed'
+    store.close()
+
+
+def test_live_pda_status_maps_by_variant_name(tmp_path):
+    # A still-open PDA never consults the outcome index — the borsh status variant wins.
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x04' * 32
+    store.record_swap_outcome(key.hex(), 'completed', 100)  # must be ignored while the PDA is live
+    for variant, stage in [('Active', 'active'), ('Fulfilled', 'fulfilled'), ('TimedOut', 'timed_out')]:
+        swap = SimpleNamespace(status=type(variant, (), {})())
+        assert _swap_stage(validator, swap, key) == stage
+    store.close()

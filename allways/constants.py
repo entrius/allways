@@ -112,6 +112,11 @@ RATE_REFERENCE_TRIM_FRAC = 0.10  # drop the top & bottom 10% of weight before av
 RATE_REFERENCE_MINER_CAP_FRAC = 0.25  # cap any single miner at 25% of total reference weight
 RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ reference undefined ⇒ neutral
 
+# ─── Swap outcome retention ──────────────────────────────
+# Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are
+# tiny and only queried while an offering still polls a finished swap — 7 days is generous.
+SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
+
 # ─── Collateral ──────────────────────────────────────────
 # Collateral a miner must post to back a swap = sol_amount × this/10_000. Mirrors the contract's
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
