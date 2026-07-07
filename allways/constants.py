@@ -4,7 +4,6 @@ from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
 NETUID_FINNEY = 7
-NETUID_LOCAL = 2
 
 # ─── Contract ──────────────────────────────────────────────
 # Mainnet default; override via CONTRACT_ADDRESS env var.
@@ -19,9 +18,6 @@ STALE_BLOCK_POLL_THRESHOLD = 30
 # Seconds without a completed forward step before the supervisor declares the
 # loop dead/hung and exits non-zero for the process manager to restart.
 FORWARD_STALL_THRESHOLD_SECONDS = 600
-
-# ─── Commitment Format ────────────────────────────────────
-COMMITMENT_VERSION = 1
 
 # ─── Unit Conversions ────────────────────────────────────
 TAO_TO_RAO = 1_000_000_000
@@ -124,10 +120,6 @@ COLLATERAL_REQUIREMENT_BPS = 11_000
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
-# ─── Reservation ─────────────────────────────────────────
-RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
-RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
-MAX_RESERVATIONS_PER_ADDRESS = 1
 # ─── Optimistic Extensions ───────────────────────────────
 # Tunables for the propose/challenge/finalize extension flow. Per-chain timing
 # (block time, confirmations) lives in allways/chains.py; the contract enforces
@@ -171,26 +163,17 @@ EXTEND_THRESHOLD_BLOCKS = 2 * VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE
 # this file directly if you need a different value.
 MINER_TIMEOUT_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
 
-# Tiered escalation. First extension fires on tx visibility alone (mempool
-# OK) and buys time for one block; second extension requires ≥1 confirmation
-# and buys the full chain-aware confirmation window. Hard cap is enforced
-# contract-side via MAX_EXTENSIONS_PER_RESERVATION / _PER_SWAP — these client
-# constants must mirror the contract values.
-MAX_EXTENSIONS_PER_RESERVATION = 2
+# Sizing input for SENT_CACHE_DISCARD_MARGIN_BLOCKS below (miner sent-cache retention). NOT a
+# contract-enforced extension cap: the Solana contract bounds extensions solely by max_extend_at
+# (the ceiling), with no per-swap count limit — a conservative 2 keeps the cache margin generous.
 MAX_EXTENSIONS_PER_SWAP = 2
 
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.
 FEE_DIVISOR = 100
 
-# ─── Display Only ─────────────────────────────────────────
-# Fallbacks/defaults for CLI display. Live values are written by `alw admin`
-# and read from the contract at runtime.
-MIN_COLLATERAL_TAO = 0.1
+# Base fulfillment window in blocks — sizing input for SENT_CACHE_DISCARD_MARGIN_BLOCKS below.
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
-DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
-DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
-RESERVATION_TTL_BLOCKS = 50  # ~10 min
 
 # Blocks past a retained entry's last-known timeout_block before discard. Sized for the contract's worst case:
 # MAX_EXTENSIONS_PER_SWAP extensions each push the deadline up to MAX_EXTENSION_BLOCKS further (not cumulative).

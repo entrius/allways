@@ -147,7 +147,7 @@ def sign_or_prompt_external(
 ) -> str:
     """Sign a proof-of-ownership message, falling back to externally-pasted signature.
 
-    Tries internal signing first (env var WIF, wallet coldkey, Bitcoin Core RPC).
+    Tries internal signing first (env var WIF, wallet coldkey).
     On failure for BTC source swaps in interactive mode, prompts the user to
     sign the exact message in an external wallet (Electrum, Sparrow, Trezor,
     Bitcoin Core) and paste the base64 BIP-137 signature. Verifies the pasted

@@ -16,7 +16,7 @@ class ChainDefinition:
     name: str  # Display name (e.g. 'Bitcoin')
     native_unit: str  # Smallest unit name (e.g. 'satoshi')
     decimals: int  # Precision (e.g. 8 for BTC, 9 for TAO)
-    env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_RPC_URL)
+    env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_NETWORK)
     seconds_per_block: int = 12  # Average block time on this chain
     min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
     # Smallest amount that can actually exist/move on-chain, in native units

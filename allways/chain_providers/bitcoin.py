@@ -12,14 +12,12 @@ from embit.script import address_to_scriptpubkey
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_BTC, ChainDefinition
-from allways.constants import BTC_TO_SAT
 
 ADDR_TYPE_P2PKH = 'p2pkh'
 ADDR_TYPE_P2SH_P2WPKH = 'p2wpkh-p2sh'
 ADDR_TYPE_P2WPKH = 'p2wpkh'
 ADDR_TYPE_P2TR = 'p2tr'
 
-LOG_RPC = '[BTC-RPC]'
 LOG_ESPLORA = '[Esplora]'
 
 
@@ -97,38 +95,21 @@ def esplora_tag(base: str) -> str:
 
 
 class BitcoinProvider(ChainProvider):
-    """Bitcoin chain provider. Supports two modes:
+    """Bitcoin chain provider: embit + Esplora HTTP API (no local node required).
 
-    - node: Uses a local Bitcoin Core JSON-RPC node (default)
-    - lightweight: Uses embit + Esplora API (no local node required)
-
-    Set BTC_MODE=lightweight to run without a local node.
+    Verification reads the Esplora API; signing/broadcast uses embit with a WIF from
+    BTC_PRIVATE_KEY. A local Bitcoin Core node mode was removed.
     """
 
     def __init__(self):
-        self.mode = os.environ.get('BTC_MODE', 'node').lower()
-        if self.mode not in ('node', 'lightweight'):
-            raise ValueError(f"BTC_MODE must be 'node' or 'lightweight', got '{self.mode}'")
-
-        self.network = os.environ.get('BTC_NETWORK', '').lower()
-
-        if self.mode == 'node':
-            self.rpc_url = os.environ.get('BTC_RPC_URL', 'http://localhost:8332')
-            self.rpc_user = os.environ.get('BTC_RPC_USER', '')
-            self.rpc_pass = os.environ.get('BTC_RPC_PASS', '')
-            if not self.network:
-                if ':48332' in self.rpc_url:
-                    self.network = 'testnet4'
-                elif any(p in self.rpc_url for p in [':18332', ':18443', 'testnet']):
-                    self.network = 'testnet'
-                else:
-                    self.network = 'mainnet'
-        else:
-            self.rpc_url = ''
-            self.rpc_user = ''
-            self.rpc_pass = ''
-            if not self.network:
-                self.network = 'mainnet'
+        # Local-node mode was removed; warn (don't fail) if a stale BTC_MODE=node lingers.
+        legacy_mode = os.environ.get('BTC_MODE', '').lower()
+        if legacy_mode and legacy_mode != 'lightweight':
+            bt.logging.warning(
+                f'BTC_MODE={legacy_mode!r} is no longer supported — local Bitcoin node mode was '
+                'removed. Running via Esplora/embit; set BTC_PRIVATE_KEY (+ optional BTC_ESPLORA_URLS).'
+            )
+        self.network = os.environ.get('BTC_NETWORK', '').lower() or 'mainnet'
 
         # Disable HTTP keepalive: validators are long-running and the default
         # global session pools idle TLS sockets that Blockstream's CDN silently
@@ -160,54 +141,22 @@ class BitcoinProvider(ChainProvider):
 
     def describe(self) -> str:
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
-        if self.mode == 'lightweight':
-            return f'Esplora API ({self.network}): {hosts}'
-        return f'Core RPC {self.rpc_url} (primary) + Esplora fallback: {hosts}'
+        return f'Esplora API ({self.network}): {hosts}'
 
     def check_connection(self, require_send: bool = True) -> None:
-        if self.mode == 'lightweight':
-            if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
-                raise ConnectionError('BTC_MODE=lightweight requires BTC_PRIVATE_KEY env var')
-            try:
-                import embit  # noqa: F401
-            except ImportError as e:
-                raise ConnectionError('BTC_MODE=lightweight requires embit (pip install embit)') from e
-            try:
-                resp = self.btc_api_get('/blocks/tip/height', timeout=10)
-                resp.raise_for_status()
-                tip = int(resp.text.strip())
-                bt.logging.success(f'{LOG_ESPLORA} connected: network={self.network}, tip={tip}')
-            except Exception as e:
-                raise ConnectionError(f'Cannot reach Esplora API: {e}') from e
-            return
-
-        result = self.rpc_call('getblockchaininfo', [])
-        if result is None:
-            raise ConnectionError(f'Cannot reach Bitcoin RPC at {self.rpc_url}')
-        bt.logging.success(f'{LOG_RPC} connected: chain={result.get("chain")}, blocks={result.get("blocks")}')
-
-    def rpc_call(self, method: str, params: Optional[list] = None) -> Optional[dict]:
-        """Generic JSON-RPC helper for BTC Core."""
-        if self.mode == 'lightweight':
-            return None
-        payload = {
-            'jsonrpc': '2.0',
-            'id': 1,
-            'method': method,
-            'params': params or [],
-        }
+        if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
+            raise ConnectionError('BTC signing requires the BTC_PRIVATE_KEY env var')
         try:
-            auth = (self.rpc_user, self.rpc_pass) if self.rpc_user else None
-            response = self.http.post(self.rpc_url, json=payload, auth=auth, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            if result.get('error'):
-                bt.logging.error(f'{LOG_RPC} error ({method}): {result["error"]}')
-                return None
-            return result.get('result')
+            import embit  # noqa: F401
+        except ImportError as e:
+            raise ConnectionError('BTC provider requires embit (pip install embit)') from e
+        try:
+            resp = self.btc_api_get('/blocks/tip/height', timeout=10)
+            resp.raise_for_status()
+            tip = int(resp.text.strip())
+            bt.logging.success(f'{LOG_ESPLORA} connected: network={self.network}, tip={tip}')
         except Exception as e:
-            bt.logging.error(f'{LOG_RPC} call failed ({method}): {e}')
-            return None
+            raise ConnectionError(f'Cannot reach Esplora API: {e}') from e
 
     def fetch_matching_tx(
         self,
@@ -215,92 +164,13 @@ class BitcoinProvider(ChainProvider):
         expected_recipient: str,
         expected_amount: int,
         block_hint: int = 0,
-        max_scan_blocks: int = 150,  # unused — BTC backends index by tx hash
+        max_scan_blocks: int = 150,  # unused — Esplora indexes by tx hash
     ) -> Optional[TransactionInfo]:
-        """Look up a Bitcoin tx via local RPC, falling back to Esplora.
-
-        A pruned local node only resolves mempool/wallet txs, so most
-        confirmed-tx lookups fall through to Esplora. Which backend served the
-        result is logged at debug so that reliance is visible, not silent.
-        """
-        if self.mode == 'lightweight':
-            return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
-
-        result = self.rpc_verify_transaction(tx_hash, expected_recipient, expected_amount)
-        if result is not None:
-            bt.logging.debug(f'{LOG_RPC} served tx {tx_hash[:16]}...')
-            return result
-        bt.logging.debug(f'{LOG_RPC} no match for tx {tx_hash[:16]}..., falling back to Esplora')
+        """Look up a Bitcoin tx via the Esplora API (indexed by tx hash)."""
         return self.api_verify_transaction(tx_hash, expected_recipient, expected_amount)
 
-    def rpc_verify_transaction(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int
-    ) -> Optional[TransactionInfo]:
-        """Verify a Bitcoin transaction using getrawtransaction RPC."""
-        raw_tx = self.rpc_call('getrawtransaction', [tx_hash, True])
-        if not raw_tx:
-            return None
-
-        confirmations = raw_tx.get('confirmations', 0)
-        confirmed = confirmations >= self.get_chain().min_confirmations
-        block_number = None
-        block_time = raw_tx.get('blocktime')  # unix seconds, present once mined (replay freshness, B2)
-
-        if confirmed and 'blockhash' in raw_tx:
-            block_info = self.rpc_call('getblock', [raw_tx['blockhash']])
-            if block_info:
-                block_number = block_info.get('height')
-
-        for vout in raw_tx.get('vout', []):
-            addresses = vout.get('scriptPubKey', {}).get('addresses', [])
-            if not addresses:
-                addr = vout.get('scriptPubKey', {}).get('address')
-                if addr:
-                    addresses = [addr]
-
-            amount_sat = int(round(vout.get('value', 0) * BTC_TO_SAT))
-
-            if expected_recipient in addresses and amount_sat >= expected_amount:
-                sender = self.rpc_resolve_sender(raw_tx)
-                return TransactionInfo(
-                    tx_hash=tx_hash,
-                    confirmed=confirmed,
-                    sender=sender,
-                    recipient=expected_recipient,
-                    amount=amount_sat,
-                    block_number=block_number,
-                    confirmations=confirmations,
-                    block_time=block_time,
-                )
-
-        bt.logging.warning(
-            f'{LOG_RPC} tx {tx_hash[:16]}... has no vout paying {expected_recipient} >= {expected_amount} sat'
-        )
-        return None
-
-    def rpc_resolve_sender(self, raw_tx: dict) -> str:
-        """Extract sender address from the first vin of a raw transaction."""
-        if not raw_tx.get('vin'):
-            return ''
-        vin = raw_tx['vin'][0]
-        if 'txid' not in vin:
-            return ''
-        prev_tx = self.rpc_call('getrawtransaction', [vin['txid'], True])
-        if not prev_tx or not prev_tx.get('vout'):
-            return ''
-        vout_idx = vin.get('vout', 0)
-        if vout_idx >= len(prev_tx['vout']):
-            return ''
-        prev_vout = prev_tx['vout'][vout_idx]
-        prev_addrs = prev_vout.get('scriptPubKey', {}).get('addresses', [])
-        if not prev_addrs:
-            prev_addr = prev_vout.get('scriptPubKey', {}).get('address')
-            if prev_addr:
-                prev_addrs = [prev_addr]
-        return prev_addrs[0] if prev_addrs else ''
-
     # --- Esplora API methods (blockstream.info + mempool.space fallback) ---
-    # Used as primary data source in lightweight mode, and as fallback in node mode.
+    # The sole data source for tx verification, confirmations, and balances.
 
     def api_calc_confirmations(self, block_number: int) -> int:
         """Fetch the chain tip from Esplora and calculate confirmations for a block."""
@@ -382,14 +252,7 @@ class BitcoinProvider(ChainProvider):
             return None
 
     def get_current_block_height(self) -> Optional[int]:
-        """Bitcoin chain tip via RPC with Esplora fallback. None on failure."""
-        if self.mode == 'node':
-            result = self.rpc_call('getblockcount', [])
-            if result is not None:
-                try:
-                    return int(result)
-                except (TypeError, ValueError):
-                    pass
+        """Bitcoin chain tip via the Esplora API. None on failure."""
         try:
             resp = self.btc_api_get('/blocks/tip/height', timeout=10)
             if resp.ok:
@@ -401,12 +264,7 @@ class BitcoinProvider(ChainProvider):
         return None
 
     def get_balance(self, address: str) -> int:
-        """Get balance for a Bitcoin address in satoshis via RPC with Esplora fallback."""
-        if self.mode != 'lightweight':
-            result = self.rpc_call('getreceivedbyaddress', [address, 0])
-            if result is not None:
-                return int(round(result * BTC_TO_SAT))
-            bt.logging.debug(f'BTC balance: local RPC had no result for {address}, falling back to Esplora')
+        """Get balance for a Bitcoin address in satoshis via the Esplora API."""
         return self.api_get_balance(address)
 
     def btc_api_bases(self) -> list[tuple[str, Optional[dict]]]:
@@ -539,7 +397,7 @@ class BitcoinProvider(ChainProvider):
             return False
 
     def get_wif(self, address: str) -> Optional[str]:
-        """Get WIF private key from env var or Bitcoin Core wallet."""
+        """Get the WIF private key from the BTC_PRIVATE_KEY env var."""
         wif = os.environ.get('BTC_PRIVATE_KEY')
         if wif:
             if wif[0] not in '5KLc9':
@@ -549,17 +407,14 @@ class BitcoinProvider(ChainProvider):
                 )
                 return None
             return wif
-        if self.mode == 'lightweight':
-            bt.logging.error('BTC_MODE=lightweight requires BTC_PRIVATE_KEY env var for key operations')
-            return None
-        result = self.rpc_call('dumpprivkey', [address])
-        return result if isinstance(result, str) else None
+        bt.logging.error('BTC signing requires the BTC_PRIVATE_KEY env var for key operations')
+        return None
 
     def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a message proving ownership of a Bitcoin address.
 
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
-        key: WIF private key string. If None, attempts dumpprivkey RPC.
+        key: WIF private key string. If None, falls back to get_wif (BTC_PRIVATE_KEY).
         """
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
@@ -878,65 +733,11 @@ class BitcoinProvider(ChainProvider):
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None
     ) -> Optional[Tuple[str, int]]:
-        """Send BTC. Lightweight: embit + Blockstream. Node: RPC. Returns (tx_hash, block_number) or None.
+        """Send BTC via embit + Esplora. Returns (tx_hash, block_number) or None.
 
-        When ``from_address`` is given in node mode, inputs are pinned to UTXOs
-        at that address. Plain ``sendtoaddress`` lets Core pick UTXOs from any
-        address in the wallet — including auto-generated change addresses left
-        over from prior sends — so the tx's first-input sender drifts off the
-        miner's committed address and validators reject the fulfillment.
-
-        Signing credentials come from ``BTC_PRIVATE_KEY`` / ``bitcoind`` wallet,
-        not from the caller.
+        Signing credentials come from ``BTC_PRIVATE_KEY``, not from the caller.
+        ``from_address`` pins the spend to that address's UTXOs so the tx's
+        first-input sender stays on the miner's committed address (validators
+        enforce sender == committed address).
         """
-        if self.mode == 'lightweight':
-            return self.send_amount_lightweight(to_address, amount, from_address=from_address)
-
-        self.last_send_error = None
-        btc_amount = amount / BTC_TO_SAT
-        if from_address:
-            tx_hash = self.rpc_send_from_address(from_address, to_address, btc_amount)
-        else:
-            tx_hash = self.rpc_call('sendtoaddress', [to_address, btc_amount])
-        if not tx_hash or not isinstance(tx_hash, str):
-            self._send_error(f'BTC send failed for {amount} sat to {to_address}')
-            return None
-
-        block_count = self.rpc_call('getblockcount', [])
-        block_number = (block_count + 1) if isinstance(block_count, int) else 0
-        bt.logging.info(f'Sent {amount} sat ({btc_amount} BTC) to {to_address} (tx: {tx_hash})')
-        return (tx_hash, block_number)
-
-    def rpc_send_from_address(self, from_address: str, to_address: str, btc_amount: float) -> Optional[str]:
-        """Send ``btc_amount`` to ``to_address`` using only UTXOs owned by ``from_address``.
-
-        Required so the resulting tx's first-input sender equals the miner's
-        committed address — validators enforce this and Core's default UTXO
-        selection does not (it freely spends change addresses from prior sends).
-
-        Flow: listunspent → createrawtransaction → fundrawtransaction with
-        ``add_inputs=False`` so Core can't top up from other addresses, with
-        ``changeAddress=from_address`` so change returns to the committed
-        address rather than a fresh one.
-        """
-        utxos = self.rpc_call('listunspent', [1, 9999999, [from_address]]) or []
-        if not utxos:
-            bt.logging.error(f'BTC send: no spendable UTXOs at {from_address}')
-            return None
-        inputs = [{'txid': u['txid'], 'vout': u['vout']} for u in utxos]
-        raw = self.rpc_call('createrawtransaction', [inputs, {to_address: btc_amount}])
-        if not raw or not isinstance(raw, str):
-            bt.logging.error(f'BTC createrawtransaction failed for {from_address} -> {to_address}')
-            return None
-        funded = self.rpc_call(
-            'fundrawtransaction',
-            [raw, {'changeAddress': from_address, 'add_inputs': False}],
-        )
-        if not funded or not funded.get('hex'):
-            bt.logging.error(f'BTC fundrawtransaction failed for {from_address} -> {to_address}')
-            return None
-        signed = self.rpc_call('signrawtransactionwithwallet', [funded['hex']])
-        if not signed or not signed.get('complete'):
-            bt.logging.error(f'BTC signrawtransactionwithwallet incomplete: {signed}')
-            return None
-        return self.rpc_call('sendrawtransaction', [signed['hex']])
+        return self.send_amount_lightweight(to_address, amount, from_address=from_address)
