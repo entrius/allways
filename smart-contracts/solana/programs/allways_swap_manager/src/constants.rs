@@ -168,8 +168,9 @@ pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 
 /// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs` — how long
 /// a pool gathers contending requests before the stake-weighted draw. Must stay well below the
-/// reservation TTL; paired with `SLOT_MS` to pin the draw's seed slot.
-pub const POOL_WINDOW_SECS: i64 = 60;
+/// reservation TTL; paired with `SLOT_MS` to pin the draw's seed slot. Runtime-adjustable via
+/// `set_pool_window` (dev seeds 5s for fast swaps).
+pub const POOL_WINDOW_SECS: i64 = 30;
 
 /// Initial minimum seconds between successful validator-weight updates (Phase 10) — an anti-thrash
 /// floor, not a schedule. Seeds `Config.weights_update_min_interval_secs`.
