@@ -53,7 +53,10 @@ def _make_handler(validator, secret: str):
                         return self._send(404, {'error': 'no executable quote for that pair/amount'})
                     return self._send(200, bq.__dict__)
                 if url.path == '/status':
-                    return self._send(200, swap_status(validator, q['miner_hotkey']).__dict__)
+                    # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
+                    # swap directly — the only route to post-attestation stages, since vote_initiate
+                    # consumes the reservation at quorum.
+                    return self._send(200, swap_status(validator, q['miner_hotkey'], q.get('swap_key', '')).__dict__)
                 if url.path == '/health':
                     return self._send(200, {'ok': True})
             except (KeyError, ValueError) as e:

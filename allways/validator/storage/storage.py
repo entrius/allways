@@ -6,13 +6,19 @@ disabled-state result.
 """
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import bittensor as bt
 
-from .database import create_database_connection
+from .database import create_database_connection, is_connection_failure
 from .repository import Repository
+
+# Floor between reconnect attempts after a dropped/failed connection. Each attempt can
+# stall up to CONNECT_TIMEOUT_SEC, so a down aw-db costs one bounded stall per interval,
+# not one per write. The warning is rate-limited by the same clock.
+RECONNECT_MIN_INTERVAL_SEC = 30.0
 
 
 @dataclass
@@ -28,7 +34,9 @@ def _flag_enabled() -> bool:
 
 class DatabaseStorage:
     """Single connection per validator instance; one transactional flush per
-    scoring round. Caller decides what to pass in.
+    scoring round. Caller decides what to pass in. A dead connection (aw-db
+    restart, boot-order race) is dropped and lazily re-established on a later
+    write — failures are logged, never raised into the forward loop.
 
     Methods accept already-shaped row tuples — the validator's scoring code
     is responsible for producing them, not this class. That keeps the
@@ -39,23 +47,76 @@ class DatabaseStorage:
         self.logger = bt.logging
         self.db_connection = None
         self.repo = None
+        self._enabled = _flag_enabled()
+        self._last_reconnect_attempt = 0.0
 
-        if not _flag_enabled():
+        if not self._enabled:
             bt.logging.info('STORE_DB_RESULTS not set — validator DB storage disabled')
             return
 
         bt.logging.info('STORE_DB_RESULTS=1 — connecting to Postgres for dashboard writes')
-        self.db_connection = create_database_connection()
-        if self.db_connection is not None:
-            self.repo = Repository(self.db_connection)
+        if self._connect():
             bt.logging.success('Validator DB storage enabled')
         else:
             bt.logging.error(
-                'STORE_DB_RESULTS=1 but Postgres connection failed — dashboard writes disabled for this process'
+                'STORE_DB_RESULTS=1 but Postgres connection failed — dashboard writes paused until reconnect'
             )
 
     def is_enabled(self) -> bool:
+        """Storage is configured (STORE_DB_RESULTS set) — the callers' gate. Deliberately NOT
+        "connection currently live": the write methods own connection state (drop + lazy
+        redial), so a dead connection must still reach them or reconnect would be unreachable."""
+        return self._enabled
+
+    def _connected(self) -> bool:
         return self.db_connection is not None and self.repo is not None
+
+    def _connect(self) -> bool:
+        self.db_connection = create_database_connection()
+        self.repo = Repository(self.db_connection) if self.db_connection is not None else None
+        return self._connected()
+
+    def _ensure_connection(self) -> bool:
+        """Lazy reconnect for a dropped (or never-established) connection, at most once per
+        RECONNECT_MIN_INTERVAL_SEC. Called at the top of every write so a restarted aw-db
+        heals without a validator restart."""
+        if not self._enabled:
+            return False
+        if self._connected():
+            return True
+        now = time.monotonic()
+        if now - self._last_reconnect_attempt < RECONNECT_MIN_INTERVAL_SEC:
+            return False
+        self._last_reconnect_attempt = now
+        bt.logging.warning('Dashboard DB connection is down — attempting reconnect')
+        if self._connect():
+            bt.logging.success('Dashboard DB connection re-established')
+            return True
+        return False
+
+    def _drop_connection(self) -> None:
+        try:
+            if self.db_connection is not None:
+                self.db_connection.close()
+        except Exception:
+            pass
+        self.db_connection = None
+        self.repo = None
+
+    def _handle_write_failure(self, ex: Exception, context: str) -> str:
+        """Best-effort rollback, then drop the connection on connection-class failures so the
+        next write reconnects. Never raises — dashboard writes must not kill the forward loop."""
+        if self.db_connection is not None:
+            try:
+                self.db_connection.rollback()
+                self.db_connection.autocommit = True
+            except Exception:
+                pass
+        if is_connection_failure(ex):
+            self._drop_connection()
+        msg = f'{context}: {ex}'
+        self.logger.error(msg)
+        return msg
 
     def flush_scoring_window(
         self,
@@ -78,7 +139,7 @@ class DatabaseStorage:
         Failure on any write rolls back the whole window — the cursor is
         never left ahead of (or behind) the rows it describes.
         """
-        if not self.is_enabled():
+        if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
 
         result = StorageResult(success=True)
@@ -105,13 +166,8 @@ class DatabaseStorage:
             self.db_connection.autocommit = True
 
         except Exception as ex:
-            if self.db_connection is not None:
-                self.db_connection.rollback()
-                self.db_connection.autocommit = True
-            error_msg = f'Failed to flush scoring window to DB: {ex}'
             result.success = False
-            result.errors.append(error_msg)
-            self.logger.error(error_msg)
+            result.errors.append(self._handle_write_failure(ex, 'Failed to flush scoring window to DB'))
 
         return result
 
@@ -136,7 +192,7 @@ class DatabaseStorage:
         ``[window_start, window_end)`` is the unix-second range to clear per
         direction. ``max_ts`` advances both sync_cursor watermarks.
         """
-        if not self.is_enabled():
+        if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
 
         result = StorageResult(success=True)
@@ -154,16 +210,8 @@ class DatabaseStorage:
             self.db_connection.autocommit = True
 
         except Exception as ex:
-            if self.db_connection is not None:
-                try:
-                    self.db_connection.rollback()
-                except Exception:
-                    pass
-                self.db_connection.autocommit = True
-            error_msg = f'Failed to flush halt window to DB: {ex}'
             result.success = False
-            result.errors.append(error_msg)
-            self.logger.error(error_msg)
+            result.errors.append(self._handle_write_failure(ex, 'Failed to flush halt window to DB'))
 
         return result
 
@@ -182,7 +230,7 @@ class DatabaseStorage:
         rate, ts)``. Empty list for a direction means "no qualifying
         holder right now" — that direction's rows are cleared.
         """
-        if not self.is_enabled():
+        if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
 
         result = StorageResult(success=True)
@@ -194,16 +242,8 @@ class DatabaseStorage:
             self.db_connection.autocommit = True
             result.stored_counts['current_crown_holders'] = count
         except Exception as ex:
-            if self.db_connection is not None:
-                try:
-                    self.db_connection.rollback()
-                except Exception:
-                    pass
-                self.db_connection.autocommit = True
-            error_msg = f'Failed to upsert current_crown_holders: {ex}'
             result.success = False
-            result.errors.append(error_msg)
-            self.logger.error(error_msg)
+            result.errors.append(self._handle_write_failure(ex, 'Failed to upsert current_crown_holders'))
 
         return result
 

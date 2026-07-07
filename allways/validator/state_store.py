@@ -4,7 +4,9 @@ Tables: ``rate_events`` + ``active_events`` + ``activity_events`` +
 ``collateral_events`` (the crown-time event series, sourced from Solana program
 events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 ``clearing_rates`` (per-swap realized history from ``SwapCompleted``, backing the
-C-rev rate-quality reference), and ``solana_event_meta`` (the event-ingest cursor).
+C-rev rate-quality reference), ``swap_outcomes`` (terminal completed/timed_out
+truth per swap_key, backing the seam's stage disambiguation after the swap PDA
+closes), and ``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
 brief exclusive lock that concurrent openers would otherwise hit as "database is
@@ -339,6 +341,30 @@ class ValidatorStateStore:
             return
         self._execute('DELETE FROM clearing_rates WHERE block_num < ?', (cutoff_block,))
 
+    # ─── swap_outcomes (terminal per-swap truth for the seam) ───────────
+
+    def record_swap_outcome(self, swap_key: str, outcome: str, block_time: int) -> None:
+        """Persist a swap's terminal outcome (``completed`` | ``timed_out``) keyed by
+        swap_key hex. Upsert: a cursor-reset re-ingest of the same event is a no-op."""
+        self._execute(
+            """
+            INSERT INTO swap_outcomes (swap_key, outcome, block_time) VALUES (?, ?, ?)
+            ON CONFLICT(swap_key) DO UPDATE SET outcome = excluded.outcome, block_time = excluded.block_time
+            """,
+            (swap_key, outcome, block_time),
+        )
+
+    def get_swap_outcome(self, swap_key: str) -> Optional[str]:
+        row = self._fetchone('SELECT outcome FROM swap_outcomes WHERE swap_key = ?', (swap_key,))
+        return row['outcome'] if row is not None else None
+
+    def prune_swap_outcomes(self, cutoff_block: int) -> None:
+        """Drop outcome rows older than ``cutoff_block``. No anchor row — each row is
+        an independent terminal fact, only queried while the offering still polls."""
+        if cutoff_block <= 0:
+            return
+        self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
+
     def get_solana_event_cursor(self) -> Optional[str]:
         """Last ingested Solana tx signature (the SolanaEventIngest cursor).
         ``None`` on a fresh DB so the first poll starts from the prune horizon."""
@@ -558,6 +584,16 @@ class ValidatorStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);
+
+                -- Terminal outcome per swap (SwapCompleted | SwapTimedOut), keyed by
+                -- swap_key hex. Terminal swap PDAs are closed on-chain, so this is the
+                -- seam's only way to tell a slash from a completion after close. Not
+                -- the old B3.5 scoring ledger — scoring reads on-chain counters.
+                CREATE TABLE IF NOT EXISTS swap_outcomes (
+                    swap_key    TEXT PRIMARY KEY,
+                    outcome     TEXT NOT NULL,
+                    block_time  INTEGER NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS solana_event_meta (
                     key     TEXT PRIMARY KEY,

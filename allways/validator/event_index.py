@@ -7,7 +7,8 @@ this index persists them into the ``state_store`` event tables, attributing each
 its bound Bittensor hotkey at write time (B3.2). The crown math is unchanged — it consumes the same
 ``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed. ``SwapCompleted`` additionally
 persists its realized legs into ``clearing_rates`` (C-rev), the per-swap history the rate-quality reference
-is built from.
+is built from. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
+``swap_outcomes``, the seam's post-close completed-vs-slashed truth (terminal swap PDAs are closed on-chain).
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
 blocks. Reservation + swap lifecycle drive a per-miner ``MinerActivity`` machine (D4): ``PoolResolved``
@@ -32,6 +33,14 @@ _FULFILL_TRANSITIONS = {
     'SwapInitiated': ActivityTransition.FULFILL_START,
     'SwapCompleted': ActivityTransition.FULFILL_END,
     'SwapTimedOut': ActivityTransition.FULFILL_END,
+}
+
+# Terminal events → per-swap outcome persisted for the seam (reserve_engine._swap_stage):
+# terminal swap PDAs close on-chain, so this index is what disambiguates a slash from a
+# completion once the account is gone.
+_OUTCOME_BY_EVENT = {
+    'SwapCompleted': 'completed',
+    'SwapTimedOut': 'timed_out',
 }
 
 
@@ -77,6 +86,9 @@ class SolanaEventIndex:
             return self._apply_reservation(hotkey, block_time)
         if name in _FULFILL_TRANSITIONS:
             self.state_store.insert_activity_event(block_time, hotkey, _FULFILL_TRANSITIONS[name])
+            outcome = _OUTCOME_BY_EVENT.get(name)
+            if outcome is not None:
+                self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
             # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the C-rev quality reference, in
             # addition to closing the fulfillment above.

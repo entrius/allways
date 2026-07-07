@@ -104,8 +104,8 @@ def test_contract_rejection_returns_reject_not_raise():
 
     def _raise(*_a, **_k):
         raise RuntimeError(
-            "send failed: AnchorError ... Error Code: MinerReserved. Error Number: 6022. "
-            "Error Message: Miner already has an active reservation. custom program error: 0x1786"
+            'send failed: AnchorError ... Error Code: MinerReserved. Error Number: 6022. '
+            'Error Message: Miner already has an active reservation. custom program error: 0x1786'
         )
 
     client.open_or_request = _raise
@@ -150,3 +150,155 @@ def test_join_uses_pinned_pool_rate_not_live_quote():
     _, sol_amount, _, to_amount, _, _, _ = client.calls[0]
     # to_amount derived from pinned 0.0021 (≈ 0.0021 BTC for 1 SOL = 210000 sat), not the 0.0099 live quote.
     assert to_amount == 210_000
+
+
+# ─── _swap_stage: closed-PDA terminal disambiguation ────────────────────────
+# Terminal swaps (Completed AND TimedOut) close their PDA on-chain, so a None swap
+# account alone can't tell a completion from a slash — the validator's own
+# swap_outcomes index (written on SwapCompleted/SwapTimedOut ingest) must.
+
+
+def _stage_validator(tmp_path):
+    from allways.validator.state_store import ValidatorStateStore
+
+    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+    return SimpleNamespace(state_store=store), store
+
+
+def test_closed_pda_with_recorded_slash_reports_timed_out(tmp_path):
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x01' * 32
+    store.record_swap_outcome(key.hex(), 'timed_out', 100)
+    assert _swap_stage(validator, None, key) == 'timed_out'
+    store.close()
+
+
+def test_closed_pda_with_recorded_completion_reports_completed(tmp_path):
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x02' * 32
+    store.record_swap_outcome(key.hex(), 'completed', 100)
+    assert _swap_stage(validator, None, key) == 'completed'
+    store.close()
+
+
+def test_closed_pda_with_unrecorded_outcome_reports_fulfilled(tmp_path):
+    # Ingest lag: another validator's quorum closed the PDA but this validator hasn't
+    # ingested the terminal event yet. The fallback must be NON-terminal so the consumer
+    # keeps polling and picks up the real outcome next ingest — a 'completed' guess for a
+    # fresh slash would resurrect the original bug through a one-forward-step window.
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    assert _swap_stage(validator, None, b'\x03' * 32) == 'fulfilled'
+    store.close()
+
+
+def test_live_pda_status_maps_by_variant_name(tmp_path):
+    # A still-open PDA never consults the outcome index — the borsh status variant wins.
+    from allways.validator.reserve_engine import _swap_stage
+
+    validator, store = _stage_validator(tmp_path)
+    key = b'\x04' * 32
+    store.record_swap_outcome(key.hex(), 'completed', 100)  # must be ignored while the PDA is live
+    for variant, stage in [('Active', 'active'), ('Fulfilled', 'fulfilled'), ('TimedOut', 'timed_out')]:
+        swap = SimpleNamespace(status=type(variant, (), {})())
+        assert _swap_stage(validator, swap, key) == stage
+    store.close()
+
+
+# ─── swap_status by swap_key (post-attestation resolution) ──────────────────
+# vote_initiate consumes the reservation at attestation quorum (reserved_until=0,
+# claimed_swap_key cleared), so post-attestation stages are only reachable by key —
+# the consumer persists the swap_key from /confirm and polls /status with it.
+
+
+class StatusClient:
+    """Minimal client for the status paths: swap-by-key + reservation + a valid binding."""
+
+    def __init__(self, swap=None, reservation=None):
+        self._swap = swap
+        self._reservation = reservation
+        self.swap_keys_queried = []
+
+    def get_swap(self, swap_key):
+        self.swap_keys_queried.append(swap_key)
+        return self._swap
+
+    def get_reservation(self, miner):
+        return self._reservation
+
+    def get_hotkey_binding(self, hotkey_bytes):
+        return SimpleNamespace(miner=MINER_PK)
+
+    def get_binding(self, miner):
+        return SimpleNamespace(miner=MINER_PK, hotkey=HOTKEY_BYTES, hotkey_sig=BINDING_SIG)
+
+
+def _live_swap(variant: str):
+    return SimpleNamespace(
+        status=type(variant, (), {})(),
+        user='userSOLpk',
+        from_chain='sol',
+        to_chain='btc',
+        from_amount=1_000_000_000,
+        to_amount=210_000,
+        miner_from_addr='minerSOLaddr',
+    )
+
+
+def _status_validator(tmp_path, client):
+    validator, store = _stage_validator(tmp_path)
+    validator.solana_client = client
+    return validator, store
+
+
+def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x05' * 32
+    consumed = SimpleNamespace(reserved_until=0)  # vote_initiate zeroed it at quorum
+    client = StatusClient(swap=_live_swap('Active'), reservation=consumed)
+    validator, store = _status_validator(tmp_path, client)
+    assert swap_status(validator, HOTKEY).stage == 'none'  # reservation path is blind post-attestation
+    s = swap_status(validator, HOTKEY, key.hex())
+    assert s.stage == 'active' and s.swap_key == key.hex() and s.reserved_until == 0
+    assert s.detail['from_chain'] == 'sol' and s.detail['to_amount'] == 210_000
+    assert client.swap_keys_queried == [key]
+    store.close()
+
+
+def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x06' * 32
+    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
+    store.record_swap_outcome(key.hex(), 'timed_out', 100)
+    s = swap_status(validator, HOTKEY, key.hex())
+    assert s.stage == 'timed_out' and s.swap_key == key.hex() and s.detail == {}
+    store.close()
+
+
+def test_closed_pda_by_key_with_unrecorded_outcome_reports_fulfilled(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
+    assert swap_status(validator, HOTKEY, (b'\x07' * 32).hex()).stage == 'fulfilled'
+    store.close()
+
+
+def test_malformed_swap_key_raises_value_error(tmp_path):
+    # Non-hex or wrong-length keys must raise ValueError (seam maps it to a 400).
+    from allways.validator.reserve_engine import swap_status
+
+    validator, store = _status_validator(tmp_path, StatusClient())
+    for bad in ('zz', 'abcd'):
+        try:
+            swap_status(validator, HOTKEY, bad)
+            assert False, f'expected ValueError for swap_key={bad!r}'
+        except ValueError:
+            pass
+    store.close()

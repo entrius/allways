@@ -16,8 +16,13 @@ ATTR = {'pk_a': 'hk_a', 'pk_b': 'hk_b'}
 RESERVATION_TTL = 300
 
 
+DEFAULT_SWAP_KEY = b'\x2a' * 32
+
+
 def rec(name: str, *, miner: str = 'pk_a', block_time, slot: int = 0, **fields) -> EventRecord:
-    fields = {'miner': miner, **fields}
+    # swap_key defaults so swap-lifecycle recs match the on-chain layouts (Hash32); harmless extra
+    # field on events that don't carry one.
+    fields = {'miner': miner, 'swap_key': DEFAULT_SWAP_KEY, **fields}
     return EventRecord(name=name, fields=fields, slot=slot, block_time=block_time, signature=f'sig{slot}')
 
 
@@ -331,6 +336,63 @@ class TestIngestClearingRate:
         store.prune_clearing_rates(500)
         blocks = [r['block'] for r in store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)]
         assert blocks == [900]  # no anchor preservation — old sample is gone
+        store.close()
+
+
+class TestIngestSwapOutcomes:
+    def test_swap_completed_records_completed_outcome(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        idx.ingest(
+            [
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    swap_key=key,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                )
+            ],
+            ATTR,
+        )
+        assert store.get_swap_outcome(key.hex()) == 'completed'
+        store.close()
+
+    def test_swap_timed_out_records_timed_out_outcome(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        idx.ingest(
+            [rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, sol_amount=10, slash=1)],
+            ATTR,
+        )
+        assert store.get_swap_outcome(key.hex()) == 'timed_out'
+        assert store.get_swap_outcome(DEFAULT_SWAP_KEY.hex()) is None  # only the event's key lands
+        store.close()
+
+    def test_reingest_of_same_event_is_a_noop_upsert(self, tmp_path: Path):
+        """A cursor reset can replay history — the outcome row upserts instead of erroring."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        event = rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, sol_amount=10, slash=1)
+        idx.ingest([event], ATTR)
+        idx.ingest([event], ATTR)
+        assert store.get_swap_outcome(key.hex()) == 'timed_out'
+        store.close()
+
+    def test_prune_drops_old_outcomes(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        old, recent = b'\x01' * 32, b'\x02' * 32
+        store.record_swap_outcome(old.hex(), 'completed', 100)
+        store.record_swap_outcome(recent.hex(), 'timed_out', 900)
+        store.prune_swap_outcomes(500)
+        assert store.get_swap_outcome(old.hex()) is None
+        assert store.get_swap_outcome(recent.hex()) == 'timed_out'
         store.close()
 
 
