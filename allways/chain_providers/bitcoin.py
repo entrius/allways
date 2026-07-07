@@ -109,7 +109,13 @@ class BitcoinProvider(ChainProvider):
                 f'BTC_MODE={legacy_mode!r} is no longer supported — local Bitcoin node mode was '
                 'removed. Running via Esplora/embit; set BTC_PRIVATE_KEY (+ optional BTC_ESPLORA_URLS).'
             )
-        self.network = os.environ.get('BTC_NETWORK', '').lower() or 'mainnet'
+        # Node mode (which inferred the network from the RPC URL) is gone, so BTC_NETWORK is the only
+        # source. Warn on the mainnet default so a testnet operator who never set it isn't run as mainnet
+        # (a mainnet-derived address wouldn't match their committed testnet address → unfulfillable swaps).
+        self.network = os.environ.get('BTC_NETWORK', '').lower()
+        if not self.network:
+            self.network = 'mainnet'
+            bt.logging.warning('BTC_NETWORK unset — defaulting to mainnet; set BTC_NETWORK=testnet for testnet.')
 
         # Disable HTTP keepalive: validators are long-running and the default
         # global session pools idle TLS sockets that Blockstream's CDN silently
