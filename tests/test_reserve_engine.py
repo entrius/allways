@@ -185,13 +185,15 @@ def test_closed_pda_with_recorded_completion_reports_completed(tmp_path):
     store.close()
 
 
-def test_closed_pda_with_unknown_key_falls_back_to_completed(tmp_path):
-    # Validator restarted with no local history + RPC pruned before ingest: the seam
-    # still returns a terminal stage so the offering stops polling.
+def test_closed_pda_with_unrecorded_outcome_reports_fulfilled(tmp_path):
+    # Ingest lag: another validator's quorum closed the PDA but this validator hasn't
+    # ingested the terminal event yet. The fallback must be NON-terminal so the consumer
+    # keeps polling and picks up the real outcome next ingest — a 'completed' guess for a
+    # fresh slash would resurrect the original bug through a one-forward-step window.
     from allways.validator.reserve_engine import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
-    assert _swap_stage(validator, None, b'\x03' * 32) == 'completed'
+    assert _swap_stage(validator, None, b'\x03' * 32) == 'fulfilled'
     store.close()
 
 

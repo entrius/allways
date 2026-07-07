@@ -266,10 +266,13 @@ class SwapStatus:
 
     none → reserved → claimed → active → fulfilled → { completed | timed_out }
 
-    ``completed`` and ``timed_out`` are terminal. ``timed_out`` means the miner was slashed;
-    it is sourced from the live PDA status or, after the terminal PDA closes, from the
-    validator's ``swap_outcomes`` event index. A closed PDA whose swap_key is absent from
-    that index degrades to ``completed`` (see ``_swap_stage``)."""
+    ``completed`` and ``timed_out`` are terminal; ``timed_out`` means the miner was slashed.
+    Both are sourced from the live PDA status or, after the terminal PDA closes on-chain, from
+    the validator's ``swap_outcomes`` event index. A closed PDA whose outcome isn't recorded
+    yet reports ``fulfilled`` — transient, normally resolving within ~one forward step once the
+    terminal event is ingested. Consumers keep polling on ``fulfilled`` and should apply their
+    own reconcile deadline: in the wiped-state.db + RPC-pruned edge the outcome never lands, and
+    the validator won't guess terminal truth it hasn't ingested (see ``_swap_stage``)."""
 
     stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out
     reserved_until: int = 0
@@ -317,10 +320,11 @@ def _swap_stage(validator, swap, swap_key: bytes) -> str:
     """Stage for a claimed swap. A closed PDA is terminal, but Completed and TimedOut swaps both
     close on-chain, so the on-chain account alone can't tell a completion from a slash — the
     validator's own event index (``swap_outcomes``, written on SwapCompleted/SwapTimedOut ingest)
-    disambiguates. An unknown swap_key (validator restarted with no local history and the RPC
-    pruned the signatures before ingest) falls back to ``completed``: the overwhelmingly common
-    terminal outcome, and the seam must return *some* terminal stage so the offering stops polling."""
+    disambiguates. On an outcome miss, fall back NON-terminal to ``fulfilled``: the miss is
+    normally ingest lag (another validator's quorum closed the PDA since our last forward-step
+    ingest) and self-corrects at the next ingest, whereas a terminal guess would stop the
+    consumer polling on a wrong answer — for a slash, exactly the bug this index exists to fix."""
     if swap is None:
         outcome = validator.state_store.get_swap_outcome(swap_key.hex())
-        return outcome or 'completed'
+        return outcome or 'fulfilled'
     return _STAGE_BY_NAME.get(type(getattr(swap, 'status', None)).__name__, 'claimed')
