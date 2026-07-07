@@ -78,6 +78,22 @@ def test_cross_party_transfer_passes():
     assert result.sender == '5Miner'
 
 
+def test_payout_from_uncommitted_wallet_is_rejected():
+    # Accountability guardrail: the dest leg pins expected_sender to the miner's committed payout
+    # wallet, so a tx delivering the right amount to the right recipient but sent from a DIFFERENT
+    # wallet is rejected. Miners are held liable to the wallet they registered — not any wallet that
+    # happens to pay the user. This check is intentional; loosening it (crediting a delivery regardless
+    # of sender) widens a credit-someone-else's-tx exploit surface. Do not relax without a design call.
+    provider = FakeProvider(_tx(sender='5OtherWallet', recipient='5User'))
+    result = provider.verify_transaction(
+        tx_hash='0xabc',
+        expected_recipient='5User',
+        expected_amount=100,
+        expected_sender='5Miner',
+    )
+    assert result is None
+
+
 def test_self_transfer_rejected_even_without_expected_sender():
     # The dest-confirm path pins expected_sender, but guard A->A regardless.
     provider = FakeProvider(_tx(sender='5Aaa', recipient='5Aaa'))

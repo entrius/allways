@@ -4,7 +4,6 @@ from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
 NETUID_FINNEY = 7
-NETUID_LOCAL = 2
 
 # ─── Contract ──────────────────────────────────────────────
 # Mainnet default; override via CONTRACT_ADDRESS env var.
@@ -19,9 +18,6 @@ STALE_BLOCK_POLL_THRESHOLD = 30
 # Seconds without a completed forward step before the supervisor declares the
 # loop dead/hung and exits non-zero for the process manager to restart.
 FORWARD_STALL_THRESHOLD_SECONDS = 600
-
-# ─── Commitment Format ────────────────────────────────────
-COMMITMENT_VERSION = 1
 
 # ─── Unit Conversions ────────────────────────────────────
 TAO_TO_RAO = 1_000_000_000
@@ -124,21 +120,16 @@ COLLATERAL_REQUIREMENT_BPS = 11_000
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
-# ─── Reservation ─────────────────────────────────────────
-RESERVATION_COOLDOWN_BLOCKS = 150  # ~30 min base cooldown on failed reservation
-RESERVATION_COOLDOWN_MULTIPLIER = 2  # 150 → 300 → 600 ...
-MAX_RESERVATIONS_PER_ADDRESS = 1
 # ─── Optimistic Extensions ───────────────────────────────
 # Tunables for the propose/challenge/finalize extension flow. Per-chain timing
 # (block time, confirmations) lives in allways/chains.py; the contract enforces
-# its own MAX_EXTENSION_BLOCKS independently.
+# the extension ceiling (max_extend_at) independently.
 EXTENSION_PADDING_SECONDS = 120  # safety buffer on top of confirmation time
 # Validator-view convergence: extension targets snap up to this native-seconds grid so validators
 # computing `now + confirmation_runway` at slightly different wall-clock moments agree on one target_at.
 # Seconds, never blocks (the deadline axis is unix-seconds); >= the slowest chain's block time so a
 # bucket always spans at least one source block.
 EXTENSION_BUCKET_SECONDS = 600  # 10 min
-MAX_EXTENSION_BLOCKS = 250  # client-side cap, mirrors the contract's hard cap
 # Mirrors the contract's CHALLENGE_WINDOW_BLOCKS — must stay in sync with
 # smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally
 # to avoid known-doomed txs; the contract is authoritative.
@@ -171,31 +162,12 @@ EXTEND_THRESHOLD_BLOCKS = 2 * VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE
 # this file directly if you need a different value.
 MINER_TIMEOUT_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
 
-# Tiered escalation. First extension fires on tx visibility alone (mempool
-# OK) and buys time for one block; second extension requires ≥1 confirmation
-# and buys the full chain-aware confirmation window. Hard cap is enforced
-# contract-side via MAX_EXTENSIONS_PER_RESERVATION / _PER_SWAP — these client
-# constants must mirror the contract values.
-MAX_EXTENSIONS_PER_RESERVATION = 2
-MAX_EXTENSIONS_PER_SWAP = 2
-
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.
 FEE_DIVISOR = 100
 
-# ─── Display Only ─────────────────────────────────────────
-# Fallbacks/defaults for CLI display. Live values are written by `alw admin`
-# and read from the contract at runtime.
-MIN_COLLATERAL_TAO = 0.1
+# Base fulfillment window (blocks); its seconds form is the sent-cache margin's base-window buffer.
 DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
-DEFAULT_MIN_SWAP_AMOUNT_RAO = 100_000_000  # 0.1 TAO
-DEFAULT_MAX_SWAP_AMOUNT_RAO = 500_000_000  # 0.5 TAO
-RESERVATION_TTL_BLOCKS = 50  # ~10 min
-
-# Blocks past a retained entry's last-known timeout_block before discard. Sized for the contract's worst case:
-# MAX_EXTENSIONS_PER_SWAP extensions each push the deadline up to MAX_EXTENSION_BLOCKS further (not cumulative).
-# A smaller margin can discard a still-active twice-extended swap and re-send on rediscovery (#461). ~550 ≈ 1.8h.
-SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
 
 # ─── Unix-axis miner runways (B4 — Solana) ────────────────
 # The Solana swap deadline (`Swap.timeout_at`) is unix-seconds, not a block height. Port the two
@@ -203,4 +175,9 @@ SENT_CACHE_DISCARD_MARGIN_BLOCKS = MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCK
 # wall-clock meaning. Edit these directly if validator extension cadence changes.
 SECS_PER_BLOCK = 12
 MINER_TIMEOUT_CUSHION_SECS = MINER_TIMEOUT_CUSHION_BLOCKS * SECS_PER_BLOCK
-SENT_CACHE_DISCARD_MARGIN_SECS = SENT_CACHE_DISCARD_MARGIN_BLOCKS * SECS_PER_BLOCK
+# Retain a miner's unmarked sent entry until past the contract's max extended deadline, else it can
+# discard then re-send a still-claimable swap (#461 double-send). The contract slides the deadline
+# cumulatively up to the extension ceiling, so cover that full budget plus one base window. Keep
+# CONTRACT_MAX_TOTAL_EXTENSION_SECS in sync with smart-contracts/solana/.../constants.rs.
+CONTRACT_MAX_TOTAL_EXTENSION_SECS = 7200  # 120 min — mirror of the contract's MAX_TOTAL_EXTENSION_SECS
+SENT_CACHE_DISCARD_MARGIN_SECS = CONTRACT_MAX_TOTAL_EXTENSION_SECS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS * SECS_PER_BLOCK

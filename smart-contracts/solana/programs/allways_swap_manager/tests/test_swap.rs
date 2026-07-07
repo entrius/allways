@@ -120,6 +120,14 @@ fn add_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
             .to_account_metas(None),
     )
 }
+fn set_halted_ix(admin: &Pubkey, halted: bool) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetHalted { halted }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
+            .to_account_metas(None),
+    )
+}
 fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -158,6 +166,29 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
+            liquidity: 1_000,
+        }
+        .data(),
+        allways_swap_manager::accounts::SetQuote {
+            miner: *miner,
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            treasury: treasury_pda(),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+/// Post a quote with caller-chosen payout addresses + rate on the same pair (overwrites in place) —
+/// used to prove a post-reservation re-quote cannot redirect an in-flight swap.
+fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetQuote {
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+            miner_from_addr: from_addr.to_string(),
+            miner_to_addr: to_addr.to_string(),
+            rate,
             liquidity: 1_000,
         }
         .data(),
@@ -355,6 +386,13 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
 /// As `setup`, but the miner posts an arbitrary collateral amount. Must be ≥ 1.10× SOL_AMOUNT or the
 /// in-setup `open` is rejected by the over-collateralization entry gate.
 fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u64) {
+    let (svm, _admin, vals, miner, rent) = setup_full(collateral);
+    (svm, vals, miner, rent)
+}
+
+/// As `setup_with_collateral`, but also returns the admin keypair — needed to drive admin-only
+/// instructions (e.g. set_halted) in tests.
+fn setup_full(collateral: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair, u64) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
     set_clock(&mut svm, BASE_TS);
@@ -390,7 +428,7 @@ fn setup_with_collateral(collateral: u64) -> (LiteSVM, Vec<Keypair>, Keypair, u6
     send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
     set_clock(&mut svm, BASE_TS);
 
-    (svm, vals, miner, rent_reserve)
+    (svm, admin, vals, miner, rent_reserve)
 }
 
 /// Claim the source tx on-chain, then attest it to quorum (PendingAttestation → Active).
@@ -612,6 +650,122 @@ fn test_timeout_slash_refund_and_invariant() {
 
 fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, tx: &str) -> Result<(), String> {
     send(svm, timeout_ix(&v.pubkey(), miner, user, tx), &v.pubkey(), v)
+}
+
+#[test]
+fn test_halt_blocks_new_entry_and_lifts_on_unhalt() {
+    // PRs 8/482/458: halting the subnet must block NEW entry — post_collateral, vote_activate, and pool
+    // open all revert SystemHalted — so no fresh capital or reservations enter while paused. Unhalting
+    // restores entry. (In-flight finalization is covered by test_halt_allows_inflight_confirm.)
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    set_clock(&mut svm, BASE_TS);
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, init_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("init");
+    let v = Keypair::new();
+    svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add val");
+
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("halt");
+
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    assert!(
+        send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).is_err(),
+        "post_collateral must revert SystemHalted while halted"
+    );
+
+    // Lift the halt → the same entry now succeeds.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), false), &admin.pubkey(), &admin).expect("unhalt");
+    send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post after unhalt");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+
+    // Re-halt → activation entry is blocked too.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("re-halt");
+    assert!(
+        send(&mut svm, vote_activate_ix(&v.pubkey(), &miner.pubkey()), &v.pubkey(), &v).is_err(),
+        "vote_activate must revert SystemHalted while halted"
+    );
+}
+
+#[test]
+fn test_halt_allows_inflight_confirm() {
+    // PRs 8/482/458 (precedence half): a halt pauses new entry but must NOT strand an in-flight swap —
+    // confirm_swap deliberately ignores `halted`. A swap already Active/Fulfilled when the subnet halts
+    // can still reach confirm quorum and complete.
+    let (mut svm, admin, vals, miner, rent) = setup_full(COLLATERAL);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+
+    // Halt AFTER the swap is in flight.
+    send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("halt");
+
+    // In-flight confirm still reaches quorum while halted.
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0 while halted");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1 while halted");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "in-flight swap confirmed despite halt");
+    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "vault invariant after halted confirm");
+}
+
+#[test]
+fn test_swap_terms_frozen_against_post_reservation_requote() {
+    // Fund-theft defense (invariant A): once a reservation is resolved, the swap's payout addresses and
+    // rate are frozen into the immutable Reservation. A miner that re-posts its quote AFTER reserving —
+    // pointing the payout at its own wallet and doubling the rate — must NOT be able to redirect the
+    // in-flight swap. submit_swap_claim / vote_initiate read terms from the Reservation, never the live
+    // quote (the MinerQuote account isn't even in their Accounts structs). Existing tests can't catch a
+    // read-from-live-quote regression because they never make the live quote differ from the reservation.
+    // NOTE: the *rate band* (is_executable_rate) that would reject a bogus rate is off-chain by design —
+    // the contract stores rate opaquely (set_quote.rs); that gate is tested in tests/test_rate.py.
+    let (mut svm, vals, miner, _rent) = setup();
+    // Miner mutates its live quote out from under the resolved reservation. Whether or not the contract
+    // even permits re-quoting while reserved, the swap must still execute on the frozen terms.
+    let _ = send(
+        &mut svm,
+        set_quote_vals_ix(&miner.pubkey(), "ATTACKER_BTC", "ATTACKER_SOL", RATE * 2),
+        &miner.pubkey(),
+        &miner,
+    );
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+
+    let s = Swap::try_deserialize(
+        &mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(s.rate, RATE, "rate frozen at reservation — not the doubled re-quote");
+    assert_eq!(s.miner_to_addr, MINER_TO, "payout addr frozen — not the attacker wallet");
+    assert_eq!(s.miner_from_addr, MINER_FROM, "source addr frozen at reservation");
+    assert_eq!(s.user, LOTTERY_USER, "taker pinned by the lottery, not the re-quote");
+    assert_eq!(s.user_to_addr, "userSOLaddr");
+}
+
+#[test]
+fn test_confirm_succeeds_after_deadline() {
+    // Invariant B: confirm_swap gates only on status == Fulfilled — it has NO deadline check. A payout
+    // delivered and marked Fulfilled still confirms even when the confirm quorum lands AFTER timeout_at
+    // (slow BTC confirmations). Locks in that nobody adds a deadline gate that would re-break the
+    // delivered-past-deadline confirm path (the 262/263/264 family). Mirror of the happy-path confirm
+    // test, but with the clock warped well past the deadline before quorum.
+    let (mut svm, vals, miner, rent) = setup();
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+
+    set_clock(&mut svm, BASE_TS + TIMEOUT_SECS + 5_000); // well past timeout_at, before confirm quorum
+
+    let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0 past deadline");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1 past deadline");
+
+    // Confirmed, not slashed: 1% fee (not a 1.1× slash), success credited, no failure, swap closed.
+    let fee = SOL_AMOUNT / 100;
+    assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee, not a slash");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "success credited past deadline");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 0, "a delivered swap is not failed");
+    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed on confirm");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "vault invariant after past-deadline confirm");
 }
 
 #[test]

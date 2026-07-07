@@ -137,6 +137,18 @@ def test_fulfilled_overdue_but_verifiable_still_confirms():
     assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.CONFIRM
 
 
+def test_fulfilled_pending_dest_at_ceiling_overdue_times_out():
+    # Accountability guardrail: a payout that's broadcast but still unconfirmed, whose extension budget
+    # is exhausted (timeout_at == max_extend_at, no room left to slide) and is now overdue, MUST slash.
+    # The ceiling is ample runway (MAX_TOTAL_EXTENSION_SECS); failing to confirm within it means the
+    # miner underfee'd/mis-sent the payout — its responsibility, so the timeout is warranted, not a
+    # false slash. This tripwire guards that the exhausted-extension path still slashes.
+    loop, providers = loop_with(result=True)
+    providers['sol'].result = False  # dest matched but unconfirmed (pending)
+    swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1000)  # at ceiling — no extend room
+    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
+
+
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST

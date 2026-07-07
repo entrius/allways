@@ -6,7 +6,6 @@ if [ -z "$HOTKEY_NAME" ]; then echo "HOTKEY_NAME is not set" && exit 1; fi
 if [ -z "$SUBTENSOR_NETWORK" ]; then echo "SUBTENSOR_NETWORK is not set" && exit 1; fi
 if [ -z "$PORT" ]; then echo "PORT is not set" && exit 1; fi
 if [ -z "$LOG_LEVEL" ]; then echo "LOG_LEVEL is not set" && exit 1; fi
-if [ "${BTC_MODE}" != "lightweight" ] && [ -z "$BTC_RPC_URL" ]; then echo "BTC_RPC_URL is not set (required unless BTC_MODE=lightweight)" && exit 1; fi
 
 exec python neurons/validator.py \
   --netuid ${NETUID} \

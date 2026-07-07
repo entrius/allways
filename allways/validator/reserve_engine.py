@@ -166,6 +166,8 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     submit_swap_claim. Rejects (caller resends) if the tx isn't visible/confirmed yet — no queue."""
     from allways.validator.solana_swap_loop import is_tx_fresh
 
+    # Reject empty/whitespace-only hashes and strip surrounding whitespace before use (#167).
+    from_tx_hash = from_tx_hash.strip() if from_tx_hash else from_tx_hash
     if not from_tx_hash:
         return ConfirmResult(False, 'Missing source tx hash')
     client = validator.solana_client
