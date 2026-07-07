@@ -47,6 +47,7 @@ from allways.validator.seam_http import maybe_start_seam
 from allways.validator.solana_swap_loop import SolanaSwapLoop
 from allways.validator.state_store import ValidatorStateStore
 from allways.validator.storage import DatabaseStorage
+from neurons.base.neuron import validator_dev_mode
 from neurons.base.validator import BaseValidatorNeuron
 
 load_dotenv()
@@ -98,8 +99,12 @@ class Validator(BaseValidatorNeuron):
         # (getProgramAccounts), decides per status, verifies both legs with
         # replay-freshness gates, and casts the on-chain consensus vote. This
         # subsumes the old substrate swap_tracker discovery + verifier.
-        # Safety hatch for staged rollout: SOLANA_VALIDATOR_READONLY=1 logs "WOULD …" without voting.
-        solana_read_only = os.environ.get('SOLANA_VALIDATOR_READONLY', '0') == '1'
+        # Dev/testnet mode (VALIDATOR_DEV_MODE=1): observe-only. The swap loop logs "WOULD …"
+        # instead of voting, and should_set_weights() suppresses weight-setting. See validator_dev_mode().
+        dev_mode = validator_dev_mode()
+        if dev_mode:
+            bt.logging.warning('VALIDATOR_DEV_MODE on — observe-only: no Solana votes, no set_weights.')
+        solana_read_only = dev_mode
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only
