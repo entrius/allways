@@ -170,6 +170,29 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
+/// Post a quote with caller-chosen payout addresses + rate on the same pair (overwrites in place) —
+/// used to prove a post-reservation re-quote cannot redirect an in-flight swap.
+fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetQuote {
+            from_chain: FROM_CHAIN.to_string(),
+            to_chain: TO_CHAIN.to_string(),
+            miner_from_addr: from_addr.to_string(),
+            miner_to_addr: to_addr.to_string(),
+            rate,
+            liquidity: 1_000,
+        }
+        .data(),
+        allways_swap_manager::accounts::SetQuote {
+            miner: *miner,
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            treasury: treasury_pda(),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
 fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
@@ -612,6 +635,65 @@ fn test_timeout_slash_refund_and_invariant() {
 
 fn timeout_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, user: &Pubkey, tx: &str) -> Result<(), String> {
     send(svm, timeout_ix(&v.pubkey(), miner, user, tx), &v.pubkey(), v)
+}
+
+#[test]
+fn test_swap_terms_frozen_against_post_reservation_requote() {
+    // Fund-theft defense (invariant A): once a reservation is resolved, the swap's payout addresses and
+    // rate are frozen into the immutable Reservation. A miner that re-posts its quote AFTER reserving —
+    // pointing the payout at its own wallet and doubling the rate — must NOT be able to redirect the
+    // in-flight swap. submit_swap_claim / vote_initiate read terms from the Reservation, never the live
+    // quote (the MinerQuote account isn't even in their Accounts structs). Existing tests can't catch a
+    // read-from-live-quote regression because they never make the live quote differ from the reservation.
+    // NOTE: the *rate band* (is_executable_rate) that would reject a bogus rate is off-chain by design —
+    // the contract stores rate opaquely (set_quote.rs); that gate is tested in tests/test_rate.py.
+    let (mut svm, vals, miner, _rent) = setup();
+    // Miner mutates its live quote out from under the resolved reservation. Whether or not the contract
+    // even permits re-quoting while reserved, the swap must still execute on the frozen terms.
+    let _ = send(
+        &mut svm,
+        set_quote_vals_ix(&miner.pubkey(), "ATTACKER_BTC", "ATTACKER_SOL", RATE * 2),
+        &miner.pubkey(),
+        &miner,
+    );
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+
+    let s = Swap::try_deserialize(
+        &mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(s.rate, RATE, "rate frozen at reservation — not the doubled re-quote");
+    assert_eq!(s.miner_to_addr, MINER_TO, "payout addr frozen — not the attacker wallet");
+    assert_eq!(s.miner_from_addr, MINER_FROM, "source addr frozen at reservation");
+    assert_eq!(s.user, LOTTERY_USER, "taker pinned by the lottery, not the re-quote");
+    assert_eq!(s.user_to_addr, "userSOLaddr");
+}
+
+#[test]
+fn test_confirm_succeeds_after_deadline() {
+    // Invariant B: confirm_swap gates only on status == Fulfilled — it has NO deadline check. A payout
+    // delivered and marked Fulfilled still confirms even when the confirm quorum lands AFTER timeout_at
+    // (slow BTC confirmations). Locks in that nobody adds a deadline gate that would re-break the
+    // delivered-past-deadline confirm path (the 262/263/264 family). Mirror of the happy-path confirm
+    // test, but with the clock warped well past the deadline before quorum.
+    let (mut svm, vals, miner, rent) = setup();
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+
+    set_clock(&mut svm, BASE_TS + TIMEOUT_SECS + 5_000); // well past timeout_at, before confirm quorum
+
+    let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0 past deadline");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1 past deadline");
+
+    // Confirmed, not slashed: 1% fee (not a 1.1× slash), success credited, no failure, swap closed.
+    let fee = SOL_AMOUNT / 100;
+    assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee, not a slash");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).successful_swaps, 1, "success credited past deadline");
+    assert_eq!(miner_state(&svm, &miner.pubkey()).failed_swaps, 0, "a delivered swap is not failed");
+    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);
+    assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed on confirm");
+    assert!(invariant_holds(&svm, &miner.pubkey(), rent), "vault invariant after past-deadline confirm");
 }
 
 #[test]
