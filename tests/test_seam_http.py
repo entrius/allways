@@ -101,3 +101,20 @@ def test_rate(server):
 def test_status(server):
     code, payload = _req(server, 'GET', '/status?miner_hotkey=hk')
     assert code == 200 and payload['stage'] == 'reserved'
+
+
+def test_status_forwards_optional_swap_key(server, monkeypatch):
+    """swap_key drives by-key resolution in the engine — the seam must pass it through
+    (and default it to '' when absent, preserving the reservation-path behavior)."""
+    seen = []
+
+    def fake_status(validator, miner_hotkey, swap_key_hex=''):
+        seen.append((miner_hotkey, swap_key_hex))
+        return SwapStatus('timed_out', 0, '', swap_key_hex)
+
+    monkeypatch.setattr(seam_http, 'swap_status', fake_status)
+    key = 'ab' * 32
+    code, payload = _req(server, 'GET', f'/status?miner_hotkey=hk&swap_key={key}')
+    assert code == 200 and payload['stage'] == 'timed_out' and payload['swap_key'] == key
+    _req(server, 'GET', '/status?miner_hotkey=hk')
+    assert seen == [('hk', key), ('hk', '')]

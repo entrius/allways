@@ -272,7 +272,13 @@ class SwapStatus:
     yet reports ``fulfilled`` — transient, normally resolving within ~one forward step once the
     terminal event is ingested. Consumers keep polling on ``fulfilled`` and should apply their
     own reconcile deadline: in the wiped-state.db + RPC-pruned edge the outcome never lands, and
-    the validator won't guess terminal truth it hasn't ingested (see ``_swap_stage``)."""
+    the validator won't guess terminal truth it hasn't ingested (see ``_swap_stage``).
+
+    Resolution: the consumer passes the ``swap_key`` it persisted at claim time to resolve the
+    swap directly — required for post-attestation stages, because ``vote_initiate`` consumes
+    the reservation at attestation quorum, so the reservation stops referencing the swap the
+    moment it goes ``active``. Without ``swap_key``, resolution walks the miner's reservation
+    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible."""
 
     stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out
     reserved_until: int = 0
@@ -281,8 +287,13 @@ class SwapStatus:
     detail: dict = field(default_factory=dict)
 
 
-def swap_status(validator, miner_hotkey: str) -> SwapStatus:
-    """Current lifecycle stage for a miner's live reservation/swap — the offering polls this."""
+def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapStatus:
+    """Current lifecycle stage for a reservation/swap — the offering polls this.
+
+    With ``swap_key_hex`` the swap resolves by key (survives the reservation being consumed at
+    attestation quorum); without it, via the miner's live reservation (pre-attestation stages)."""
+    if swap_key_hex:
+        return _swap_status_by_key(validator, swap_key_hex)
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
@@ -304,6 +315,28 @@ def swap_status(validator, miner_hotkey: str) -> SwapStatus:
     swap = client.get_swap(swap_key)
     stage = _swap_stage(validator, swap, swap_key)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
+    """Resolve directly by swap_key: a live PDA's status maps as usual; a closed PDA goes through
+    the ``swap_outcomes`` disambiguation. ``reserved_until`` is 0 here — the reservation is
+    already consumed (or irrelevant) once the consumer polls by key."""
+    swap_key = bytes.fromhex(swap_key_hex)  # bad hex raises ValueError → seam answers 400
+    if len(swap_key) != 32:
+        raise ValueError('swap_key must be 32 bytes hex')
+    swap = validator.solana_client.get_swap(swap_key)
+    stage = _swap_stage(validator, swap, swap_key)
+    if swap is None:
+        return SwapStatus(stage, swap_key=swap_key_hex)
+    # Same detail shape as the reservation path — the Swap PDA carries the full legs.
+    detail = {
+        'from_chain': swap.from_chain,
+        'to_chain': swap.to_chain,
+        'from_amount': int(swap.from_amount),
+        'to_amount': int(swap.to_amount),
+        'miner_from_addr': swap.miner_from_addr,
+    }
+    return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
 
 
 # On-chain Swap.status is a borsh enum object; map by its variant name (not int()).
