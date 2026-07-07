@@ -59,5 +59,10 @@ class SwapPoller:
         fulfilled = self._mine('Fulfilled')
         # Forget keys no longer present so a reused-tx swap re-logs; bounded to the live set.
         live = {s.key_hex for s in active} | {s.key_hex for s in fulfilled}
+        # A key that was known but is no longer Active/Fulfilled left the miner's live set — the swap
+        # reached a terminal state (Completed = paid, or TimedOut = slashed). Log it so the miner's own log
+        # tells the full story end to end (the miner can't see WHICH terminal without querying outcomes).
+        for gone in self.known - live:
+            bt.logging.info(f'Swap {gone[:16]}: left active set — resolved (Completed or TimedOut)')
         self.known &= live
         return active, fulfilled

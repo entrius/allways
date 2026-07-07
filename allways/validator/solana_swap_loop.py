@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import bittensor as bt
+from solders.pubkey import Pubkey
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs
@@ -35,10 +36,12 @@ class SwapDecision(Enum):
 
 
 class SwapAction(NamedTuple):
-    """A decision plus the extension target it implies (``target_at`` is None for non-extend decisions)."""
+    """A decision plus the extension target it implies (``target_at`` is None for non-extend decisions)
+    and a human ``reason`` (leg tri-states / why) surfaced per pass so a WAITing swap isn't silent."""
 
     decision: SwapDecision
     target_at: Optional[int] = None
+    reason: Optional[str] = None
 
 
 # Decisions that drive an on-chain write this pass.
@@ -213,7 +216,7 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
         )
         if s_status == 'down':
-            return SwapAction(SwapDecision.SKIP)
+            return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
         d_status, d_info = self._fetch_leg(
             swap.to_chain,
             swap.to_tx_hash,
@@ -223,22 +226,27 @@ class SolanaSwapLoop:
             sender=swap.miner_to_addr,
         )
         if d_status == 'down':
-            return SwapAction(SwapDecision.SKIP)
+            return SwapAction(SwapDecision.SKIP, reason=f'dest provider unreachable (src={s_status})')
         if d_status == 'pending':
             # Valid-but-unconfirmed payout near timeout → extend; if extension is exhausted/not yet due,
             # fall through to the same overdue rule (at the ceiling + overdue still slashes).
             action = self._extend_timeout_action(swap, d_info, now)
             if action.decision == SwapDecision.EXTEND_TIMEOUT:
-                return action
+                return action._replace(reason='dest confirmed-pending near timeout → extend')
         # Dest freshness: payout must be mined after the swap was initiated on-chain (replay defense).
         elif (
             s_status == 'ok'
             and d_status == 'ok'
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
-            return SwapAction(SwapDecision.CONFIRM)
+            return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
         # Unverifiable/stale dest + overdue ⇒ TIMEOUT; else wait for the leg.
-        return SwapAction(SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT)
+        why = f'src={s_status} dst={d_status}'
+        return (
+            SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
+            if overdue
+            else SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
+        )
 
     def _reject_logged(self, swap: Any, expected_to: int) -> None:
         """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
@@ -256,7 +264,7 @@ class SolanaSwapLoop:
         expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
         if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
             self._reject_logged(swap, expected_to)
-            return SwapAction(SwapDecision.REJECT)
+            return SwapAction(SwapDecision.REJECT, reason=f'to_amount {swap.to_amount} != pinned-rate {expected_to}')
         # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
         s_status, info = self._fetch_leg(
             swap.from_chain,
@@ -266,20 +274,22 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
         )
         if s_status == 'down':
-            return SwapAction(SwapDecision.SKIP)
+            return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
         if s_status == 'pending':
             # Valid-but-unconfirmed deposit near reservation expiry → extend so the honest miner isn't slashed.
-            return self._extend_reservation_action(swap, info, now)
+            return self._extend_reservation_action(swap, info, now)._replace(
+                reason='source confirmed-pending near reservation expiry'
+            )
         if s_status != 'ok':
-            return SwapAction(SwapDecision.WAIT)
+            return SwapAction(SwapDecision.WAIT, reason=f'source deposit {s_status} — awaiting user funds')
         reservation = self._get_reservation(swap.miner)
         if reservation is None:
             bt.logging.warning(f'{self._label(swap)}: no reservation read — cannot check freshness, waiting')
-            return SwapAction(SwapDecision.WAIT)
+            return SwapAction(SwapDecision.WAIT, reason='no reservation read')
         # Source freshness: deposit must be mined after the reservation was created (replay defense).
         if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
-            return SwapAction(SwapDecision.WAIT)  # replayed/stale deposit — never attest
-        return SwapAction(SwapDecision.ATTEST)
+            return SwapAction(SwapDecision.WAIT, reason='source deposit stale/replayed — never attest')
+        return SwapAction(SwapDecision.ATTEST, reason='source verified + fresh')
 
     def decide(self, swap: Any, now: int) -> SwapAction:
         """Per-status decision (+extension target where applicable). Verifies legs where needed; reads
@@ -290,10 +300,13 @@ class SolanaSwapLoop:
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
             # Never extend: no mark_fulfilled = no broadcast evidence, so an overdue Active is slash-eligible.
-            return SwapAction(SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT)
+            return SwapAction(
+                SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                reason='overdue, miner never fulfilled — slashing' if overdue else 'awaiting miner mark_fulfilled',
+            )
         if status == 'Fulfilled':
             return self._decide_fulfilled(swap, now, overdue)
-        return SwapAction(SwapDecision.WAIT)
+        return SwapAction(SwapDecision.WAIT, reason=f'status {status} — no action')
 
     def _cast_vote(self, swap: Any, action: SwapAction) -> bool:
         """Submit the on-chain write for an actionable decision. Pre-checks the VoteRound so we don't
@@ -347,8 +360,33 @@ class SolanaSwapLoop:
             if not getattr(pool, 'requests', None):
                 continue  # nothing to draw
             miner = pool.miner
+            reqs = getattr(pool, 'requests', None) or []
+            # Log the pool's participants (the routers/users bidding for this miner's slot) before the draw,
+            # so the stake-weighted resolution is auditable — every contender, not just the winner.
+
+            def _fmt(v: Any) -> str:
+                # Request pubkey fields decode to raw 32-byte arrays; render base58 (readable) not b'\\x..'.
+                try:
+                    if isinstance(v, (bytes, bytearray, list)):
+                        return str(Pubkey(bytes(v)))[:8]
+                    return str(v)[:8]
+                except Exception:
+                    return '?'
+
+            def _who(r: Any) -> str:
+                parts = []
+                for f in ('router', 'validator', 'user', 'requester'):
+                    v = getattr(r, f, None)
+                    if v:
+                        parts.append(f'{f}={_fmt(v)}')
+                return '/'.join(parts) or '?'
+
+            bt.logging.info(
+                f'pool {miner}: CLOSED @ {int(getattr(pool, "closes_at", 0))} — {len(reqs)} contender(s): '
+                + ', '.join(_who(r) for r in reqs)
+            )
             if self.read_only:
-                bt.logging.info(f'pool {miner}: WOULD resolve_pool ({len(pool.requests)} req, read-only)')
+                bt.logging.info(f'pool {miner}: WOULD resolve_pool ({len(reqs)} req, read-only)')
                 continue
             try:
                 self.client.resolve_pool(miner)
@@ -376,6 +414,10 @@ class SolanaSwapLoop:
             except Exception as e:  # one bad swap must not break the pass
                 bt.logging.error(f'swap {key}: decide failed: {e}')
                 continue
+            # Per-swap visibility EVERY pass — the story from the validator's lens: what it saw + decided this
+            # round, including a plain WAIT (previously silent, which hid a stalled swap until it timed out).
+            reason = f' — {action.reason}' if action.reason else ''
+            bt.logging.info(f'swap {key} [{_status_name(swap)}]: {action.decision.value}{reason}')
             if action.decision in ACTIONABLE:
                 if self.read_only:
                     bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {action.decision.value} (read-only)')
