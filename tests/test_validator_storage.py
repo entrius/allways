@@ -4,9 +4,15 @@ A slow-booting or restarted aw-db must pause dashboard writes, not disable them 
 process lifetime: a connection-class failure drops the connection and a later write lazily
 reconnects (rate-limited). Writes stay non-fatal to the forward loop throughout.
 
+``is_enabled()`` is the callers' gate and means "configured", not "connection live" — otherwise
+the gates in forward.py/scoring.py would make the reconnect unreachable (the review finding).
+
 Mocks the psycopg layer entirely (psycopg isn't a test dependency): failures are raised as a
 test-local ``OperationalError``, which ``is_connection_failure`` matches by class name.
 """
+
+import contextlib
+from types import SimpleNamespace
 
 from allways.validator.storage import storage as storage_mod
 from allways.validator.storage.database import is_connection_failure
@@ -35,6 +41,10 @@ class FakeConnection:
     def rollback(self):
         self._maybe_fail()
 
+    def pipeline(self):
+        self._maybe_fail()
+        return contextlib.nullcontext()
+
     def close(self):
         self.closed = True
 
@@ -46,6 +56,12 @@ class FakeRepo:
     def replace_current_crown(self, rows_by_direction, commit=False):
         self.conn._maybe_fail()
         return len(rows_by_direction)
+
+    def delete_crown_in_range(self, from_chain, to_chain, lo, hi, commit=False):
+        self.conn._maybe_fail()
+
+    def set_sync_cursor(self, key, value, commit=False):
+        self.conn._maybe_fail()
 
 
 def make_storage(monkeypatch, connections):
@@ -75,7 +91,8 @@ def test_write_failure_does_not_raise_and_drops_connection(monkeypatch):
     conn.failing = True  # aw-db restarted: repo call AND the rollback both raise
     result = storage.upsert_current_crown_snapshot({})  # must not propagate into the forward loop
     assert not result.success and result.errors
-    assert conn.closed and not storage.is_enabled()
+    assert conn.closed and storage.db_connection is None
+    assert storage.is_enabled()  # still configured — the callers' gate must stay open to reach the redial
 
 
 def test_reconnects_on_next_write_after_drop(monkeypatch):
@@ -107,11 +124,11 @@ def test_boot_time_connect_failure_heals_on_later_write(monkeypatch):
     # The full-e2e boot-order landmine: aw-db up after the validator.
     fresh = FakeConnection()
     storage = make_storage(monkeypatch, [None, fresh])
-    assert not storage.is_enabled()
+    assert storage.is_enabled() and storage.db_connection is None  # configured, not yet connected
 
     force_retry_window(storage)
     assert storage.upsert_current_crown_snapshot({}).success
-    assert storage.is_enabled() and storage.db_connection is fresh
+    assert storage.db_connection is fresh
 
 
 def test_non_connection_failure_keeps_connection(monkeypatch):
@@ -124,7 +141,7 @@ def test_non_connection_failure_keeps_connection(monkeypatch):
     storage.repo.replace_current_crown = raise_value_error
     result = storage.upsert_current_crown_snapshot({})
     assert not result.success
-    assert storage.is_enabled() and storage.db_connection is conn  # only connection-class errors drop
+    assert storage.db_connection is conn  # only connection-class errors drop
 
 
 def test_disabled_flag_never_dials(monkeypatch):
@@ -133,3 +150,18 @@ def test_disabled_flag_never_dials(monkeypatch):
     storage = DatabaseStorage()
     assert not storage.is_enabled()
     assert not storage.upsert_current_crown_snapshot({}).success
+
+
+def test_gated_caller_path_reaches_the_redial(monkeypatch):
+    """Through a REAL caller (scoring._flush_halt_window, same is_enabled() gate as forward.py):
+    with the connection dead, the gate must still pass so the write methods — which own
+    connection state — get to redial. Regression for the unreachable-reconnect review finding."""
+    from allways.validator.scoring import _flush_halt_window
+
+    fresh = FakeConnection()
+    storage = make_storage(monkeypatch, [None, fresh])  # aw-db down at validator boot
+    force_retry_window(storage)
+
+    _flush_halt_window(SimpleNamespace(database_storage=storage), current_time=1_000_000)
+    assert storage.db_connection is fresh
+    assert fresh.commits == 2  # flush_halt_window + upsert_current_crown_snapshot both landed

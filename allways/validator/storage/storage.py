@@ -63,12 +63,18 @@ class DatabaseStorage:
             )
 
     def is_enabled(self) -> bool:
+        """Storage is configured (STORE_DB_RESULTS set) — the callers' gate. Deliberately NOT
+        "connection currently live": the write methods own connection state (drop + lazy
+        redial), so a dead connection must still reach them or reconnect would be unreachable."""
+        return self._enabled
+
+    def _connected(self) -> bool:
         return self.db_connection is not None and self.repo is not None
 
     def _connect(self) -> bool:
         self.db_connection = create_database_connection()
         self.repo = Repository(self.db_connection) if self.db_connection is not None else None
-        return self.is_enabled()
+        return self._connected()
 
     def _ensure_connection(self) -> bool:
         """Lazy reconnect for a dropped (or never-established) connection, at most once per
@@ -76,7 +82,7 @@ class DatabaseStorage:
         heals without a validator restart."""
         if not self._enabled:
             return False
-        if self.is_enabled():
+        if self._connected():
             return True
         now = time.monotonic()
         if now - self._last_reconnect_attempt < RECONNECT_MIN_INTERVAL_SEC:
