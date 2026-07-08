@@ -1,10 +1,13 @@
 """alw admin - Program administration commands (admin-only, signed by the Solana keypair)."""
 
+import os
+
 import click
 from solders.pubkey import Pubkey
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     console,
     fail,
     from_lamports,
@@ -23,6 +26,15 @@ def _parse_pubkey(s: str):
         fail(f'Not a valid Solana pubkey: {s}')
 
 
+def _confirm(prompt: str) -> bool:
+    """Confirm interactively, unless a group-level `admin --yes` (or ALW_ASSUME_YES env) opts out — this
+    is what makes the admin commands scriptable/headless without dropping the interactive safety prompt."""
+    ctx = click.get_current_context(silent=True)
+    if (ctx is not None and ctx.obj and ctx.obj.get('yes')) or os.environ.get('ALW_ASSUME_YES'):
+        return True
+    return click.confirm(prompt)
+
+
 def _run_setter(title, getter, setter, noun, format_current, new_display, success_msg):
     _, client = get_solana_cli_context()
     try:
@@ -32,7 +44,7 @@ def _run_setter(title, getter, setter, noun, format_current, new_display, succes
     console.print(f'\n[bold]{title}[/bold]\n')
     console.print(f'  Current: {format_current(current)}')
     console.print(f'  New:     {new_display}\n')
-    if not click.confirm(f'Confirm updating {noun}?'):
+    if not _confirm(f'Confirm updating {noun}?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
     try:
@@ -44,9 +56,14 @@ def _run_setter(title, getter, setter, noun, format_current, new_display, succes
 
 
 @click.group('admin', cls=StyledGroup, show_disclaimer=True)
-def admin_group():
-    """Program administration commands (admin-only)."""
-    pass
+@click.option('--yes', '-y', 'assume_yes', is_flag=True, help='Skip confirmation prompts (for scripting).')
+@click.pass_context
+def admin_group(ctx, assume_yes):
+    """Program administration commands (admin-only).
+
+    [dim]Pass --yes before the subcommand (e.g. `alw admin --yes set-max-swap 50`) or set
+    ALW_ASSUME_YES=1 to run headless.[/dim]"""
+    ctx.obj = {'yes': assume_yes}
 
 
 @admin_group.command('set-timeout', show_disclaimer=True)
@@ -92,7 +109,7 @@ def set_reservation_ttl(secs: int):
 
 
 @admin_group.command('set-reservation-fee', show_disclaimer=True)
-@click.argument('amount_sol', type=float)
+@click.argument('amount_sol', type=FINITE_FLOAT)
 def set_reservation_fee(amount_sol: float):
     """Set the flat per-request reservation fee (in SOL).
 
@@ -177,7 +194,7 @@ def set_max_extension(secs: int):
 
 
 @admin_group.command('set-min-collateral', show_disclaimer=True)
-@click.argument('amount_sol', type=float)
+@click.argument('amount_sol', type=FINITE_FLOAT)
 def set_min_collateral(amount_sol: float):
     """Set the minimum collateral amount (in SOL).
 
@@ -199,7 +216,7 @@ def set_min_collateral(amount_sol: float):
 
 
 @admin_group.command('set-max-collateral', show_disclaimer=True)
-@click.argument('amount_sol', type=float)
+@click.argument('amount_sol', type=FINITE_FLOAT)
 def set_max_collateral(amount_sol: float):
     """Set the maximum collateral amount (in SOL). Use 0 to remove the cap.
 
@@ -222,7 +239,7 @@ def set_max_collateral(amount_sol: float):
 
 
 @admin_group.command('set-min-swap', show_disclaimer=True)
-@click.argument('amount_sol', type=float)
+@click.argument('amount_sol', type=FINITE_FLOAT)
 def set_min_swap(amount_sol: float):
     """Set the minimum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
 
@@ -245,7 +262,7 @@ def set_min_swap(amount_sol: float):
 
 
 @admin_group.command('set-max-swap', show_disclaimer=True)
-@click.argument('amount_sol', type=float)
+@click.argument('amount_sol', type=FINITE_FLOAT)
 def set_max_swap(amount_sol: float):
     """Set the maximum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
 
@@ -317,7 +334,7 @@ def add_vali(pubkey: str, weight: int):
         console.print('  [yellow]Warning: this pubkey is already a registered validator[/yellow]')
     console.print()
 
-    if not click.confirm('Confirm adding validator?'):
+    if not _confirm('Confirm adding validator?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
@@ -351,7 +368,7 @@ def remove_vali(pubkey: str):
         console.print('  [yellow]Warning: this pubkey is not a registered validator[/yellow]')
     console.print()
 
-    if not click.confirm('Confirm removing validator?'):
+    if not _confirm('Confirm removing validator?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
@@ -365,7 +382,7 @@ def remove_vali(pubkey: str):
 
 @admin_group.command('withdraw-treasury', show_disclaimer=True)
 @click.argument('recipient', type=str)
-@click.option('--amount', default=None, type=float, help='Amount in SOL (default: withdraw the full balance)')
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in SOL (default: withdraw the full balance)')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
     """Withdraw accrued protocol fees from the treasury to a recipient.
@@ -396,7 +413,7 @@ def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
     if lamports > total:
         fail('Requested amount exceeds the accrued treasury balance.')
 
-    if not yes and not click.confirm('Confirm withdrawing treasury fees?'):
+    if not yes and not _confirm('Confirm withdrawing treasury fees?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
@@ -436,7 +453,7 @@ def halt_system():
     console.print('  This blocks new deposits / activations / reservation pools.')
     console.print('  Existing swaps continue to completion.\n')
 
-    if not click.confirm('Confirm halting the system?'):
+    if not _confirm('Confirm halting the system?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
@@ -467,7 +484,7 @@ def resume_system():
     console.print('\n[bold]Resume System[/bold]\n')
     console.print('  This allows new deposits / activations / pools again.\n')
 
-    if not click.confirm('Confirm resuming the system?'):
+    if not _confirm('Confirm resuming the system?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 

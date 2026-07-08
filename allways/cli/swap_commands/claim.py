@@ -10,16 +10,12 @@ from allways.cli.swap_commands.helpers import not_implemented
 
 
 @click.command('claim', cls=StyledCommand, show_disclaimer=True)
-@click.argument('swap_id', type=int)
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def claim_command(swap_id: int, yes: bool):
-    """Claim a pending slash payout for a timed-out swap.
+@click.argument('swap_key', type=str, required=False, default=None)
+def claim_command(swap_key):
+    """Claim a slash payout for a timed-out swap (not yet available from the CLI).
 
-    [dim]If a miner failed to fulfill your swap before the timeout,
-    you can claim a slash payout from their collateral.
-    Only the original swap user can claim.[/dim]
-
-    [dim]Examples:
-        $ alw claim 42[/dim]
+    [dim]When a miner fails to fulfill before the timeout, the user is owed a slash payout from the
+    miner's collateral. Settling it needs source-chain verification the CLI taker path does not do
+    yet — use the browser swap flow. Inspect a swap with `alw view swap <swap_key>`.[/dim]
     """
     not_implemented('Slash claim (CLI fund relay)')

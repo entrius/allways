@@ -19,6 +19,7 @@ import click
 
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     console,
     fail,
     get_cli_context,
@@ -75,7 +76,7 @@ def quote_options(f):
         f = click.option(f'--{spoke}-address', default=None, help=f'Your {spoke.upper()} address.')(f)
         f = click.option(
             f'--{spoke}-price',
-            type=float,
+            type=FINITE_FLOAT,
             default=None,
             help=f'{spoke.upper()} per 1 {hub} (0/omit to skip {spoke.upper()}).',
         )(f)

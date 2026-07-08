@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import time
@@ -88,19 +89,57 @@ class CliError(Exception):
     """Local CLI/Solana error type — replaces the deleted ink! contract error."""
 
 
+# NOT_IMPLEMENTED_EXIT: distinct from Click's usage-error code (2) so a script can tell "deferred CLI
+# path" apart from "you passed bad args". EX_UNAVAILABLE (sysexits.h) = 69.
+NOT_IMPLEMENTED_EXIT = 69
+
+# When a --json command is running, errors must stay machine-readable — `fail()` emits `{"error": ...}`
+# instead of Rich text so a consumer piping --json never chokes on a plain-text error. Set per command.
+_JSON_OUTPUT = False
+
+
+def set_json_output(enabled: bool) -> None:
+    """Mark the current command as JSON-mode so `fail()` (and thus `safe_read`) emit JSON errors."""
+    global _JSON_OUTPUT
+    _JSON_OUTPUT = bool(enabled)
+
+
+class FiniteFloatType(click.ParamType):
+    """A float option that rejects nan/inf at parse time with a clean Click usage error — so
+    user-supplied `--amount nan/inf/1e999` never reaches an `int()` cast and dumps a traceback."""
+
+    name = 'number'
+
+    def convert(self, value, param, ctx):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            self.fail(f'{value!r} is not a number', param, ctx)
+        if not math.isfinite(f):
+            self.fail(f'{value!r} must be a finite number (not nan/inf)', param, ctx)
+        return f
+
+
+FINITE_FLOAT = FiniteFloatType()
+
+
 def fail(message: str, code: int = 1) -> None:
-    """Single error-exit path: print the message in red and exit non-zero so `$?` reflects failure.
+    """Single error-exit path: exit non-zero so `$?` reflects failure. In JSON mode emits
+    `{"error": ...}`; otherwise prints the message in red.
 
     Every command rejection/error across the CLI routes through here — that is what makes the CLI script-safe."""
-    console.print(f'[red]{message}[/red]')
+    if _JSON_OUTPUT:
+        click.echo(json.dumps({'error': message}))
+    else:
+        console.print(f'[red]{message}[/red]')
     raise SystemExit(code)
 
 
-def not_implemented(what: str, code: int = 2) -> None:
+def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
     """Honest exit for the fund-moving relays (post-tx / claim / resume) that need chain-provider verification.
 
-    Points at the working browser flow and exits non-zero (code 2 = not implemented) so scripts don't mistake
-    a deferred path for success. This is NOT a read view — the read views are all live on Solana now."""
+    Points at the working browser flow and exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so
+    scripts can tell a deferred path apart from bad args. The read views are all live on Solana now."""
     console.print(
         f'[yellow]{what} is not available from the CLI yet.[/yellow]\n'
         f'[dim]This step verifies your deposit against the source chain, which the CLI taker path does not do '
@@ -115,6 +154,21 @@ def print_json(data) -> None:
     click.echo(json.dumps(data, indent=2, default=str))
 
 
+def effective_rate(from_chain: str, to_chain: str, rate_display: str) -> str:
+    """Directional 'to per 1 from' rate for display. Stored quotes are canonical 'dest per 1 hub', which
+    reads backwards for a spoke→hub direction (BTC→SOL stored 0.0021 really means ~476 SOL per BTC).
+    Return the reciprocal for spoke→hub so `amount × shown-rate ≈ you receive` always reconciles."""
+    from allways.constants import NUMERAIRE_CHAIN
+
+    try:
+        r = float(rate_display)
+    except (TypeError, ValueError):
+        return rate_display
+    if to_chain == NUMERAIRE_CHAIN and r > 0:
+        r = 1.0 / r
+    return f'{r:.8g}'
+
+
 def safe_read(fn: Callable, what: str = 'read from Solana'):
     """Run a client read, converting any RPC/decode/transport failure into a clean non-zero `fail`.
 
@@ -125,8 +179,8 @@ def safe_read(fn: Callable, what: str = 'read from Solana'):
         return fn()
     except (SolanaClientError, SolanaRpcError) as e:
         fail(f'Failed to {what}: {e}')
-    except requests.RequestException as e:
-        fail(f'Could not reach the Solana RPC ({what}): {e}')
+    except requests.RequestException:
+        fail(f'Could not reach the Solana RPC to {what}. Is the node up at the configured solana-rpc?')
 
 
 ZERO_SWAP_KEY = bytes(32)

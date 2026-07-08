@@ -10,6 +10,7 @@ from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_time
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     console,
+    effective_rate,
     fail,
     from_lamports,
     get_cli_context,
@@ -80,7 +81,8 @@ def miner_status(pubkey: str):
         console.print('[bold]Posted Quotes[/bold]\n')
         for q in quotes:
             src_up, dst_up = q.from_chain.upper(), q.to_chain.upper()
-            console.print(f'  {src_up} → {dst_up}: [green]rate {q.rate / RATE_PRECISION:g}[/green]')
+            rd = effective_rate(q.from_chain, q.to_chain, f'{q.rate / RATE_PRECISION:g}')
+            console.print(f'  {src_up} → {dst_up}: [green]{rd} {dst_up}/{src_up}[/green]')
             console.print(f'    receive on {src_up}: [dim]{q.miner_from_addr}[/dim]')
             console.print(f'    send on {dst_up}:    [dim]{q.miner_to_addr}[/dim]')
     else:

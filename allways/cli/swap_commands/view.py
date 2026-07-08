@@ -17,11 +17,13 @@ from solders.pubkey import Pubkey
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     PENDING_SWAP_FILE,
     STATUS_SORT_ORDER,
     STATUS_STYLES,
     ZERO_SWAP_KEY,
     console,
+    effective_rate,
     fail,
     from_lamports,
     get_solana_cli_context,
@@ -30,6 +32,7 @@ from allways.cli.swap_commands.helpers import (
     print_json,
     safe_read,
     secs_str,
+    set_json_output,
 )
 from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.solana.client import swap_from_solana
@@ -54,6 +57,11 @@ def _short(s: str, full: bool, n: int = 8) -> str:
 
 def _quote_dir(q) -> str:
     return f'{q.from_chain.upper()}→{q.to_chain.upper()}'
+
+
+def _rate(q) -> str:
+    """Effective directional rate ('to per 1 from') for display — see helpers.effective_rate."""
+    return effective_rate(q.from_chain, q.to_chain, rate_display_from_fixed(q.rate))
 
 
 def _max_rate(entry) -> float:
@@ -86,7 +94,7 @@ def _max_rate(entry) -> float:
     help='Only show miners in a given runtime state.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (SOL).'
+    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
@@ -100,6 +108,7 @@ def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
 
     [dim]Miners are Solana pubkeys (no metagraph uid here); '#' is a display index and `--sort uid` means
     stable pubkey order.[/dim]"""
+    set_json_output(as_json)
     _, client = get_solana_cli_context(need_keypair=False)
     now = int(time.time())
     book = load_miner_book(client, with_reservation=True)
@@ -138,7 +147,7 @@ def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
                         {
                             'from': q.from_chain,
                             'to': q.to_chain,
-                            'rate': rate_display_from_fixed(q.rate),
+                            'rate': _rate(q),
                             'miner_from_addr': q.miner_from_addr,
                             'miner_to_addr': q.miner_to_addr,
                         }
@@ -165,7 +174,7 @@ def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
         for j, q in enumerate(e.quotes):
             if j:
                 dirs.append('\n')
-            dirs.append(f'{_quote_dir(q)} @ {rate_display_from_fixed(q.rate)}')
+            dirs.append(f'{_quote_dir(q)} @ {_rate(q)}')
             if full:
                 dirs.append(f'  ({q.miner_from_addr}→{q.miner_to_addr})', style='dim')
         table.add_row(
@@ -198,7 +207,7 @@ def _parse_pair(pair: str):
     help='Sort field. rate descends; capacity descends; pair groups by direction; uid = stable pubkey order.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (SOL).'
+    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
@@ -209,6 +218,7 @@ def _parse_pair(pair: str):
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
 def view_rates(pair, full, sort_by, min_capacity, search, as_json):
     """Show posted miner rates, one row per direction."""
+    set_json_output(as_json)
     want = _parse_pair(pair) if pair else None
     _, client = get_solana_cli_context(need_keypair=False)
     now = int(time.time())
@@ -230,7 +240,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
             rows.append((e, q, status))
 
     if sort_by == 'rate':
-        rows.sort(key=lambda r: float(rate_display_from_fixed(r[1].rate) or 0), reverse=True)
+        rows.sort(key=lambda r: float(_rate(r[1]) or 0), reverse=True)
     elif sort_by == 'capacity':
         rows.sort(key=lambda r: r[0].collateral, reverse=True)
     elif sort_by == 'pair':
@@ -245,7 +255,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
                     'miner': e.pubkey_str,
                     'from': q.from_chain,
                     'to': q.to_chain,
-                    'rate': rate_display_from_fixed(q.rate),
+                    'rate': _rate(q),
                     'collateral_sol': from_lamports(e.collateral),
                     'status': status,
                     'miner_from_addr': q.miner_from_addr,
@@ -262,7 +272,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
 
     table = Table(title=f'Posted Rates ({len(rows)})', show_header=True)
     table.add_column('Direction', style='cyan')
-    table.add_column('Rate', style='green', justify='right')
+    table.add_column('Rate (to/from)', style='green', justify='right')
     table.add_column('Miner', style='white')
     table.add_column('Collateral', style='green', justify='right')
     table.add_column('Status')
@@ -271,7 +281,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
     for e, q, status in rows:
         cells = [
             _quote_dir(q),
-            rate_display_from_fixed(q.rate),
+            _rate(q),
             _short(e.pubkey_str, full),
             f'{from_lamports(e.collateral):.4f} SOL',
             Text(status, style=STATUS_STYLES.get(status, 'white')),
@@ -312,6 +322,7 @@ def _swap_json(s):
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
 def view_active_swaps(status_filter, as_json):
     """List swaps currently open on-chain (completed/timed-out swaps are closed and not listed)."""
+    set_json_output(as_json)
     _, client = get_solana_cli_context(need_keypair=False)
     variant = _SWAP_STATUS_VARIANTS.get(status_filter.lower()) if status_filter else None
     raw = safe_read(lambda: client.get_swaps(status=variant), what='read swaps')
@@ -367,6 +378,7 @@ def _render_swap_detail(s):
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
 def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
     """Inspect a single swap by its 32-byte hex swap_key."""
+    set_json_output(as_json)
     try:
         key = bytes.fromhex(swap_key_hex)
     except ValueError:
@@ -404,24 +416,42 @@ def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
             return
 
 
-def _read_config():
-    """Read the on-chain Config. `fail` (non-zero) on RPC error; None (exit 0) when genuinely uninitialized."""
-    _, client = get_solana_cli_context(need_keypair=False)
-    cfg = safe_read(lambda: client.get_config(), what='read config')
-    if cfg is None:
-        console.print('[yellow]Program is not initialized (no Config account).[/yellow]')
-    return cfg
-
-
 def _sol_or(amount: int, zero_label: str) -> str:
     return f'{from_lamports(amount):.4f} SOL' + (f' ({zero_label})' if amount == 0 else '')
 
 
 @view_group.command('config')
-def view_config():
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of text.')
+def view_config(as_json):
     """Show the current on-chain program Config (bounds, fees, windows, threshold). Read-only."""
-    cfg = _read_config()
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    cfg = safe_read(lambda: client.get_config(), what='read config')
     if cfg is None:
+        print_json({'initialized': False}) if as_json else console.print(
+            '[yellow]Program is not initialized (no Config account).[/yellow]'
+        )
+        return
+    if as_json:
+        print_json(
+            {
+                'admin': str(cfg.admin),
+                'version': cfg.version,
+                'halted': bool(cfg.halted),
+                'consensus_threshold_percent': cfg.consensus_threshold_percent,
+                'reservation_fee_sol': from_lamports(cfg.reservation_fee_lamports),
+                'min_collateral_sol': from_lamports(cfg.min_collateral),
+                'max_collateral_sol': from_lamports(cfg.max_collateral),
+                'min_swap_amount_sol': from_lamports(cfg.min_swap_amount),
+                'max_swap_amount_sol': from_lamports(cfg.max_swap_amount),
+                'fulfillment_timeout_secs': cfg.fulfillment_timeout_secs,
+                'reservation_ttl_secs': cfg.reservation_ttl_secs,
+                'pool_window_secs': cfg.pool_window_secs,
+                'weights_update_min_interval_secs': cfg.weights_update_min_interval_secs,
+                'max_total_extension_secs': cfg.max_total_extension_secs,
+                'validator_count': len(cfg.validators),
+            }
+        )
         return
     console.print('\n[bold]Program Config[/bold]\n')
     console.print(f'  Admin:                {cfg.admin}')
@@ -442,18 +472,28 @@ def view_config():
 
 
 @view_group.command('validators')
-def view_validators():
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of text.')
+def view_validators(as_json):
     """List the registered validators with their lottery weights and the consensus threshold."""
-    cfg = _read_config()
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    cfg = safe_read(lambda: client.get_config(), what='read config')
     if cfg is None:
+        print_json({'initialized': False, 'validators': []}) if as_json else console.print(
+            '[yellow]Program is not initialized (no Config account).[/yellow]'
+        )
+        return
+    validators = [{'pubkey': str(Pubkey.from_bytes(bytes(v.key))), 'weight': v.weight} for v in cfg.validators]
+    if as_json:
+        print_json({'consensus_threshold_percent': cfg.consensus_threshold_percent, 'validators': validators})
         return
     console.print('\n[bold]Validators[/bold]\n')
     console.print(f'  Consensus threshold: {cfg.consensus_threshold_percent}%\n')
-    if not cfg.validators:
+    if not validators:
         console.print('  [yellow]No validators registered.[/yellow]\n')
         return
-    for v in cfg.validators:
-        console.print(f'  {Pubkey.from_bytes(bytes(v.key))}  weight={v.weight}')
+    for v in validators:
+        console.print(f'  {v["pubkey"]}  weight={v["weight"]}')
     console.print()
 
 
@@ -472,6 +512,7 @@ def _pending_miner():
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
 def view_reservation(miner_pk, as_json):
     """Show the reservation held on a miner (reservations are keyed by the miner pubkey)."""
+    set_json_output(as_json)
     target = miner_pk or _pending_miner()
     if not target:
         fail('No miner specified and no saved swap found. Pass --miner <pubkey>.')

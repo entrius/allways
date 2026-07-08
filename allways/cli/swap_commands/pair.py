@@ -7,6 +7,7 @@ import click
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     console,
     fail,
     get_cli_context,
@@ -43,19 +44,19 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
     fwd_label = f'  {src_up} to {dst_up} (user sends {src_up}, miner returns {dst_up})'
     rev_label = f'  {dst_up} to {src_up} (user sends {dst_up}, miner returns {src_up})'
     while True:
-        fwd = click.prompt(fwd_label, type=float)
+        fwd = click.prompt(fwd_label, type=FINITE_FLOAT)
         if fwd < 0:
             console.print('[red]Rate cannot be negative[/red]')
         else:
             break
     if fwd > 0:
-        rev = click.prompt(rev_label, type=float, default=fwd)
+        rev = click.prompt(rev_label, type=FINITE_FLOAT, default=fwd)
         if rev < 0:
             console.print('[red]Rate cannot be negative, using 0 (not offered)[/red]')
             rev = 0.0
     else:
         while True:
-            rev = click.prompt(rev_label, type=float)
+            rev = click.prompt(rev_label, type=FINITE_FLOAT)
             if rev < 0:
                 console.print('[red]Rate cannot be negative[/red]')
             elif rev == 0:
@@ -70,8 +71,8 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
 @click.argument('src_addr', required=False, default=None, type=str)
 @click.argument('dst_chain', required=False, default=None, type=str)
 @click.argument('dst_addr', required=False, default=None, type=str)
-@click.argument('rate', required=False, default=None, type=float)
-@click.argument('counter_rate', required=False, default=None, type=float)
+@click.argument('rate', required=False, default=None, type=FINITE_FLOAT)
+@click.argument('counter_rate', required=False, default=None, type=FINITE_FLOAT)
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(

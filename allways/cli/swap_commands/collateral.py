@@ -7,6 +7,7 @@ from rich.table import Table
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     console,
     fail,
     from_lamports,
@@ -38,7 +39,7 @@ def collateral_group():
 
 
 @collateral_group.command('deposit', show_disclaimer=True)
-@click.option('--amount', default=None, type=float, help='Amount in SOL')
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in SOL')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_deposit(amount: float | None, yes: bool):
     """Deposit SOL collateral to the swap program.
@@ -50,7 +51,7 @@ def collateral_deposit(amount: float | None, yes: bool):
         $ alw collateral deposit  (prompts interactively)[/dim]
     """
     if amount is None:
-        amount = click.prompt('Amount to deposit (SOL)', type=float)
+        amount = click.prompt('Amount to deposit (SOL)', type=FINITE_FLOAT)
 
     if amount <= 0:
         fail('Amount must be positive')
@@ -100,7 +101,7 @@ def collateral_deposit(amount: float | None, yes: bool):
 
 
 @collateral_group.command('withdraw', show_disclaimer=True)
-@click.option('--amount', default=None, type=float, help='Amount in SOL')
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in SOL')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_withdraw(amount: float | None, yes: bool):
     """Withdraw SOL collateral from the swap program.
@@ -112,7 +113,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         $ alw collateral withdraw  (prompts interactively)[/dim]
     """
     if amount is None:
-        amount = click.prompt('Amount to withdraw (SOL)', type=float)
+        amount = click.prompt('Amount to withdraw (SOL)', type=FINITE_FLOAT)
 
     if amount <= 0:
         fail('Amount must be positive')
@@ -171,7 +172,9 @@ def collateral_withdraw(amount: float | None, yes: bool):
 
 @collateral_group.command('recover-from-hotkey', show_disclaimer=True)
 @click.option('--dest', default=None, help='Destination ss58 (default: your coldkey)')
-@click.option('--amount', default=None, type=float, help='Amount in TAO to recover (default: sweep all free balance)')
+@click.option(
+    '--amount', default=None, type=FINITE_FLOAT, help='Amount in TAO to recover (default: sweep all free balance)'
+)
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: bool):
     """Move a hotkey's free TAO balance back to your coldkey.

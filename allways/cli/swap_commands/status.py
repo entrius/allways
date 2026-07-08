@@ -12,11 +12,13 @@ from allways.cli.swap_commands.helpers import (
     BROWSER_SWAP_URL,
     ZERO_SWAP_KEY,
     console,
+    fail,
     from_lamports,
     get_effective_config,
     get_solana_cli_context,
     print_json,
     safe_read,
+    set_json_output,
 )
 
 
@@ -39,11 +41,12 @@ def status_command(miner_pk, as_json):
     [dim]Examples:
         $ alw status[/dim]
     """
+    set_json_output(as_json)
     config = get_effective_config()
     network = config.get('network', 'finney')
     _, client = get_solana_cli_context(need_keypair=False)
 
-    cfg = safe_read(lambda: client.get_config(), what='reach Solana RPC')
+    cfg = safe_read(lambda: client.get_config(), what='read the program config')
     program_initialized = cfg is not None
     halted = bool(cfg and cfg.halted)
 
@@ -64,9 +67,10 @@ def status_command(miner_pk, as_json):
         from solders.pubkey import Pubkey
 
         try:
-            resv = safe_read(lambda: client.get_reservation(Pubkey.from_string(resv_miner)), what='read reservation')
+            miner_key = Pubkey.from_string(resv_miner)
         except (ValueError, TypeError):
-            resv = None
+            fail(f'Invalid --miner pubkey: {resv_miner}')
+        resv = safe_read(lambda: client.get_reservation(miner_key), what='read reservation')
 
     if as_json:
         out = {

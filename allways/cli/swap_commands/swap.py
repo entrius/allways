@@ -14,7 +14,7 @@ import click
 
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import PENDING_SWAP_FILE, console, fail, get_solana_cli_context
+from allways.cli.swap_commands.helpers import FINITE_FLOAT, PENDING_SWAP_FILE, console, fail, get_solana_cli_context
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     rate_display_from_fixed,
@@ -54,7 +54,7 @@ def _poll_reservation(client, miner, timeout_secs: int):
 @swap_group.command('now', show_disclaimer=True)
 @click.option('--from', 'from_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--to', 'to_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
-@click.option('--amount', 'amount_opt', default=None, type=float, help='Amount to send in source chain units')
+@click.option('--amount', 'amount_opt', default=None, type=FINITE_FLOAT, help='Amount to send in source chain units')
 @click.option('--receive-address', 'receive_address_opt', default=None, help='Receive address on destination chain')
 @click.option('--from-address', 'from_address_opt', default=None, help='Source address on source chain')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
