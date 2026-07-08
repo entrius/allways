@@ -37,10 +37,12 @@ _FULFILL_TRANSITIONS = {
 
 # Terminal events → per-swap outcome persisted for the seam (reserve_engine._swap_stage):
 # terminal swap PDAs close on-chain, so this index is what disambiguates a slash from a
-# completion once the account is gone.
+# completion once the account is gone. ``expired`` is a claim reaped stale before attestation
+# (close_stale_claim closes the Swap PDA) — the user never completed, so it's terminal too.
 _OUTCOME_BY_EVENT = {
     'SwapCompleted': 'completed',
     'SwapTimedOut': 'timed_out',
+    'StaleClaimClosed': 'expired',
 }
 
 
@@ -101,6 +103,12 @@ class SolanaEventIndex:
                     int(rec.fields['from_amount']),
                     int(rec.fields['to_amount']),
                 )
+            return True
+        if name == 'StaleClaimClosed':
+            # A PendingAttestation claim reaped stale: the Swap PDA is gone, so record the terminal
+            # 'expired' outcome for the seam. No activity edge — the miner never entered FULFILLING;
+            # its synthetic RESERVE_EXPIRE already returns it to AVAILABLE.
+            self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), _OUTCOME_BY_EVENT[name], block_time)
             return True
         if name in ('CollateralPosted', 'CollateralWithdrawn'):
             total = int(rec.fields['total'])

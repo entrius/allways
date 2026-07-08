@@ -265,9 +265,11 @@ class SwapStatus:
     """Seam ``/status`` payload. ``stage`` is the offering-facing lifecycle enum:
 
     none → reserved → claimed → active → fulfilled → { completed | timed_out }
+    (a claim reaped stale before attestation ends at the terminal ``expired`` instead)
 
-    ``completed`` and ``timed_out`` are terminal; ``timed_out`` means the miner was slashed.
-    Both are sourced from the live PDA status or, after the terminal PDA closes on-chain, from
+    ``completed``, ``timed_out``, and ``expired`` are terminal; ``timed_out`` means the miner was
+    slashed, ``expired`` means the claim went stale pre-attestation (no funds moved, the Swap PDA
+    was closed by ``close_stale_claim``). They are sourced from the live PDA status or, after the terminal PDA closes on-chain, from
     the validator's ``swap_outcomes`` event index. A closed PDA whose outcome isn't recorded
     yet reports ``fulfilled`` — transient, normally resolving within ~one forward step once the
     terminal event is ingested. Consumers keep polling on ``fulfilled`` and should apply their
@@ -280,7 +282,7 @@ class SwapStatus:
     moment it goes ``active``. Without ``swap_key``, resolution walks the miner's reservation
     and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible."""
 
-    stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out
+    stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out | expired
     reserved_until: int = 0
     user: str = ''
     swap_key: str = ''
@@ -352,8 +354,8 @@ _STAGE_BY_NAME = {
 def _swap_stage(validator, swap, swap_key: bytes) -> str:
     """Stage for a claimed swap. A closed PDA is terminal, but Completed and TimedOut swaps both
     close on-chain, so the on-chain account alone can't tell a completion from a slash — the
-    validator's own event index (``swap_outcomes``, written on SwapCompleted/SwapTimedOut ingest)
-    disambiguates. On an outcome miss, fall back NON-terminal to ``fulfilled``: the miss is
+    validator's own event index (``swap_outcomes``, written on SwapCompleted/SwapTimedOut/
+    StaleClaimClosed ingest) disambiguates. On an outcome miss, fall back NON-terminal to ``fulfilled``: the miss is
     normally ingest lag (another validator's quorum closed the PDA since our last forward-step
     ingest) and self-corrects at the next ingest, whereas a terminal guess would stop the
     consumer polling on a wrong answer — for a slash, exactly the bug this index exists to fix."""

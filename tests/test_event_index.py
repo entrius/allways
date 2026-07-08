@@ -374,6 +374,14 @@ class TestIngestSwapOutcomes:
         assert store.get_swap_outcome(DEFAULT_SWAP_KEY.hex()) is None  # only the event's key lands
         store.close()
 
+    def test_stale_claim_closed_records_expired_outcome(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        idx.ingest([rec('StaleClaimClosed', miner='pk_a', block_time=400, swap_key=key)], ATTR)
+        assert store.get_swap_outcome(key.hex()) == 'expired'
+        store.close()
+
     def test_reingest_of_same_event_is_a_noop_upsert(self, tmp_path: Path):
         """A cursor reset can replay history — the outcome row upserts instead of erroring."""
         store = make_store(tmp_path)
