@@ -20,6 +20,7 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     to_smallest_units,
 )
+from allways.constants import NUMERAIRE_CHAIN
 
 
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
@@ -91,8 +92,10 @@ def swap_now_command(
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         console.print(f'[red]--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}[/red]')
         return
-    if from_chain == to_chain or 'sol' not in (from_chain, to_chain):
-        console.print('[red]A launch swap must have a SOL leg (sol<->btc or sol<->tao).[/red]')
+    if from_chain == to_chain or NUMERAIRE_CHAIN not in (from_chain, to_chain):
+        console.print(
+            f'[red]A launch swap must have a {NUMERAIRE_CHAIN.upper()} leg (every pair is hub<->spoke).[/red]'
+        )
         return
     if amount_opt is None or amount_opt <= 0:
         console.print('[red]--amount (source-chain units) is required.[/red]')
@@ -103,9 +106,11 @@ def swap_now_command(
 
     _config, client = get_solana_cli_context(need_keypair=True)
     user = client.keypair.pubkey()
-    user_from_addr = str(user) if from_chain == 'sol' else (from_address_opt or '')
+    user_from_addr = str(user) if from_chain == NUMERAIRE_CHAIN else (from_address_opt or '')
     if not user_from_addr:
-        console.print('[red]--from-address (your source-chain address) is required for a non-SOL source.[/red]')
+        console.print(
+            f'[red]--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.[/red]'
+        )
         return
 
     cfg = client.get_config()

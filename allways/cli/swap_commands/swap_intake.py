@@ -43,7 +43,9 @@ def compute_intake_amounts(from_chain: str, to_chain: str, from_amount: int, rat
     ``rate_display`` is the miner's canonical 'dest per 1 SOL' rate. Requires one leg to be SOL.
     """
     if NUMERAIRE_CHAIN not in (from_chain, to_chain):
-        raise ValueError(f'{from_chain}->{to_chain}: a {NUMERAIRE_CHAIN} leg is required (every launch pair is hub<->spoke)')
+        raise ValueError(
+            f'{from_chain}->{to_chain}: a {NUMERAIRE_CHAIN} leg is required (every launch pair is hub<->spoke)'
+        )
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(

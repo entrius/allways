@@ -24,6 +24,8 @@ TAO_TO_RAO = 1_000_000_000
 BTC_TO_SAT = 100_000_000
 
 # ─── Rate Encoding ───────────────────────────────────────
+# Fixed-point scale for the miner rate: stored u128 = display_rate * RATE_PRECISION.
+# Single source of truth, mirrors constants.rs (1e18).
 RATE_PRECISION = 10**18
 # Significant digits enforced on every committed rate. Normalized at the CLI
 # (post) and again at the validator (parse) so scoring buckets, consensus

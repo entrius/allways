@@ -2,11 +2,13 @@
 
 import math
 from decimal import Decimal
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 from allways.chains import canonical_pair, get_chain
-from allways.classes import Swap
 from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, RATE_SIG_FIGS
+
+if TYPE_CHECKING:
+    from allways.solana.client import SolanaSwap
 
 
 def normalize_rate(rate: float) -> str:
@@ -54,7 +56,7 @@ def calculate_to_amount(
             return from_amount * rate_fixed // (RATE_PRECISION * 10 ** (-decimal_diff))
 
 
-def expected_swap_amounts(swap: Swap, fee_divisor: int) -> Tuple[int, int]:
+def expected_swap_amounts(swap: 'SolanaSwap', fee_divisor: int) -> Tuple[int, int]:
     """Compute expected to_amount and fee-adjusted user_receives from a swap's on-chain fields.
 
     Single source of truth used by both miner (fulfillment) and validator (verification).

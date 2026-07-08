@@ -229,10 +229,10 @@ class SwapFulfiller:
             bt.logging.error(f'Swap {swap.key_hex[:16]}: no provider for dest chain: {swap.to_chain}')
             return None
 
-        # Miner's own dest-chain sending address — cached from this miner's posted quote at startup. For
-        # TAO we don't need a from_address hint (the wallet keypair identifies the sender). For non-TAO
-        # chains we pass the cached address so the provider can skip UTXO probing.
-        from_address = None if swap.to_chain == 'tao' else self.my_addresses.get(swap.to_chain)
+        # Miner's own dest-chain sending address — cached from this miner's posted quote at startup, passed
+        # as a hint so UTXO-based providers can skip probing. Providers that identify their own sender from
+        # a wallet keypair (e.g. subtensor) ignore it, so this is uniform across chains.
+        from_address = self.my_addresses.get(swap.to_chain)
 
         bt.logging.info(
             f'Swap {swap.key_hex[:16]}: initiating dest send of {user_receives_amount} to {swap.user_to_addr} '
