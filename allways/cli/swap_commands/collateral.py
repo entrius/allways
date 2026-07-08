@@ -44,7 +44,7 @@ def collateral_group():
 def collateral_deposit(amount: float | None, yes: bool):
     """Deposit SOL collateral to the swap program.
 
-    [dim]Amount is in SOL, posted from your Solana keypair (SOLANA_KEYPAIR_PATH / ~/.solana/id.json).[/dim]
+    [dim]Amount is in SOL, posted from your Solana keypair (SOLANA_KEYPAIR_PATH / solana-keypair config / ~/.solana/id.json).[/dim]
 
     [dim]Examples:
         $ alw collateral deposit --amount 5.0

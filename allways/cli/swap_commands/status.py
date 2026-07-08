@@ -17,17 +17,18 @@ from allways.cli.swap_commands.helpers import (
     get_effective_config,
     get_solana_cli_context,
     print_json,
+    resolve_solana_keypair_path,
     safe_read,
     set_json_output,
 )
 
 
-def _load_caller():
-    """Load the caller's Solana keypair without creating one. Returns Pubkey or None."""
+def _load_caller(config):
+    """Load the caller's Solana keypair (env/config-resolved) without creating one. Returns Pubkey or None."""
     from allways.solana import keys
 
     try:
-        return keys.load_keypair().pubkey()
+        return keys.load_keypair(resolve_solana_keypair_path(config)).pubkey()
     except Exception:
         return None
 
@@ -50,7 +51,7 @@ def status_command(miner_pk, as_json):
     program_initialized = cfg is not None
     halted = bool(cfg and cfg.halted)
 
-    caller = _load_caller()
+    caller = _load_caller(config)
     balance = None
     miner_state = None
     if caller is not None:
@@ -113,7 +114,9 @@ def status_command(miner_pk, as_json):
         console.print(f'  Keypair:      {caller}')
         console.print(f'  Balance:      {bal}')
     else:
-        console.print('  Keypair:      [dim]none loaded (set SOLANA_KEYPAIR_PATH)[/dim]')
+        console.print(
+            '  Keypair:      [dim]none loaded (`alw config set solana-keypair <path>` or SOLANA_KEYPAIR_PATH)[/dim]'
+        )
 
     if is_miner:
         console.print('\n[bold]Miner[/bold]\n')

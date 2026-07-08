@@ -27,6 +27,8 @@ PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 # Each chain takes a simple network NAME (alw config set solana-network devnet); the code
 # maps it to an endpoint so operators never hand-copy RPC URLs. Raw-URL escape hatches still
 # win for paid/custom RPCs (SOLANA_RPC_URL env / solana-rpc config; BTC_ESPLORA_URLS env).
+# The Solana SIGNER resolves the same way: SOLANA_KEYPAIR_PATH env wins, else the
+# solana-keypair config path, else the solana-CLI default ~/.solana/id.json.
 SOLANA_NETWORKS = {
     'devnet': 'https://api.devnet.solana.com',
     'mainnet': 'https://api.mainnet-beta.solana.com',
@@ -56,6 +58,32 @@ def resolve_solana_rpc(config: dict) -> str:
             f'[yellow]Unknown solana-network {name!r} (expected {list(SOLANA_NETWORKS)}); using localnet.[/yellow]'
         )
     return 'http://127.0.0.1:8899'
+
+
+def resolve_solana_keypair_path(config: dict) -> str:
+    """Solana keypair precedence: SOLANA_KEYPAIR_PATH env (raw path escape hatch) wins;
+    else the solana-keypair config path; else the solana-CLI default ~/.solana/id.json."""
+    raw = os.environ.get('SOLANA_KEYPAIR_PATH') or config.get('solana-keypair')
+    if raw:
+        return os.path.expanduser(raw)
+    return str(Path.home() / '.solana' / 'id.json')
+
+
+def load_cli_keypair(config: dict):
+    """Load the CLI signing keypair from the resolved path (see resolve_solana_keypair_path).
+
+    An explicitly pointed-at path (env/config) must exist — minting a fresh key there would
+    silently sign with an unfunded, non-authority identity. Only the bare ~/.solana/id.json
+    default keeps the auto-generate convenience."""
+    from allways.solana import keys
+
+    path = resolve_solana_keypair_path(config)
+    explicit = os.environ.get('SOLANA_KEYPAIR_PATH') or config.get('solana-keypair')
+    if explicit and not os.path.exists(path):
+        fail(
+            f'Configured solana-keypair {path} not found (from SOLANA_KEYPAIR_PATH env or `alw config set solana-keypair`).'
+        )
+    return keys.load_or_create(path)
 
 
 def apply_btc_network_env(config: dict) -> None:
@@ -534,13 +562,13 @@ def secs_str(secs: int) -> str:
 def get_solana_cli_context(need_keypair: bool = True):
     """Solana CLI setup for the B4-repointed miner/admin commands → (config, solana_client).
 
-    The miner/admin identity is the Solana keypair (SOLANA_KEYPAIR_PATH / ~/.solana/id.json), NOT the bt
-    wallet — collateral, quotes, and config are keyed by that pubkey on the program. The bt wallet is only
-    needed where a command links the two identities (`alw miner bind-hotkey`).
+    The miner/admin identity is the Solana keypair (SOLANA_KEYPAIR_PATH env / solana-keypair config /
+    ~/.solana/id.json), NOT the bt wallet — collateral, quotes, and config are keyed by that pubkey on the
+    program. The bt wallet is only needed where a command links the two identities (`alw miner bind-hotkey`).
     """
     from solders.pubkey import Pubkey
 
-    from allways.solana import keys, pdas
+    from allways.solana import pdas
     from allways.solana.client import AllwaysSolanaClient
 
     config = get_effective_config()
@@ -554,7 +582,7 @@ def get_solana_cli_context(need_keypair: bool = True):
             console.print(
                 f'[yellow]Ignoring invalid program-id config {configured!r}; using default {program_id}[/yellow]'
             )
-    keypair = keys.load_or_create() if need_keypair else None
+    keypair = load_cli_keypair(config) if need_keypair else None
     return config, AllwaysSolanaClient(rpc_url, program_id=program_id, keypair=keypair)
 
 
