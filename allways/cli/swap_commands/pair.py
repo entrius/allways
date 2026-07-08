@@ -7,7 +7,9 @@ import click
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
     console,
+    fail,
     get_cli_context,
     get_solana_cli_context,
     loading,
@@ -42,19 +44,19 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
     fwd_label = f'  {src_up} to {dst_up} (user sends {src_up}, miner returns {dst_up})'
     rev_label = f'  {dst_up} to {src_up} (user sends {dst_up}, miner returns {src_up})'
     while True:
-        fwd = click.prompt(fwd_label, type=float)
+        fwd = click.prompt(fwd_label, type=FINITE_FLOAT)
         if fwd < 0:
             console.print('[red]Rate cannot be negative[/red]')
         else:
             break
     if fwd > 0:
-        rev = click.prompt(rev_label, type=float, default=fwd)
+        rev = click.prompt(rev_label, type=FINITE_FLOAT, default=fwd)
         if rev < 0:
             console.print('[red]Rate cannot be negative, using 0 (not offered)[/red]')
             rev = 0.0
     else:
         while True:
-            rev = click.prompt(rev_label, type=float)
+            rev = click.prompt(rev_label, type=FINITE_FLOAT)
             if rev < 0:
                 console.print('[red]Rate cannot be negative[/red]')
             elif rev == 0:
@@ -69,8 +71,8 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
 @click.argument('src_addr', required=False, default=None, type=str)
 @click.argument('dst_chain', required=False, default=None, type=str)
 @click.argument('dst_addr', required=False, default=None, type=str)
-@click.argument('rate', required=False, default=None, type=float)
-@click.argument('counter_rate', required=False, default=None, type=float)
+@click.argument('rate', required=False, default=None, type=FINITE_FLOAT)
+@click.argument('counter_rate', required=False, default=None, type=FINITE_FLOAT)
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
@@ -106,9 +108,8 @@ def post_pair(
     else:
         src_chain = src_chain.lower()
         if src_chain not in SUPPORTED_CHAINS:
-            console.print(f'[red]Unsupported chain: {src_chain}[/red]')
             console.print(f'[dim]Supported: {", ".join(SUPPORTED_CHAINS.keys())}[/dim]')
-            return
+            fail(f'Unsupported chain: {src_chain}')
 
     if dst_chain is None:
         remaining = [c for c in SUPPORTED_CHAINS if c != src_chain]
@@ -119,12 +120,10 @@ def post_pair(
     else:
         dst_chain = dst_chain.lower()
         if dst_chain not in SUPPORTED_CHAINS:
-            console.print(f'[red]Unsupported chain: {dst_chain}[/red]')
             console.print(f'[dim]Supported: {", ".join(SUPPORTED_CHAINS.keys())}[/dim]')
-            return
+            fail(f'Unsupported chain: {dst_chain}')
         if dst_chain == src_chain:
-            console.print('[red]Chains must be different[/red]')
-            return
+            fail('Chains must be different')
 
     # --- Addresses ---
     if src_addr is None:
@@ -139,17 +138,14 @@ def post_pair(
     if rate is None:
         rate, counter_rate = prompt_rates(canon_from, canon_to)
     elif rate < 0:
-        console.print('[red]Rate cannot be negative[/red]')
-        return
+        fail('Rate cannot be negative')
     else:
         if counter_rate is None:
             counter_rate = rate
         elif counter_rate < 0:
-            console.print('[red]Rate cannot be negative[/red]')
-            return
+            fail('Rate cannot be negative')
         if rate == 0 and counter_rate == 0:
-            console.print('[red]At least one direction must have a positive rate[/red]')
-            return
+            fail('At least one direction must have a positive rate')
 
     # Normalize to canonical direction.
     # Positional args: RATE = user's source→dest, so swap rates to match canonical order.
@@ -232,9 +228,10 @@ def post_pair(
         except SolanaClientError as e:
             console.print(f'[red]Failed to publish {from_chain.upper()} → {to_chain.upper()}: {e}[/red]')
 
-    if posted:
-        console.print(f'[green]Published {posted} quote direction(s)![/green]')
-        write_rate_posted_flag(wallet.hotkey.ss58_address)
+    if not posted:
+        fail('No quotes were published.')
+    console.print(f'[green]Published {posted} quote direction(s)![/green]')
+    write_rate_posted_flag(wallet.hotkey.ss58_address)
 
 
 def write_rate_posted_flag(hotkey: str) -> None:

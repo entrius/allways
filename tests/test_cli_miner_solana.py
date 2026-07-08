@@ -67,7 +67,7 @@ def test_deposit_respects_max_collateral():
     c = _client(config=_config(max_collateral=1_000_000), collateral=900_000)
     with patch('allways.cli.swap_commands.collateral.get_solana_cli_context', return_value=({}, c)):
         res = CliRunner().invoke(collateral_group, ['deposit', '--amount', '5', '--yes'])
-    assert res.exit_code == 0
+    assert res.exit_code != 0  # a rejected deposit must exit non-zero (script-safe)
     c.post_collateral.assert_not_called()
     assert 'exceed the max collateral' in res.output
 
@@ -76,7 +76,7 @@ def test_withdraw_blocked_while_active():
     c = _client(state=_state(active=True))
     with patch('allways.cli.swap_commands.collateral.get_solana_cli_context', return_value=({}, c)):
         res = CliRunner().invoke(collateral_group, ['withdraw', '--amount', '1', '--yes'])
-    assert res.exit_code == 0
+    assert res.exit_code != 0  # a blocked withdrawal must exit non-zero (script-safe)
     c.withdraw_collateral.assert_not_called()
     assert 'while miner is active' in res.output
 
@@ -88,7 +88,7 @@ def test_withdraw_blocked_within_cooldown():
         c = _client(state=_state(active=False, deactivation_at=1_000_000), config=_config(fulfillment_timeout_secs=600))
         with patch('allways.cli.swap_commands.collateral.get_solana_cli_context', return_value=({}, c)):
             res = CliRunner().invoke(collateral_group, ['withdraw', '--amount', '1', '--yes'])
-    assert res.exit_code == 0
+    assert res.exit_code != 0  # a blocked withdrawal must exit non-zero (script-safe)
     c.withdraw_collateral.assert_not_called()
     assert 'cooldown active' in res.output
 

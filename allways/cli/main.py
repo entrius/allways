@@ -5,8 +5,8 @@ Usage:
     alw config              - Show/set CLI configuration
     alw miner post          - Post a trading pair
     alw collateral          - Manage collateral
-    alw swap now        - Execute a swap (guided interactive)
-    alw swap post-tx    - Submit tx hash for pending swap
+    alw swap quote          - Preview miner rates for a swap
+    alw swap now            - Originate a swap (flag-driven)
     alw view                - View swaps, miners, rates
 """
 
@@ -108,6 +108,8 @@ def show_config():
         table.add_column('Value', style='green')
 
         for key, value in config.items():
+            if key in HIDDEN_CONFIG_KEYS:
+                continue  # legacy substrate key, dead on Solana — hidden but tolerated in the file
             table.add_row(key, str(value))
 
         console.print(table)
@@ -130,13 +132,15 @@ VALID_CONFIG_KEYS = (
     'hotkey',
     'network',
     'netuid',
-    'contract-address',
     'program-id',
     'solana-rpc',
     'solana-network',
     'btc-network',
     'env',
 )
+
+# Legacy keys still tolerated in an existing config file but never shown or settable (dead on Solana).
+HIDDEN_CONFIG_KEYS = ('contract-address', 'contract')
 
 
 @config_group.command('set')
@@ -154,8 +158,7 @@ def config_set(key: str, value: str):
         solana-network      Solana network name (devnet/mainnet/localnet) → RPC resolved in code
         solana-rpc          Custom Solana RPC URL (escape hatch; SOLANA_RPC_URL env wins)
         btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
-        program-id          Solana program ID (miner/admin commands)
-        contract-address    Legacy substrate contract address (old taker/reserve path)[/dim]
+        program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:
         env:            testnet | mainnet   (sets all three chains at once)
@@ -186,14 +189,14 @@ def config_set(key: str, value: str):
             return
         config.update(bundle)
         CONFIG_FILE.write_text(json.dumps(config, indent=2))
-        console.print(
-            f'[green]Set env {value}:[/green] ' + ', '.join(f'{k}={v}' for k, v in bundle.items())
-        )
+        console.print(f'[green]Set env {value}:[/green] ' + ', '.join(f'{k}={v}' for k, v in bundle.items()))
         return
 
     # Validate name-based network keys — the raw-URL escape hatches are solana-rpc / SOLANA_RPC_URL.
     if key == 'solana-network' and value not in SOLANA_NETWORKS:
-        console.print(f'[red]Unknown solana-network {value!r}; expected {list(SOLANA_NETWORKS)} (or set a custom solana-rpc).[/red]')
+        console.print(
+            f'[red]Unknown solana-network {value!r}; expected {list(SOLANA_NETWORKS)} (or set a custom solana-rpc).[/red]'
+        )
         return
     if key == 'btc-network' and value not in BTC_NETWORKS:
         console.print(f'[red]Unknown btc-network {value!r}; expected {list(BTC_NETWORKS)}.[/red]')

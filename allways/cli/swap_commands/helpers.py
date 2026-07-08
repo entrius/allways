@@ -1,9 +1,11 @@
 import json
+import math
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import bittensor as bt
 import click
@@ -13,6 +15,8 @@ from rich.text import Text
 
 from allways.classes import SwapStatus
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.solana.client import SolanaClientError
+from allways.solana.rpc import SolanaRpcError
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -72,23 +76,182 @@ def quote_update_fee_lamports(elapsed_secs: int) -> int:
             return fee
     return 0
 
+
 console = Console()
+
+# The taker fund-relay path (post-tx / claim / resume) verifies deposits against a chain provider before it
+# can advance a swap; that verification isn't wired into the CLI yet. Until it is, those commands point at the
+# working browser flow. Keep this URL in one place so every pointer agrees.
+BROWSER_SWAP_URL = 'http://localhost:9090'
 
 
 class CliError(Exception):
     """Local CLI/Solana error type — replaces the deleted ink! contract error."""
 
 
-def taker_view_unavailable(what: str) -> None:
-    """Stub for the taker READ/relay views (preview, dashboard, resume, post-tx) still on the old ink! surface.
+# NOT_IMPLEMENTED_EXIT: distinct from Click's usage-error code (2) so a script can tell "deferred CLI
+# path" apart from "you passed bad args". EX_UNAVAILABLE (sysexits.h) = 69.
+NOT_IMPLEMENTED_EXIT = 69
 
-    Swap origination (`alw swap now`) is live on Solana. What remains stubbed are the read-only aggregation
-    views that drew from the ink! contract surface and need a Solana MinerQuote/Reservation-backed re-port."""
+# When a --json command is running, errors must stay machine-readable — `fail()` emits `{"error": ...}`
+# instead of Rich text so a consumer piping --json never chokes on a plain-text error. Set per command.
+_JSON_OUTPUT = False
+
+
+def set_json_output(enabled: bool) -> None:
+    """Mark the current command as JSON-mode so `fail()` (and thus `safe_read`) emit JSON errors."""
+    global _JSON_OUTPUT
+    _JSON_OUTPUT = bool(enabled)
+
+
+class FiniteFloatType(click.ParamType):
+    """A float option that rejects nan/inf at parse time with a clean Click usage error — so
+    user-supplied `--amount nan/inf/1e999` never reaches an `int()` cast and dumps a traceback."""
+
+    name = 'number'
+
+    def convert(self, value, param, ctx):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            self.fail(f'{value!r} is not a number', param, ctx)
+        if not math.isfinite(f):
+            self.fail(f'{value!r} must be a finite number (not nan/inf)', param, ctx)
+        return f
+
+
+FINITE_FLOAT = FiniteFloatType()
+
+
+def fail(message: str, code: int = 1) -> None:
+    """Single error-exit path: exit non-zero so `$?` reflects failure. In JSON mode emits
+    `{"error": ...}`; otherwise prints the message in red.
+
+    Every command rejection/error across the CLI routes through here — that is what makes the CLI script-safe."""
+    if _JSON_OUTPUT:
+        click.echo(json.dumps({'error': message}))
+    else:
+        console.print(f'[red]{message}[/red]')
+    raise SystemExit(code)
+
+
+def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
+    """Honest exit for the fund-moving relays (post-tx / claim / resume) that need chain-provider verification.
+
+    Points at the working browser flow and exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so
+    scripts can tell a deferred path apart from bad args. The read views are all live on Solana now."""
     console.print(
-        f'[yellow]{what} is not available yet.[/yellow]\n'
-        '[dim]Swap origination (`alw swap now`) is live on Solana; this read/relay view still needs its '
-        'Solana-backed re-port (MinerQuote aggregation, on-chain swaps/reservations).[/dim]'
+        f'[yellow]{what} is not available from the CLI yet.[/yellow]\n'
+        f'[dim]This step verifies your deposit against the source chain, which the CLI taker path does not do '
+        f'yet. Use the browser swap flow at {BROWSER_SWAP_URL} to complete a swap end-to-end; '
+        f'`alw swap now` originates a reservation on-chain.[/dim]'
     )
+    raise SystemExit(code)
+
+
+def print_json(data) -> None:
+    """Emit a value as pretty JSON (str fallback for non-serializable types like Pubkey)."""
+    click.echo(json.dumps(data, indent=2, default=str))
+
+
+def effective_rate(from_chain: str, to_chain: str, rate_display: str) -> str:
+    """Directional 'to per 1 from' rate for display. Stored quotes are canonical 'dest per 1 hub', which
+    reads backwards for a spoke→hub direction (BTC→SOL stored 0.0021 really means ~476 SOL per BTC).
+    Return the reciprocal for spoke→hub so `amount × shown-rate ≈ you receive` always reconciles."""
+    from allways.constants import NUMERAIRE_CHAIN
+
+    try:
+        r = float(rate_display)
+    except (TypeError, ValueError):
+        return rate_display
+    if to_chain == NUMERAIRE_CHAIN and r > 0:
+        r = 1.0 / r
+    return f'{r:.8g}'
+
+
+def safe_read(fn: Callable, what: str = 'read from Solana'):
+    """Run a client read, converting any RPC/decode/transport failure into a clean non-zero `fail`.
+
+    Reads raise `SolanaClientError` (decode), `SolanaRpcError` (RPC-level error), or a bare
+    `requests` transport error (unreachable RPC). All three must surface as a script-safe failure,
+    never a stacktrace."""
+    try:
+        return fn()
+    except (SolanaClientError, SolanaRpcError) as e:
+        fail(f'Failed to {what}: {e}')
+    except requests.RequestException:
+        fail(f'Could not reach the Solana RPC to {what}. Is the node up at the configured solana-rpc?')
+
+
+ZERO_SWAP_KEY = bytes(32)
+
+
+@dataclass
+class MinerBookEntry:
+    """One miner's aggregated on-chain view: its posted quotes (one per direction) plus runtime state.
+
+    Taker views key by the Solana miner pubkey (a miner has no bittensor uid here), so `miner` is the identity."""
+
+    miner: object  # solders Pubkey
+    quotes: List[object] = field(default_factory=list)  # MinerQuote rows, one per direction
+    collateral: int = 0  # lamports
+    state: Optional[object] = None  # MinerState | None
+    reservation: Optional[object] = None  # Reservation | None
+
+    @property
+    def pubkey_str(self) -> str:
+        return str(self.miner)
+
+
+def load_miner_book(client, with_reservation: bool = True) -> List[MinerBookEntry]:
+    """Group all on-chain MinerQuote rows by miner and attach collateral + state (+ reservation).
+
+    One `MinerBookEntry` per distinct miner pubkey; `quotes` holds its per-direction rows. Any read failure
+    routes through `safe_read` (clean non-zero exit)."""
+    rows = safe_read(lambda: client.get_all('MinerQuote'), what='read miner quotes')
+    by_miner: dict = {}
+    for _pk, q in rows:
+        by_miner.setdefault(bytes(q.miner), MinerBookEntry(miner=q.miner)).quotes.append(q)
+    book = list(by_miner.values())
+    for entry in book:
+        entry.collateral = (
+            safe_read(lambda m=entry.miner: client.get_collateral_lamports(m), what='read collateral') or 0
+        )
+        entry.state = safe_read(lambda m=entry.miner: client.get_miner_state(m), what='read miner state')
+        if with_reservation:
+            entry.reservation = safe_read(lambda m=entry.miner: client.get_reservation(m), what='read reservation')
+    return book
+
+
+def miner_runtime_status(state, reservation, now: int) -> str:
+    """Collapse on-chain miner state into one runtime label the taker views sort/filter on.
+
+    offline (not registered / inactive) → in-swap → reserved (live reservation, no deposit claimed yet) →
+    cooldown (busy) → available."""
+    if state is None or not state.active:
+        return 'offline'
+    if state.has_active_swap:
+        return 'in-swap'
+    if (
+        reservation is not None
+        and int(getattr(reservation, 'reserved_until', 0)) > now
+        and bytes(getattr(reservation, 'claimed_swap_key', ZERO_SWAP_KEY)) == ZERO_SWAP_KEY
+    ):
+        return 'reserved'
+    if int(getattr(state, 'busy_until', 0)) > now:
+        return 'cooldown'
+    return 'available'
+
+
+STATUS_STYLES = {
+    'available': 'green',
+    'reserved': 'cyan',
+    'in-swap': 'yellow',
+    'cooldown': 'magenta',
+    'offline': 'dim',
+}
+# Deterministic sort order for `--sort status`: most-available first.
+STATUS_SORT_ORDER = ['available', 'reserved', 'in-swap', 'cooldown', 'offline']
 
 
 # --- Miner reliability (swap success rate) -------------------------------
@@ -331,7 +494,9 @@ def from_lamports(amount_lamports: int) -> float:
 
 
 def secs_str(secs: int) -> str:
-    """Render a seconds duration as `<n>s (~<m>m)` — shared by admin setters and view dumps."""
+    """Render a seconds duration for admin setters + view dumps: bare `45s` under a minute, `600s (~10m)` above."""
+    if secs < 60:
+        return f'{secs}s'
     return f'{secs}s (~{secs // 60}m)'
 
 
