@@ -59,6 +59,7 @@ from allways.cli.swap_commands.helpers import (  # noqa: E402
     apply_btc_network_env,
     apply_global_flags,
     console,
+    fail,
     get_effective_config,
 )
 
@@ -113,12 +114,32 @@ def show_config():
             table.add_row(key, str(value))
 
         console.print(table)
+
+        # Show which key will actually sign (env > solana-keypair config > ~/.solana/id.json),
+        # so a wrong signer is visible here instead of as a cryptic on-chain failure.
+        signer = _resolved_signer_line(config)
+        if signer:
+            console.print(f'\n[dim]Solana signer:[/dim] {signer}')
         console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]\n')
 
     except json.JSONDecodeError:
         console.print('[red]Error: Invalid JSON in config file[/red]')
     except Exception as e:
         console.print(f'[red]Error reading config: {e}[/red]')
+
+
+def _resolved_signer_line(config: dict) -> str | None:
+    """Resolved Solana signer as 'pubkey (path)', or a not-found note; None only on import trouble."""
+    try:
+        from allways.cli.swap_commands.helpers import resolve_solana_keypair_path
+        from allways.solana import keys
+
+        path = resolve_solana_keypair_path(config)
+        if not os.path.isfile(path):
+            return f'[yellow]no keypair at {path}[/yellow]'
+        return f'{keys.load_keypair(path).pubkey()} [dim]({path})[/dim]'
+    except Exception:
+        return None
 
 
 KNOWN_NETWORKS = {
@@ -135,6 +156,7 @@ VALID_CONFIG_KEYS = (
     'program-id',
     'solana-rpc',
     'solana-network',
+    'solana-keypair',
     'btc-network',
     'env',
 )
@@ -157,6 +179,7 @@ def config_set(key: str, value: str):
         netuid              Subnet UID
         solana-network      Solana network name (devnet/mainnet/localnet) → RPC resolved in code
         solana-rpc          Custom Solana RPC URL (escape hatch; SOLANA_RPC_URL env wins)
+        solana-keypair      Path to the Solana keypair that signs miner/admin ops (SOLANA_KEYPAIR_PATH env wins)
         btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
         program-id          Solana program ID (miner/admin commands)[/dim]
 
@@ -170,6 +193,7 @@ def config_set(key: str, value: str):
         $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + netuid 19
         $ alw config set wallet alice
         $ alw config set solana-network devnet
+        $ alw config set solana-keypair ~/.config/solana/dev.json
         $ alw config set network finney[/dim]
     """
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
@@ -202,6 +226,20 @@ def config_set(key: str, value: str):
         console.print(f'[red]Unknown btc-network {value!r}; expected {list(BTC_NETWORKS)}.[/red]')
         return
 
+    # Validate the keypair at set time and echo its pubkey, so a typo'd path or wrong file
+    # fails here — not later as an unfunded/non-authority signer on a live command.
+    keypair_pubkey = None
+    if key == 'solana-keypair':
+        from allways.solana import keys
+
+        value = os.path.expanduser(value)
+        if not os.path.isfile(value):
+            fail(f'solana-keypair {value} not found.')
+        try:
+            keypair_pubkey = keys.load_keypair(value).pubkey()
+        except Exception as e:
+            fail(f'solana-keypair {value} is not a loadable Solana keypair file: {e}')
+
     # Normalize network: reverse-map known endpoints to names
     if key == 'network':
         for name, endpoint in KNOWN_NETWORKS.items():
@@ -217,6 +255,8 @@ def config_set(key: str, value: str):
     display = value
     if key == 'network' and value in KNOWN_NETWORKS:
         display = f'{value} ({KNOWN_NETWORKS[value]})'
+    if keypair_pubkey is not None:
+        display = f'{value} → signs as {keypair_pubkey}'
 
     if old_value is not None:
         console.print(f'[green]Updated {key}:[/green] {old_value} -> {display}')
