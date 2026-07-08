@@ -18,6 +18,60 @@ ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
 PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 
+# ─── Per-chain network resolution ────────────────────────────────────────────
+# Each chain takes a simple network NAME (alw config set solana-network devnet); the code
+# maps it to an endpoint so operators never hand-copy RPC URLs. Raw-URL escape hatches still
+# win for paid/custom RPCs (SOLANA_RPC_URL env / solana-rpc config; BTC_ESPLORA_URLS env).
+SOLANA_NETWORKS = {
+    'devnet': 'https://api.devnet.solana.com',
+    'mainnet': 'https://api.mainnet-beta.solana.com',
+    'localnet': 'http://127.0.0.1:8899',
+}
+# Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
+BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
+# One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid.
+ENV_BUNDLES = {
+    'testnet': {'network': 'test', 'solana-network': 'devnet', 'btc-network': 'testnet4', 'netuid': '19'},
+    'mainnet': {'network': 'finney', 'solana-network': 'mainnet', 'btc-network': 'mainnet', 'netuid': '7'},
+}
+
+
+def resolve_solana_rpc(config: dict) -> str:
+    """Solana RPC precedence: SOLANA_RPC_URL env / solana-rpc config (raw URL — paid/custom) win;
+    else the solana-network name resolves to a public endpoint; else localnet default."""
+    raw = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc')
+    if raw:
+        return raw
+    name = config.get('solana-network')
+    if name:
+        url = SOLANA_NETWORKS.get(name)
+        if url:
+            return url
+        console.print(
+            f'[yellow]Unknown solana-network {name!r} (expected {list(SOLANA_NETWORKS)}); using localnet.[/yellow]'
+        )
+    return 'http://127.0.0.1:8899'
+
+
+def apply_btc_network_env(config: dict) -> None:
+    """Feed btc-network config into the BTC provider, which reads BTC_NETWORK from the env.
+    A real BTC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
+    if not os.environ.get('BTC_NETWORK') and config.get('btc-network'):
+        os.environ['BTC_NETWORK'] = config['btc-network']
+
+
+# Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().
+QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < secs, lamports); else free
+
+
+def quote_update_fee_lamports(elapsed_secs: int) -> int:
+    """Churn fee (lamports) to re-quote a direction ``elapsed_secs`` after its last update: 0.01 SOL
+    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Creation is free. Mirrors the contract."""
+    for below, fee in QUOTE_UPDATE_FEE_TIERS:
+        if elapsed_secs < below:
+            return fee
+    return 0
+
 console = Console()
 
 
@@ -294,7 +348,7 @@ def get_solana_cli_context(need_keypair: bool = True):
     from allways.solana.client import AllwaysSolanaClient
 
     config = get_effective_config()
-    rpc_url = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc') or 'http://127.0.0.1:8899'
+    rpc_url = resolve_solana_rpc(config)
     program_id = pdas.PROGRAM_ID
     configured = config.get('program-id') or config.get('contract')
     if configured:

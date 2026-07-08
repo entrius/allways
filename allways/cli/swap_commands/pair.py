@@ -1,10 +1,18 @@
 """alw post - Publish a trading pair as on-chain Solana quotes."""
 
+import time
+
 import click
 
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, get_cli_context, get_solana_cli_context, loading
+from allways.cli.swap_commands.helpers import (
+    console,
+    get_cli_context,
+    get_solana_cli_context,
+    loading,
+    quote_update_fee_lamports,
+)
 from allways.constants import RATE_PRECISION
 from allways.solana.client import SolanaClientError
 
@@ -63,6 +71,7 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
 @click.argument('dst_addr', required=False, default=None, type=str)
 @click.argument('rate', required=False, default=None, type=float)
 @click.argument('counter_rate', required=False, default=None, type=float)
+@click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
     src_chain: str | None,
@@ -72,6 +81,7 @@ def post_pair(
     rate: float | None,
     counter_rate: float | None,
     yes: bool,
+    dry_run: bool,
 ):
     """Post a trading pair to chain via commitment.
 
@@ -175,6 +185,25 @@ def post_pair(
             console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
+    # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
+    # quote's own updated_at. Total shown before the confirm so the fee is never a surprise.
+    now = int(time.time())
+    miner = client.keypair.pubkey()
+    to_post = ([(src_chain, dst_chain)] if rate > 0 else []) + ([(dst_chain, src_chain)] if counter_rate > 0 else [])
+    total_fee = 0
+    for from_c, to_c in to_post:
+        cur = client.get_quote(miner, from_c, to_c)
+        if cur is not None:
+            total_fee += quote_update_fee_lamports(now - int(cur.updated_at))
+    if total_fee:
+        console.print(
+            f'  [yellow]Churn fee: {total_fee / 1e9:g} SOL[/yellow] '
+            "[dim](updating existing quote(s); free 10 min after each direction's last change)[/dim]\n"
+        )
+
+    if dry_run:
+        console.print('[dim]--dry-run: nothing posted.[/dim]')
+        return
     if not yes and not click.confirm('Confirm publishing this pair?'):
         console.print('[yellow]Cancelled[/yellow]')
         return

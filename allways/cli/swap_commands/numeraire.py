@@ -11,13 +11,20 @@ An optional symmetric `spread_bps` gives the miner margin both ways (sol→X pos
 high); `spread_bps=0` posts the zero-margin mid.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import console, get_cli_context, get_solana_cli_context, loading
+from allways.cli.swap_commands.helpers import (
+    console,
+    get_cli_context,
+    get_solana_cli_context,
+    loading,
+    quote_update_fee_lamports,
+)
 from allways.cli.swap_commands.pair import write_rate_posted_flag
 from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.solana.client import SolanaClientError
@@ -60,8 +67,9 @@ def derive_sol_numeraire_quotes(
 @click.option('--tao-price', type=float, default=None, help='TAO per 1 SOL (0/omit to skip TAO).')
 @click.option('--tao-address', default=None, help='Your TAO address.')
 @click.option('--spread', 'spread_bps', type=int, default=0, help='Symmetric margin in bps (0 = mid).')
+@click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', 'yes', is_flag=True, help='Skip confirmation.')
-def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, spread_bps, yes):
+def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, spread_bps, dry_run, yes):
     """Publish all SOL pairs from one price per chain (the 'X per 1 SOL' convention).
 
     \b
@@ -87,16 +95,48 @@ def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, 
         console.print('[red]--sol-address is required.[/red]')
         return
 
+    _, wallet, _, _ = get_cli_context(need_client=False)
+    _, client = get_solana_cli_context()
+    miner = client.keypair.pubkey()
+    now = int(time.time())
+
     specs = derive_sol_numeraire_quotes(sol_address, chain_specs, spread_bps)
-    console.print('\n[bold]Publishing SOL-numéraire quotes[/bold]  [dim](X per 1 SOL)[/dim]\n')
+
+    # Show each direction's current rate + the churn fee this update will incur (per-direction,
+    # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
+    console.print('\n[bold]SOL-numéraire quotes[/bold]  [dim](X per 1 SOL)[/dim]\n')
+    total_fee = 0
     for sp in specs:
-        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{sp.rate:g}[/green]')
-    if not yes and not click.confirm('\nConfirm publishing these quotes?'):
+        cur = client.get_quote(miner, sp.from_chain, sp.to_chain)
+        if cur is None:
+            note = '[dim]new — free[/dim]'
+        else:
+            age = now - int(cur.updated_at)
+            fee = quote_update_fee_lamports(age)
+            total_fee += fee
+            was = int(cur.rate) / RATE_PRECISION
+            if fee:
+                note = (
+                    f'[yellow]churn fee {fee / 1e9:g} SOL[/yellow] '
+                    f'[dim](was {was:g}, set {age}s ago; free to update in {max(0, 600 - age)}s)[/dim]'
+                )
+            else:
+                note = f'[dim]free (was {was:g})[/dim]'
+        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{sp.rate:g}[/green]   {note}')
+
+    if total_fee:
+        console.print(
+            f'\n[yellow]Total churn fee: {total_fee / 1e9:g} SOL[/yellow] '
+            '[dim](→ treasury; each direction is free again 10 min after its last update)[/dim]'
+        )
+
+    if dry_run:
+        console.print('\n[dim]--dry-run: nothing posted.[/dim]')
+        return
+    if not yes and not click.confirm('\nPublish these quotes?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
-    _, wallet, _, _ = get_cli_context(need_client=False)
-    _, client = get_solana_cli_context()
     posted = 0
     for sp in specs:
         try:

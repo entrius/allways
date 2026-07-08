@@ -50,7 +50,20 @@ load_dotenv(find_dotenv(usecwd=True), override=False)
 load_dotenv(Path.home() / '.allways' / '.env', override=False)
 
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
-from allways.cli.swap_commands.helpers import ALLWAYS_DIR, CONFIG_FILE, apply_global_flags, console  # noqa: E402
+from allways.cli.swap_commands.helpers import (  # noqa: E402
+    ALLWAYS_DIR,
+    BTC_NETWORKS,
+    CONFIG_FILE,
+    ENV_BUNDLES,
+    SOLANA_NETWORKS,
+    apply_btc_network_env,
+    apply_global_flags,
+    console,
+    get_effective_config,
+)
+
+# Feed a configured btc-network into the BTC provider (which reads BTC_NETWORK from env; a real env wins).
+apply_btc_network_env(get_effective_config())
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
@@ -112,7 +125,18 @@ KNOWN_NETWORKS = {
     'local': 'ws://127.0.0.1:9944',
 }
 
-VALID_CONFIG_KEYS = ('wallet', 'hotkey', 'network', 'netuid', 'contract-address', 'program-id', 'solana-rpc')
+VALID_CONFIG_KEYS = (
+    'wallet',
+    'hotkey',
+    'network',
+    'netuid',
+    'contract-address',
+    'program-id',
+    'solana-rpc',
+    'solana-network',
+    'btc-network',
+    'env',
+)
 
 
 @config_group.command('set')
@@ -122,25 +146,28 @@ def config_set(key: str, value: str):
     """Set a configuration value.
 
     [dim]Valid keys:
-        wallet              Wallet name
-        hotkey              Hotkey name
-        contract-address    Substrate contract address (legacy taker/reserve path)
+        env                 One-liner bundle: sets network + solana-network + btc-network + netuid
+        wallet              Bittensor wallet name
+        hotkey              Bittensor hotkey name
+        network             Bittensor network name (test/finney/local) or ws:// endpoint
+        netuid              Subnet UID
+        solana-network      Solana network name (devnet/mainnet/localnet) → RPC resolved in code
+        solana-rpc          Custom Solana RPC URL (escape hatch; SOLANA_RPC_URL env wins)
+        btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
         program-id          Solana program ID (miner/admin commands)
-        solana-rpc          Solana RPC URL (overridden by SOLANA_RPC_URL env)
-        network             Network name or endpoint URL
-        netuid              Subnet UID[/dim]
+        contract-address    Legacy substrate contract address (old taker/reserve path)[/dim]
 
-    [dim]Networks:
-        finney              Production  (wss://entrypoint-finney.opentensor.ai:443)
-        test                Test        (wss://test.finney.opentensor.ai:443)
-        local               Local dev   (ws://127.0.0.1:9944)
-        ws://...            Custom endpoint[/dim]
+    [dim]Networks per chain:
+        env:            testnet | mainnet   (sets all three chains at once)
+        network:        finney | test | local | ws://...
+        solana-network: devnet | mainnet | localnet   (or set a custom solana-rpc URL)
+        btc-network:    mainnet | testnet4 | testnet | signet[/dim]
 
     [dim]Examples:
+        $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + netuid 19
         $ alw config set wallet alice
-        $ alw config set contract-address 5Cxxx...
-        $ alw config set network finney
-        $ alw config set network local[/dim]
+        $ alw config set solana-network devnet
+        $ alw config set network finney[/dim]
     """
     ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -150,6 +177,27 @@ def config_set(key: str, value: str):
             config = json.loads(CONFIG_FILE.read_text())
         except json.JSONDecodeError:
             console.print('[yellow]Warning: Existing config was invalid, starting fresh[/yellow]')
+
+    # env bundle: expand one name into all three chains' networks + netuid in a single write.
+    if key == 'env':
+        bundle = ENV_BUNDLES.get(value)
+        if not bundle:
+            console.print(f'[red]Unknown env {value!r}; expected {list(ENV_BUNDLES)}.[/red]')
+            return
+        config.update(bundle)
+        CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        console.print(
+            f'[green]Set env {value}:[/green] ' + ', '.join(f'{k}={v}' for k, v in bundle.items())
+        )
+        return
+
+    # Validate name-based network keys — the raw-URL escape hatches are solana-rpc / SOLANA_RPC_URL.
+    if key == 'solana-network' and value not in SOLANA_NETWORKS:
+        console.print(f'[red]Unknown solana-network {value!r}; expected {list(SOLANA_NETWORKS)} (or set a custom solana-rpc).[/red]')
+        return
+    if key == 'btc-network' and value not in BTC_NETWORKS:
+        console.print(f'[red]Unknown btc-network {value!r}; expected {list(BTC_NETWORKS)}.[/red]')
+        return
 
     # Normalize network: reverse-map known endpoints to names
     if key == 'network':
