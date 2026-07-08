@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
+from allways import dev_signal
 from allways.chains import canonical_pair, get_chain
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import (
@@ -98,6 +99,7 @@ def score_and_reward_miners(self: Validator) -> None:
         else:
             rewards, miner_uids = calculate_miner_rewards(self, now)
         self.update_scores(rewards, miner_uids)
+        dev_signal.emit('scoring_rewards', halted=halted, rewards={i: float(r) for i, r in enumerate(rewards) if r})
         prune_crown_events(self, now)
         # Advance both cursors only after a round completes, so a mid-round
         # failure retries the same window next forward. last_scored_block gates

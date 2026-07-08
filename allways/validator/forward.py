@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import bittensor as bt
 
+from allways import dev_signal
 from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
 from allways.validator.scoring import (
@@ -63,6 +64,7 @@ async def forward(self: Validator) -> None:
     # one); halt-aware clearing happens once per round in `_flush_halt_window`.
     crown_snapshot = snapshot_current_crown_holders(self)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
+    dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}': v for k, v in crown_snapshot.items()})
     if self.database_storage.is_enabled():
         try:
             self.database_storage.upsert_current_crown_snapshot(crown_snapshot)

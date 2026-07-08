@@ -16,6 +16,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 import bittensor as bt
 from solders.pubkey import Pubkey
 
+from allways import dev_signal
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs
 from allways.constants import EXTENSION_PADDING_SECONDS
@@ -270,6 +271,7 @@ class SolanaSwapLoop:
             f'{self._label(swap)}: REJECT — to_amount {swap.to_amount} inconsistent with pinned rate '
             f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
         )
+        dev_signal.emit('d1_reject', swap_key=key, expected=expected_to, got=int(swap.to_amount))
 
     def _claim_is_stale(self, reservation: Any, swap: Any, now: int) -> bool:
         """A PendingAttestation claim is orphaned when its reservation can no longer carry it to attestation:
@@ -349,22 +351,22 @@ class SolanaSwapLoop:
             if decision == SwapDecision.ATTEST:
                 if self.client.has_voted(pdas.REQ_INITIATE, swap.miner, voter):
                     return False
-                self.client.vote_initiate(swap_key, swap.miner)
+                sig = self.client.vote_initiate(swap_key, swap.miner)
             elif decision == SwapDecision.CONFIRM:
                 if self.client.has_voted(pdas.REQ_CONFIRM, swap_key, voter):
                     return False
-                self.client.confirm_swap(swap_key, swap.miner, swap.from_chain, swap.to_chain)
+                sig = self.client.confirm_swap(swap_key, swap.miner, swap.from_chain, swap.to_chain)
             elif decision == SwapDecision.TIMEOUT:
                 if self.client.has_voted(pdas.REQ_TIMEOUT, swap_key, voter):
                     return False
-                self.client.timeout_swap(swap_key, swap.miner, swap.user)
+                sig = self.client.timeout_swap(swap_key, swap.miner, swap.user)
             elif decision == SwapDecision.CANCEL:
                 # Permissionless reap (no vote round) — first validator wins, peers no-op benignly.
-                self.client.close_stale_claim(swap.miner, swap_key)
+                sig = self.client.close_stale_claim(swap.miner, swap_key)
             elif decision == SwapDecision.EXTEND_RESERVATION:
-                self.client.extend_reservation(swap.miner, action.target_at)
+                sig = self.client.extend_reservation(swap.miner, action.target_at)
             elif decision == SwapDecision.EXTEND_TIMEOUT:
-                self.client.extend_timeout(swap_key, swap.miner, action.target_at)
+                sig = self.client.extend_timeout(swap_key, swap.miner, action.target_at)
             else:
                 return False  # REJECT / non-actionable: cast nothing
         except Exception as e:
@@ -377,6 +379,7 @@ class SolanaSwapLoop:
             bt.logging.error(f'{label}: {decision.value} failed: {e}')
             return False
         bt.logging.success(f'{label}: {decision.value} submitted')
+        dev_signal.emit('vote_cast', swap_key=_swap_key_hex(swap.swap_key), decision=decision.value, sig=sig)
         return True
 
     def resolve_pools_once(self, now: int) -> List[str]:
@@ -431,6 +434,7 @@ class SolanaSwapLoop:
                 bt.logging.error(f'pool {miner}: resolve_pool failed: {e}')
                 continue
             bt.logging.success(f'pool {miner}: resolved ({len(pool.requests)} req)')
+            dev_signal.emit('pool_resolved', miner=str(miner), requests=len(reqs))
             resolved.append(str(miner))
         return resolved
 
@@ -452,6 +456,13 @@ class SolanaSwapLoop:
             # round, including a plain WAIT (previously silent, which hid a stalled swap until it timed out).
             reason = f' — {action.reason}' if action.reason else ''
             bt.logging.info(f'swap {key} [{_status_name(swap)}]: {action.decision.value}{reason}')
+            dev_signal.emit(
+                'decision',
+                swap_key=key,
+                status=_status_name(swap),
+                decision=action.decision.value,
+                reason=action.reason,
+            )
             if action.decision in ACTIONABLE:
                 if self.read_only:
                     bt.logging.info(f'swap {key} [{_status_name(swap)}]: WOULD {action.decision.value} (read-only)')
