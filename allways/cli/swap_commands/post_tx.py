@@ -1,13 +1,12 @@
 """alw swap post-tx - Submit source transaction hash for a pending swap reservation.
 
-Stub: the reserve→deposit→confirm relay moves on-chain to Solana
-(submit_swap_claim against an on-chain Reservation); the taker CLI intake is not
-wired yet."""
+Deferred: advancing a reservation with a source-tx hash requires verifying the deposit against the source
+chain (a chain-provider check the CLI taker path does not do yet). Exits non-zero; use the browser flow."""
 
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import taker_view_unavailable
+from allways.cli.swap_commands.helpers import not_implemented
 
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
@@ -34,4 +33,4 @@ def post_tx_command(tx_hash: str, tx_block: int):
         $ alw swap post-tx abc123def... --block 12345   (escape hatch)
         $ alw swap post-tx  (prompts for tx hash)[/dim]
     """
-    taker_view_unavailable('Swap post-tx')
+    not_implemented('Swap post-tx (CLI fund relay)')

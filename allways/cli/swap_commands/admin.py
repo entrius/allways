@@ -6,6 +6,7 @@ from solders.pubkey import Pubkey
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     console,
+    fail,
     from_lamports,
     get_solana_cli_context,
     loading,
@@ -19,8 +20,7 @@ def _parse_pubkey(s: str):
     try:
         return Pubkey.from_string(s)
     except Exception:
-        console.print(f'[red]Not a valid Solana pubkey: {s}[/red]')
-        return None
+        fail(f'Not a valid Solana pubkey: {s}')
 
 
 def _run_setter(title, getter, setter, noun, format_current, new_display, success_msg):
@@ -28,8 +28,7 @@ def _run_setter(title, getter, setter, noun, format_current, new_display, succes
     try:
         current = getter(client)
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read {noun}: {e}[/red]')
-        return
+        fail(f'Failed to read {noun}: {e}')
     console.print(f'\n[bold]{title}[/bold]\n')
     console.print(f'  Current: {format_current(current)}')
     console.print(f'  New:     {new_display}\n')
@@ -41,7 +40,7 @@ def _run_setter(title, getter, setter, noun, format_current, new_display, succes
             setter(client)
         console.print(f'[green]{success_msg}[/green]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to set {noun}: {e}[/red]')
+        fail(f'Failed to set {noun}: {e}')
 
 
 @click.group('admin', cls=StyledGroup, show_disclaimer=True)
@@ -59,8 +58,7 @@ def set_timeout(secs: int):
         $ alw admin set-timeout 600[/dim]
     """
     if secs < 60:
-        console.print('[red]Seconds must be >= 60[/red]')
-        return
+        fail('Seconds must be >= 60')
     _run_setter(
         title='Set Fulfillment Timeout',
         getter=lambda c: c.get_config().fulfillment_timeout_secs,
@@ -81,8 +79,7 @@ def set_reservation_ttl(secs: int):
         $ alw admin set-reservation-ttl 600[/dim]
     """
     if secs <= 0:
-        console.print('[red]Seconds must be positive[/red]')
-        return
+        fail('Seconds must be positive')
     _run_setter(
         title='Set Reservation TTL',
         getter=lambda c: c.get_config().reservation_ttl_secs,
@@ -103,8 +100,7 @@ def set_reservation_fee(amount_sol: float):
         $ alw admin set-reservation-fee 0.001[/dim]
     """
     if amount_sol < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
+        fail('Amount must be non-negative')
     lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Reservation Fee',
@@ -126,8 +122,7 @@ def set_pool_window(secs: int):
         $ alw admin set-pool-window 60[/dim]
     """
     if secs <= 0:
-        console.print('[red]Seconds must be positive[/red]')
-        return
+        fail('Seconds must be positive')
     _run_setter(
         title='Set Pool Window',
         getter=lambda c: c.get_config().pool_window_secs,
@@ -148,8 +143,7 @@ def set_weights_interval(secs: int):
         $ alw admin set-weights-interval 1200[/dim]
     """
     if secs <= 0:
-        console.print('[red]Seconds must be positive[/red]')
-        return
+        fail('Seconds must be positive')
     _run_setter(
         title='Set Weights Update Interval',
         getter=lambda c: c.get_config().weights_update_min_interval_secs,
@@ -170,8 +164,7 @@ def set_max_extension(secs: int):
         $ alw admin set-max-extension 3600[/dim]
     """
     if secs < 0:
-        console.print('[red]Seconds must be non-negative[/red]')
-        return
+        fail('Seconds must be non-negative')
     _run_setter(
         title='Set Max Total Extension',
         getter=lambda c: c.get_config().max_total_extension_secs,
@@ -192,8 +185,7 @@ def set_min_collateral(amount_sol: float):
         $ alw admin set-min-collateral 2.0[/dim]
     """
     if amount_sol <= 0:
-        console.print('[red]Amount must be positive[/red]')
-        return
+        fail('Amount must be positive')
     lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Minimum Collateral',
@@ -216,8 +208,7 @@ def set_max_collateral(amount_sol: float):
         $ alw admin set-max-collateral 0[/dim]
     """
     if amount_sol < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
+        fail('Amount must be non-negative')
     lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Maximum Collateral',
@@ -240,8 +231,7 @@ def set_min_swap(amount_sol: float):
         $ alw admin set-min-swap 0[/dim]
     """
     if amount_sol < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
+        fail('Amount must be non-negative')
     lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Minimum Swap Amount',
@@ -264,8 +254,7 @@ def set_max_swap(amount_sol: float):
         $ alw admin set-max-swap 0[/dim]
     """
     if amount_sol < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
+        fail('Amount must be non-negative')
     lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Maximum Swap Amount',
@@ -287,8 +276,7 @@ def set_threshold(percent: int):
         $ alw admin set-threshold 67[/dim]
     """
     if percent <= 0 or percent > 100:
-        console.print('[red]Threshold must be 1-100[/red]')
-        return
+        fail('Threshold must be 1-100')
     _run_setter(
         title='Set Consensus Threshold',
         getter=lambda c: c.get_config().consensus_threshold_percent,
@@ -315,15 +303,12 @@ def add_vali(pubkey: str, weight: int):
         $ alw admin add-vali <pubkey> --weight 1[/dim]
     """
     pk = _parse_pubkey(pubkey)
-    if pk is None:
-        return
     _, client = get_solana_cli_context()
 
     try:
         already = _is_validator(client.get_config(), pk)
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read validator set: {e}[/red]')
-        return
+        fail(f'Failed to read validator set: {e}')
 
     console.print('\n[bold]Add Validator[/bold]\n')
     console.print(f'  Pubkey: {pk}')
@@ -341,7 +326,7 @@ def add_vali(pubkey: str, weight: int):
             client.add_validator(pk, weight)
         console.print(f'[green]Validator {pk} added[/green]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to add validator: {e}[/red]')
+        fail(f'Failed to add validator: {e}')
 
 
 @admin_group.command('remove-vali', show_disclaimer=True)
@@ -353,15 +338,12 @@ def remove_vali(pubkey: str):
         $ alw admin remove-vali <pubkey>[/dim]
     """
     pk = _parse_pubkey(pubkey)
-    if pk is None:
-        return
     _, client = get_solana_cli_context()
 
     try:
         registered = _is_validator(client.get_config(), pk)
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read validator set: {e}[/red]')
-        return
+        fail(f'Failed to read validator set: {e}')
 
     console.print('\n[bold]Remove Validator[/bold]\n')
     console.print(f'  Pubkey: {pk}')
@@ -378,7 +360,7 @@ def remove_vali(pubkey: str):
             client.remove_validator(pk)
         console.print(f'[green]Validator {pk} removed[/green]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to remove validator: {e}[/red]')
+        fail(f'Failed to remove validator: {e}')
 
 
 @admin_group.command('withdraw-treasury', show_disclaimer=True)
@@ -395,15 +377,12 @@ def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
         $ alw admin withdraw-treasury <pubkey> --amount 1.5[/dim]
     """
     pk = _parse_pubkey(recipient)
-    if pk is None:
-        return
     _, client = get_solana_cli_context()
 
     try:
         treasury = client.get_treasury()
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read treasury: {e}[/red]')
-        return
+        fail(f'Failed to read treasury: {e}')
     total = treasury.total if treasury is not None else 0
 
     lamports = to_lamports(amount) if amount is not None else total
@@ -413,11 +392,9 @@ def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
     console.print(f'  Recipient: {pk}\n')
 
     if lamports <= 0:
-        console.print('[yellow]Nothing to withdraw.[/yellow]')
-        return
+        fail('Nothing to withdraw (treasury is empty or amount is zero).')
     if lamports > total:
-        console.print('[red]Requested amount exceeds the accrued treasury balance.[/red]')
-        return
+        fail('Requested amount exceeds the accrued treasury balance.')
 
     if not yes and not click.confirm('Confirm withdrawing treasury fees?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -428,7 +405,7 @@ def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
             client.withdraw_treasury(pk, lamports)
         console.print(f'[green]Withdrew {from_lamports(lamports):.6f} SOL to {pk}[/green]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to withdraw treasury: {e}[/red]')
+        fail(f'Failed to withdraw treasury: {e}')
 
 
 @click.group('danger', cls=StyledGroup, show_disclaimer=True)
@@ -453,8 +430,7 @@ def halt_system():
             console.print('[yellow]System is already halted[/yellow]')
             return
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read halt status: {e}[/red]')
-        return
+        fail(f'Failed to read halt status: {e}')
 
     console.print('\n[bold red]Halt System[/bold red]\n')
     console.print('  This blocks new deposits / activations / reservation pools.')
@@ -469,7 +445,7 @@ def halt_system():
             client.set_halted(True)
         console.print('[red]System is now halted[/red]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to halt system: {e}[/red]')
+        fail(f'Failed to halt system: {e}')
 
 
 @danger_group.command('resume', show_disclaimer=True)
@@ -486,8 +462,7 @@ def resume_system():
             console.print('[yellow]System is not halted[/yellow]')
             return
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read halt status: {e}[/red]')
-        return
+        fail(f'Failed to read halt status: {e}')
 
     console.print('\n[bold]Resume System[/bold]\n')
     console.print('  This allows new deposits / activations / pools again.\n')
@@ -501,7 +476,7 @@ def resume_system():
             client.set_halted(False)
         console.print('[green]System resumed[/green]\n')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to resume system: {e}[/red]')
+        fail(f'Failed to resume system: {e}')
 
 
 admin_group.add_command(danger_group)

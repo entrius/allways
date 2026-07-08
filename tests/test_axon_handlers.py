@@ -8,7 +8,6 @@ test_axon_solana_handlers.py.
 
 import asyncio
 import threading
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from allways.synapses import SwapReserveSynapse

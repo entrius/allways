@@ -1,13 +1,13 @@
 """alw swap resume-reservation - Recover an interrupted pre-initiate reservation flow.
 
-Stub: the reserve→deposit→initiate flow moves on-chain to Solana with the
-reservation pool; its Solana-backed re-port is pending (`alw swap now` origination is live)."""
+Deferred: resuming a reservation submits + verifies the source deposit against the source chain (a
+chain-provider check the CLI taker path does not do yet). Exits non-zero; use the browser flow."""
 
 from typing import Optional
 
 import click
 
-from allways.cli.swap_commands.helpers import taker_view_unavailable
+from allways.cli.swap_commands.helpers import not_implemented
 
 
 @click.command('resume-reservation')
@@ -37,4 +37,4 @@ def resume_reservation_command(from_tx_hash_opt: Optional[str], auto_send: bool,
         alw swap resume-reservation --from-tx-hash abc123... --yes
         alw swap resume-reservation --send --yes
     """
-    taker_view_unavailable('Swap resume-reservation')
+    not_implemented('Swap resume-reservation (CLI fund relay)')

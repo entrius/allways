@@ -1,25 +1,45 @@
 """alw view - Inspect miners, rates, swaps, validators, config, and reservations.
 
-`view config` and `view validators` read the on-chain Config directly. The taker aggregation
-views (miners/rates/swaps/reservation) still drew from the old ink! contract surface and need a
-Solana-backed re-port (MinerQuote aggregation, on-chain swaps/reservations), so they stay stubbed."""
+All views read the on-chain Solana program: `config`/`validators` read the Config account; `miners`/`rates`
+aggregate MinerQuote + MinerState; `active-swaps`/`swap` read Swap accounts; `reservation` reads a per-miner
+Reservation. Reads need no keypair. Per-miner reliability is keyed by bittensor hotkey (not the Solana miner
+pubkey these views key on), so it is intentionally omitted here rather than shown against the wrong key.
+"""
+
+import json
+import time
 
 import click
+from rich.table import Table
+from rich.text import Text
 from solders.pubkey import Pubkey
 
+from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    PENDING_SWAP_FILE,
+    STATUS_SORT_ORDER,
+    STATUS_STYLES,
+    ZERO_SWAP_KEY,
     console,
+    fail,
     from_lamports,
     get_solana_cli_context,
+    load_miner_book,
+    miner_runtime_status,
+    print_json,
+    safe_read,
     secs_str,
-    taker_view_unavailable,
 )
-from allways.solana.client import SolanaClientError
+from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
+from allways.solana.client import swap_from_solana
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
 MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
-RATES_SORT_FIELDS = ['uid', 'rate', 'fwd', 'rev', 'capacity']
+RATES_SORT_FIELDS = ['rate', 'capacity', 'pair', 'uid']
+# On-chain Swap accounts only ever hold these live statuses; completed/timed-out swaps are closed on-chain.
+SWAP_STATUS_CHOICES = ['active', 'fulfilled', 'pending-attestation']
+_SWAP_STATUS_VARIANTS = {'active': 'Active', 'fulfilled': 'Fulfilled', 'pending-attestation': 'PendingAttestation'}
 
 
 @click.group('view', cls=StyledGroup)
@@ -28,15 +48,35 @@ def view_group():
     pass
 
 
+def _short(s: str, full: bool, n: int = 8) -> str:
+    return s if full else (f'{s[:n]}…' if len(s) > n else s)
+
+
+def _quote_dir(q) -> str:
+    return f'{q.from_chain.upper()}→{q.to_chain.upper()}'
+
+
+def _max_rate(entry) -> float:
+    """Highest numeric rate the miner posts (coarse cross-direction proxy for `--sort rate`)."""
+    rates = []
+    for q in entry.quotes:
+        try:
+            rates.append(float(rate_display_from_fixed(q.rate)))
+        except (TypeError, ValueError):
+            continue
+    return max(rates) if rates else 0.0
+
+
 @view_group.command('miners')
-@click.option('--full', is_flag=True, help='Show untruncated addresses and hotkeys')
+@click.option('--full', is_flag=True, help='Show untruncated pubkeys and addresses')
 @click.option(
     '--sort',
     'sort_by',
     type=click.Choice(MINER_SORT_FIELDS, case_sensitive=False),
     default='uid',
     show_default=True,
-    help='Sort field. uid ascends; rate/capacity descend; status groups available→reserved→in-swap→cooldown→offline.',
+    help='Sort field. uid = stable pubkey order; rate/capacity descend; status groups '
+    'available→reserved→in-swap→cooldown→offline.',
 )
 @click.option(
     '--status',
@@ -46,72 +86,328 @@ def view_group():
     help='Only show miners in a given runtime state.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
     default=None,
     type=str,
-    help='Case-insensitive substring match against UID, addresses, and hotkey.',
+    help='Case-insensitive substring match against pubkey and posted addresses.',
 )
-def view_miners(full, sort_by, status_filter, min_capacity, search):
-    """List active miners with their posted directions and status."""
-    taker_view_unavailable('`view miners`')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
+    """List miners with their runtime status, collateral, and posted directions/rates.
+
+    [dim]Miners are Solana pubkeys (no metagraph uid here); '#' is a display index and `--sort uid` means
+    stable pubkey order.[/dim]"""
+    _, client = get_solana_cli_context(need_keypair=False)
+    now = int(time.time())
+    book = load_miner_book(client, with_reservation=True)
+
+    rows = []
+    for e in book:
+        status = miner_runtime_status(e.state, e.reservation, now)
+        addrs = ' '.join(f'{q.miner_from_addr} {q.miner_to_addr}' for q in e.quotes)
+        rows.append((e, status, addrs))
+
+    if status_filter:
+        rows = [r for r in rows if r[1] == status_filter.lower()]
+    if min_capacity is not None:
+        rows = [r for r in rows if from_lamports(r[0].collateral) >= min_capacity]
+    if search:
+        needle = search.lower()
+        rows = [r for r in rows if needle in (r[0].pubkey_str + ' ' + r[2]).lower()]
+
+    if sort_by == 'uid':
+        rows.sort(key=lambda r: r[0].pubkey_str)
+    elif sort_by == 'rate':
+        rows.sort(key=lambda r: _max_rate(r[0]), reverse=True)
+    elif sort_by == 'capacity':
+        rows.sort(key=lambda r: r[0].collateral, reverse=True)
+    elif sort_by == 'status':
+        rows.sort(key=lambda r: STATUS_SORT_ORDER.index(r[1]))
+
+    if as_json:
+        print_json(
+            [
+                {
+                    'miner': e.pubkey_str,
+                    'status': status,
+                    'collateral_sol': from_lamports(e.collateral),
+                    'quotes': [
+                        {
+                            'from': q.from_chain,
+                            'to': q.to_chain,
+                            'rate': rate_display_from_fixed(q.rate),
+                            'miner_from_addr': q.miner_from_addr,
+                            'miner_to_addr': q.miner_to_addr,
+                        }
+                        for q in e.quotes
+                    ],
+                }
+                for e, status, _addrs in rows
+            ]
+        )
+        return
+
+    if not rows:
+        console.print('[yellow]No miners match those filters.[/yellow]')
+        return
+
+    table = Table(title=f'Miners ({len(rows)})', show_header=True, show_lines=True)
+    table.add_column('#', style='dim', justify='right')
+    table.add_column('Miner', style='cyan')
+    table.add_column('Status')
+    table.add_column('Collateral', style='green', justify='right')
+    table.add_column('Directions', style='white')
+    for i, (e, status, _addrs) in enumerate(rows, 1):
+        dirs = Text()
+        for j, q in enumerate(e.quotes):
+            if j:
+                dirs.append('\n')
+            dirs.append(f'{_quote_dir(q)} @ {rate_display_from_fixed(q.rate)}')
+            if full:
+                dirs.append(f'  ({q.miner_from_addr}→{q.miner_to_addr})', style='dim')
+        table.add_row(
+            str(i),
+            _short(e.pubkey_str, full),
+            Text(status, style=STATUS_STYLES.get(status, 'white')),
+            f'{from_lamports(e.collateral):.4f} SOL',
+            dirs,
+        )
+    console.print(table)
+
+
+def _parse_pair(pair: str):
+    """Parse `sol-btc` → ('sol','btc'). Fail (non-zero) on malformed/unknown pair."""
+    parts = pair.lower().split('-')
+    if len(parts) != 2 or parts[0] not in SUPPORTED_CHAINS or parts[1] not in SUPPORTED_CHAINS:
+        fail(f'Invalid --pair {pair!r}. Use <from>-<to> with supported chains, e.g. sol-btc.')
+    return parts[0], parts[1]
 
 
 @view_group.command('rates')
-@click.option('--pair', default=None, type=str, help='Filter by pair (e.g. btc-tao)')
-@click.option('--full', is_flag=True, help='Show untruncated addresses')
+@click.option('--pair', default=None, type=str, help='Filter by direction (e.g. sol-btc)')
+@click.option('--full', is_flag=True, help='Show untruncated pubkeys and addresses')
 @click.option(
     '--sort',
     'sort_by',
     type=click.Choice(RATES_SORT_FIELDS, case_sensitive=False),
     default='rate',
     show_default=True,
-    help='Sort field. rate = best of fwd/rev (desc); fwd/rev = that direction only (desc); uid asc; capacity desc.',
+    help='Sort field. rate descends; capacity descends; pair groups by direction; uid = stable pubkey order.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
     default=None,
     type=str,
-    help='Case-insensitive substring match against UID and posted addresses.',
+    help='Case-insensitive substring match against pubkey and posted addresses.',
 )
-def view_rates(pair, full, sort_by, min_capacity, search):
-    """Show posted miner rates per direction."""
-    taker_view_unavailable('`view rates`')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_rates(pair, full, sort_by, min_capacity, search, as_json):
+    """Show posted miner rates, one row per direction."""
+    want = _parse_pair(pair) if pair else None
+    _, client = get_solana_cli_context(need_keypair=False)
+    now = int(time.time())
+    book = load_miner_book(client, with_reservation=True)
+
+    rows = []  # (entry, quote, status)
+    for e in book:
+        status = miner_runtime_status(e.state, e.reservation, now)
+        if min_capacity is not None and from_lamports(e.collateral) < min_capacity:
+            continue
+        for q in e.quotes:
+            if want and (q.from_chain, q.to_chain) != want:
+                continue
+            if search:
+                needle = search.lower()
+                hay = f'{e.pubkey_str} {q.miner_from_addr} {q.miner_to_addr}'.lower()
+                if needle not in hay:
+                    continue
+            rows.append((e, q, status))
+
+    if sort_by == 'rate':
+        rows.sort(key=lambda r: float(rate_display_from_fixed(r[1].rate) or 0), reverse=True)
+    elif sort_by == 'capacity':
+        rows.sort(key=lambda r: r[0].collateral, reverse=True)
+    elif sort_by == 'pair':
+        rows.sort(key=lambda r: (r[1].from_chain, r[1].to_chain))
+    elif sort_by == 'uid':
+        rows.sort(key=lambda r: r[0].pubkey_str)
+
+    if as_json:
+        print_json(
+            [
+                {
+                    'miner': e.pubkey_str,
+                    'from': q.from_chain,
+                    'to': q.to_chain,
+                    'rate': rate_display_from_fixed(q.rate),
+                    'collateral_sol': from_lamports(e.collateral),
+                    'status': status,
+                    'miner_from_addr': q.miner_from_addr,
+                    'miner_to_addr': q.miner_to_addr,
+                }
+                for e, q, status in rows
+            ]
+        )
+        return
+
+    if not rows:
+        console.print('[yellow]No posted rates match those filters.[/yellow]')
+        return
+
+    table = Table(title=f'Posted Rates ({len(rows)})', show_header=True)
+    table.add_column('Direction', style='cyan')
+    table.add_column('Rate', style='green', justify='right')
+    table.add_column('Miner', style='white')
+    table.add_column('Collateral', style='green', justify='right')
+    table.add_column('Status')
+    if full:
+        table.add_column('Addresses', style='dim')
+    for e, q, status in rows:
+        cells = [
+            _quote_dir(q),
+            rate_display_from_fixed(q.rate),
+            _short(e.pubkey_str, full),
+            f'{from_lamports(e.collateral):.4f} SOL',
+            Text(status, style=STATUS_STYLES.get(status, 'white')),
+        ]
+        if full:
+            cells.append(f'{q.miner_from_addr} → {q.miner_to_addr}')
+        table.add_row(*cells)
+    console.print(table)
+
+
+def _swap_json(s):
+    return {
+        'swap_key': s.key_hex,
+        'miner': str(s.miner),
+        'user': str(s.user),
+        'from_chain': s.from_chain,
+        'to_chain': s.to_chain,
+        'from_amount': s.from_amount,
+        'to_amount': s.to_amount,
+        'sol_amount': s.sol_amount,
+        'status': s.status,
+        'from_tx_hash': s.from_tx_hash,
+        'to_tx_hash': s.to_tx_hash,
+        'initiated_at': s.initiated_at,
+        'timeout_at': s.timeout_at,
+        'fulfilled_at': s.fulfilled_at,
+    }
 
 
 @view_group.command('active-swaps')
 @click.option(
     '--status',
+    'status_filter',
     default=None,
-    type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
-    help='Filter by status (active, fulfilled, completed, timed_out)',
+    type=click.Choice(SWAP_STATUS_CHOICES, case_sensitive=False),
+    help='Filter by on-chain status (active, fulfilled, pending-attestation).',
 )
-def view_active_swaps(status: str):
-    """List swaps currently tracked on-chain."""
-    taker_view_unavailable('`view active-swaps`')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_active_swaps(status_filter, as_json):
+    """List swaps currently open on-chain (completed/timed-out swaps are closed and not listed)."""
+    _, client = get_solana_cli_context(need_keypair=False)
+    variant = _SWAP_STATUS_VARIANTS.get(status_filter.lower()) if status_filter else None
+    raw = safe_read(lambda: client.get_swaps(status=variant), what='read swaps')
+    swaps = [swap_from_solana(s) for _pk, s in raw]
+
+    if as_json:
+        print_json([_swap_json(s) for s in swaps])
+        return
+
+    if not swaps:
+        console.print('[yellow]No swaps currently open on-chain.[/yellow]')
+        return
+
+    table = Table(title=f'Open Swaps ({len(swaps)})', show_header=True)
+    table.add_column('Swap Key', style='cyan')
+    table.add_column('Pair', style='green')
+    table.add_column('From Amt', justify='right')
+    table.add_column('To Amt', justify='right')
+    table.add_column('Status', style='bold')
+    for s in swaps:
+        table.add_row(
+            s.key_hex[:16],
+            f'{s.from_chain.upper()}→{s.to_chain.upper()}',
+            str(s.from_amount),
+            str(s.to_amount),
+            s.status,
+        )
+    console.print(table)
+
+
+def _render_swap_detail(s):
+    to_dec = get_chain(s.to_chain).decimals
+    from_dec = get_chain(s.from_chain).decimals
+    console.print(f'\n[bold]Swap {s.key_hex[:16]}[/bold]\n')
+    console.print(f'  Status:      [bold]{s.status}[/bold]')
+    console.print(f'  Pair:        {s.from_chain.upper()} → {s.to_chain.upper()}')
+    console.print(f'  Miner:       {s.miner}')
+    console.print(f'  User:        {s.user}')
+    console.print(f'  Send:        {s.from_amount / 10**from_dec:g} {s.from_chain.upper()}')
+    console.print(f'  Receive:     {s.to_amount / 10**to_dec:g} {s.to_chain.upper()} (pinned payout)')
+    console.print(f'  User from:   {s.user_from_addr}')
+    console.print(f'  Miner to:    {s.miner_to_addr}')
+    console.print(f'  Source tx:   {s.from_tx_hash or "[dim](none)[/dim]"}')
+    console.print(f'  Dest tx:     {s.to_tx_hash or "[dim](none)[/dim]"}')
+    console.print(f'  Initiated:   {s.initiated_at}')
+    console.print(f'  Timeout at:  {s.timeout_at}')
+    console.print(f'  Fulfilled:   {s.fulfilled_at or "[dim](not yet)[/dim]"}\n')
 
 
 @view_group.command('swap')
-@click.argument('swap_id', type=int)
+@click.argument('swap_key_hex', type=str)
 @click.option('--watch', '-w', is_flag=True, help='Poll and refresh until swap completes or times out')
-def view_swap(swap_id: int, watch: bool):
-    """Inspect a single swap by id."""
-    taker_view_unavailable('`view swap`')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
+def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
+    """Inspect a single swap by its 32-byte hex swap_key."""
+    try:
+        key = bytes.fromhex(swap_key_hex)
+    except ValueError:
+        fail(f'Invalid swap_key {swap_key_hex!r}: expected hex (the 32-byte swap_key, not an integer id).')
+
+    _, client = get_solana_cli_context(need_keypair=False)
+
+    def _load():
+        acct = safe_read(lambda: client.get_swap(key), what='read swap')
+        return swap_from_solana(acct, key) if acct is not None else None
+
+    s = _load()
+    if s is None:
+        fail(f'No swap found for swap_key {swap_key_hex}.')
+
+    if as_json:
+        print_json(_swap_json(s))
+        return
+
+    if not watch:
+        _render_swap_detail(s)
+        return
+
+    terminal = {'PendingAttestation'}
+    while True:
+        console.clear()
+        _render_swap_detail(s)
+        if s.status in terminal:
+            console.print('[dim]Swap reached a terminal on-chain status.[/dim]')
+            return
+        time.sleep(5)
+        s = _load()
+        if s is None:
+            console.print('[dim]Swap account closed (resolved and cleaned up on-chain).[/dim]')
+            return
 
 
 def _read_config():
-    """Read the on-chain program Config (read-only — no keypair needed). None if unreadable/uninitialized."""
+    """Read the on-chain Config. `fail` (non-zero) on RPC error; None (exit 0) when genuinely uninitialized."""
     _, client = get_solana_cli_context(need_keypair=False)
-    try:
-        cfg = client.get_config()
-    except SolanaClientError as e:
-        console.print(f'[red]Failed to read config: {e}[/red]')
-        return None
+    cfg = safe_read(lambda: client.get_config(), what='read config')
     if cfg is None:
         console.print('[yellow]Program is not initialized (no Config account).[/yellow]')
     return cfg
@@ -161,7 +457,69 @@ def view_validators():
     console.print()
 
 
+def _pending_miner():
+    """Return the miner pubkey string saved by `alw swap now` in pending_swap.json, or None."""
+    if not PENDING_SWAP_FILE.exists():
+        return None
+    try:
+        return json.loads(PENDING_SWAP_FILE.read_text()).get('miner')
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 @view_group.command('reservation')
-def view_reservation():
-    """Show your current pending reservation, if any."""
-    taker_view_unavailable('`view reservation`')
+@click.option('--miner', 'miner_pk', default=None, type=str, help='Miner pubkey whose reservation to inspect')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
+def view_reservation(miner_pk, as_json):
+    """Show the reservation held on a miner (reservations are keyed by the miner pubkey)."""
+    target = miner_pk or _pending_miner()
+    if not target:
+        fail('No miner specified and no saved swap found. Pass --miner <pubkey>.')
+    try:
+        miner = Pubkey.from_string(target)
+    except (ValueError, TypeError):
+        fail(f'Invalid miner pubkey: {target}')
+
+    _, client = get_solana_cli_context(need_keypair=False)
+    resv = safe_read(lambda: client.get_reservation(miner), what='read reservation')
+
+    if resv is None:
+        if as_json:
+            print_json({'miner': str(miner), 'reservation': None})
+            return
+        console.print(f'[yellow]No active reservation on miner {target}.[/yellow]')
+        return
+
+    now = int(time.time())
+    remaining = max(0, int(resv.reserved_until) - now)
+    claimed = bytes(resv.claimed_swap_key) != ZERO_SWAP_KEY
+    to_dec = get_chain(resv.to_chain).decimals
+    from_dec = get_chain(resv.from_chain).decimals
+
+    if as_json:
+        print_json(
+            {
+                'miner': str(miner),
+                'user': str(resv.user),
+                'from_chain': resv.from_chain,
+                'to_chain': resv.to_chain,
+                'from_amount': resv.from_amount,
+                'to_amount': resv.to_amount,
+                'sol_amount': resv.sol_amount,
+                'reserved_until': int(resv.reserved_until),
+                'remaining_secs': remaining,
+                'deposit_claimed': claimed,
+                'miner_from_addr': resv.miner_from_addr,
+            }
+        )
+        return
+
+    console.print('\n[bold]Reservation[/bold]\n')
+    console.print(f'  Miner:       {miner}')
+    console.print(f'  User:        {resv.user}')
+    console.print(f'  Pair:        {resv.from_chain.upper()} → {resv.to_chain.upper()}')
+    console.print(f'  Send:        {resv.from_amount / 10**from_dec:g} {resv.from_chain.upper()}')
+    console.print(f'  Receive:     {resv.to_amount / 10**to_dec:g} {resv.to_chain.upper()}')
+    console.print(f'  Send to:     {resv.miner_from_addr}')
+    console.print(f'  Reserved:    {"expired" if remaining == 0 else secs_str(remaining) + " remaining"}')
+    console.print(f'  Deposit:     {"claimed" if claimed else "[dim]not yet sent[/dim]"}\n')

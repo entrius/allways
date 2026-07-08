@@ -1,12 +1,12 @@
 """alw claim - Claim a pending slash payout for a timed-out swap.
 
-Stub: the slash/refund payout flow moves on-chain to Solana with the
-reservation pool; its Solana-backed re-port is pending (`alw swap now` origination is live)."""
+Deferred: the slash/refund payout needs source-chain verification of the failed swap (a chain-provider check
+the CLI taker path does not do yet). Exits non-zero; use the browser flow."""
 
 import click
 
 from allways.cli.help import StyledCommand
-from allways.cli.swap_commands.helpers import taker_view_unavailable
+from allways.cli.swap_commands.helpers import not_implemented
 
 
 @click.command('claim', cls=StyledCommand, show_disclaimer=True)
@@ -22,4 +22,4 @@ def claim_command(swap_id: int, yes: bool):
     [dim]Examples:
         $ alw claim 42[/dim]
     """
-    taker_view_unavailable('Slash claim')
+    not_implemented('Slash claim (CLI fund relay)')

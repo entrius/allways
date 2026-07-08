@@ -20,6 +20,7 @@ import click
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     console,
+    fail,
     get_cli_context,
     get_solana_cli_context,
     loading,
@@ -112,15 +113,12 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
         if not price or price <= 0:
             continue
         if not addr:
-            console.print(f'[red]--{spoke}-address required with --{spoke}-price[/red]')
-            return
+            fail(f'--{spoke}-address required with --{spoke}-price')
         chain_specs[spoke] = (price, addr)
     if not chain_specs:
-        console.print('[yellow]Nothing to post — give at least one --<chain>-price/--<chain>-address.[/yellow]')
-        return
+        fail('Nothing to post — give at least one --<chain>-price/--<chain>-address.')
     if not sol_address:
-        console.print(f'[red]--{NUMERAIRE_CHAIN}-address is required.[/red]')
-        return
+        fail(f'--{NUMERAIRE_CHAIN}-address is required.')
 
     _, wallet, _, _ = get_cli_context(need_client=False)
     _, client = get_solana_cli_context()
@@ -173,9 +171,10 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
             posted += 1
         except SolanaClientError as e:
             console.print(f'[red]Failed {sp.from_chain.upper()} → {sp.to_chain.upper()}: {e}[/red]')
-    if posted:
-        console.print(f'[green]Published {posted} quote direction(s)![/green]')
-        write_rate_posted_flag(wallet.hotkey.ss58_address)
+    if not posted:
+        fail('No quotes were published.')
+    console.print(f'[green]Published {posted} quote direction(s)![/green]')
+    write_rate_posted_flag(wallet.hotkey.ss58_address)
 
 
 # Interpolate the registry-derived example into the help (Click doesn't format docstrings).

@@ -8,12 +8,14 @@ from rich.table import Table
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     console,
+    fail,
     from_lamports,
     from_rao,
     get_cli_context,
     get_solana_cli_context,
     is_valid_ss58,
     loading,
+    secs_str,
     to_lamports,
     to_rao,
 )
@@ -51,8 +53,7 @@ def collateral_deposit(amount: float | None, yes: bool):
         amount = click.prompt('Amount to deposit (SOL)', type=float)
 
     if amount <= 0:
-        console.print('[red]Amount must be positive[/red]')
-        return
+        fail('Amount must be positive')
 
     amount_lamports = to_lamports(amount)
 
@@ -68,21 +69,19 @@ def collateral_deposit(amount: float | None, yes: bool):
         if config is not None and config.max_collateral > 0:
             current = client.get_collateral_lamports(pubkey) or 0
             if current + amount_lamports > config.max_collateral:
-                console.print(
-                    f'[red]This would exceed the max collateral limit ({from_lamports(config.max_collateral):.4f} SOL). '
-                    f'Current: {from_lamports(current):.4f} SOL, posting: {amount} SOL.[/red]'
+                fail(
+                    f'This would exceed the max collateral limit ({from_lamports(config.max_collateral):.4f} SOL). '
+                    f'Current: {from_lamports(current):.4f} SOL, posting: {amount} SOL.'
                 )
-                return
 
         free = client.rpc.get_account_lamports(pubkey) or 0
         required = amount_lamports + SOLANA_FEE_BUFFER_LAMPORTS
         if free < required:
-            console.print(
-                f'[red]Insufficient keypair balance. Free: {from_lamports(free):.4f} SOL, '
-                f'need: {from_lamports(required):.4f} SOL (amount + gas buffer).[/red]'
-            )
             console.print(f'[dim]Fund the Solana keypair: solana transfer {pubkey} <sol>[/dim]')
-            return
+            fail(
+                f'Insufficient keypair balance. Free: {from_lamports(free):.4f} SOL, '
+                f'need: {from_lamports(required):.4f} SOL (amount + gas buffer).'
+            )
     except SolanaClientError as e:
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
@@ -97,7 +96,7 @@ def collateral_deposit(amount: float | None, yes: bool):
             client.post_collateral(amount_lamports)
         console.print(f'[green]Successfully deposited {amount} SOL collateral![/green]')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to deposit collateral: {e}[/red]')
+        fail(f'Failed to deposit collateral: {e}')
 
 
 @collateral_group.command('withdraw', show_disclaimer=True)
@@ -116,8 +115,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         amount = click.prompt('Amount to withdraw (SOL)', type=float)
 
     if amount <= 0:
-        console.print('[red]Amount must be positive[/red]')
-        return
+        fail('Amount must be positive')
 
     amount_lamports = to_lamports(amount)
 
@@ -132,20 +130,16 @@ def collateral_withdraw(amount: float | None, yes: bool):
         now = int(time.time())
         ms = client.get_miner_state(pubkey)
         if ms is None:
-            console.print('[red]No miner state found for this keypair (no collateral posted).[/red]')
-            return
+            fail('No miner state found for this keypair (no collateral posted).')
 
         if ms.active:
-            console.print('[red]Cannot withdraw while miner is active. Run `alw miner deactivate` first.[/red]')
-            return
+            fail('Cannot withdraw while miner is active. Run `alw miner deactivate` first.')
 
         if ms.has_active_swap:
-            console.print('[red]Cannot withdraw while miner has an active swap.[/red]')
-            return
+            fail('Cannot withdraw while miner has an active swap.')
 
         if ms.busy_until > now:
-            console.print('[red]Cannot withdraw while miner is busy (open pool / held reservation).[/red]')
-            return
+            fail('Cannot withdraw while miner is busy (open pool / held reservation).')
 
         if ms.deactivation_at > 0:
             config = client.get_config()
@@ -153,18 +147,11 @@ def collateral_withdraw(amount: float | None, yes: bool):
             cooldown_end = ms.deactivation_at + (timeout_secs * 2)
             if now < cooldown_end:
                 remaining = cooldown_end - now
-                console.print(
-                    f'[red]Withdrawal cooldown active. ~{remaining}s (~{remaining // 60} min) remaining.[/red]'
-                )
-                return
+                fail(f'Withdrawal cooldown active. {secs_str(remaining)} remaining.')
 
         current = client.get_collateral_lamports(pubkey) or 0
         if amount_lamports > current:
-            console.print(
-                f'[red]Insufficient collateral. Current: {from_lamports(current):.4f} SOL, '
-                f'requested: {amount} SOL.[/red]'
-            )
-            return
+            fail(f'Insufficient collateral. Current: {from_lamports(current):.4f} SOL, requested: {amount} SOL.')
     except SolanaClientError as e:
         console.print(f'[yellow]Warning: pre-flight check failed ({e}), proceeding anyway[/yellow]')
     except Exception as e:
@@ -179,7 +166,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
             client.withdraw_collateral(amount_lamports)
         console.print(f'[green]Successfully withdrew {amount} SOL collateral![/green]')
     except SolanaClientError as e:
-        console.print(f'[red]Failed to withdraw collateral: {e}[/red]')
+        fail(f'Failed to withdraw collateral: {e}')
 
 
 @collateral_group.command('recover-from-hotkey', show_disclaimer=True)
@@ -208,8 +195,7 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
     if dest is None:
         dest = wallet.coldkeypub.ss58_address
     elif not is_valid_ss58(dest):
-        console.print(f'[red]Invalid destination ss58 address: {dest}[/red]')
-        return
+        fail(f'Invalid destination ss58 address: {dest}')
 
     keypair = wallet.hotkey
     src = keypair.ss58_address
@@ -219,8 +205,7 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
         account_data = account_info.value if hasattr(account_info, 'value') else account_info
         free_rao = int(account_data.get('data', {}).get('free', 0))
     except Exception as e:
-        console.print(f'[red]Failed to read hotkey balance: {e}[/red]')
-        return
+        fail(f'Failed to read hotkey balance: {e}')
 
     sweep = amount is None
     amount_rao = 0
@@ -228,17 +213,15 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
         action = 'Sweep entire free balance (minus tx fee)'
     else:
         if amount <= 0:
-            console.print('[red]Amount must be positive[/red]')
-            return
+            fail('Amount must be positive')
         amount_rao = to_rao(amount)
         required = amount_rao + MIN_BALANCE_FOR_TX_RAO
         if required > free_rao:
-            console.print(
-                f'[red]Insufficient hotkey balance. Free: {from_rao(free_rao):.4f} TAO, '
+            fail(
+                f'Insufficient hotkey balance. Free: {from_rao(free_rao):.4f} TAO, '
                 f'need: {from_rao(required):.4f} TAO (amount + {from_rao(MIN_BALANCE_FOR_TX_RAO):.2f} TAO gas buffer). '
-                f'Omit --amount to sweep everything.[/red]'
+                f'Omit --amount to sweep everything.'
             )
-            return
         action = f'Transfer {amount} TAO'
 
     console.print('\n[bold]Recovering Hotkey Balance[/bold]\n')
@@ -275,8 +258,7 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
         with loading('Submitting transaction...'):
             receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True)
     except Exception as e:
-        console.print(f'[red]Failed to submit transfer: {e}[/red]')
-        return
+        fail(f'Failed to submit transfer: {e}')
 
     try:
         succeeded = receipt.is_success
@@ -293,7 +275,7 @@ def collateral_recover_from_hotkey(dest: str | None, amount: float | None, yes: 
         console.print(f'[green]Recovered hotkey balance to {dest}.[/green]')
         console.print(f'[dim]Block hash: {receipt.block_hash}[/dim]')
     else:
-        console.print(f'[red]Transfer failed: {receipt.error_message}[/red]')
+        fail(f'Transfer failed: {receipt.error_message}')
 
 
 @collateral_group.command('view')
@@ -315,8 +297,7 @@ def collateral_view(pubkey: str):
             ms = client.get_miner_state(target)
             config = client.get_config()
     except SolanaClientError as e:
-        console.print(f'[red]Failed to read collateral: {e}[/red]')
-        return
+        fail(f'Failed to read collateral: {e}')
 
     is_active = bool(ms and ms.active)
     min_required = config.min_collateral if config is not None else 0
