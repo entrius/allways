@@ -302,3 +302,122 @@ def test_malformed_swap_key_raises_value_error(tmp_path):
         except ValueError:
             pass
     store.close()
+
+
+# ── confirm_deposit: deferred-confirmation intake. Accepts a content-valid deposit even before it fully
+# confirms (the crank defers voting until confirmations accrue); fast-fails without a claim on absent/mismatch
+# (None) or a stale MINED deposit, so the short reservation TTL frees the miner.
+from allways.chain_providers.base import ProviderUnreachableError, TransactionInfo  # noqa: E402
+from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
+
+CONFIRM_CREATED_AT = 1000
+
+
+class _ConfirmClient(FakeClient):
+    def __init__(self, reservation, **kw):
+        super().__init__(**kw)
+        self._reservation = reservation
+        self.claims = []
+
+    def get_reservation(self, miner):
+        return self._reservation
+
+    def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
+        self.claims.append((swap_key, from_tx_hash, from_tx_block))
+        return 'claimsig'
+
+
+class _FakeProvider:
+    def __init__(self, tx_info, *, unreachable=False, grace=0):
+        self._tx = tx_info
+        self._unreachable = unreachable
+        self._grace = grace
+
+    def verify_transaction(self, **kw):
+        if self._unreachable:
+            raise ProviderUnreachableError('down')
+        return self._tx
+
+    def get_chain(self):
+        return SimpleNamespace(replay_grace_secs=self._grace)
+
+
+def _confirm_reservation(**over):
+    d = dict(
+        reserved_until=FUTURE,
+        claimed_swap_key=b'\x00' * 32,
+        from_chain='btc',
+        miner_from_addr='minerBTC',
+        from_amount=100_000,
+        from_addr='userBTC',
+        created_at=CONFIRM_CREATED_AT,
+    )
+    d.update(over)
+    return SimpleNamespace(**d)
+
+
+def _tx(*, confirmed, block_time, confirmations=0):
+    return TransactionInfo(
+        tx_hash='abc',
+        confirmed=confirmed,
+        sender='userBTC',
+        recipient='minerBTC',
+        amount=100_000,
+        block_number=(None if block_time is None else 500),
+        confirmations=confirmations,
+        block_time=block_time,
+    )
+
+
+def _confirm(reservation, tx_info, *, unreachable=False):
+    client = _ConfirmClient(reservation)
+    provider = _FakeProvider(tx_info, unreachable=unreachable)
+    validator = SimpleNamespace(
+        solana_client=client, axon_chain_providers={'btc': provider}, axon_lock=threading.RLock()
+    )
+    return confirm_deposit(validator, HOTKEY, 'srctxhash'), client
+
+
+def test_confirm_accepts_unconfirmed_mempool_deposit():
+    # KEY new behavior: a content-valid 0-conf mempool tx (no block_time) still creates the claim.
+    r, client = _confirm(_confirm_reservation(), _tx(confirmed=False, block_time=None))
+    assert r.ok and client.claims
+
+
+def test_confirm_accepts_mined_low_conf_fresh_deposit():
+    # Mined but below min_confirmations, block_time present + fresh → accepted; crank defers the rest.
+    r, client = _confirm(_confirm_reservation(), _tx(confirmed=False, block_time=CONFIRM_CREATED_AT + 5, confirmations=1))
+    assert r.ok and client.claims
+
+
+def test_confirm_accepts_deeply_confirmed_fast_chain_deposit():
+    # Regression: a deeply-confirmed source still creates the claim (unchanged path for SOL/TAO fast chains).
+    r, client = _confirm(_confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
+    assert r.ok and client.claims
+
+
+def test_confirm_rejects_absent_or_mismatch_without_claim():
+    # verify_transaction None (absent OR content mismatch) → fast-fail, no claim, TTL frees the miner.
+    r, client = _confirm(_confirm_reservation(), None)
+    assert not r.ok and not client.claims
+
+
+def test_confirm_rejects_stale_mined_deposit_without_claim():
+    # A MINED tx older than the reservation floor is a replay → freshness fast-fail (block_time checkable).
+    r, client = _confirm(_confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6))
+    assert not r.ok and not client.claims
+
+
+def test_confirm_rejects_when_reservation_expired():
+    r, client = _confirm(_confirm_reservation(reserved_until=1), _tx(confirmed=False, block_time=None))
+    assert not r.ok and not client.claims
+
+
+def test_confirm_rejects_when_reservation_already_claimed():
+    r, client = _confirm(_confirm_reservation(claimed_swap_key=b'\x07' * 32), _tx(confirmed=True, block_time=FUTURE))
+    assert not r.ok and not client.claims
+
+
+def test_confirm_provider_unreachable_resends_without_claim():
+    r, client = _confirm(_confirm_reservation(), None, unreachable=True)
+    assert not r.ok and not client.claims and 'unreachable' in r.reason.lower()

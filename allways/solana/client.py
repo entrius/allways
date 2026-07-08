@@ -477,6 +477,21 @@ class AllwaysSolanaClient:
         args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
         return self._send([self._ix('timeout_swap', args, metas)])
 
+    def close_stale_claim(self, miner, swap_key: bytes) -> str:
+        """Permissionless: reap an orphaned PendingAttestation claim whose reservation has expired (or was
+        superseded). Closes the Swap PDA (rent -> caller) and frees the reservation's claim slot. No slash —
+        the claim never obligated the miner. Caller = this client's keypair."""
+        caller = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(caller, True, True),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+        ]
+        args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
+        return self._send([self._ix('close_stale_claim', args, metas)])
+
     def vote_activate(self, miner) -> str:
         """Vote to activate a miner; on quorum its MinerState flips active=true."""
         validator = self.keypair.pubkey()

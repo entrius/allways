@@ -8,11 +8,13 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 from types import SimpleNamespace
 
 from allways.chain_providers.base import ProviderUnreachableError
+from allways.solana.client import swap_key_from_tx_hash
 from allways.validator.solana_swap_loop import SolanaSwapLoop, SwapAction, SwapDecision, _is_benign_resolve
 
 INITIATED_AT = 1000  # dest-freshness floor
 RESV_CREATED_AT = 1200  # source-freshness floor
 FRESH = 5000  # block_time comfortably after both floors
+DEFAULT_CLAIM_KEY = swap_key_from_tx_hash('srctx')  # keccak of make_swap's default from_tx_hash — the live claim
 
 
 def make_swap(
@@ -74,8 +76,15 @@ class RecordingProvider:
         )
 
 
-def make_reservation(created_at=RESV_CREATED_AT, reserved_until=0, max_extend_at=10_000):
-    return SimpleNamespace(created_at=created_at, reserved_until=reserved_until, max_extend_at=max_extend_at)
+def make_reservation(created_at=RESV_CREATED_AT, reserved_until=1_000_000, max_extend_at=10_000, claimed_swap_key=None):
+    # Defaults model a LIVE reservation pinning make_swap's default claim (reserved_until well past any test
+    # `now`, claim slot pointing at the swap) so PendingAttestation decisions aren't reaped as stale.
+    return SimpleNamespace(
+        created_at=created_at,
+        reserved_until=reserved_until,
+        max_extend_at=max_extend_at,
+        claimed_swap_key=DEFAULT_CLAIM_KEY if claimed_swap_key is None else claimed_swap_key,
+    )
 
 
 def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None):
@@ -342,12 +351,40 @@ def test_extension_target_clamped_to_ceiling():
     assert action.target_at > 1600
 
 
-class ExtendRecordingClient:
-    """Captures extend calls; raisers simulate the contract ceiling / lost-race rejections."""
+# ── Deferred-confirmation reaper: a PendingAttestation claim whose reservation can no longer carry it to
+# attestation (expired past its ceiling, or its slot re-resolved) is reaped via close_stale_claim, freeing
+# the miner. The stale check precedes the leg fetch, since no source status can rescue a dead reservation.
+def test_pending_attestation_expired_reservation_reaps():
+    resv = make_reservation(reserved_until=1000)  # ran past its ceiling (< now 1500), source never confirmed
+    loop, _ = loop_with(result=None, reservation=resv)  # source absent (dropped/RBF'd)
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.CANCEL
 
-    def __init__(self, reservation_exc=None, timeout_exc=None):
+
+def test_pending_attestation_expired_reservation_reaps_even_if_source_pending():
+    resv = make_reservation(reserved_until=1000)
+    loop, _ = loop_with(result=False, reservation=resv)  # still in mempool, but the reservation is already dead
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.CANCEL
+
+
+def test_pending_attestation_superseded_claim_reaps():
+    resv = make_reservation(reserved_until=1_000_000, claimed_swap_key=b'\x09' * 32)  # slot points elsewhere
+    loop, _ = loop_with(result=True, reservation=resv)
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.CANCEL
+
+
+def test_pending_attestation_live_matching_reservation_not_reaped():
+    # Regression: a live reservation whose claim slot matches must attest on a confirmed source, never reap.
+    loop, _ = loop_with(result=True)  # default reservation is live + matching
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
+
+
+class ExtendRecordingClient:
+    """Captures extend/close calls; raisers simulate the contract ceiling / lost-race rejections."""
+
+    def __init__(self, reservation_exc=None, timeout_exc=None, close_exc=None):
         self.reservation_exc = reservation_exc
         self.timeout_exc = timeout_exc
+        self.close_exc = close_exc
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
@@ -360,6 +397,11 @@ class ExtendRecordingClient:
         self.calls.append(('extend_timeout', swap_key, miner, target_at))
         if self.timeout_exc:
             raise self.timeout_exc
+
+    def close_stale_claim(self, miner, swap_key):
+        self.calls.append(('close_stale_claim', miner, swap_key))
+        if self.close_exc:
+            raise self.close_exc
 
 
 def test_cast_extend_reservation_calls_client():
@@ -379,6 +421,27 @@ def test_cast_extend_tolerates_exceeds_ceiling_as_noop():
     client = ExtendRecordingClient(timeout_exc=RuntimeError('ExtensionExceedsCeiling'))
     loop = SolanaSwapLoop(client, {}, fee_divisor=100)
     assert loop._cast_vote(make_swap(), SwapAction(SwapDecision.EXTEND_TIMEOUT, 2160)) is False  # no raise
+
+
+def test_cast_cancel_calls_close_stale_claim():
+    client = ExtendRecordingClient()
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop._cast_vote(make_swap(), SwapAction(SwapDecision.CANCEL)) is True
+    assert client.calls[0][0] == 'close_stale_claim' and client.calls[0][1] == 'minerPK'
+
+
+def test_cast_cancel_tolerates_claim_not_expired_as_noop():
+    # Another validator's clock hasn't crossed expiry yet — contract rejects with ClaimNotExpired; benign.
+    client = ExtendRecordingClient(close_exc=RuntimeError('ClaimNotExpired'))
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop._cast_vote(make_swap(), SwapAction(SwapDecision.CANCEL)) is False  # no raise
+
+
+def test_cast_cancel_tolerates_already_reaped_as_noop():
+    # A peer already reaped it — the Swap PDA is gone; benign lost race.
+    client = ExtendRecordingClient(close_exc=RuntimeError('AccountNotInitialized: swap'))
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop._cast_vote(make_swap(), SwapAction(SwapDecision.CANCEL)) is False  # no raise
 
 
 def test_run_once_discovers_and_decides_mix():
