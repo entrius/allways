@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Tuple
 import bittensor as bt
 import click
 import requests
+from bittensor.utils import ss58_encode
 from rich.console import Console
 from rich.text import Text
 
@@ -147,6 +148,36 @@ def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
         f'`alw swap now` originates a reservation on-chain.[/dim]'
     )
     raise SystemExit(code)
+
+
+# --- Pending swap context (taker reserve → post-tx handoff) ---------------
+# `alw swap now` stashes the just-reserved miner pubkey via `_save_pending` (see swap.py). That gives
+# `alw swap post-tx` a fast, unambiguous handle on the winning miner; post-tx re-validates it against
+# the chain and falls back to scanning all bindings if it's missing (e.g. run from another machine).
+# The confirm relay is keyed by the miner's Bittensor hotkey (reservations are keyed by miner), so
+# post-tx resolves the pubkey → hotkey via the on-chain binding. Non-authoritative cache — safe to delete.
+def hotkey_bytes_to_ss58(hotkey: bytes) -> str:
+    """32-byte sr25519 public key → ss58 (Bittensor format 42). Empty on bad input."""
+    try:
+        return ss58_encode(bytes(hotkey), ss58_format=42)
+    except Exception:
+        return ''
+
+
+def load_pending_swap() -> Optional[dict]:
+    """Read the stashed swap context, or None if absent/unreadable."""
+    try:
+        return json.loads(PENDING_SWAP_FILE.read_text())
+    except Exception:
+        return None
+
+
+def clear_pending_swap() -> None:
+    """Remove the stashed context once the confirm relay is accepted."""
+    try:
+        PENDING_SWAP_FILE.unlink()
+    except Exception:
+        pass
 
 
 def print_json(data) -> None:
