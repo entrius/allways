@@ -163,7 +163,9 @@ class ConfirmResult:
 
 def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_block: int = 0) -> ConfirmResult:
     """Relay a user's source deposit into a claim: verify the tx against the pinned reservation, then
-    submit_swap_claim. Rejects (caller resends) if the tx isn't visible/confirmed yet — no queue."""
+    submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
+    it fully confirms — the crank defers voting until confirmations accrue. Fast-fails (no claim, so the short
+    TTL frees the miner) only when the tx is absent or its content doesn't match the reservation."""
     from allways.validator.solana_swap_loop import is_tx_fresh
 
     # Reject empty/whitespace-only hashes and strip surrounding whitespace before use (#167).
@@ -198,12 +200,17 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         )
     except ProviderUnreachableError:
         return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
-    if tx_info is None or not tx_info.confirmed:
-        return ConfirmResult(False, 'Source tx not yet visible/confirmed — resend once it has enough confirmations')
+    if tx_info is None:
+        # None = absent or content-mismatch; fast-fail (no claim) so the short TTL frees the miner.
+        return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
 
-    grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
-    if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
-        return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
+    # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting until it
+    # confirms (source 'pending'->extend, 'ok'+fresh->attest). A 0-conf mempool tx has no block_time, so its
+    # freshness is deferred too; only a mined tx is freshness-checked here (fast-fail a stale mined deposit).
+    if tx_info.block_time is not None:
+        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
+        if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
+            return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
 
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0)

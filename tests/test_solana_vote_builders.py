@@ -52,6 +52,7 @@ def test_ix_discriminators_match_anchor_global_formula():
         'vote_initiate',
         'confirm_swap',
         'timeout_swap',
+        'close_stale_claim',
         'vote_activate',
         'mark_fulfilled',
         'extend_timeout',
@@ -119,6 +120,21 @@ def test_confirm_swap_ix(client):
         (pdas.stats_pda(miner, 'BTC', 'tao', PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_CONFIRM, SK, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
+    ]
+
+
+def test_close_stale_claim_ix(client):
+    miner = Keypair().pubkey()
+    client.close_stale_claim(miner, SK)
+    ix = _ix(client)
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['close_stale_claim']
+    assert ix.data[8:] == SK
+    # Accounts match CloseStaleClaim<'info>: caller(signer,writable), miner, reservation(mut), swap(mut).
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (miner, False, False),
+        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.swap_pda(SK, PID), False, True),
     ]
 
 

@@ -28,6 +28,7 @@ class SwapDecision(Enum):
     ATTEST = 'attest'  # PendingAttestation: source deposit verified -> would vote_initiate
     CONFIRM = 'confirm'  # Fulfilled: both legs verified -> would confirm_swap
     TIMEOUT = 'timeout'  # Active past its deadline -> would timeout_swap
+    CANCEL = 'cancel'  # PendingAttestation whose reservation expired -> close_stale_claim (reap, no slash)
     EXTEND_RESERVATION = 'extend_reservation'  # source valid-but-unconfirmed near expiry -> slide reserved_until
     EXTEND_TIMEOUT = 'extend_timeout'  # dest valid-but-unconfirmed near timeout -> slide timeout_at
     WAIT = 'wait'  # in-flight, nothing to do yet
@@ -50,6 +51,7 @@ ACTIONABLE = frozenset(
         SwapDecision.ATTEST,
         SwapDecision.CONFIRM,
         SwapDecision.TIMEOUT,
+        SwapDecision.CANCEL,
         SwapDecision.EXTEND_RESERVATION,
         SwapDecision.EXTEND_TIMEOUT,
     }
@@ -64,6 +66,11 @@ _BENIGN_EXTEND_MARKERS = ('ExtensionNotLater', 'ExtensionExceedsCeiling')
 # resolved it (NoRequests: opened_at zeroed), or the on-chain clock hasn't crossed closes_at yet
 # (PoolNotClosed, clock skew) — both expected, retried next pass. Real failures still surface.
 _BENIGN_RESOLVE_MARKERS = ('NoRequests', 'PoolNotClosed')
+
+# close_stale_claim is permissionless, so every validator cranks every stale claim and the first-wins race
+# leaves losers with a benign failure: a peer already reaped it (the Swap PDA is gone), or the reservation is
+# not yet expired on the on-chain clock (ClaimNotExpired, clock skew) — both expected, retried/settled next pass.
+_BENIGN_CLOSE_MARKERS = ('ClaimNotExpired', 'NotPending', 'AccountNotInitialized', 'could not find account')
 
 
 def _status_name(swap: Any) -> str:
@@ -84,6 +91,11 @@ def _is_benign_extension(e: Exception) -> bool:
 def _is_benign_resolve(e: Exception) -> bool:
     """A lost resolve_pool race — a peer already resolved it, or the clock hasn't crossed closes_at."""
     return any(m in str(e) for m in _BENIGN_RESOLVE_MARKERS)
+
+
+def _is_benign_close(e: Exception) -> bool:
+    """A lost close_stale_claim race — a peer already reaped it, or the reservation isn't expired yet."""
+    return any(m in str(e) for m in _BENIGN_CLOSE_MARKERS)
 
 
 def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
@@ -259,7 +271,24 @@ class SolanaSwapLoop:
             f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
         )
 
+    def _claim_is_stale(self, reservation: Any, swap: Any, now: int) -> bool:
+        """A PendingAttestation claim is orphaned when its reservation can no longer carry it to attestation:
+        expired (reserved_until < now) or its claim slot no longer points at this swap (re-resolved/consumed).
+        Mirrors the contract's close_stale_claim guard so we never send a tx it would reject. False when the
+        reservation is unreadable this round (retry next pass)."""
+        if reservation is None:
+            return False
+        if int(reservation.reserved_until) < now:
+            return True
+        return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
+
     def _decide_pending_attestation(self, swap: Any, now: int) -> SwapAction:
+        reservation = self._get_reservation(swap.miner)
+        # An orphaned claim can never attest (vote_initiate needs a live reservation) — reap it (close_stale_claim)
+        # to free the miner + reclaim rent. Covers a dropped/RBF'd source and one past its extension ceiling; a
+        # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
+        if self._claim_is_stale(reservation, swap, now):
+            return SwapAction(SwapDecision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
         # D1: refuse to attest if to_amount is inconsistent with the pinned (unforgeable) miner rate.
         expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
         if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
@@ -282,7 +311,6 @@ class SolanaSwapLoop:
             )
         if s_status != 'ok':
             return SwapAction(SwapDecision.WAIT, reason=f'source deposit {s_status} — awaiting user funds')
-        reservation = self._get_reservation(swap.miner)
         if reservation is None:
             bt.logging.warning(f'{self._label(swap)}: no reservation read — cannot check freshness, waiting')
             return SwapAction(SwapDecision.WAIT, reason='no reservation read')
@@ -330,6 +358,9 @@ class SolanaSwapLoop:
                 if self.client.has_voted(pdas.REQ_TIMEOUT, swap_key, voter):
                     return False
                 self.client.timeout_swap(swap_key, swap.miner, swap.user)
+            elif decision == SwapDecision.CANCEL:
+                # Permissionless reap (no vote round) — first validator wins, peers no-op benignly.
+                self.client.close_stale_claim(swap.miner, swap_key)
             elif decision == SwapDecision.EXTEND_RESERVATION:
                 self.client.extend_reservation(swap.miner, action.target_at)
             elif decision == SwapDecision.EXTEND_TIMEOUT:
@@ -338,6 +369,9 @@ class SolanaSwapLoop:
                 return False  # REJECT / non-actionable: cast nothing
         except Exception as e:
             if decision in (SwapDecision.EXTEND_RESERVATION, SwapDecision.EXTEND_TIMEOUT) and _is_benign_extension(e):
+                bt.logging.debug(f'{label}: {decision.value} no-op ({e})')
+                return False
+            if decision == SwapDecision.CANCEL and _is_benign_close(e):
                 bt.logging.debug(f'{label}: {decision.value} no-op ({e})')
                 return False
             bt.logging.error(f'{label}: {decision.value} failed: {e}')

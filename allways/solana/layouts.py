@@ -325,6 +325,7 @@ IX_DISCRIMINATORS = {
     'vote_initiate': bytes([210, 23, 157, 114, 35, 129, 164, 4]),
     'confirm_swap': bytes([183, 168, 179, 117, 86, 243, 166, 195]),
     'timeout_swap': bytes([18, 157, 212, 120, 145, 200, 239, 63]),
+    'close_stale_claim': bytes([185, 69, 27, 37, 187, 78, 157, 188]),  # reap an orphaned PendingAttestation claim
     'vote_activate': bytes([24, 233, 47, 230, 116, 115, 109, 41]),
     'mark_fulfilled': bytes([40, 188, 159, 127, 20, 151, 228, 191]),
     'extend_timeout': bytes([246, 84, 96, 134, 76, 55, 57, 33]),

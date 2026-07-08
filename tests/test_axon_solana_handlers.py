@@ -176,10 +176,29 @@ def test_confirm_already_claimed_rejects():
 
 
 def test_confirm_tx_not_visible_rejects():
+    # Absent tx (verify → None): fast-fail with no claim, so the short TTL frees the miner.
     client = FakeSolanaClient(reservation=_reservation())
     s = run(axon_handlers.handle_swap_confirm(make_validator(client, FakeProvider(None)), confirm_synapse()))
-    assert s.accepted is False and 'not yet visible' in s.rejection_reason
+    assert s.accepted is False and 'not visible' in s.rejection_reason
     assert client.calls == []
+
+
+def test_confirm_unconfirmed_mempool_deposit_relays_claim():
+    # Deferred intake: a content-valid but unconfirmed (0-conf mempool) deposit still creates the claim;
+    # the crank defers voting until confirmations accrue.
+    mempool = TransactionInfo(
+        tx_hash='srctx',
+        confirmed=False,
+        sender='userBTC',
+        recipient='minerBTC',
+        amount=500,
+        block_number=None,
+        block_time=None,  # unmined → no block_time; freshness deferred to the crank's 'ok' gate
+    )
+    client = FakeSolanaClient(reservation=_reservation())
+    s = run(axon_handlers.handle_swap_confirm(make_validator(client, FakeProvider(mempool)), confirm_synapse()))
+    assert s.accepted is True
+    assert client.calls == [('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 0)]
 
 
 def test_confirm_stale_deposit_rejects():
