@@ -86,9 +86,7 @@ def log_scoring_trace(
             for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
             if hk in hotkey_to_uid
         )
-        lines.append(
-            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s'
-        )
+        lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
 
     for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
@@ -131,9 +129,7 @@ def log_scoring_trace(
 
     if recycled > 0:
         parts = [
-            f'{t.unfilled_time}s unfilled in {f}→{to}'
-            for (f, to), t in direction_traces.items()
-            if t.unfilled_time > 0
+            f'{t.unfilled_time}s unfilled in {f}→{to}' for (f, to), t in direction_traces.items() if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')

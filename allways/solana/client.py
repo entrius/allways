@@ -604,9 +604,7 @@ class AllwaysSolanaClient:
         if not tx:
             return []
         logs = (tx.get('meta') or {}).get('logMessages') or []
-        return [
-            base64.b64decode(line[len('Program data: ') :]) for line in logs if line.startswith('Program data: ')
-        ]
+        return [base64.b64decode(line[len('Program data: ') :]) for line in logs if line.startswith('Program data: ')]
 
     # ---------- dev helper ----------
     def airdrop(self, pubkey, lamports: int) -> str:

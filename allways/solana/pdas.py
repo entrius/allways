@@ -16,9 +16,6 @@ from solders.pubkey import Pubkey
 DEV_PROGRAM_ID = 'AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU'
 PROGRAM_ID = Pubkey.from_string(os.environ.get('ALLWAYS_PROGRAM_ID', DEV_PROGRAM_ID))
 
-# Fixed-point scale for the miner rate: stored u128 = display_rate * RATE_PRECISION (constants.rs).
-RATE_PRECISION = 1_000_000_000_000_000_000  # 1e18
-
 # Vote-round request types (constants.rs). REQ_RESERVE is gone (lottery-based).
 REQ_ACTIVATE = 0
 REQ_INITIATE = 2

@@ -26,7 +26,7 @@ from allways.cli.swap_commands.helpers import (
     quote_update_fee_lamports,
 )
 from allways.cli.swap_commands.pair import write_rate_posted_flag
-from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION
+from allways.constants import LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.solana.client import SolanaClientError
 
 
@@ -60,39 +60,66 @@ def derive_sol_numeraire_quotes(
     return specs
 
 
+def _hub_addr_kw() -> str:
+    return f'{NUMERAIRE_CHAIN}_address'
+
+
+def quote_options(f):
+    """Attach the hub-address flag plus a ``--<spoke>-price`` / ``--<spoke>-address`` pair for every
+    launch spoke. Registry-derived from ``LAUNCH_SPOKES`` — add a spoke there and its flags appear
+    here automatically, with no hand-typed per-chain options. Every flag stays explicit, so posting
+    quotes is fully scriptable (``--yes`` skips the confirm)."""
+    hub = NUMERAIRE_CHAIN.upper()
+    for spoke in reversed(LAUNCH_SPOKES):  # reversed: decorators stack bottom-up, so this restores registry order
+        f = click.option(f'--{spoke}-address', default=None, help=f'Your {spoke.upper()} address.')(f)
+        f = click.option(
+            f'--{spoke}-price',
+            type=float,
+            default=None,
+            help=f'{spoke.upper()} per 1 {hub} (0/omit to skip {spoke.upper()}).',
+        )(f)
+    return click.option(
+        f'--{NUMERAIRE_CHAIN}-address', _hub_addr_kw(), default=None, help=f'Your {hub} address (the hub leg).'
+    )(f)
+
+
+def _example() -> str:
+    """A concrete, copy-pasteable usage line built from the current registry (not hand-typed)."""
+    flags = ' '.join(f'--{s}-price <{s}-per-{NUMERAIRE_CHAIN}> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
+    return f'alw miner quotes --{NUMERAIRE_CHAIN}-address <{NUMERAIRE_CHAIN}> {flags} --spread 50'
+
+
 @click.command('quotes', cls=StyledCommand)
-@click.option('--sol-address', 'sol_address', default=None, help='Your SOL address (the hub leg).')
-@click.option('--btc-price', type=float, default=None, help='BTC per 1 SOL (0/omit to skip BTC).')
-@click.option('--btc-address', default=None, help='Your BTC address.')
-@click.option('--tao-price', type=float, default=None, help='TAO per 1 SOL (0/omit to skip TAO).')
-@click.option('--tao-address', default=None, help='Your TAO address.')
+@quote_options
 @click.option('--spread', 'spread_bps', type=int, default=0, help='Symmetric margin in bps (0 = mid).')
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', 'yes', is_flag=True, help='Skip confirmation.')
-def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, spread_bps, dry_run, yes):
-    """Publish all SOL pairs from one price per chain (the 'X per 1 SOL' convention).
+def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
+    """Publish every hub pair from one price per chain (the 'X per 1 SOL' convention).
+
+    One --<spoke>-price + --<spoke>-address pair per launch spoke; give as many or as few as you
+    like. Both directions of each pair derive from that single price.
 
     \b
     Example:
-        alw miner quotes --sol-address <sol> --btc-price 0.0021 --btc-address <btc> \\
-                         --tao-price 0.5 --tao-address <tao> --spread 50
+        {example}
     """
+    sol_address = spoke_opts.get(_hub_addr_kw())
     chain_specs: Dict[str, Tuple[float, str]] = {}
-    if btc_price and btc_price > 0:
-        if not btc_address:
-            console.print('[red]--btc-address required with --btc-price[/red]')
+    for spoke in LAUNCH_SPOKES:
+        price = spoke_opts.get(f'{spoke}_price')
+        addr = spoke_opts.get(f'{spoke}_address')
+        if not price or price <= 0:
+            continue
+        if not addr:
+            console.print(f'[red]--{spoke}-address required with --{spoke}-price[/red]')
             return
-        chain_specs['btc'] = (btc_price, btc_address)
-    if tao_price and tao_price > 0:
-        if not tao_address:
-            console.print('[red]--tao-address required with --tao-price[/red]')
-            return
-        chain_specs['tao'] = (tao_price, tao_address)
+        chain_specs[spoke] = (price, addr)
     if not chain_specs:
         console.print('[yellow]Nothing to post — give at least one --<chain>-price/--<chain>-address.[/yellow]')
         return
     if not sol_address:
-        console.print('[red]--sol-address is required.[/red]')
+        console.print(f'[red]--{NUMERAIRE_CHAIN}-address is required.[/red]')
         return
 
     _, wallet, _, _ = get_cli_context(need_client=False)
@@ -104,7 +131,8 @@ def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, 
 
     # Show each direction's current rate + the churn fee this update will incur (per-direction,
     # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
-    console.print('\n[bold]SOL-numéraire quotes[/bold]  [dim](X per 1 SOL)[/dim]\n')
+    hub = NUMERAIRE_CHAIN.upper()
+    console.print(f'\n[bold]{hub}-numéraire quotes[/bold]  [dim](X per 1 {hub})[/dim]\n')
     total_fee = 0
     for sp in specs:
         cur = client.get_quote(miner, sp.from_chain, sp.to_chain)
@@ -148,3 +176,7 @@ def quotes_command(sol_address, btc_price, btc_address, tao_price, tao_address, 
     if posted:
         console.print(f'[green]Published {posted} quote direction(s)![/green]')
         write_rate_posted_flag(wallet.hotkey.ss58_address)
+
+
+# Interpolate the registry-derived example into the help (Click doesn't format docstrings).
+quotes_command.help = quotes_command.help.format(example=_example())
