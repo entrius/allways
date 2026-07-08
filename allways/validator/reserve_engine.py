@@ -310,6 +310,12 @@ def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapSta
     reservation = client.get_reservation(miner_pk)
     if reservation is None or reservation.reserved_until == 0:
         return SwapStatus('none')
+    swap_key = bytes(reservation.claimed_swap_key)
+    # An expired UNCLAIMED reservation is dead — the pool can be re-entered over it. Reporting it as
+    # 'reserved' with its stale user makes the offering's win-detection read "another validator's user
+    # holds this miner" and mark won draws lost. A claimed one still speaks through its swap's stage.
+    if swap_key == EMPTY_SWAP_KEY and int(reservation.reserved_until) < time.time():
+        return SwapStatus('none')
     # detail carries what the offering needs to instruct the user (where + how much to send).
     detail = {
         'from_chain': reservation.from_chain,
@@ -318,7 +324,6 @@ def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapSta
         'to_amount': int(reservation.to_amount),
         'miner_from_addr': reservation.miner_from_addr,
     }
-    swap_key = bytes(reservation.claimed_swap_key)
     if swap_key == EMPTY_SWAP_KEY:
         return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
     swap = client.get_swap(swap_key)
