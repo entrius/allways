@@ -6,8 +6,10 @@ from allways.classes import MinerActivity
 NETUID_FINNEY = 7
 
 # ─── Contract ──────────────────────────────────────────────
-# Mainnet default; override via CONTRACT_ADDRESS env var.
-CONTRACT_ADDRESS = '5DjJmTpcHZvF3aZZEafKBdo3ksmdUSZ8bBBUSFhW3Ce3xf1J'
+# allways_swap_manager program address. Committed default is the devnet deployment;
+# override with ALLWAYS_PROGRAM_ID. Must match the deployed program — a mismatch derives
+# different PDAs, so every account merely reads as absent instead of erroring.
+PROGRAM_ID = 'AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU'
 
 # ─── Polling ──────────────────────────────────────────────
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.

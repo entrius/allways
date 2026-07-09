@@ -584,22 +584,12 @@ def get_solana_cli_context(need_keypair: bool = True):
     ~/.solana/id.json), NOT the bt wallet — collateral, quotes, and config are keyed by that pubkey on the
     program. The bt wallet is only needed where a command links the two identities (`alw miner bind-hotkey`).
     """
-    from solders.pubkey import Pubkey
-
-    from allways.solana import pdas
     from allways.solana.client import AllwaysSolanaClient
+    from allways.solana.program import resolve_program_id
 
     config = get_effective_config()
     rpc_url = resolve_solana_rpc(config)
-    program_id = pdas.PROGRAM_ID
-    configured = config.get('program-id') or config.get('contract')
-    if configured:
-        try:
-            program_id = Pubkey.from_string(configured)
-        except (ValueError, TypeError):
-            console.print(
-                f'[yellow]Ignoring invalid program-id config {configured!r}; using default {program_id}[/yellow]'
-            )
+    program_id = resolve_program_id(config)
     keypair = load_cli_keypair(config) if need_keypair else None
     return config, AllwaysSolanaClient(rpc_url, program_id=program_id, keypair=keypair)
 
