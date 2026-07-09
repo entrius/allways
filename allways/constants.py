@@ -9,7 +9,7 @@ NETUID_FINNEY = 7
 # allways_swap_manager program address. Committed default is the devnet deployment;
 # override with ALLWAYS_PROGRAM_ID. Must match the deployed program — a mismatch derives
 # different PDAs, so every account merely reads as absent instead of erroring.
-PROGRAM_ID = 'AKgfVK8zJVHuZwttdjU2CPykaHyTAvw5r9FUFUpM74JU'
+PROGRAM_ID = 'EhFT382UbUyzD56vv4kFJE3shtxqDgfpwErhJ7L1qeMf'
 
 # ─── Polling ──────────────────────────────────────────────
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.
