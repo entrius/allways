@@ -40,7 +40,7 @@ class WeightingTrace:
     crown_share: float = 0.0
     volume_share: float = 0.0
     participation: float = 1.0
-    volume_factor: float = 1.0
+    fill_ratio: float = 1.0
     eligible: bool = False
 
     def record_capacity(self, factor: float) -> None:
@@ -51,7 +51,7 @@ class WeightingTrace:
         self.crown_share = crown_share
         self.volume_share = (vol_rao / total_volume_rao) if total_volume_rao > 0 else 0.0
         self.participation = min(1.0, self.volume_share / crown_share) if crown_share > 0 else 1.0
-        self.volume_factor = factor
+        self.fill_ratio = factor
 
     def record_eligibility(self, eligible: bool) -> None:
         self.eligible = eligible
@@ -101,7 +101,7 @@ def log_scoring_trace(
             extras = (
                 f' cap={wt.capacity_factor:.2f}'
                 f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
-                f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
+                f' crown_share={wt.crown_share:.2f} fill={wt.fill_ratio:.2f}'
             )
         lines.append(
             f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'

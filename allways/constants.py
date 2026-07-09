@@ -74,11 +74,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
 # Volume floor: a direction whose in-window SOL-side notional clears less than this
-# (lamports — 1 SOL) is treated as having no volume for the round: the quality-volume
-# slice folds into crown and volume_factor stays neutral, the same fallback as a fully
+# (lamports — 1 SOL) is treated as having no volume for the round: the execution
+# slice folds into crown and fill_ratio stays neutral, the same fallback as a fully
 # idle direction. Keeps a couple of dust swaps from steering the weights.
 MIN_DIRECTION_VOLUME = 1_000_000_000
-# Reward-shape weights (B3.5): reward = eligible × [w_a·crown + w_b·quality_volume].
+# Reward-shape weights (B3.5): reward = eligible × [w_a·crown + w_b·execution].
 # w_a weights the crown-time component (best-rate presence × capacity), w_b the
 # realized-volume share × rate-quality (executed throughput at fair rates). Phase C
 # turns w_b on at a conservative 0.2 so crown stays the primary driver while real
@@ -86,7 +86,7 @@ MIN_DIRECTION_VOLUME = 1_000_000_000
 # envelope is unchanged. Too-thin on-chain clearing-rate history ⇒ rate_quality neutral
 # (1.0), so w_b still pays realized volume by raw share — it never zeroes everyone.
 REWARD_WEIGHT_CROWN: float = 0.8
-REWARD_WEIGHT_QUALITY_VOLUME: float = 0.2
+REWARD_WEIGHT_EXECUTION: float = 0.2
 # Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
 # replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
 # it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
@@ -96,7 +96,7 @@ MAX_FAILED_SWAPS: int = 2
 
 # ─── Rate-quality curve (Phase C) ────────────────────────
 # One-sided clamp mapping realized-VWAP-vs-market advantage → a quality
-# multiplier on the quality-volume reward. At/above market (within a tolerance
+# multiplier on the execution reward. At/above market (within a tolerance
 # deadband) scores 1.0 — the crown already rewards best-rate presence, so
 # above-market is not paid again here. Worse-than-market ramps linearly to
 # RATE_QUALITY_MIN at RATE_QUALITY_FLOOR_ADV. Tunable without code changes.
