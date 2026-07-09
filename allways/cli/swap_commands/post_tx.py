@@ -13,8 +13,6 @@ taker who won the draw, because ``Reservation.from_addr`` is pinned at reserve t
 relay the confirm, but only the winner's deposit verifies.
 """
 
-import time
-
 import click
 
 from allways.cli.dendrite_lite import (
@@ -29,23 +27,12 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     get_solana_cli_context,
     hotkey_bytes_to_ss58,
+    live_unclaimed,
     load_pending_swap,
     loading,
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.synapses import SwapConfirmSynapse
-
-EMPTY_SWAP_KEY = bytes(32)
-
-
-def _live_unclaimed(resv) -> bool:
-    """The reservation exists, is still within its TTL, and has no claim yet."""
-    now = int(time.time())
-    return (
-        resv is not None
-        and int(resv.reserved_until) > now
-        and bytes(resv.claimed_swap_key) == EMPTY_SWAP_KEY
-    )
 
 
 def _find_reservations(client, user, miner_hint, require_user):
@@ -71,7 +58,7 @@ def _find_reservations(client, user, miner_hint, require_user):
             console.print(f'[red]Invalid miner pubkey: {miner_hint}[/red]')
             return []
         resv = client.get_reservation(mpk)
-        if _live_unclaimed(resv) and (not require_user or str(resv.user) == str(user)):
+        if live_unclaimed(resv) and (not require_user or str(resv.user) == str(user)):
             return [(mpk, _hotkey(mpk), resv)]
         return []
 
@@ -79,7 +66,7 @@ def _find_reservations(client, user, miner_hint, require_user):
     for _pda, binding in client.get_all('Binding'):
         mpk = binding.miner
         resv = client.get_reservation(mpk)
-        if _live_unclaimed(resv) and str(resv.user) == str(user):
+        if live_unclaimed(resv) and str(resv.user) == str(user):
             found.append((mpk, hotkey_bytes_to_ss58(binding.hotkey), resv))
     return found
 

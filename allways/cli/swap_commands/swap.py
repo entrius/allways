@@ -14,7 +14,14 @@ import click
 
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import FINITE_FLOAT, PENDING_SWAP_FILE, console, fail, get_solana_cli_context
+from allways.cli.swap_commands.helpers import (
+    FINITE_FLOAT,
+    PENDING_SWAP_FILE,
+    console,
+    fail,
+    get_solana_cli_context,
+    live_unclaimed,
+)
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     rate_display_from_fixed,
@@ -40,12 +47,32 @@ def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandi
     return out
 
 
+# Slack (seconds) added on top of a source chain's confirmation wait before we'll tell a taker to send:
+# covers broadcast + the post-tx relay round trip.
+_RELAY_MARGIN_SECS = 30
+
+
+def _send_margin_secs(chain_id: str) -> int:
+    """Minimum reservation life required before instructing a send on ``chain_id``: the source chain's
+    confirmation wait (``min_confirmations × seconds_per_block``) plus relay slack. Sending into a
+    reservation that expires before the deposit can be claimed strands the funds (no escrow, no Swap,
+    no refund)."""
+    ch = get_chain(chain_id)
+    return int(ch.min_confirmations) * int(ch.seconds_per_block) + _RELAY_MARGIN_SECS
+
+
 def _poll_reservation(client, miner, timeout_secs: int):
-    """Poll the per-miner Reservation until the draw populates it (reserved_until != 0) or we time out."""
+    """Poll until THIS request's draw writes a live, unclaimed Reservation — or we time out.
+
+    Uses the shared ``live_unclaimed`` predicate (same one `post-tx` uses), NOT ``reserved_until != 0``.
+    A reservation left over from an abandoned reserve keeps a non-zero-but-past ``reserved_until``
+    indefinitely; the old check matched it instantly and made `swap now` tell the taker to send funds
+    before ``resolve_pool`` ran. Requiring liveness means we keep waiting through both the pre-draw
+    (``reserved_until == 0``) and the stale-leftover (expired) states until the draw writes a fresh one."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         resv = client.get_reservation(miner)
-        if resv is not None and int(getattr(resv, 'reserved_until', 0)) != 0:
+        if live_unclaimed(resv):
             return resv
         time.sleep(3)
     return None
@@ -140,9 +167,19 @@ def swap_now_command(
 
     resv = _poll_reservation(client, cand.miner, timeout_secs=pool_window + 60)
     if resv is None:
-        fail('  Pool not resolved yet — check `alw view reservation` shortly.')
+        fail('  Draw did not resolve into a live reservation in time — no reservation won. '
+             'Do NOT send funds; check `alw view reservation` and re-run.')
     if str(resv.user) != str(user):
-        fail("  Another taker won this miner's draw. Re-run to try again.")
+        fail("  Another taker won this miner's draw. Do NOT send funds; re-run to try again.")
+    # Never instruct a send the reservation can't outlive: the deposit must land and reach the source
+    # chain's confirmation depth before reserved_until, or the claim is rejected and the funds are
+    # stranded (funds go straight to the miner — no escrow, no Swap, no timeout, no refund).
+    remaining = int(resv.reserved_until) - int(time.time())
+    margin = _send_margin_secs(from_chain)
+    if remaining < margin:
+        fail(f'  Reservation has only {remaining}s left — too short to send {from_chain.upper()} safely '
+             f'(needs ~{margin}s for {from_chain.upper()} confirmations + relay). Do NOT send funds; '
+             'raise reservation_ttl (or re-run for a fresh reservation).')
 
     _save_pending(cand.miner, from_chain, to_chain)
     console.print(
