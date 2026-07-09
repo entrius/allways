@@ -4,6 +4,6 @@ Hand-rolled + sync: `solders` (keys/tx primitives) + `borsh-construct` (account/
 thin JSON-RPC layer. The validator's sole on-chain client (the old ink!/Substrate client is gone).
 """
 
-from allways.solana.pdas import PROGRAM_ID
+from allways.solana.program import resolve_program_id
 
-__all__ = ['PROGRAM_ID']
+__all__ = ['resolve_program_id']

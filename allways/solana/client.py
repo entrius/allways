@@ -19,6 +19,7 @@ from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
 from allways.solana import layouts, pdas
+from allways.solana.program import resolve_program_id
 from allways.solana.rpc import SolanaRpc
 
 SYSTEM_PROGRAM = Pubkey.from_string('11111111111111111111111111111111')
@@ -112,10 +113,14 @@ class SolanaClientError(Exception):
 
 class AllwaysSolanaClient:
     def __init__(
-        self, rpc_url: str, program_id: Pubkey = pdas.PROGRAM_ID, keypair: Optional[Keypair] = None, timeout: int = 30
+        self,
+        rpc_url: str,
+        program_id: Optional[Pubkey] = None,
+        keypair: Optional[Keypair] = None,
+        timeout: int = 30,
     ):
         self.rpc = SolanaRpc(rpc_url, timeout=timeout)
-        self.program_id = program_id
+        self.program_id = program_id or resolve_program_id()
         self.keypair = keypair
 
     # ---------- decode ----------

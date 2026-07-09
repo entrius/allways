@@ -13,8 +13,9 @@ from solders.keypair import Keypair
 
 from allways.solana import layouts, pdas
 from allways.solana.client import SYSTEM_PROGRAM, AllwaysSolanaClient, swap_key_from_tx_hash
+from allways.solana.program import resolve_program_id
 
-PID = pdas.PROGRAM_ID
+PID = resolve_program_id()
 SK = bytes(range(32))  # a stand-in 32-byte swap_key
 
 

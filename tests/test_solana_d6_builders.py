@@ -11,8 +11,9 @@ from solders.keypair import Keypair
 
 from allways.solana import layouts, pdas
 from allways.solana.client import AllwaysSolanaClient
+from allways.solana.program import resolve_program_id
 
-PID = pdas.PROGRAM_ID
+PID = resolve_program_id()
 
 
 def _global_disc(name: str) -> bytes:

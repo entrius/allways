@@ -12,19 +12,21 @@ import time
 from pathlib import Path
 from typing import Dict
 
-import bittensor as bt
-from bittensor import Keypair as BtKeypair
 from dotenv import load_dotenv
 
-from allways.chain_providers import create_chain_providers
-from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS
-from allways.miner.fulfillment import SwapFulfiller
-from allways.miner.swap_poller import SwapPoller
-from allways.solana import keys
-from allways.solana.client import AllwaysSolanaClient
-from neurons.base.miner import BaseMinerNeuron
-
+# Must precede the allways imports: they resolve env-backed settings, and a later load would be a no-op.
 load_dotenv()
+
+import bittensor as bt  # noqa: E402
+from bittensor import Keypair as BtKeypair  # noqa: E402
+
+from allways.chain_providers import create_chain_providers  # noqa: E402
+from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS  # noqa: E402
+from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
+from allways.miner.swap_poller import SwapPoller  # noqa: E402
+from allways.solana import keys  # noqa: E402
+from allways.solana.client import AllwaysSolanaClient  # noqa: E402
+from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
 class Miner(BaseMinerNeuron):

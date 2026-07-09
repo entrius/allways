@@ -14,22 +14,26 @@ import threading
 import time
 from functools import partial
 
-import bittensor as bt
-import wandb
 from dotenv import load_dotenv
 
-from allways import __version__
-from allways.chain_providers import create_chain_providers
-from allways.constants import (
+# Must precede the allways imports: they resolve env-backed settings, and a later load would be a no-op.
+load_dotenv()
+
+import bittensor as bt  # noqa: E402
+import wandb  # noqa: E402
+
+from allways import __version__  # noqa: E402
+from allways.chain_providers import create_chain_providers  # noqa: E402
+from allways.constants import (  # noqa: E402
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
 )
-from allways.solana import keys
-from allways.solana.client import AllwaysSolanaClient
-from allways.solana.events import SolanaEventIngest
-from allways.validator.axon_handlers import (
+from allways.solana import keys  # noqa: E402
+from allways.solana.client import AllwaysSolanaClient  # noqa: E402
+from allways.solana.events import SolanaEventIngest  # noqa: E402
+from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
     blacklist_swap_reserve,
@@ -40,17 +44,15 @@ from allways.validator.axon_handlers import (
     priority_swap_confirm,
     priority_swap_reserve,
 )
-from allways.validator.bounds_cache import SolanaConfigCache
-from allways.validator.event_index import SolanaEventIndex
-from allways.validator.forward import forward
-from allways.validator.seam_http import maybe_start_seam
-from allways.validator.solana_swap_loop import SolanaSwapLoop
-from allways.validator.state_store import ValidatorStateStore
-from allways.validator.storage import DatabaseStorage
-from neurons.base.neuron import validator_dev_mode
-from neurons.base.validator import BaseValidatorNeuron
-
-load_dotenv()
+from allways.validator.bounds_cache import SolanaConfigCache  # noqa: E402
+from allways.validator.event_index import SolanaEventIndex  # noqa: E402
+from allways.validator.forward import forward  # noqa: E402
+from allways.validator.seam_http import maybe_start_seam  # noqa: E402
+from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
+from allways.validator.state_store import ValidatorStateStore  # noqa: E402
+from allways.validator.storage import DatabaseStorage  # noqa: E402
+from neurons.base.neuron import validator_dev_mode  # noqa: E402
+from neurons.base.validator import BaseValidatorNeuron  # noqa: E402
 
 WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-gittensor')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'allways-validators')
