@@ -22,6 +22,7 @@ from typing import Callable, Dict, List, Optional, Set
 
 import bittensor as bt
 
+from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
@@ -91,6 +92,7 @@ class SolanaEventIndex:
             outcome = _OUTCOME_BY_EVENT.get(name)
             if outcome is not None:
                 self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
+                dev_signal.emit('swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=outcome)
             # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the C-rev quality reference, in
             # addition to closing the fulfillment above.
@@ -108,7 +110,12 @@ class SolanaEventIndex:
             # A PendingAttestation claim reaped stale: the Swap PDA is gone, so record the terminal
             # 'expired' outcome for the seam. No activity edge — the miner never entered FULFILLING;
             # its synthetic RESERVE_EXPIRE already returns it to AVAILABLE.
-            self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), _OUTCOME_BY_EVENT[name], block_time)
+            self.state_store.record_swap_outcome(
+                bytes(rec.fields['swap_key']).hex(), _OUTCOME_BY_EVENT[name], block_time
+            )
+            dev_signal.emit(
+                'swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=_OUTCOME_BY_EVENT[name]
+            )
             return True
         if name in ('CollateralPosted', 'CollateralWithdrawn'):
             total = int(rec.fields['total'])

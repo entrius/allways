@@ -16,6 +16,7 @@ from typing import Dict, Optional, Set, Tuple
 
 import bittensor as bt
 
+from allways import dev_signal
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
 from allways.constants import FEE_DIVISOR, MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
 from allways.solana.client import SolanaClientError, SolanaSwap
@@ -171,15 +172,18 @@ class SwapFulfiller:
                     f'(now {now} >= {swap.timeout_at} - {MINER_TIMEOUT_CUSHION_SECS})'
                 )
                 self.cushion_warned.add(swap.key_hex)
+            dev_signal.emit('refuse', swap_key=swap.key_hex, reason='inside_cushion')
             return None
 
         if not swap.miner_from_addr:
             bt.logging.error(f'Swap {swap.key_hex[:16]}: missing miner_from_addr on swap')
+            dev_signal.emit('refuse', swap_key=swap.key_hex, reason='missing_miner_from_addr')
             return None
 
         user_receives = apply_fee_deduction(swap.to_amount, self.fee_divisor)
         if user_receives == 0:
             bt.logging.error(f'Swap {swap.key_hex[:16]}: pinned to_amount yields 0 after the fee haircut')
+            dev_signal.emit('refuse', swap_key=swap.key_hex, reason='zero_after_fee')
             return None
 
         return user_receives, swap.miner_from_addr
@@ -213,6 +217,7 @@ class SwapFulfiller:
                 return False
 
             bt.logging.info(f'Swap {swap.key_hex[:16]}: source funds verified ({tx_info.amount} from {tx_info.sender})')
+            dev_signal.emit('source_verified', swap_key=swap.key_hex, sender=tx_info.sender, amount=tx_info.amount)
             return True
 
         except ProviderUnreachableError as e:
@@ -227,6 +232,12 @@ class SwapFulfiller:
         provider = self.providers.get(swap.to_chain)
         if not provider:
             bt.logging.error(f'Swap {swap.key_hex[:16]}: no provider for dest chain: {swap.to_chain}')
+            return None
+
+        # Harness-injected slash path: pretend the send failed so the swap times out and slashes.
+        if dev_signal.fault('withhold_dest'):
+            bt.logging.warning(f'Swap {swap.key_hex[:16]}: withholding dest funds (dev fault withhold_dest)')
+            dev_signal.emit('refuse', swap_key=swap.key_hex, reason='withhold_dest')
             return None
 
         # Miner's own dest-chain sending address — cached from this miner's posted quote at startup, passed
@@ -245,6 +256,7 @@ class SwapFulfiller:
                 f'Swap {swap.key_hex[:16]}: sent {user_receives_amount} to {swap.user_to_addr} '
                 f'on {swap.to_chain} (tx: {tx_hash}, block: {block_num})'
             )
+            dev_signal.emit('dest_sent', swap_key=swap.key_hex, tx=tx_hash, amount=user_receives_amount)
         else:
             reason = getattr(provider, 'last_send_error', None) or 'no provider error captured'
             bt.logging.error(
@@ -315,6 +327,7 @@ class SwapFulfiller:
             self.save_sent_cache()
             self.mark_fulfilled_attempts.pop(key, None)
             bt.logging.success(f'Swap {key[:16]}: marked as fulfilled')
+            dev_signal.emit('marked_fulfilled', swap_key=key, tx=sent.to_tx_hash)
             return True
         except SolanaClientError as e:
             attempts = self.mark_fulfilled_attempts.get(key, 0) + 1
