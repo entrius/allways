@@ -3,7 +3,7 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::{
     CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
-    RESV_SEED, SLOT_MS, TREASURY_SEED,
+    RESV_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
@@ -185,9 +185,6 @@ pub fn handler(
             q.rate,
         );
         let window = ctx.accounts.config.pool_window_secs;
-        let seed_slot = clock
-            .slot
-            .saturating_add((window as u64).saturating_mul(1000) / SLOT_MS);
         let closes_at = now.saturating_add(window);
 
         // Busy from the moment the pool opens: covers the window + the eventual reservation TTL.
@@ -203,7 +200,9 @@ pub fn handler(
         pool.rate = rate;
         pool.opened_at = now;
         pool.closes_at = closes_at;
-        pool.seed_slot = seed_slot;
+        // Unpinned: `resolve_pool` arms the seed slot after the window shuts, so the draw's entropy
+        // cannot be read (or predicted) while bids are still being placed.
+        pool.seed_slot = 0;
         pool.requests.clear();
         pool.requests.push(req);
         pool.bump = pool_bump;
@@ -214,7 +213,7 @@ pub fn handler(
             from_chain,
             to_chain,
             closes_at,
-            seed_slot,
+            seed_slot: 0, // armed later by resolve_pool; kept in the event for schema stability
         });
     } else {
         // JOIN or UPDATE — must be within the window and match the pinned pair.

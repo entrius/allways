@@ -107,6 +107,8 @@ pub enum ErrorCode {
     AlreadyRequested,
     #[msg("Pool has no requests to resolve")]
     NoRequests,
+    #[msg("Draw seed slot has not been produced yet; retry once the chain advances")]
+    SeedSlotNotYetProduced,
 
     // --- Phase 10: consensus validator weights ---
     #[msg("Weights vector length must match the validator set")]

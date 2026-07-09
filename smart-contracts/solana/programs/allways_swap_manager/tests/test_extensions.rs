@@ -10,12 +10,14 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS},
-    allways_swap_manager::state::{MinerState, Reservation, Swap},
+    allways_swap_manager::state::{MinerState, Pool, Reservation, Swap},
     litesvm::LiteSVM,
+    solana_hash::Hash,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
+    solana_slot_hashes::SlotHashes,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -68,6 +70,20 @@ fn swap_pda(key: &[u8; 32]) -> Pubkey {
 }
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
+}
+
+/// resolve_pool is two-phase: arm the draw on a future slot, produce it, then draw. See
+/// tests/test_reservation.rs for the entropy invariants this protects.
+fn arm_and_resolve(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("arm draw");
+    let a = svm.get_account(&pool_pda(miner)).unwrap();
+    let seed_slot = Pool::try_deserialize(&mut a.data.as_slice()).unwrap().seed_slot;
+    let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1]
+        .iter()
+        .map(|&s| (s, Hash::new_from_array([s as u8; 32])))
+        .collect();
+    svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("resolve");
 }
 
 fn set_clock(svm: &mut LiteSVM, ts: i64) {
@@ -335,7 +351,7 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair) {
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
     set_clock(&mut svm, BASE_TS);
     (svm, vals, miner)
 }
