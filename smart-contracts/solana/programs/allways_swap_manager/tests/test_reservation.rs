@@ -1,10 +1,13 @@
 // Phase 9 — reservation lottery: open_or_request / resolve_pool, flat fee, guards (LiteSVM).
 //   cargo test -p allways_swap_manager --test test_reservation
 //
-// The weighted draw itself is unit-tested as a pure fn in src/lottery.rs (LiteSVM doesn't populate
-// SlotHashes with future slots, so resolve here uses the deterministic fallback seed). These tests
-// cover the on-chain machinery: open pins the miner quote, the per-request fee accrues to treasury,
-// validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve.
+// resolve_pool is two-phase: the first call after the window shuts arms the draw on a future slot,
+// a later call resolves against that slot's hash. Tests seed the real SlotHashes sysvar between the
+// two (see `arm_and_resolve`) — there is no fallback seed to lean on. The weighted draw itself is
+// unit-tested as a pure fn in src/lottery.rs, and the sysvar scan in src/instructions/resolve_pool.rs.
+//
+// These cover the on-chain machinery: open pins the miner quote, the per-request fee accrues to
+// treasury, validator dedup, pair-mismatch, window timing, guards, single/multi-requester resolve.
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
@@ -13,9 +16,11 @@ use {
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
     allways_swap_manager::state::{MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
+    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
+    solana_slot_hashes::SlotHashes,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -62,6 +67,36 @@ fn set_clock(svm: &mut LiteSVM, ts: i64) {
     let mut clock = svm.get_sysvar::<Clock>();
     clock.unix_timestamp = ts;
     svm.set_sysvar::<Clock>(&clock);
+}
+
+/// LiteSVM never advances Clock::slot on its own; the draw needs it to move.
+fn set_slot(svm: &mut LiteSVM, slot: u64) {
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.slot = slot;
+    svm.set_sysvar::<Clock>(&clock);
+}
+
+/// Populate SlotHashes with `slots` (any order — SlotHashes::new sorts descending, as on-chain).
+/// Each slot's hash is `[slot as u8; 32]` so a test can tell which entry the draw consumed.
+fn set_slot_hashes(svm: &mut LiteSVM, slots: &[u64]) {
+    let entries: Vec<(u64, Hash)> = slots.iter().map(|&s| (s, Hash::new_from_array([s as u8; 32]))).collect();
+    svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
+}
+
+/// Crank #1 arms the draw on a future slot; make that slot (and a couple after it) exist.
+/// Returns the armed seed slot.
+fn arm_draw(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) -> u64 {
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("arm draw");
+    let seed_slot = pool(svm, miner).seed_slot;
+    assert_ne!(seed_slot, 0, "first resolve after close must arm a seed slot");
+    seed_slot
+}
+
+/// Arm, produce the seed slot, then resolve. The normal two-crank path.
+fn arm_and_resolve(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) -> Result<(), String> {
+    let seed_slot = arm_draw(svm, val, miner);
+    set_slot_hashes(svm, &[seed_slot - 1, seed_slot, seed_slot + 1]);
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val)
 }
 
 fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, signer: &Keypair) -> Result<(), String> {
@@ -339,7 +374,7 @@ fn test_single_requester_resolve_creates_reservation() {
 
     // warp past close, resolve (sole entrant wins regardless of seed)
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
 
     let r = reservation(&svm, &miner.pubkey());
     assert_eq!(r.reserved_until, BASE_TS + POOL_WINDOW_SECS + 1 + TTL, "reserved with TTL from resolve time");
@@ -364,7 +399,7 @@ fn test_multi_requester_resolve_picks_one() {
     send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL", &u1, "from1", "to1", 2_000_000_000, 1, 0), &vals[1].pubkey(), &vals[1]).expect("join");
 
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[2], &miner.pubkey()).expect("resolve");
 
     let r = reservation(&svm, &miner.pubkey());
     assert!(r.reserved_until > 0, "a winner was reserved");
@@ -419,7 +454,7 @@ fn test_open_blocked_while_reserved() {
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
     assert!(reservation(&svm, &miner.pubkey()).reserved_until > 0);
 
     // a new open is blocked while the reservation is active
@@ -445,7 +480,7 @@ fn test_reservation_blocks_deactivate_until_expiry() {
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
     assert!(is_active(&svm, &miner.pubkey()));
 
     let blocked = send(&mut svm, deactivate_ix(&miner.pubkey()), &miner.pubkey(), &miner);
@@ -533,7 +568,7 @@ fn test_cannot_force_deactivate_while_reserved() {
     let user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u", "uSOL", 2_000_000_000, 1, 0), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
     let blocked = send(&mut svm, vote_deactivate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
     assert!(blocked.is_err(), "cannot force-deactivate a reserved miner");
 }
@@ -555,7 +590,7 @@ fn test_update_reflected_in_reservation() {
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &u2, "fromB", "toB", 2_000_000_000, 9, 0), &vals[0].pubkey(), &vals[0]).expect("update");
 
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
 
     let r = reservation(&svm, &miner.pubkey());
     assert_eq!(r.sol_amount, 2_000_000_000, "reservation reflects the updated bid amount");
@@ -583,4 +618,109 @@ fn test_update_after_window_close_fails() {
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     let late = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "u1", "uSOL", 2, 2, 0), &vals[0].pubkey(), &vals[0]);
     assert!(late.is_err(), "cannot update after the window closed");
+}
+
+// --- draw entropy: arm-after-close, skip tolerance, no predictable fallback ---
+
+/// Open a pool with one request and warp past the window close.
+fn open_and_close(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair) {
+    let user = Keypair::new().pubkey();
+    send(
+        svm,
+        open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "userBTC", "userSOL", 2_000_000_000, 100_000, 0),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("open");
+    set_clock(svm, BASE_TS + POOL_WINDOW_SECS + 1);
+}
+
+#[test]
+fn test_open_does_not_pin_seed_slot() {
+    // The entropy must not be knowable while bids are still being placed: pinning at open let a
+    // late joiner read the slot hash and enter only when it would win.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    send(
+        &mut svm,
+        open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL", &user, "userBTC", "userSOL", 2_000_000_000, 100_000, 0),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("open");
+    assert_eq!(pool(&svm, &miner.pubkey()).seed_slot, 0, "seed slot must stay unpinned during the bidding window");
+}
+
+#[test]
+fn test_arming_creates_no_reservation() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    open_and_close(&mut svm, &vals, &miner);
+    let seed_slot = arm_draw(&mut svm, &vals[0], &miner.pubkey());
+    assert!(seed_slot > 0);
+    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "arming must not draw a winner");
+    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0, "pool stays open until the draw resolves");
+}
+
+#[test]
+fn test_resolve_before_seed_slot_is_produced_errors() {
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    open_and_close(&mut svm, &vals, &miner);
+    let seed_slot = arm_draw(&mut svm, &vals[0], &miner.pubkey());
+
+    // Chain has not reached the armed slot yet.
+    set_slot_hashes(&mut svm, &[seed_slot - 2, seed_slot - 1]);
+    let e = send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
+        .expect_err("must not resolve before the seed slot exists");
+    assert!(e.contains("SeedSlotNotYetProduced"), "unexpected error: {e}");
+    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "no reservation from an unproduced seed");
+    assert_eq!(pool(&svm, &miner.pubkey()).seed_slot, seed_slot, "armed slot must not drift on a failed retry");
+}
+
+#[test]
+fn test_skipped_seed_slot_resolves_from_next_produced_slot() {
+    // A skipped seed slot used to fall through to a seed derivable at pool-open. Now it takes the
+    // lowest produced slot above it and draws normally.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    open_and_close(&mut svm, &vals, &miner);
+    let seed_slot = arm_draw(&mut svm, &vals[0], &miner.pubkey());
+
+    // Buffer straddles the seed slot, but the seed slot itself was never produced (leader skipped it).
+    set_slot_hashes(&mut svm, &[seed_slot - 1, seed_slot + 1, seed_slot + 2]);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
+        .expect("skipped seed slot must still resolve");
+    assert_ne!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "winner drawn");
+    assert_eq!(pool(&svm, &miner.pubkey()).seed_slot, 0, "pool reset re-arms next contest");
+}
+
+#[test]
+fn test_rolled_off_seed_slot_rearms_instead_of_drawing() {
+    // After a long stall the armed slot ages out of SlotHashes. Drawing from whatever is left would
+    // let the caller pick the hash by choosing when to crank, so we re-arm.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    open_and_close(&mut svm, &vals, &miner);
+    let first = arm_draw(&mut svm, &vals[0], &miner.pubkey());
+
+    // >512 slots later: every retained slot is newer than the armed one.
+    set_slot(&mut svm, first + 601);
+    set_slot_hashes(&mut svm, &[first + 600, first + 601]);
+    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-arm");
+
+    let second = pool(&svm, &miner.pubkey()).seed_slot;
+    assert_ne!(second, first, "must re-arm on a fresh slot");
+    assert_ne!(second, 0);
+    assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "no draw from a rolled-off window");
+    assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0, "bids survive the re-arm");
+}
+
+#[test]
+fn test_armed_slot_is_ahead_of_every_produced_slot() {
+    // The security property: at arm time the seed slot does not exist, so nobody — not the arming
+    // cranker, not a bidder — can know the hash the draw will consume.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    set_slot(&mut svm, 1_000);
+    set_slot_hashes(&mut svm, &[998, 999, 1_000]);
+    open_and_close(&mut svm, &vals, &miner);
+
+    let seed_slot = arm_draw(&mut svm, &vals[0], &miner.pubkey());
+    assert!(seed_slot > 1_000, "armed slot {seed_slot} must exceed the newest produced slot (1000)");
 }

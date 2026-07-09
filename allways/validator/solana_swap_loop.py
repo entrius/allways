@@ -64,9 +64,10 @@ _BENIGN_EXTEND_MARKERS = ('ExtensionNotLater', 'ExtensionExceedsCeiling')
 
 # resolve_pool is permissionless, so every validator cranks every closed pool and the contract's
 # first-wins idempotency handles the race. A loser's tx fails with one of these — a peer already
-# resolved it (NoRequests: opened_at zeroed), or the on-chain clock hasn't crossed closes_at yet
-# (PoolNotClosed, clock skew) — both expected, retried next pass. Real failures still surface.
-_BENIGN_RESOLVE_MARKERS = ('NoRequests', 'PoolNotClosed')
+# resolved it (NoRequests: opened_at zeroed), the on-chain clock hasn't crossed closes_at yet
+# (PoolNotClosed, clock skew), or the armed draw slot isn't on-chain yet (SeedSlotNotYetProduced —
+# resolve is two-phase: arm, then draw). All expected, retried next pass. Real failures still surface.
+_BENIGN_RESOLVE_MARKERS = ('NoRequests', 'PoolNotClosed', 'SeedSlotNotYetProduced')
 
 # close_stale_claim is permissionless, so every validator cranks every stale claim and the first-wins race
 # leaves losers with a benign failure: a peer already reaped it (the Swap PDA is gone), or the reservation is

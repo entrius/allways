@@ -76,9 +76,9 @@ pub const REQ_TIMEOUT: u8 = 7;
 /// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
 
-/// Solana slot time (ms) — a chain property, used with `POOL_WINDOW_SECS` (economic-levers section
-/// below) to pin the draw's future seed slot from the window duration.
-pub const SLOT_MS: u64 = 400;
+/// Slots the draw's seed slot is pinned ahead of the arming crank. Small: the pool has already
+/// closed, so this only has to be far enough ahead that the slot is unproduced when pinned.
+pub const SEED_SLOT_DELAY_SLOTS: u64 = 4;
 
 /// Bounded max lengths for stored strings.
 pub const MAX_ADDR_LEN: usize = 80;
@@ -168,8 +168,7 @@ pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 
 /// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs` — how long
 /// a pool gathers contending requests before the stake-weighted draw. Must stay well below the
-/// reservation TTL; paired with `SLOT_MS` to pin the draw's seed slot. Runtime-adjustable via
-/// `set_pool_window` (dev seeds 5s for fast swaps).
+/// reservation TTL. Runtime-adjustable via `set_pool_window` (dev seeds 5s for fast swaps).
 pub const POOL_WINDOW_SECS: i64 = 30;
 
 /// Initial minimum seconds between successful validator-weight updates (Phase 10) — an anti-thrash

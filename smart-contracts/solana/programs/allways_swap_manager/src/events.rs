@@ -187,6 +187,14 @@ pub struct ReservationRequested {
     pub requests: u8,
 }
 
+/// The closed pool's draw seed slot has been pinned to a not-yet-produced slot. Re-emitted if that
+/// slot rolls out of SlotHashes before any crank resolves (a stall long enough to lose ~512 slots).
+#[event]
+pub struct PoolDrawArmed {
+    pub miner: Pubkey,
+    pub seed_slot: u64,
+}
+
 #[event]
 pub struct PoolResolved {
     pub miner: Pubkey,

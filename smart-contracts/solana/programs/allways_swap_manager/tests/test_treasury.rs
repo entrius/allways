@@ -7,12 +7,14 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::Treasury,
+    allways_swap_manager::state::{Pool, Treasury},
     litesvm::LiteSVM,
+    solana_hash::Hash,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
+    solana_slot_hashes::SlotHashes,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -146,10 +148,16 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
         allways_swap_manager::accounts::OpenOrRequest { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), pool: pool_pda(&miner.pubkey()), treasury: treasury_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    send(&mut svm, Instruction::new_with_bytes(pid(),
+    // resolve_pool is two-phase: arm the draw on a future slot, produce it, then draw.
+    let ix = Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::ResolvePool {}.data(),
         allways_swap_manager::accounts::ResolvePool { caller: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), pool: pool_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), slot_hashes: SLOT_HASHES_ID, system_program: SYS }.to_account_metas(None),
-    ), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    );
+    send(&mut svm, ix.clone(), &vals[0].pubkey(), &vals[0]).expect("arm draw");
+    let seed_slot = Pool::try_deserialize(&mut svm.get_account(&pool_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap().seed_slot;
+    let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1].iter().map(|&s| (s, Hash::new_from_array([s as u8; 32]))).collect();
+    svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
+    send(&mut svm, ix, &vals[0].pubkey(), &vals[0]).expect("resolve");
 
     let key = skey("tx1");
     // claim the source tx on-chain (PendingAttestation), then attest it to quorum

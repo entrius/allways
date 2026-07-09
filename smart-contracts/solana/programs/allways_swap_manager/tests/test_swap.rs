@@ -6,12 +6,14 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerDirectionStats, MinerState, Reservation, Swap, SwapStatus, Treasury},
+    allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
+    solana_hash::Hash,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
+    solana_slot_hashes::SlotHashes,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -82,6 +84,20 @@ fn set_clock(svm: &mut LiteSVM, ts: i64) {
     clock.unix_timestamp = ts;
     svm.set_sysvar::<Clock>(&clock);
 }
+/// resolve_pool is two-phase: arm the draw on a future slot, produce it, then draw. See
+/// tests/test_reservation.rs for the entropy invariants this protects.
+fn arm_and_resolve(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("arm draw");
+    let a = svm.get_account(&pool_pda(miner)).unwrap();
+    let seed_slot = Pool::try_deserialize(&mut a.data.as_slice()).unwrap().seed_slot;
+    let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1]
+        .iter()
+        .map(|&s| (s, Hash::new_from_array([s as u8; 32])))
+        .collect();
+    svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
+    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("resolve");
+}
+
 fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, signer: &Keypair) -> Result<(), String> {
     svm.expire_blockhash();
     let bh = svm.latest_blockhash();
@@ -425,7 +441,7 @@ fn setup_full(collateral: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair, u64)
     set_clock(&mut svm, setup_ts);
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
-    send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("resolve");
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
     set_clock(&mut svm, BASE_TS);
 
     (svm, admin, vals, miner, rent_reserve)
@@ -445,7 +461,7 @@ fn do_reserve(svm: &mut LiteSVM, opener: &Keypair, miner: &Pubkey) {
     let user = Keypair::new().pubkey();
     send(svm, open_ix(&opener.pubkey(), miner, &user), &opener.pubkey(), opener).expect("open");
     set_clock(svm, now + POOL_WINDOW_SECS + 1);
-    send(svm, resolve_ix(&opener.pubkey(), miner), &opener.pubkey(), opener).expect("resolve");
+    arm_and_resolve(svm, opener, miner);
 }
 
 fn invariant_holds(svm: &LiteSVM, miner: &Pubkey, rent_reserve: u64) -> bool {
