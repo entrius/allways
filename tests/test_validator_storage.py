@@ -57,6 +57,10 @@ class FakeRepo:
         self.conn._maybe_fail()
         return len(rows_by_direction)
 
+    def replace_current_miner_scores(self, rows, commit=False):
+        self.conn._maybe_fail()
+        return len(rows)
+
     def delete_crown_in_range(self, from_chain, to_chain, lo, hi, commit=False):
         self.conn._maybe_fail()
 
@@ -165,3 +169,16 @@ def test_gated_caller_path_reaches_the_redial(monkeypatch):
     _flush_halt_window(SimpleNamespace(database_storage=storage), current_time=1_000_000)
     assert storage.db_connection is fresh
     assert fresh.commits == 2  # flush_halt_window + upsert_current_crown_snapshot both landed
+
+
+def test_halt_flush_clears_live_score_tip(monkeypatch):
+    """flush_halt_window wipes current_miner_scores in the same transaction as
+    the crown clear — the dashboard never shows a live tip while the pool is
+    recycling."""
+    conn = FakeConnection()
+    storage = make_storage(monkeypatch, [conn])
+    calls = []
+    storage.repo.replace_current_miner_scores = lambda rows, commit=False: calls.append(rows) or len(rows)
+    result = storage.flush_halt_window(directions=[('sol', 'btc')], window_start=0, window_end=100, max_ts=100)
+    assert result.success
+    assert calls == [[]]

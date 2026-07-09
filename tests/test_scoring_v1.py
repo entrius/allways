@@ -31,6 +31,7 @@ from allways.validator.scoring import (
     score_and_reward_miners,
     scoring_window_bounds,
     snapshot_current_crown_holders,
+    snapshot_current_miner_scores,
 )
 from allways.validator.state_store import ValidatorStateStore
 
@@ -2720,3 +2721,84 @@ class TestCrownPredicateParity:
         assert min_leg > 0  # rate is executable, so the gate is live
         assert can_fund('hk_poor', rate) is False
         assert can_fund('hk_rich', rate) is True
+
+
+class TestScoreSnapshots:
+    """miner_scores round rows + the current_miner_scores live tip (D8): the
+    persisted factors must be exactly what the reward math paid — same shared
+    ``build_direction_score_rows``, so a snapshot can never disagree with the
+    weights that went on chain."""
+
+    def _solo_with_storage(self, tmp_path: Path) -> SimpleNamespace:
+        v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
+        v.database_storage.is_enabled.return_value = True
+        return v
+
+    def test_round_flush_rows_match_reward_math(self, tmp_path: Path):
+        v = self._solo_with_storage(tmp_path)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
+        rows = kwargs['miner_score_rows']
+        assert len(rows) == 1
+        (round_ts, hotkey, from_c, to_c, eligible, crown_share, capacity, fill_ratio, vol_share, quality, reward) = (
+            rows[0]
+        )
+        assert round_ts == v.block  # round keyed by window_end
+        assert (hotkey, from_c, to_c) == ('hk_a', 'btc', 'sol')
+        assert eligible is True
+        np.testing.assert_allclose((crown_share, capacity, fill_ratio, vol_share, quality), (1.0,) * 5)
+        # The persisted factors reproduce the persisted reward, and the
+        # persisted reward is what the weights actually paid.
+        expected = 0.8 * POOL_BTC_SOL * crown_share * capacity * fill_ratio + 0.2 * POOL_BTC_SOL * vol_share * quality
+        np.testing.assert_allclose(reward, expected, atol=1e-9)
+        np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
+
+    def test_ineligible_holder_persists_factors_with_zero_reward(self, tmp_path: Path):
+        """The gate zeroes the reward but the factors are still recorded — the
+        dashboard can show WHY the eligible=false round paid nothing."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, all_eligible=False)
+        v.database_storage.is_enabled.return_value = True
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
+        )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        assert len(rows) == 1
+        row = rows[0]
+        assert row[4] is False  # eligible
+        np.testing.assert_allclose(row[5], 1.0)  # crown_share still recorded
+        assert row[10] == 0.0  # reward
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+    def test_live_tip_equals_round_rows_for_same_window(self, tmp_path: Path):
+        """The tip is the same math over the same window — identical rows,
+        with ts standing in for round_ts."""
+        v = self._solo_with_storage(tmp_path)
+        tip = snapshot_current_miner_scores(v, at_time=v.block)
+        calculate_miner_rewards(v, v.block)
+        round_rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        assert tip == round_rows
+        v.state_store.close()
+
+    def test_tip_empty_when_no_crown(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        assert snapshot_current_miner_scores(v, at_time=v.block) == []
+        v.state_store.close()
+
+    def test_halt_flush_carries_no_score_rows(self, tmp_path: Path):
+        """A halted round pays nobody: the halt flush goes through
+        flush_halt_window (which clears the live tip) and miner_scores gets no
+        rows for the round."""
+        v = self._solo_with_storage(tmp_path)
+        v.solana_config_cache.halted.return_value = True
+        v.update_scores = lambda rewards, miner_uids: None
+        score_and_reward_miners(v)
+        assert v.database_storage.flush_halt_window.called
+        assert not v.database_storage.flush_scoring_window.called
+        v.state_store.close()
