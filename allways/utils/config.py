@@ -3,7 +3,7 @@ import os
 
 import bittensor as bt
 
-from allways.constants import MINER_POLL_INTERVAL_SECONDS, SCORING_EMA_ALPHA, VALIDATOR_POLL_INTERVAL_SECONDS
+from allways.constants import MINER_POLL_INTERVAL_SECONDS, VALIDATOR_POLL_INTERVAL_SECONDS
 from allways.utils.logging import setup_events_logger
 
 
@@ -95,7 +95,9 @@ def add_validator_args(cls, parser):
         '--neuron.moving_average_alpha',
         type=float,
         help='Moving average alpha parameter, how much to add of the new observation.',
-        default=SCORING_EMA_ALPHA,
+        # 1.0 = instantaneous, no smoothing across scoring passes — each round's
+        # rewards fully replace the previous scores. Operator-overridable.
+        default=1.0,
     )
 
     parser.add_argument(

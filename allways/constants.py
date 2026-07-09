@@ -1,5 +1,3 @@
-import os
-
 from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
@@ -55,7 +53,6 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
-SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 # Crown reward-state policy (D4): the only place that decides which MinerActivity
 # states earn crown. "All busy forfeits" = only AVAILABLE; add MinerActivity.FULFILLING
 # here to reward in-flight miners, with no other logic change.
@@ -140,54 +137,24 @@ EXTENSION_PADDING_SECONDS = 120  # safety buffer on top of confirmation time
 # Seconds, never blocks (the deadline axis is unix-seconds); >= the slowest chain's block time so a
 # bucket always spans at least one source block.
 EXTENSION_BUCKET_SECONDS = 600  # 10 min
-# Mirrors the contract's CHALLENGE_WINDOW_BLOCKS — must stay in sync with
-# smart-contracts/ink/lib.rs. Validators gate finalize calls on this locally
-# to avoid known-doomed txs; the contract is authoritative.
-CHALLENGE_WINDOW_BLOCKS = 8
-# Conservative upper bound on subtensor blocks elapsed per validator forward
-# step (base poll + per-step work + jitter). Used as a safety margin when
-# sizing extension targets so a single delayed step doesn't strand a propose
-# whose finalize window opens past the original reservation deadline.
-# Default sized for mainnet; testnet validators with slower/jankier RPC can
-# override via VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE env var.
-DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = 5
-VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE = max(
-    1,
-    int(
-        os.environ.get(
-            'VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE',
-            DEFAULT_VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE,
-        )
-    ),
-)
-# Vote to extend when this many blocks remain: a forward step to land each of
-# the propose and finalize txs, plus the challenge window between them.
-EXTEND_THRESHOLD_BLOCKS = 2 * VALIDATOR_FORWARD_STEP_BLOCKS_ESTIMATE + CHALLENGE_WINDOW_BLOCKS
-
-# Cushion the miner subtracts from each swap's timeout before agreeing to
-# fulfill. Pinned to EXTEND_THRESHOLD_BLOCKS so the miner won't start a
-# fulfill inside the window where validators can no longer land a propose +
-# challenge before expiry. Not env-overridable: the right value is system-
-# determined (validator extension runway), not operator preference. Edit
-# this file directly if you need a different value.
-MINER_TIMEOUT_CUSHION_BLOCKS = EXTEND_THRESHOLD_BLOCKS
 
 # ─── Protocol Fee ──────────────────────────────────────────
 # Hardcoded 1% — matches the contract's immutable FEE_DIVISOR.
 FEE_DIVISOR = 100
 
-# Base fulfillment window (blocks); its seconds form is the sent-cache margin's base-window buffer.
-DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS = 50  # ~10 min
+# Base fulfillment window (seconds, ~10 min) — the sent-cache margin's base-window buffer.
+DEFAULT_FULFILLMENT_TIMEOUT_SECS = 600
 
 # ─── Unix-axis miner runways (B4 — Solana) ────────────────
-# The Solana swap deadline (`Swap.timeout_at`) is unix-seconds, not a block height. Port the two
-# block-denominated miner runways to seconds via the subtensor block time so they keep the same
-# wall-clock meaning. Edit these directly if validator extension cadence changes.
-SECS_PER_BLOCK = 12
-MINER_TIMEOUT_CUSHION_SECS = MINER_TIMEOUT_CUSHION_BLOCKS * SECS_PER_BLOCK
+# The Solana swap deadline (`Swap.timeout_at`) is unix-seconds. Cushion the miner subtracts from
+# each swap's timeout before agreeing to fulfill, so it never starts a fulfill inside the span
+# where validators can no longer land an extension propose + challenge before expiry. Sized to
+# that runway — two validator forward steps plus the challenge window, at 12s subtensor blocks
+# ((2·5 + 8) × 12) — not operator preference; edit here if extension cadence changes.
+MINER_TIMEOUT_CUSHION_SECS = 216
 # Retain a miner's unmarked sent entry until past the contract's max extended deadline, else it can
 # discard then re-send a still-claimable swap (#461 double-send). The contract slides the deadline
 # cumulatively up to the extension ceiling, so cover that full budget plus one base window. Keep
 # CONTRACT_MAX_TOTAL_EXTENSION_SECS in sync with smart-contracts/solana/.../constants.rs.
 CONTRACT_MAX_TOTAL_EXTENSION_SECS = 8400  # 140 min — mirror of the contract's MAX_TOTAL_EXTENSION_SECS
-SENT_CACHE_DISCARD_MARGIN_SECS = CONTRACT_MAX_TOTAL_EXTENSION_SECS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS * SECS_PER_BLOCK
+SENT_CACHE_DISCARD_MARGIN_SECS = CONTRACT_MAX_TOTAL_EXTENSION_SECS + DEFAULT_FULFILLMENT_TIMEOUT_SECS

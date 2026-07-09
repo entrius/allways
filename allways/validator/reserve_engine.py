@@ -8,7 +8,7 @@ invariants before it signs — the caller (offering or CLI) is never trusted.
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 import bittensor as bt
 from bittensor import Keypair
@@ -16,7 +16,7 @@ from solders.pubkey import Pubkey
 
 from allways.chain_providers.base import ProviderUnreachableError
 from allways.cli.swap_commands.swap_intake import (
-    MinerCandidate,
+    candidate_miners,
     compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
@@ -233,18 +233,6 @@ class BestQuote:
     to_amount: int
 
 
-def _candidate_miners(validator, from_chain: str, to_chain: str) -> List[MinerCandidate]:
-    """All miners with a live quote for this exact direction, collateral attached."""
-    client = validator.solana_client
-    out: List[MinerCandidate] = []
-    for _pk, q in client.get_all('MinerQuote'):
-        if q.from_chain != from_chain or q.to_chain != to_chain:
-            continue
-        collateral = client.get_collateral_lamports(q.miner) or 0
-        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
-    return out
-
-
 def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> Optional[BestQuote]:
     """Best executable quote for ``from_amount`` (source smallest-units): the miner giving the most dest.
 
@@ -254,7 +242,7 @@ def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> O
     min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
     max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
     best = select_best_miner(
-        _candidate_miners(validator, from_chain, to_chain), from_chain, to_chain, from_amount, min_swap, max_swap
+        candidate_miners(client, from_chain, to_chain), from_chain, to_chain, from_amount, min_swap, max_swap
     )
     if best is None:
         return None

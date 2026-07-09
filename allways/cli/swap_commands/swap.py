@@ -9,7 +9,7 @@ unrouted taker never waits on validator liveness."""
 
 import json
 import time
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import click
 
@@ -24,7 +24,7 @@ from allways.cli.swap_commands.helpers import (
     live_unclaimed,
 )
 from allways.cli.swap_commands.swap_intake import (
-    MinerCandidate,
+    candidate_miners,
     compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
@@ -38,17 +38,6 @@ from allways.utils.rate import apply_fee_deduction
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
 def swap_group():
     """Execute and manage cross-chain swaps."""
-
-
-def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
-    """All miners with a posted quote for this exact direction, with their collateral attached."""
-    out: List[MinerCandidate] = []
-    for _pk, q in client.get_all('MinerQuote'):
-        if q.from_chain != from_chain or q.to_chain != to_chain:
-            continue
-        collateral = client.get_collateral_lamports(q.miner) or 0
-        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
-    return out
 
 
 class PoolContention(NamedTuple):
@@ -220,7 +209,7 @@ def swap_now_command(
     pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
 
     from_amount = to_smallest_units(amount_opt, from_chain)
-    candidates = _candidate_miners(client, from_chain, to_chain)
+    candidates = candidate_miners(client, from_chain, to_chain)
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
     best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
