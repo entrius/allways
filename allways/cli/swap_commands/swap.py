@@ -47,18 +47,11 @@ def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandi
     return out
 
 
-# Slack (seconds) added on top of a source chain's confirmation wait before we'll tell a taker to send:
-# covers broadcast + the post-tx relay round trip.
-_RELAY_MARGIN_SECS = 30
-
-
-def _send_margin_secs(chain_id: str) -> int:
-    """Minimum reservation life required before instructing a send on ``chain_id``: the source chain's
-    confirmation wait (``min_confirmations × seconds_per_block``) plus relay slack. Sending into a
-    reservation that expires before the deposit can be claimed strands the funds (no escrow, no Swap,
-    no refund)."""
-    ch = get_chain(chain_id)
-    return int(ch.min_confirmations) * int(ch.seconds_per_block) + _RELAY_MARGIN_SECS
+# Minimum reservation life required before we'll instruct a send. The reservation must outlive
+# broadcast -> mempool visibility -> post-tx relay -> submit_swap_claim landing, which is all the
+# on-chain claim gate checks (`reserved_until >= now`, empty claim slot). Chain-independent by
+# construction: 60s post-tx dendrite timeout + ~60s Solana claim landing + 60s slack.
+_SEND_MARGIN_SECS = 180
 
 
 def _poll_reservation(client, miner, timeout_secs: int):
@@ -171,15 +164,14 @@ def swap_now_command(
              'Do NOT send funds; check `alw view reservation` and re-run.')
     if str(resv.user) != str(user):
         fail("  Another taker won this miner's draw. Do NOT send funds; re-run to try again.")
-    # Never instruct a send the reservation can't outlive: the deposit must land and reach the source
-    # chain's confirmation depth before reserved_until, or the claim is rejected and the funds are
-    # stranded (funds go straight to the miner — no escrow, no Swap, no timeout, no refund).
+    # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
+    # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
+    # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
     remaining = int(resv.reserved_until) - int(time.time())
-    margin = _send_margin_secs(from_chain)
-    if remaining < margin:
-        fail(f'  Reservation has only {remaining}s left — too short to send {from_chain.upper()} safely '
-             f'(needs ~{margin}s for {from_chain.upper()} confirmations + relay). Do NOT send funds; '
-             'raise reservation_ttl (or re-run for a fresh reservation).')
+    if remaining < _SEND_MARGIN_SECS:
+        fail(f'  Reservation has only {remaining}s left — too short to land the claim for your '
+             f'{from_chain.upper()} deposit (needs ~{_SEND_MARGIN_SECS}s to relay it on-chain). '
+             'Do NOT send funds; re-run for a fresh reservation.')
 
     _save_pending(cand.miner, from_chain, to_chain)
     console.print(
