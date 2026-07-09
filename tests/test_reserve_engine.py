@@ -256,6 +256,40 @@ def _status_validator(tmp_path, client):
     return validator, store
 
 
+def _unclaimed_reservation(reserved_until: int):
+    return SimpleNamespace(
+        reserved_until=reserved_until,
+        claimed_swap_key=b'\x00' * 32,
+        user='staleUserSOLpk',
+        from_chain='btc',
+        to_chain='sol',
+        from_amount=10_000,
+        to_amount=47_000_000,
+        miner_from_addr='tb1qminer',
+    )
+
+
+def test_expired_unclaimed_reservation_reports_none(tmp_path):
+    """A dead (expired, never-claimed) reservation must not surface as 'reserved' with its stale
+    user — the offering's win-detection would read it as another user holding the miner."""
+    import time as _time
+
+    from allways.validator.reserve_engine import swap_status
+
+    client = StatusClient(reservation=_unclaimed_reservation(int(_time.time()) - 5))
+    validator, _ = _status_validator(tmp_path, client)
+    assert swap_status(validator, HOTKEY).stage == 'none'
+
+
+def test_live_unclaimed_reservation_reports_reserved(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
+    validator, _ = _status_validator(tmp_path, client)
+    s = swap_status(validator, HOTKEY)
+    assert s.stage == 'reserved' and s.user == 'staleUserSOLpk'
+
+
 def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
     from allways.validator.reserve_engine import swap_status
 
@@ -386,13 +420,17 @@ def test_confirm_accepts_unconfirmed_mempool_deposit():
 
 def test_confirm_accepts_mined_low_conf_fresh_deposit():
     # Mined but below min_confirmations, block_time present + fresh → accepted; crank defers the rest.
-    r, client = _confirm(_confirm_reservation(), _tx(confirmed=False, block_time=CONFIRM_CREATED_AT + 5, confirmations=1))
+    r, client = _confirm(
+        _confirm_reservation(), _tx(confirmed=False, block_time=CONFIRM_CREATED_AT + 5, confirmations=1)
+    )
     assert r.ok and client.claims
 
 
 def test_confirm_accepts_deeply_confirmed_fast_chain_deposit():
     # Regression: a deeply-confirmed source still creates the claim (unchanged path for SOL/TAO fast chains).
-    r, client = _confirm(_confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
+    r, client = _confirm(
+        _confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6)
+    )
     assert r.ok and client.claims
 
 
@@ -404,7 +442,9 @@ def test_confirm_rejects_absent_or_mismatch_without_claim():
 
 def test_confirm_rejects_stale_mined_deposit_without_claim():
     # A MINED tx older than the reservation floor is a replay → freshness fast-fail (block_time checkable).
-    r, client = _confirm(_confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6))
+    r, client = _confirm(
+        _confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6)
+    )
     assert not r.ok and not client.claims
 
 
