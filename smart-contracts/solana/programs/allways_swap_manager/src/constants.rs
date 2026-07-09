@@ -187,17 +187,17 @@ pub const DEFAULT_RESERVATION_TTL_SECS: i64 = 600; // 10 min
 
 /// Total seconds a reservation/swap deadline may be slid forward across all extensions, frozen into
 /// each at creation as `deadline + this`. Seeds `Config.max_total_extension_secs`; runtime-tunable
-/// within [MIN, MAX]. 120 min gives edge-case BTC headroom: a run of back-to-back slow blocks can
+/// within [MIN, MAX]. 140 min gives edge-case BTC headroom: a run of back-to-back slow blocks can
 /// leave an honest, adequately-fee'd payout waiting >90 min for two confirmations, and the ceiling
 /// is the only bound on extensions (no per-swap count cap), so it must cover the slow tail.
-pub const MAX_TOTAL_EXTENSION_SECS: i64 = 7_200; // 120 min
+pub const MAX_TOTAL_EXTENSION_SECS: i64 = 8_400; // 140 min
 pub const MAX_TOTAL_EXTENSION_SECS_MIN: i64 = 1_800; // 30 min — two 15-min BTC blocks
-pub const MAX_TOTAL_EXTENSION_SECS_MAX: i64 = 7_200; // 120 min — hard lid
+pub const MAX_TOTAL_EXTENSION_SECS_MAX: i64 = 8_400; // 140 min — hard lid
 
 const _: () = assert!(
     MAX_TOTAL_EXTENSION_SECS >= MAX_TOTAL_EXTENSION_SECS_MIN
         && MAX_TOTAL_EXTENSION_SECS <= MAX_TOTAL_EXTENSION_SECS_MAX,
-    "MAX_TOTAL_EXTENSION_SECS must be within [30 min, 120 min]"
+    "MAX_TOTAL_EXTENSION_SECS must be within [30 min, 140 min]"
 );
 
 #[cfg(test)]

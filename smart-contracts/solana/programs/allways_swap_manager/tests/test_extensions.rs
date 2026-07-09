@@ -448,14 +448,20 @@ fn test_extend_timeout_validator_only() {
 }
 
 #[test]
-fn test_extension_ceiling_is_120_minutes() {
+fn test_extension_ceiling_is_140_minutes() {
     // Pin the tuned ceiling. In v2 extensions are bounded solely by MAX_TOTAL_EXTENSION_SECS — there is
     // NO per-swap extension count cap — so this constant is the only lever protecting an honest, slow-BTC
     // payout from a premature slash. The ceiling-rejection tests above read max_extend_at dynamically, so
     // a silent change to the constant would still pass them; this one fails if the value moves.
     assert_eq!(
         allways_swap_manager::constants::MAX_TOTAL_EXTENSION_SECS,
-        7_200,
-        "extension ceiling must be 120 min (two slow-BTC-block headroom); see constants.rs"
+        8_400,
+        "extension ceiling must be 140 min (two slow-BTC-block headroom); see constants.rs"
+    );
+    // The runtime lid must admit the default, else `set_max_total_extension(8400)` reverts on-chain.
+    assert_eq!(
+        allways_swap_manager::constants::MAX_TOTAL_EXTENSION_SECS_MAX,
+        8_400,
+        "runtime hard lid must permit the 140-min ceiling; see constants.rs"
     );
 }
