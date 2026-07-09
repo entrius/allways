@@ -208,6 +208,24 @@ def clear_pending_swap() -> None:
         pass
 
 
+EMPTY_SWAP_KEY = bytes(32)
+
+
+def live_unclaimed(resv) -> bool:
+    """Shared 'usable reservation' predicate for BOTH origination (`swap now`) and confirm (`post-tx`),
+    so the two paths can never disagree about what counts as a resolved reservation.
+
+    A reservation must exist, still be within its TTL (``reserved_until > now``), and carry no claim yet
+    (empty ``claimed_swap_key``). Crucially, ``reserved_until != 0`` alone is NOT sufficient: a reservation
+    left over from an abandoned reserve keeps its non-zero-but-past ``reserved_until`` indefinitely (nothing
+    reaps it on-chain), and treating that stale value as 'the draw resolved' is what let `swap now` tell a
+    taker to send funds before the pool draw ran — an unrecoverable loss."""
+    if resv is None:
+        return False
+    now = int(time.time())
+    return int(resv.reserved_until) > now and bytes(resv.claimed_swap_key) == EMPTY_SWAP_KEY
+
+
 def print_json(data) -> None:
     """Emit a value as pretty JSON (str fallback for non-serializable types like Pubkey)."""
     click.echo(json.dumps(data, indent=2, default=str))
