@@ -20,14 +20,13 @@ from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
-    build_direction_volumes,
     build_eligibility,
     calculate_miner_rewards,
     crown_holders_at_instant,
+    direction_sol_volume,
     due_for_scoring,
     is_eligible,
     make_crown_predicates,
-    realized_vwap,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
@@ -50,48 +49,19 @@ def make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
 
 class FakeSolanaClient:
     """Stand-in exposing ``get_all('MinerState')`` for the flat eligibility gate
-    (B3.3) and ``get_all('MinerDirectionStats')`` for the realized-volume read
-    (B3.5). Each entry's ``miner`` is the test hotkey string; the autouse
+    (B3.3). Each entry's ``miner`` is the test hotkey string; the autouse
     ``_identity_attribution`` fixture makes pubkey→hotkey attribution identity so
     state keys by the same opaque strings the crown tables use. End-to-end
     sr25519 attribution is covered in ``tests/test_eligibility.py``."""
 
     def __init__(self, miner_counters: dict[str, tuple[int, int]]):
         self._counters = miner_counters
-        # (hotkey, from_chain, to_chain) -> (total_from_amount, total_to_amount).
-        self._dir_stats: dict[tuple[str, str, str], tuple[int, int]] = {}
-
-    def add_direction_stats(
-        self,
-        miner_hotkey: str,
-        from_amount: int,
-        to_amount: int,
-        from_chain: str = 'btc',
-        to_chain: str = 'sol',
-    ) -> None:
-        """Seed a ``MinerDirectionStats`` row — the on-chain realized-volume
-        ledger that replaces the per-validator ``swap_outcomes`` table (B3.5)."""
-        self._dir_stats[(miner_hotkey, from_chain, to_chain)] = (int(from_amount), int(to_amount))
 
     def get_all(self, name: str):
         if name == 'MinerState':
             return [
                 (f'pda_{hk}', SimpleNamespace(miner=hk, successful_swaps=s, failed_swaps=f))
                 for hk, (s, f) in self._counters.items()
-            ]
-        if name == 'MinerDirectionStats':
-            return [
-                (
-                    f'stats_{hk}_{fr}_{to}',
-                    SimpleNamespace(
-                        miner=hk,
-                        from_chain=fr,
-                        to_chain=to,
-                        total_from_amount=fa,
-                        total_to_amount=ta,
-                    ),
-                )
-                for (hk, fr, to), (fa, ta) in self._dir_stats.items()
             ]
         return []
 
@@ -305,60 +275,65 @@ class TestBuildEligibility:
         assert build_eligibility(client, metagraph) == {'hk_a': False}
 
 
-class TestRealizedVWAP:
-    """Realized VWAP = total_to_amount / total_from_amount with exact-integer
-    accumulation and a divide-by-zero guard (B3.5)."""
+class TestGetClearingVolumes:
+    """``get_clearing_volumes`` sums the windowed clearing-rate legs per
+    (direction, hotkey) — the realized-volume read the reward weighting
+    consumes. Window semantics are ``(start, end]``, matching
+    ``get_clearing_rates_in_range``."""
 
-    def test_basic_ratio(self):
-        assert realized_vwap(2, 4) == 0.5
-        assert realized_vwap(15, 3) == 5.0
+    def _store(self, tmp_path: Path) -> ValidatorStateStore:
+        return ValidatorStateStore(db_path=tmp_path / 'state.db')
 
-    def test_zero_denominator_guarded(self):
-        # No executed from-leg volume → 0.0, never a ZeroDivisionError.
-        assert realized_vwap(1_000, 0) == 0.0
-        assert realized_vwap(0, 0) == 0.0
+    def test_sums_per_direction_and_hotkey(self, tmp_path: Path):
+        store = self._store(tmp_path)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600)
+        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 100, 200)
+        store.insert_clearing_rate(9_850, 'hk_b', 'sol', 'btc', 100, 50)
+        vols = store.get_clearing_volumes(9_700, 10_000)
+        assert vols[('btc', 'sol')]['hk_a'] == (400, 800)
+        assert vols[('sol', 'btc')]['hk_b'] == (100, 50)
+        store.close()
 
-    def test_negative_denominator_guarded(self):
-        # Defensive: a non-positive from-leg can't yield a meaningful rate.
-        assert realized_vwap(5, -3) == 0.0
+    def test_window_boundaries_start_exclusive_end_inclusive(self, tmp_path: Path):
+        store = self._store(tmp_path)
+        store.insert_clearing_rate(9_700, 'hk_a', 'btc', 'sol', 1, 1)  # at start — excluded
+        store.insert_clearing_rate(9_701, 'hk_a', 'btc', 'sol', 10, 10)  # just inside
+        store.insert_clearing_rate(10_000, 'hk_a', 'btc', 'sol', 100, 100)  # at end — included
+        store.insert_clearing_rate(10_001, 'hk_a', 'btc', 'sol', 1_000, 1_000)  # past end — excluded
+        vols = store.get_clearing_volumes(9_700, 10_000)
+        assert vols[('btc', 'sol')]['hk_a'] == (110, 110)
+        store.close()
 
-    def test_exact_integer_legs_before_final_ratio(self):
-        # Legs are summed as exact integers on-chain; only the final ratio is a
-        # float. A u128-scale numerator divides without precision loss in the
-        # leading digits.
-        to_amt = 10**30 + 7
-        from_amt = 10**29
-        np.testing.assert_allclose(realized_vwap(to_amt, from_amt), 10.0, rtol=1e-9)
+    def test_empty_window(self, tmp_path: Path):
+        store = self._store(tmp_path)
+        store.insert_clearing_rate(9_000, 'hk_a', 'btc', 'sol', 5, 5)
+        assert store.get_clearing_volumes(9_700, 10_000) == {}
+        store.close()
+
+    def test_u128_scale_legs_sum_exactly(self, tmp_path: Path):
+        # Legs are TEXT in SQLite; summing in Python keeps u128-scale integers
+        # exact where SQL SUM would round through float.
+        store = self._store(tmp_path)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 10**30 + 7, 1)
+        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 3, 1)
+        assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (10**30 + 10, 2)
+        store.close()
 
 
-class TestBuildDirectionVolumes:
-    """build_direction_volumes attributes on-chain MinerDirectionStats to
-    metagraph hotkeys, keyed by direction (B3.5)."""
+class TestDirectionSolVolume:
+    """The volume floor compares a direction's SOL-side notional: the hub leg is
+    ``from_amount`` when SOL is the source, ``to_amount`` when SOL is the dest."""
 
-    def test_maps_pubkey_to_hotkey_uid_per_direction(self):
-        metagraph = make_metagraph(['hk_a', 'hk_b'])
-        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
-        client.add_direction_stats('hk_a', from_amount=300, to_amount=600, from_chain='btc', to_chain='sol')
-        client.add_direction_stats('hk_b', from_amount=100, to_amount=50, from_chain='sol', to_chain='btc')
-        vols = build_direction_volumes(client, metagraph)
-        assert vols['hk_a'][('btc', 'sol')].from_amount == 300
-        assert vols['hk_a'][('btc', 'sol')].vwap == 2.0  # 600 / 300
-        assert vols['hk_b'][('sol', 'btc')].from_amount == 100
+    def test_sol_source_uses_from_leg(self):
+        legs = {'hk_a': (2_000, 5), 'hk_b': (3_000, 7)}
+        assert direction_sol_volume('sol', legs) == 5_000
 
-    def test_off_metagraph_miner_dropped(self):
-        metagraph = make_metagraph(['hk_a'])
-        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_ghost': (5, 0)})
-        client.add_direction_stats('hk_a', from_amount=10, to_amount=10)
-        client.add_direction_stats('hk_ghost', from_amount=99, to_amount=99)
-        vols = build_direction_volumes(client, metagraph)
-        assert set(vols) == {'hk_a'}
+    def test_sol_dest_uses_to_leg(self):
+        legs = {'hk_a': (5, 2_000), 'hk_b': (7, 3_000)}
+        assert direction_sol_volume('btc', legs) == 5_000
 
-    def test_direction_is_lowercased(self):
-        metagraph = make_metagraph(['hk_a'])
-        client = FakeSolanaClient({'hk_a': (5, 0)})
-        client.add_direction_stats('hk_a', from_amount=10, to_amount=10, from_chain='BTC', to_chain='SOL')
-        vols = build_direction_volumes(client, metagraph)
-        assert ('btc', 'sol') in vols['hk_a']
+    def test_empty_direction_is_zero(self):
+        assert direction_sol_volume('sol', {}) == 0
 
 
 class TestCrownHoldersHelper:
@@ -1985,26 +1960,27 @@ class TestVolumeWeighting:
         self,
         v: SimpleNamespace,
         miner_hotkey: str,
-        tao_amount: int,
-        swap_id: int = 1,  # retained for call-site compatibility; ignored (cumulative on-chain ledger)
-        resolved_block: int = 9_900,  # ignored — MinerDirectionStats has no per-swap block window
+        from_amount: int,
+        block: int = 9_900,  # inside the (9_700, 10_000] window these tests score
         completed: bool = True,
         from_chain: str = 'btc',
         to_chain: str = 'sol',
         to_amount: int | None = None,
     ) -> None:
-        """Seed realized per-direction volume on the on-chain ``MinerDirectionStats``
-        ledger (B3.5), replacing the ``swap_outcomes`` table. ``tao_amount`` is the
-        from-leg amount the ``volume_factor`` compares. A non-completed swap never
-        accrues on-chain, so it's a no-op — timed-out swaps contribute no volume."""
+        """Seed one completed swap's realized legs on the ``clearing_rates``
+        ledger — the windowed volume read the reward weighting consumes.
+        ``from_amount`` is the from-leg the ``volume_factor`` compares within a
+        direction. A non-completed swap never lands a ``SwapCompleted`` event,
+        so it writes nothing — timed-out swaps contribute no volume."""
         if not completed:
             return
-        v.solana_client.add_direction_stats(
+        v.state_store.insert_clearing_rate(
+            block,
             miner_hotkey,
-            from_amount=tao_amount,
-            to_amount=tao_amount if to_amount is None else to_amount,
-            from_chain=from_chain,
-            to_chain=to_chain,
+            from_chain,
+            to_chain,
+            from_amount,
+            from_amount if to_amount is None else to_amount,
         )
 
     def test_idle_network_no_penalty(self, tmp_path: Path):
@@ -2023,7 +1999,7 @@ class TestVolumeWeighting:
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
         # B doesn't post a rate → never holds crown.
-        self.insert_volume(v, 'hk_b', tao_amount=1_000_000_000, swap_id=1)
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A's vol_share = 0, crown_share = 1.0 → participation = 0 → vol_factor = 0.5.
         # Volume>0 in this direction → w_a=0.8/w_b=0.2; A's qv_share is 0, so
@@ -2045,8 +2021,8 @@ class TestVolumeWeighting:
                 (hk, 'btc', 'sol', 0.00020, 0),
             )
         conn.commit()
-        self.insert_volume(v, 'hk_a', tao_amount=500_000_000, swap_id=1)
-        self.insert_volume(v, 'hk_b', tao_amount=500_000_000, swap_id=2)
+        self.insert_volume(v, 'hk_a', from_amount=500_000_000)
+        self.insert_volume(v, 'hk_b', from_amount=500_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Both 50/50 on crown and volume → participation 1.0 → factor 1.0 each.
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
@@ -2070,8 +2046,8 @@ class TestVolumeWeighting:
             ('hk_b', 'sol', 'btc', 100.0, 0),
         )
         conn.commit()
-        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='sol', to_chain='btc')
-        self.insert_volume(v, 'hk_b', tao_amount=900_000_000, swap_id=2, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_a', from_amount=100_000_000, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', from_amount=900_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → vol_factor = 0.55.
         # w_a=0.8/w_b=0.2: 0.8·(pool·0.55) + 0.2·(pool·0.1) = pool·0.46.
@@ -2101,8 +2077,8 @@ class TestVolumeWeighting:
         # swap) with a 60s TTL forfeits the crown for exactly the reserved span,
         # then RESERVE_EXPIRE returns A to AVAILABLE.
         v.event_watcher.apply_event(9_800, 'PoolResolved', {'miner': 'hk_a', 'ttl': 60})
-        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=1, from_chain='sol', to_chain='btc')
-        self.insert_volume(v, 'hk_b', tao_amount=800_000_000, swap_id=2, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_a', from_amount=200_000_000, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', from_amount=800_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
         # A participation = 0.2/0.8 = 0.25 → vol_factor 0.625; B → vol_factor 1.0.
@@ -2120,12 +2096,11 @@ class TestVolumeWeighting:
         self.insert_volume(
             v,
             'hk_a',
-            tao_amount=1_000_000_000,
-            swap_id=1,
+            from_amount=1_000_000_000,
             completed=False,
         )
-        # A timed-out swap never accrues on-chain, so MinerDirectionStats has no row.
-        assert build_direction_volumes(v.solana_client, v.metagraph) == {}
+        # A timed-out swap never lands SwapCompleted, so no clearing row exists.
+        assert v.state_store.get_clearing_volumes(9_700, 10_000) == {}
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Eligible solo crown holder, zero counted volume → idle-network
         # short-circuit → factor 1.0 → full tao→btc pool.
@@ -2134,16 +2109,16 @@ class TestVolumeWeighting:
 
     def test_volume_split_per_direction(self, tmp_path: Path):
         """Per-direction volume isolates each market. A miner with volume in both
-        directions is keyed by direction in ``build_direction_volumes``, so each
-        direction's ``from_amount`` is read independently off MinerDirectionStats."""
+        directions is keyed by direction in ``get_clearing_volumes``, so each
+        direction's ``from_amount`` is summed independently."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
-        self.insert_volume(v, 'hk_a', tao_amount=300_000_000, swap_id=1, from_chain='btc', to_chain='sol')
-        self.insert_volume(v, 'hk_a', tao_amount=200_000_000, swap_id=2, from_chain='sol', to_chain='btc')
-        vols = build_direction_volumes(v.solana_client, v.metagraph)
-        assert vols['hk_a'][('btc', 'sol')].from_amount == 300_000_000
-        assert vols['hk_a'][('sol', 'btc')].from_amount == 200_000_000
+        self.insert_volume(v, 'hk_a', from_amount=300_000_000, from_chain='btc', to_chain='sol')
+        self.insert_volume(v, 'hk_a', from_amount=200_000_000, from_chain='sol', to_chain='btc')
+        vols = v.state_store.get_clearing_volumes(9_700, 10_000)
+        assert vols[('btc', 'sol')]['hk_a'] == (300_000_000, 300_000_000)
+        assert vols[('sol', 'btc')]['hk_a'] == (200_000_000, 200_000_000)
         v.state_store.close()
 
     def test_per_direction_volume_isolates_markets(self, tmp_path: Path):
@@ -2160,25 +2135,83 @@ class TestVolumeWeighting:
         )
         conn.commit()
         # A serves all of btc→tao. B floods tao→btc but earns no crown there.
-        self.insert_volume(v, 'hk_a', tao_amount=100_000_000, swap_id=1, from_chain='sol', to_chain='btc')
-        self.insert_volume(v, 'hk_b', tao_amount=9_000_000_000, swap_id=2, from_chain='btc', to_chain='sol')
+        self.insert_volume(v, 'hk_a', from_amount=1_000_000_000, from_chain='sol', to_chain='btc')
+        self.insert_volume(v, 'hk_b', from_amount=9_000_000_000, from_chain='btc', to_chain='sol')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # Old direction-blind logic: A vol_share = 0.011 of total network,
-        # crown_share = 1.0 → factor 0.5055 → reward ≈ POOL_SOL_BTC * 0.5055.
-        # New per-direction logic: A is sole btc→tao server, factor = 1.0.
+        # Old direction-blind logic: A's vol_share would be diluted by B's flood,
+        # dragging the factor below 1. Per-direction logic: A is the sole server
+        # in its own market, factor = 1.0.
         np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
-    def test_zero_amount_stats_row_tolerated(self, tmp_path: Path):
-        """A MinerDirectionStats row with zero realized volume is tolerated — it
-        carries the direction but contributes no volume (vol_share stays 0)."""
+    def test_below_floor_direction_falls_back_to_crown_only(self, tmp_path: Path):
+        """A direction clearing less than MIN_DIRECTION_VOLUME on its SOL side is
+        scored as zero-volume: w_a folds to 1.0 and volume_factor stays neutral,
+        so a dust swap neither pays the w_b slice nor penalizes the crown holder."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_sol_btc_crown(v, 'hk_a')
+        # B clears dust in A's market (btc→sol: SOL is the to-leg): without the
+        # floor A's vol_share = 0 would cost it alpha; with it, neutral.
+        self.insert_volume(v, 'hk_b', from_amount=100, to_amount=999_999_999)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        v.state_store.close()
+
+    def test_floor_boundary_exactly_at_floor_counts(self, tmp_path: Path):
+        """Exactly MIN_DIRECTION_VOLUME on the SOL side is NOT floored — the
+        idle-crown-holder penalty applies as usual."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_sol_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000, to_amount=1_000_000_000)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        # Same shape as test_idle_crown_holder_loses_alpha: A holds all crown,
+        # serves none of the (at-floor) volume → w_a·pool·vol_factor(0.5).
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
+        v.state_store.close()
+
+    def test_floor_uses_sol_leg_for_sol_source_direction(self, tmp_path: Path):
+        """For a SOL-source direction the floor reads the from-leg: a swap with a
+        big spoke-side to-leg but a dust SOL from-leg is still below the floor."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'sol', 'btc', 200.0, 0),
+        )
+        conn.commit()
+        # sol→btc: SOL is the from-leg (dust); the btc to-leg being huge is irrelevant.
+        self.insert_volume(v, 'hk_b', from_amount=999_999_999, to_amount=10**12, from_chain='sol', to_chain='btc')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        # Floored → zero-volume fallback → full crown, no alpha penalty.
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_volume_outside_window_ignored(self, tmp_path: Path):
+        """Clearing rows outside the scored window contribute no volume — the
+        weighting reads this round's flow, not history."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_sol_btc_crown(v, 'hk_a')
+        # B's heavy volume landed before the window opened (block 9_600 ≤ 9_700).
+        self.insert_volume(v, 'hk_b', from_amount=9_000_000_000, block=9_600)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        # No in-window volume → idle-network fallback → full pool for the holder.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        v.state_store.close()
+
+    def test_zero_amount_clearing_row_tolerated(self, tmp_path: Path):
+        """A clearing row with zero legs is tolerated — it contributes no volume
+        (and keeps the direction under the floor), never a crash."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
-        v.solana_client.add_direction_stats('hk_a', from_amount=0, to_amount=0, from_chain='btc', to_chain='sol')
-        vols = build_direction_volumes(v.solana_client, v.metagraph)
-        assert vols['hk_a'][('btc', 'sol')].from_amount == 0
-        assert vols['hk_a'][('btc', 'sol')].vwap == 0.0  # zero from-leg → guarded
+        self.seed_sol_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_a', from_amount=0, to_amount=0)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
 
@@ -2198,9 +2231,11 @@ class TestRewardShapeWeights:
             ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
-        v.solana_client.add_direction_stats(
-            'hk_a', from_amount=500_000_000, to_amount=100_000, from_chain='btc', to_chain='sol'
-        )
+        # One in-window completed swap: all the direction's volume, clearing at
+        # TestCrevReference.REALIZED (500) with a floor-clearing SOL leg. Doubles
+        # as the holder's own realized rate for the C-rev tests below.
+        f, t = TestCrevReference._legs(TestCrevReference.REALIZED)
+        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', f, t)
         return v
 
     def test_solo_holder_earns_full_pool_under_live_weights(self, tmp_path: Path):
@@ -2242,22 +2277,24 @@ class TestCrevReference:
     reference (the 500 outlier is trimmed when other rates dominate), and the
     holder's own clearing row sets its realized rate."""
 
-    REALIZED = 500.0  # tao→btc canonical rate the holder's own swap executed at
+    REALIZED = 500.0  # canonical rate the holder's own swap executed at
 
     @staticmethod
     def _legs(rate: float) -> tuple[int, int]:
-        # tao→btc legs (from_rao, to_sat) clearing at `rate` TAO/BTC for 0.001 BTC
-        # (100_000 sat) worth — equal btc weight per swap, so the per-miner cap is
-        # only ever triggered by repeating a hotkey, not by these distinct refs.
-        return int(rate * 0.001 * 1e9), 100_000
+        # btc→sol legs clearing at `rate` for a 1-SOL swap (1e9 lamports —
+        # clears MIN_DIRECTION_VOLUME so the volume floor never interferes).
+        # Equal SOL weight per swap, so the per-miner cap is only ever
+        # triggered by repeating a hotkey, not by these distinct refs.
+        return int(rate * 10 * 1e9), 1_000_000_000
 
     def _solo(self, tmp_path: Path, reference_rate, n_ref: int = 20):
+        # The holder's OWN windowed realized clearing rate (500) is the volume
+        # row _solo_crown_with_volume seeded in-window.
         v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
-        # The holder's OWN windowed realized clearing rate = 500.
-        f, t = self._legs(self.REALIZED)
-        v.state_store.insert_clearing_rate(0, 'hk_a', 'btc', 'sol', f, t)
-        # A cluster of other-miner swaps at the target rate. With ≥9 of them the
-        # holder's lone 500 lands in the trimmed tail, so the reference == target.
+        # A cluster of other-miner swaps at the target rate, before the scoring
+        # window (block 0) so they set the reference without adding scored
+        # volume. With ≥9 of them the holder's lone 500 lands in the trimmed
+        # tail, so the reference == target.
         if reference_rate is not None:
             rf, rt = self._legs(reference_rate)
             for i in range(n_ref):
@@ -2336,10 +2373,8 @@ class TestCapacityVolumeInteraction:
             ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
-        # B serves some volume in A's market (tao→btc) so A's vol_share = 0.
-        v.solana_client.add_direction_stats(
-            'hk_b', from_amount=500_000_000, to_amount=500_000_000, from_chain='btc', to_chain='sol'
-        )
+        # B serves the market's (floor-clearing) volume so A's vol_share = 0.
+        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: w_a 0.8 × pool × crown 1.0 × eligible 1 × capacity 0.5 × volume_factor 0.5.
         # A serves no volume (B does), so A's w_b slice is 0 → only the crown term.
@@ -2363,9 +2398,7 @@ class TestCapacityVolumeInteraction:
                 (hk, from_c, to_c, rate, 0),
             )
         conn.commit()
-        v.solana_client.add_direction_stats(
-            'hk_b', from_amount=400_000_000, to_amount=400_000_000, from_chain='sol', to_chain='btc'
-        )
+        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'btc', 1_500_000_000, 1_500_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
