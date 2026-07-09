@@ -18,7 +18,7 @@ from solders.pubkey import Pubkey
 
 from allways import dev_signal
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.chains import compute_extension_target_secs
+from allways.chains import compute_extension_target_secs, get_chain
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
@@ -78,6 +78,12 @@ def _status_name(swap: Any) -> str:
     """Borsh enum decodes to an instance whose type name is the variant (Active/Fulfilled/...)."""
     s = swap.status
     return s if isinstance(s, str) else type(s).__name__
+
+
+def _confs(chain_id: str, info: Any) -> str:
+    """Confirmation progress of a leg, e.g. '1/2 confs'. Unmined or absent legs read 0."""
+    have = int(getattr(info, 'confirmations', 0) or 0)
+    return f'{have}/{get_chain(chain_id).min_confirmations} confs'
 
 
 def _swap_key_hex(key: Any) -> str:
@@ -245,7 +251,10 @@ class SolanaSwapLoop:
             # fall through to the same overdue rule (at the ceiling + overdue still slashes).
             action = self._extend_timeout_action(swap, d_info, now)
             if action.decision == SwapDecision.EXTEND_TIMEOUT:
-                return action._replace(reason='dest confirmed-pending near timeout → extend')
+                return action._replace(
+                    reason=f'dest {_confs(swap.to_chain, d_info)} near timeout → extend timeout_at to '
+                    f'{action.target_at} (+{action.target_at - now}s)'
+                )
         # Dest freshness: payout must be mined after the swap was initiated on-chain (replay defense).
         elif (
             s_status == 'ok'
@@ -253,8 +262,11 @@ class SolanaSwapLoop:
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
             return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
-        # Unverifiable/stale dest + overdue ⇒ TIMEOUT; else wait for the leg.
-        why = f'src={s_status} dst={d_status}'
+        # Unverifiable/stale dest + overdue ⇒ TIMEOUT; else wait for the leg. Without the confirmation
+        # count and remaining runway, a healthy deferral and an imminent slash render identically.
+        why = (
+            f'src={s_status} dst={d_status} [{_confs(swap.to_chain, d_info)}] timeout_in={int(swap.timeout_at) - now}s'
+        )
         return (
             SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
             if overdue
@@ -308,9 +320,14 @@ class SolanaSwapLoop:
             return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
         if s_status == 'pending':
             # Valid-but-unconfirmed deposit near reservation expiry → extend so the honest miner isn't slashed.
-            return self._extend_reservation_action(swap, info, now)._replace(
-                reason='source confirmed-pending near reservation expiry'
-            )
+            action = self._extend_reservation_action(swap, info, now)
+            left = int(reservation.reserved_until) - now if reservation is not None else 0
+            detail = f'source {_confs(swap.from_chain, info)} reserved_until_in={left}s'
+            if action.decision == SwapDecision.EXTEND_RESERVATION:
+                return action._replace(
+                    reason=f'{detail} → extend reserved_until to {action.target_at} (+{action.target_at - now}s)'
+                )
+            return action._replace(reason=f'{detail} — awaiting confirmations')
         if s_status != 'ok':
             return SwapAction(SwapDecision.WAIT, reason=f'source deposit {s_status} — awaiting user funds')
         if reservation is None:
