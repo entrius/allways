@@ -186,5 +186,5 @@ MINER_TIMEOUT_CUSHION_SECS = MINER_TIMEOUT_CUSHION_BLOCKS * SECS_PER_BLOCK
 # discard then re-send a still-claimable swap (#461 double-send). The contract slides the deadline
 # cumulatively up to the extension ceiling, so cover that full budget plus one base window. Keep
 # CONTRACT_MAX_TOTAL_EXTENSION_SECS in sync with smart-contracts/solana/.../constants.rs.
-CONTRACT_MAX_TOTAL_EXTENSION_SECS = 7200  # 120 min — mirror of the contract's MAX_TOTAL_EXTENSION_SECS
+CONTRACT_MAX_TOTAL_EXTENSION_SECS = 8400  # 140 min — mirror of the contract's MAX_TOTAL_EXTENSION_SECS
 SENT_CACHE_DISCARD_MARGIN_SECS = CONTRACT_MAX_TOTAL_EXTENSION_SECS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS * SECS_PER_BLOCK

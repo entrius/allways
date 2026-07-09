@@ -54,7 +54,7 @@ pub fn collateral_bounds(min: u64, max: u64) -> Result<()> {
     Ok(())
 }
 
-/// Total deadline-extension budget, clamped to [30 min, 120 min]: the floor keeps it above one BTC
+/// Total deadline-extension budget, clamped to [30 min, 140 min]: the floor keeps it above one BTC
 /// block; the ceiling caps how long a miner can be held, since it's the only such bound.
 pub fn max_total_extension(secs: i64) -> Result<()> {
     require!(
