@@ -1,6 +1,6 @@
 """Unit tests for the pure taker swap-intake math (swap_intake.py).
 
-sol_amount must always be the SOL leg; to_amount must match calculate_to_amount so the CLI agrees with
+collateral_amount must always be the SOL leg; to_amount must match calculate_to_amount so the CLI agrees with
 the miner + validator. Concrete rates chosen so the arithmetic is hand-checkable.
 """
 
@@ -25,33 +25,33 @@ def test_to_smallest_units():
 
 
 def test_sol_to_btc_amounts():
-    # 1 SOL at 0.5 BTC/SOL → 0.5 BTC; SOL is source ⇒ sol_amount = from_amount.
+    # 1 SOL at 0.5 BTC/SOL → 0.5 BTC; SOL is source ⇒ collateral_amount = from_amount.
     a = compute_intake_amounts('sol', 'btc', SOL, '0.5')
     assert a.from_amount == SOL
     assert a.to_amount == 50_000_000  # 0.5 BTC
-    assert a.sol_amount == SOL
+    assert a.collateral_amount == SOL
 
 
 def test_btc_to_sol_amounts():
-    # 0.5 BTC at 0.5 BTC/SOL → 1 SOL; SOL is dest ⇒ sol_amount = to_amount.
+    # 0.5 BTC at 0.5 BTC/SOL → 1 SOL; SOL is dest ⇒ collateral_amount = to_amount.
     a = compute_intake_amounts('btc', 'sol', 50_000_000, '0.5')
     assert a.from_amount == 50_000_000
     assert a.to_amount == SOL
-    assert a.sol_amount == SOL
+    assert a.collateral_amount == SOL
 
 
 def test_sol_to_tao_amounts():
-    # both 9-dec; 1 SOL at 2 TAO/SOL → 2 TAO; sol_amount = from_amount.
+    # both 9-dec; 1 SOL at 2 TAO/SOL → 2 TAO; collateral_amount = from_amount.
     a = compute_intake_amounts('sol', 'tao', SOL, '2')
     assert a.to_amount == 2_000_000_000
-    assert a.sol_amount == SOL
+    assert a.collateral_amount == SOL
 
 
 def test_tao_to_sol_amounts():
-    # 2 TAO at 2 TAO/SOL → 1 SOL; sol_amount = to_amount.
+    # 2 TAO at 2 TAO/SOL → 1 SOL; collateral_amount = to_amount.
     a = compute_intake_amounts('tao', 'sol', 2_000_000_000, '2')
     assert a.to_amount == SOL
-    assert a.sol_amount == SOL
+    assert a.collateral_amount == SOL
 
 
 def test_non_sol_pair_rejected():

@@ -61,7 +61,7 @@ SCORING_EMA_ALPHA = 1.0  # Instantaneous — no smoothing across passes
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Numéraire / hub asset: the subnet is hub-and-spoke — every launch pair is hub↔spoke, so a rate reads
 # uniformly as 'dest per 1 hub'. SOL by construction (the contract lives on Solana: collateral, fee, and the
-# sol_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
+# collateral_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
 NUMERAIRE_CHAIN = 'sol'
 LAUNCH_SPOKES = ('btc', 'tao')  # chains paired against the hub; add a chain here to launch its pair
 # Emission pool per direction, split evenly across every hub↔spoke direction (both ways).
@@ -122,7 +122,7 @@ RATE_REFERENCE_MIN_SWAPS = 5  # fewer positive-weight samples in-window ⇒ refe
 SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
 
 # ─── Collateral ──────────────────────────────────────────
-# Collateral a miner must post to back a swap = sol_amount × this/10_000. Mirrors the contract's
+# Collateral a miner must post to back a swap = collateral_amount × this/10_000. Mirrors the contract's
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
 COLLATERAL_REQUIREMENT_BPS = 11_000
 

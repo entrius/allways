@@ -27,9 +27,11 @@ const BASE_TS: i64 = 1_700_000_000;
 const TTL: i64 = 1_800;
 const TIMEOUT_SECS: i64 = 3_600;
 const COLLATERAL: u64 = 10_000_000_000; // 10 SOL
-const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL swap size
-const FROM_AMOUNT: u128 = 100_000; // source leg (asset-native units)
-const TO_AMOUNT: u128 = 150_000; // dest leg → realized VWAP = to/from = 1.5 (matches RATE)
+const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL swap size (collateral basis)
+// BTC→SOL: SOL is the dest leg, and the finalize collateral bind requires collateral_amount == to_amount.
+// So TO_AMOUNT (the SOL leg) equals SOL_AMOUNT; FROM_AMOUNT (the BTC leg) keeps to/from ≈ RATE (1.5).
+const FROM_AMOUNT: u128 = 1_333_333_333; // source leg (asset-native units); to/from ≈ 1.5
+const TO_AMOUNT: u128 = 2_000_000_000; // dest (SOL) leg == collateral basis (bind)
 const FROM_TX_BLOCK: u32 = 800_000;
 // Fixed taker pinned by the lottery in `setup` (the Swap's user now comes from the reservation).
 const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
@@ -217,22 +219,16 @@ fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128)
         .to_account_metas(None),
     )
 }
-fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
-            user: *user,
-            user_from_addr: FROM_ADDR.to_string(),
-            user_to_addr: "userSOLaddr".to_string(),
-            sol_amount: SOL_AMOUNT,
-            from_amount: FROM_AMOUNT,
-            to_amount: TO_AMOUNT,
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            router: *validator,
+            router: *router,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -241,6 +237,29 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+/// The seat winner fills the reservation with the pinned taker + amounts (BTC→SOL constants).
+fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::FinalizeReservation {
+            user: *user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: "userSOLaddr".to_string(),
+            collateral_amount: SOL_AMOUNT,
+            from_amount: FROM_AMOUNT,
+            to_amount: TO_AMOUNT,
+        }
+        .data(),
+        allways_swap_manager::accounts::FinalizeReservation {
+            router: *router,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            reservation: resv_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -439,9 +458,11 @@ fn setup_full(collateral: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair, u64)
     // unchanged. Single requester → that requester wins the draw deterministically.
     let setup_ts = BASE_TS - 100;
     set_clock(&mut svm, setup_ts);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    // sole bidder wins → it finalizes the fill (pins LOTTERY_USER + amounts).
+    send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]).expect("finalize");
     set_clock(&mut svm, BASE_TS);
 
     (svm, admin, vals, miner, rent_reserve)
@@ -458,10 +479,11 @@ fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str) {
 /// the clock advanced past the window; the reservation is active for TTL.
 fn do_reserve(svm: &mut LiteSVM, opener: &Keypair, miner: &Pubkey) {
     let now = svm.get_sysvar::<Clock>().unix_timestamp;
-    let user = Keypair::new().pubkey();
-    send(svm, open_ix(&opener.pubkey(), miner, &user), &opener.pubkey(), opener).expect("open");
+    send(svm, open_ix(&opener.pubkey(), miner), &opener.pubkey(), opener).expect("open");
     set_clock(svm, now + POOL_WINDOW_SECS + 1);
     arm_and_resolve(svm, opener, miner);
+    // sole bidder (opener) wins → finalize the fill.
+    send(svm, finalize_ix(&opener.pubkey(), miner, &LOTTERY_USER), &opener.pubkey(), opener).expect("finalize");
 }
 
 fn invariant_holds(svm: &LiteSVM, miner: &Pubkey, rent_reserve: u64) -> bool {
@@ -479,7 +501,7 @@ fn test_initiate_creates_swap() {
     let s = Swap::try_deserialize(&mut a.data.as_slice()).unwrap();
     assert_eq!(s.user, LOTTERY_USER); // pinned by the lottery reservation, not the claimer
     assert_eq!(s.miner, miner.pubkey());
-    assert_eq!(s.sol_amount, SOL_AMOUNT);
+    assert_eq!(s.collateral_amount, SOL_AMOUNT);
     // miner quote sourced from the (immutable) reservation
     assert_eq!(s.miner_from_addr, MINER_FROM);
     assert_eq!(s.miner_to_addr, MINER_TO);
@@ -491,10 +513,11 @@ fn test_initiate_creates_swap() {
 }
 
 #[test]
-fn test_open_rejected_below_overcollateralization() {
-    // Miner holds 2.1 SOL: ≥ min_collateral (1) and ≥ 1.0× the 2 SOL swap, but < 1.10× (2.2 SOL). The
-    // over-collateralization gate moved to pool entry (review #1), so `open` rejects it up front —
-    // a reservation that vote_initiate could never satisfy is never created, so funds can't strand.
+fn test_finalize_rejected_below_overcollateralization() {
+    // Miner holds 2.1 SOL: ≥ min_collateral (1) and ≥ 1.0× the 2 SOL swap, but < 1.10× (2.2 SOL). Under
+    // two-phase the over-collateralization gate lives at FINALIZE (the amount is only known there), so
+    // the bid+draw succeed but the fill is rejected — a reservation vote_initiate could never satisfy is
+    // never made LIVE, so funds can't strand.
     let under = SOL_AMOUNT + SOL_AMOUNT / 20; // 2.1 SOL (< 2.2 = 1.10×)
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
@@ -517,8 +540,13 @@ fn test_open_rejected_below_overcollateralization() {
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
 
     let user = Keypair::new().pubkey();
-    let res = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]);
-    assert!(res.is_err(), "open must reject collateral below 1.1× the swap size");
+    // bid + draw succeed (no amount known yet)...
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("bid");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    // ...but the fill is rejected: 2 SOL × 1.10 = 2.2 SOL > 2.1 SOL held.
+    let res = send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]);
+    assert!(res.is_err(), "finalize must reject collateral below 1.1× the swap size");
 }
 
 #[test]

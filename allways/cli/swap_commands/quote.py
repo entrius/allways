@@ -104,7 +104,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
         if amts.to_amount <= 0:
             continue
-        ok, _reason = swap_viable(amts.sol_amount, c.collateral, min_swap, max_swap)
+        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
         if not ok:
             continue
         viable.append((c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR)))

@@ -237,22 +237,16 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
-            user: *user,
-            user_from_addr: FROM_ADDR.to_string(),
-            user_to_addr: "userSOLaddr".to_string(),
-            sol_amount: SOL_AMOUNT,
-            from_amount: 100_000,
-            to_amount: 0,
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            router: *validator,
+            router: *router,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -261,6 +255,29 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+/// Seat winner fills the reservation (BTC→SOL: to_amount == collateral_amount for the bind).
+fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::FinalizeReservation {
+            user: *user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: "userSOLaddr".to_string(),
+            collateral_amount: SOL_AMOUNT,
+            from_amount: 100_000,
+            to_amount: SOL_AMOUNT as u128,
+        }
+        .data(),
+        allways_swap_manager::accounts::FinalizeReservation {
+            router: *router,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            reservation: resv_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -495,11 +512,14 @@ fn reserved_miner(rpc: &RpcClient) -> Keypair {
     let vals = validator_keypairs();
     let miner = active_miner(rpc);
     send(rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
-    send(rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &PINNED_USER), &vals[0].pubkey(), &vals[0])
+    send(rpc, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
     wait_pool_window();
     send(rpc, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("resolve pool");
+    // sole bidder (vals[0]) won → finalize the fill.
+    send(rpc, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &PINNED_USER), &vals[0].pubkey(), &vals[0])
+        .expect("finalize");
     miner
 }
 
@@ -614,10 +634,10 @@ fn onchain_pool_open_pins_quote() {
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = active_miner(&rpc);
-    let user = Keypair::new().pubkey();
+    let _user = Keypair::new().pubkey();
 
     send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
-    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
 
     let p: Pool = {
@@ -639,11 +659,11 @@ fn onchain_reservation_fee_to_treasury() {
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = active_miner(&rpc);
-    let user = Keypair::new().pubkey();
+    let _user = Keypair::new().pubkey();
     send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
 
     let before = read_treasury(&rpc).total;
-    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0])
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
     let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
     assert_eq!(
@@ -660,28 +680,37 @@ fn onchain_resolve_pool_creates_reservation() {
     let rpc = rpc();
     let vals = validator_keypairs();
     let miner = active_miner(&rpc);
-    let u0 = Keypair::new().pubkey();
-    let u1 = Keypair::new().pubkey();
+    let _u0 = Keypair::new().pubkey();
+    let _u1 = Keypair::new().pubkey();
 
     // Two validators contend; real SlotHashes seeds the weighted draw.
     send(&rpc, set_quote_ix(&miner.pubkey(), FROM_CHAIN, TO_CHAIN, RATE), &miner.pubkey(), &miner).expect("set_quote");
-    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey(), &u0), &vals[0].pubkey(), &vals[0])
+    send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("open");
-    send(&rpc, open_ix(&vals[1].pubkey(), &miner.pubkey(), &u1), &vals[1].pubkey(), &vals[1])
+    send(&rpc, open_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1])
         .expect("join");
     wait_pool_window();
     send(&rpc, resolve_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2])
         .expect("resolve");
 
+    // draw creates an UNFILLED reservation (two-phase): router pinned, miner quote pinned, no fill yet.
     let r = read_reservation(&rpc, &miner.pubkey());
-    assert!(r.reserved_until > 0, "a winner was reserved");
+    assert_eq!(r.reserved_until, 0, "unfilled until the winner finalizes");
+    assert!(r.router == vals[0].pubkey() || r.router == vals[1].pubkey(), "winner is one of the bidders");
     assert_eq!(r.from_chain, FROM_CHAIN);
     assert_eq!(r.to_chain, TO_CHAIN);
-    assert_eq!(r.sol_amount, SOL_AMOUNT);
     assert_eq!(r.miner_from_addr, MINER_FROM, "pinned miner quote carried in");
     assert_eq!(r.miner_to_addr, MINER_TO);
     assert_eq!(r.rate, RATE);
-    assert_eq!(r.from_addr, FROM_ADDR, "winner's user source addr");
+
+    // the seat winner finalizes → reservation becomes live with the fill.
+    let winner = if r.router == vals[0].pubkey() { &vals[0] } else { &vals[1] };
+    send(&rpc, finalize_ix(&winner.pubkey(), &miner.pubkey(), &PINNED_USER), &winner.pubkey(), winner)
+        .expect("finalize");
+    let r = read_reservation(&rpc, &miner.pubkey());
+    assert!(r.reserved_until > 0, "reservation live after finalize");
+    assert_eq!(r.collateral_amount, SOL_AMOUNT);
+    assert_eq!(r.from_addr, FROM_ADDR, "taker's source addr pinned at finalize");
     // pool reset for reuse
     let p: Pool = {
         let a = rpc.get_account(&pool_pda(&miner.pubkey())).expect("pool account");
@@ -709,7 +738,7 @@ fn onchain_vote_initiate_creates_swap() {
     let s = read_swap(&rpc, &key);
     assert_eq!(s.user, PINNED_USER); // pinned by the lottery reservation
     assert_eq!(s.miner, miner.pubkey());
-    assert_eq!(s.sol_amount, SOL_AMOUNT);
+    assert_eq!(s.collateral_amount, SOL_AMOUNT);
     assert_eq!(s.miner_from_addr, MINER_FROM, "miner quote from reservation");
     assert_eq!(s.miner_to_addr, MINER_TO);
     assert_eq!(s.rate, RATE);

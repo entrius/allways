@@ -277,7 +277,7 @@ class TestNormalizeRate:
 class TestIsExecutableRate:
     """Crown-eligibility gate against sentinel quotes that no user can route.
 
-    SOL is the bounded asset (``sol_amount``): the contract's ``min_swap_amount``/``max_swap_amount``
+    SOL is the bounded asset (``collateral_amount``): the contract's ``min_swap_amount``/``max_swap_amount``
     constrain the SOL leg, in lamports. Bounds: ``min_swap=0.1 SOL``, ``max_swap=0.5 SOL``. (BTC decimals
     8, SOL/TAO 9 → btc↔sol decimal_factor 10, same boundary arithmetic as the retired btc↔tao gate.)
     """

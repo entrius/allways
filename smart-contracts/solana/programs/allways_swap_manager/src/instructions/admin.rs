@@ -109,6 +109,13 @@ pub fn set_pool_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn set_finalize_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    crate::validate::finalize_window(secs)?;
+    ctx.accounts.config.finalize_window_secs = secs;
+    msg!("finalize_window_secs = {}", secs);
+    Ok(())
+}
+
 pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     crate::validate::weights_update_min_interval(secs)?;
     ctx.accounts.config.weights_update_min_interval_secs = secs;

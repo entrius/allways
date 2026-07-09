@@ -3,7 +3,10 @@
 
 use anchor_lang::prelude::*;
 
-use crate::constants::{MAX_TOTAL_EXTENSION_SECS_MAX, MAX_TOTAL_EXTENSION_SECS_MIN};
+use crate::constants::{
+    FINALIZE_WINDOW_SECS_MAX, FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX,
+    MAX_TOTAL_EXTENSION_SECS_MIN,
+};
 use crate::error::ErrorCode;
 
 /// Quorum threshold as a percent of the validator set.
@@ -27,6 +30,16 @@ pub fn reservation_ttl(secs: i64) -> Result<()> {
 /// Lottery pooling window must be a positive duration.
 pub fn pool_window(secs: i64) -> Result<()> {
     require!(secs > 0, ErrorCode::InvalidAmount);
+    Ok(())
+}
+
+/// Post-draw finalize window, clamped to [15s, 300s]: long enough for the winner's internal auction +
+/// tx landing, short enough that parking a miner unfilled isn't cheap.
+pub fn finalize_window(secs: i64) -> Result<()> {
+    require!(
+        (FINALIZE_WINDOW_SECS_MIN..=FINALIZE_WINDOW_SECS_MAX).contains(&secs),
+        ErrorCode::InvalidAmount
+    );
     Ok(())
 }
 

@@ -152,7 +152,7 @@ def swap_now_command(
         user,
         user_from_addr,
         receive_address_opt,
-        amts.sol_amount,
+        amts.collateral_amount,
         amts.from_amount,
         amts.to_amount,
     )

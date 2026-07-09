@@ -56,8 +56,9 @@ class FakeClient:
     def get_collateral_lamports(self, miner):
         return self.collateral
 
-    def open_or_request(self, miner, from_chain, to_chain, user, ufa, uta, sol_amount, from_amount, to_amount):
-        self.calls.append(('open_or_request', sol_amount, from_amount, to_amount, str(user), ufa, uta))
+    def open_or_request(self, miner, from_chain, to_chain):
+        # Two-phase: a bid carries only the pair (the winner names the fill at finalize).
+        self.calls.append(('open_or_request', from_chain, to_chain))
         self._pool = SimpleNamespace(
             opened_at=1, closes_at=FUTURE, from_chain=from_chain, to_chain=to_chain, rate=self.quote.rate
         )
@@ -76,15 +77,12 @@ def _reserve(client, from_amount=1_000_000_000):
 
 
 def test_open_happy_path():
+    # Two-phase: reserve_on_behalf places a BID after a viability pre-check. The taker + amounts
+    # are named later at finalize (next wave), so the on-chain bid carries only the pair.
     client = FakeClient()
     r = _reserve(client)
     assert r.ok and r.pool_closes_at == FUTURE
-    assert client.calls and client.calls[0][0] == 'open_or_request'
-    _, sol_amount, from_amount, to_amount, user, _, uta = client.calls[0]
-    assert (
-        sol_amount == 1_000_000_000 and from_amount == 1_000_000_000
-    )  # sol is the source leg → sol_amount == from_amount
-    assert to_amount > 0 and user == USER_PK and uta == 'userBTCaddr'
+    assert client.calls == [('open_or_request', 'sol', 'btc')]
 
 
 def test_inactive_miner_rejects():
@@ -142,14 +140,15 @@ def test_low_collateral_rejects():
 
 
 def test_join_uses_pinned_pool_rate_not_live_quote():
-    # Pool already open at a pinned rate; a live quote that drifted must be ignored for the joiner's amounts.
+    # Joining an already-open pool bids successfully even when the live quote has drifted from the
+    # pinned rate: the joiner's viability pre-check computes against pool.rate (0.0021), not the live
+    # 0.0099. Under two-phase the settlement guarantee (fill honors the pinned rate) is enforced by the
+    # contract at finalize (Rust suite) — the bid itself carries no amounts.
     pinned = SimpleNamespace(opened_at=1, closes_at=FUTURE, from_chain='sol', to_chain='btc', rate=_rate_fixed(0.0021))
     client = FakeClient(quote_rate=0.0099, pool=pinned)  # live quote drifted away from the pinned 0.0021
     r = _reserve(client)
     assert r.ok
-    _, sol_amount, _, to_amount, _, _, _ = client.calls[0]
-    # to_amount derived from pinned 0.0021 (≈ 0.0021 BTC for 1 SOL = 210000 sat), not the 0.0099 live quote.
-    assert to_amount == 210_000
+    assert client.calls == [('open_or_request', 'sol', 'btc')]
 
 
 # ─── _swap_stage: closed-PDA terminal disambiguation ────────────────────────

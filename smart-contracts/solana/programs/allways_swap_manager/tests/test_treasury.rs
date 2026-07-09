@@ -144,7 +144,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     ), &miner.pubkey(), &miner).expect("set_quote");
     let pool_user = Keypair::new().pubkey();
     send(&mut svm, Instruction::new_with_bytes(pid(),
-        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "BTC".to_string(), to_chain: "SOL".to_string(), user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), sol_amount: SOL_AMOUNT, from_amount: 1, to_amount: 0 }.data(),
+        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "BTC".to_string(), to_chain: "SOL".to_string() }.data(),
         allways_swap_manager::accounts::OpenOrRequest { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), pool: pool_pda(&miner.pubkey()), treasury: treasury_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
@@ -158,6 +158,12 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1].iter().map(|&s| (s, Hash::new_from_array([s as u8; 32]))).collect();
     svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
     send(&mut svm, ix, &vals[0].pubkey(), &vals[0]).expect("resolve");
+
+    // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128 }.data(),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()) }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("finalize");
 
     let key = skey("tx1");
     // claim the source tx on-chain (PendingAttestation), then attest it to quorum

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    CONFIG_SEED, CONFIG_VERSION, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS,
+    CONFIG_SEED, CONFIG_VERSION, FINALIZE_WINDOW_SECS, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS,
     RESERVATION_FEE_LAMPORTS, TREASURY_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
 use crate::state::{Config, Treasury};
@@ -69,6 +69,7 @@ pub fn handler(
     config.halted = false;
     config.reservation_fee_lamports = RESERVATION_FEE_LAMPORTS;
     config.pool_window_secs = POOL_WINDOW_SECS;
+    config.finalize_window_secs = FINALIZE_WINDOW_SECS;
     config.weights_update_min_interval_secs = WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
     config.max_total_extension_secs = MAX_TOTAL_EXTENSION_SECS;
     config.bump = ctx.bumps.config;

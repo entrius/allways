@@ -48,7 +48,7 @@ def make_swap(
         miner_from_addr=miner_from,
         miner_to_addr='5miner',
         rate=345,
-        sol_amount=1_000_000,
+        collateral_amount=1_000_000,
         from_amount=1_000_000,
         to_amount=to_amount,
         from_tx_hash='deadbeef',

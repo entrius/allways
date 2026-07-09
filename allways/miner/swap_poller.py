@@ -48,7 +48,7 @@ class SwapPoller:
             if swap.key_hex not in self.known:
                 bt.logging.info(
                     f'Discovered swap {swap.key_hex[:16]}: {swap.from_chain} -> {swap.to_chain}, '
-                    f'sol_amount={swap.sol_amount}, status={swap.status}'
+                    f'collateral_amount={swap.collateral_amount}, status={swap.status}'
                 )
                 self.known.add(swap.key_hex)
             out.append(swap)

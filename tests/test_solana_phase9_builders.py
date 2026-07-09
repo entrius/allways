@@ -53,22 +53,10 @@ def test_ix_discriminators_match_anchor_global_formula():
 
 def test_open_or_request_ix(client):
     miner = Keypair().pubkey()
-    user = Keypair().pubkey()
-    client.open_or_request(miner, 'sol', 'btc', user, 'srcAddr', 'dstAddr', 1_000_000, 7, 9)
+    client.open_or_request(miner, 'sol', 'btc')
     ix = _ix(client)
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['open_or_request']
-    assert ix.data[8:] == layouts.IX_OPEN_OR_REQUEST_ARGS.build(
-        {
-            'from_chain': 'sol',
-            'to_chain': 'btc',
-            'user': bytes(user),
-            'user_from_addr': 'srcAddr',
-            'user_to_addr': 'dstAddr',
-            'sol_amount': 1_000_000,
-            'from_amount': 7,
-            'to_amount': 9,
-        }
-    )
+    assert ix.data[8:] == layouts.IX_OPEN_OR_REQUEST_ARGS.build({'from_chain': 'sol', 'to_chain': 'btc'})
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
