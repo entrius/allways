@@ -15,6 +15,7 @@ from allways.validator.scoring import (
     due_for_scoring,
     score_and_reward_miners,
     snapshot_current_crown_holders,
+    snapshot_current_miner_scores,
 )
 
 if TYPE_CHECKING:
@@ -70,6 +71,13 @@ async def forward(self: Validator) -> None:
             self.database_storage.upsert_current_crown_snapshot(crown_snapshot)
         except Exception as e:
             bt.logging.warning(f'current_crown_holders snapshot failed: {e}')
+        # Live mid-round score tip — the factors each holder would be paid on
+        # if the in-progress round flushed now. Same storage gate/cadence as
+        # the crown snapshot; computed only when someone is reading (DB on).
+        try:
+            self.database_storage.replace_current_miner_scores(snapshot_current_miner_scores(self))
+        except Exception as e:
+            bt.logging.warning(f'current_miner_scores snapshot failed: {e}')
 
 
 def clear_provider_caches(self: Validator) -> None:

@@ -120,21 +120,24 @@ class DatabaseStorage:
 
     def flush_scoring_window(
         self,
-        rate_rows: List[Tuple[str, str, str, float, int]],
         crown_rows_by_direction: Dict[Tuple[str, str], List[Tuple[int, int, str, str, str, float, float]]],
         crown_window_bounds_by_direction: Dict[Tuple[str, str], Tuple[int, int]],
-        rate_snapshot_max_ts: int,
+        miner_score_rows: List[Tuple],
         crown_holders_max_ts: int,
     ) -> StorageResult:
         """All-or-nothing flush for one scoring window.
 
-        - `rate_rows`: new rate quotes seen this round.
         - `crown_rows_by_direction`: recomputed crown rows, keyed by (from, to).
         - `crown_window_bounds_by_direction`: [lo, hi) unix-second range to wipe
           before re-upserting, keyed by (from, to). Must match the rows above.
-        - The two `_max_ts` values advance the corresponding sync_cursor
-          watermarks so the dashboard can render an "as-of <unix ts>" freshness
-          signal.
+        - `miner_score_rows`: per-(hotkey, direction) factor snapshots for the
+          round — written in the same transaction as the crown ledger so the
+          two can never disagree about a round.
+        - `crown_holders_max_ts` advances the sync_cursor watermark so the
+          dashboard can render an "as-of <unix ts>" freshness signal.
+
+        rate_history is not written here — the indexer owns it (real-time,
+        per QuoteSet event), including its freshness cursor.
 
         Failure on any write rolls back the whole window — the cursor is
         never left ahead of (or behind) the rows it describes.
@@ -149,8 +152,6 @@ class DatabaseStorage:
             self.db_connection.autocommit = False
 
             with self.db_connection.pipeline():
-                result.stored_counts['rate_history'] = self.repo.store_rate_history_bulk(rate_rows, commit=False)
-
                 crown_inserted = 0
                 for direction, rows in crown_rows_by_direction.items():
                     from_chain, to_chain = direction
@@ -159,7 +160,8 @@ class DatabaseStorage:
                     crown_inserted += self.repo.store_crown_holders_bulk(rows, commit=False)
                 result.stored_counts['crown_holders'] = crown_inserted
 
-                self.repo.set_sync_cursor('rate_snapshot_max_ts', rate_snapshot_max_ts, commit=False)
+                result.stored_counts['miner_scores'] = self.repo.store_miner_scores_bulk(miner_score_rows, commit=False)
+
                 self.repo.set_sync_cursor('crown_holders_max_ts', crown_holders_max_ts, commit=False)
 
             self.db_connection.commit()
@@ -183,14 +185,14 @@ class DatabaseStorage:
         During a halt, no miner earns crown and the pool recycles
         (see ``build_halted_rewards``). Mirror that on the dashboard by
         deleting any pre-existing crown_holders rows in the halted
-        window and advancing the cursor — leaves no stale "current
-        holder" implication on the historical grid. Rate events that
-        fired during halt are *not* written: the daemon never wrote
-        them either, and rate_history during a recycle has no scoring
-        meaning.
+        window, clearing the live score tip (nothing is being paid),
+        and advancing the cursor — leaves no stale "current holder"
+        implication on the historical grid. No miner_scores rows are
+        written for a halted round: the ledger records what was paid,
+        and nothing was.
 
         ``[window_start, window_end)`` is the unix-second range to clear per
-        direction. ``max_ts`` advances both sync_cursor watermarks.
+        direction. ``max_ts`` advances the crown sync_cursor watermark.
         """
         if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
@@ -203,7 +205,7 @@ class DatabaseStorage:
             with self.db_connection.pipeline():
                 for from_chain, to_chain in directions:
                     self.repo.delete_crown_in_range(from_chain, to_chain, window_start, window_end, commit=False)
-                self.repo.set_sync_cursor('rate_snapshot_max_ts', max_ts, commit=False)
+                self.repo.replace_current_miner_scores([], commit=False)
                 self.repo.set_sync_cursor('crown_holders_max_ts', max_ts, commit=False)
 
             self.db_connection.commit()
@@ -244,6 +246,29 @@ class DatabaseStorage:
         except Exception as ex:
             result.success = False
             result.errors.append(self._handle_write_failure(ex, 'Failed to upsert current_crown_holders'))
+
+        return result
+
+    def replace_current_miner_scores(self, rows: List[Tuple]) -> StorageResult:
+        """Wipe + rewrite current_miner_scores — the live mid-round tip of
+        miner_scores. Called per forward step alongside the current-crown
+        snapshot; ``miner_scores`` gets the same factors at round end. Rows
+        are ``miner_score_tuples`` shaped, ts first. An empty list clears
+        the tip (no qualifying holder right now)."""
+        if not self._ensure_connection():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+            count = self.repo.replace_current_miner_scores(rows, commit=False)
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+            result.stored_counts['current_miner_scores'] = count
+        except Exception as ex:
+            result.success = False
+            result.errors.append(self._handle_write_failure(ex, 'Failed to replace current_miner_scores'))
 
         return result
 
