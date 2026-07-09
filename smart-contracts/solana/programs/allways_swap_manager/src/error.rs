@@ -109,6 +109,12 @@ pub enum ErrorCode {
     NoRequests,
     #[msg("Draw seed slot has not been produced yet; retry once the chain advances")]
     SeedSlotNotYetProduced,
+    #[msg("Reservation already filled")]
+    AlreadyFilled,
+    #[msg("Finalize window has expired; the reservation can no longer be filled")]
+    FinalizeWindowExpired,
+    #[msg("Reservation is still within its finalize window or is already filled")]
+    NotReapable,
 
     // --- Phase 10: consensus validator weights ---
     #[msg("Weights vector length must match the validator set")]

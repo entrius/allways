@@ -2,8 +2,8 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::{
-    CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
-    RESV_SEED, TREASURY_SEED,
+    CONFIG_SEED, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED, RESV_SEED,
+    TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
@@ -70,68 +70,42 @@ pub struct OpenOrRequest<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn handler(
-    ctx: Context<OpenOrRequest>,
-    from_chain: String,
-    to_chain: String,
-    user: Pubkey,
-    user_from_addr: String,
-    user_to_addr: String,
-    sol_amount: u64,
-    from_amount: u128,
-    to_amount: u128,
-) -> Result<()> {
+/// A BID carries only the router competing for the seat. The taker + amounts are named later by the
+/// seat winner in `finalize_reservation`; the swap-size bounds + collateral gate move there too (the
+/// amount isn't known here). Miner-eligibility gates (active, not busy, min collateral) stay.
+pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String) -> Result<()> {
     require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(
-        !from_chain.is_empty()
-            && !to_chain.is_empty()
-            && !user_from_addr.is_empty()
-            && !user_to_addr.is_empty(),
+        !from_chain.is_empty() && !to_chain.is_empty(),
         ErrorCode::EmptyField
     );
     require!(
         from_chain.len() <= MAX_CHAIN_LEN && to_chain.len() <= MAX_CHAIN_LEN,
         ErrorCode::StringTooLong
     );
-    require!(
-        user_from_addr.len() <= MAX_ADDR_LEN && user_to_addr.len() <= MAX_ADDR_LEN,
-        ErrorCode::StringTooLong
-    );
 
-    let cfg = &ctx.accounts.config;
-    require!(
-        cfg.min_swap_amount == 0 || sol_amount >= cfg.min_swap_amount,
-        ErrorCode::AmountBelowMin
-    );
-    require!(
-        cfg.max_swap_amount == 0 || sol_amount <= cfg.max_swap_amount,
-        ErrorCode::AmountAboveMax
-    );
     require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
     require!(
         !ctx.accounts.miner_state.has_active_swap,
         ErrorCode::MinerHasActiveSwap
     );
     require!(
-        ctx.accounts.miner_state.collateral >= cfg.min_collateral,
-        ErrorCode::InsufficientCollateral
-    );
-    // Over-collateralization gate at entry: hold 1.10× THIS request's size up front. Collateral only
-    // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate
-    // can't later strand a user who has already sent source funds (review #1).
-    require!(
-        ctx.accounts.miner_state.collateral >= crate::constants::required_collateral(sol_amount),
+        ctx.accounts.miner_state.collateral >= ctx.accounts.config.min_collateral,
         ErrorCode::InsufficientCollateral
     );
 
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;
 
-    // Can't open a contest while an active reservation already holds the miner (would overwrite it).
+    // Can't open a contest while the miner is still held. Two holds block a new draw (which would
+    // overwrite the reservation): a FILLED reservation still within its TTL, and a drawn-but-UNFILLED
+    // reservation still inside its finalize window — the seat winner has the exclusive right to fill it
+    // and must not be evicted by a fresh contest. Once `finalize_by` passes unfilled, re-open is allowed
+    // (the abandoned slot is reapable).
     let resv = &ctx.accounts.reservation;
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
-    require!(!active_reservation, ErrorCode::MinerReserved);
+    let pending_finalize = resv.reserved_until == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
+    require!(!active_reservation && !pending_finalize, ErrorCode::MinerReserved);
 
     // Flat, non-refundable anti-spam fee: router → treasury (subnet revenue). Charged only on a
     // fresh entry (open or first join) — a same-router in-window bid UPDATE is free, so refining a
@@ -165,15 +139,7 @@ pub fn handler(
 
     let miner_key = ctx.accounts.miner.key();
     let router_key = ctx.accounts.router.key();
-    let req = Request {
-        router: router_key,
-        user,
-        user_from_addr,
-        user_to_addr,
-        sol_amount,
-        from_amount,
-        to_amount,
-    };
+    let req = Request { router: router_key };
 
     let pool_bump = ctx.bumps.pool;
     if ctx.accounts.pool.opened_at == 0 {
@@ -187,9 +153,12 @@ pub fn handler(
         let window = ctx.accounts.config.pool_window_secs;
         let closes_at = now.saturating_add(window);
 
-        // Busy from the moment the pool opens: covers the window + the eventual reservation TTL.
-        ctx.accounts.miner_state.busy_until =
-            closes_at.saturating_add(ctx.accounts.config.reservation_ttl_secs);
+        // Busy from the moment the pool opens: covers the window + the finalize window + the eventual
+        // reservation TTL. Set conservatively here so the draw/finalize never SHORTEN it — otherwise a
+        // miner would read as free during the finalize window while holding an about-to-fill reservation.
+        ctx.accounts.miner_state.busy_until = closes_at
+            .saturating_add(ctx.accounts.config.finalize_window_secs)
+            .saturating_add(ctx.accounts.config.reservation_ttl_secs);
 
         let pool = &mut ctx.accounts.pool;
         pool.miner = miner_key;
@@ -235,7 +204,6 @@ pub fn handler(
         emit!(ReservationRequested {
             miner: miner_key,
             router: router_key,
-            user,
             requests: pool.requests.len() as u8,
         });
     }

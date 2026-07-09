@@ -96,6 +96,9 @@ pub mod allways_swap_manager {
     pub fn set_pool_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_pool_window(ctx, secs)
     }
+    pub fn set_finalize_window(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_finalize_window(ctx, secs)
+    }
     pub fn set_weights_update_min_interval(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_weights_update_min_interval(ctx, secs)
     }
@@ -123,37 +126,46 @@ pub mod allways_swap_manager {
         deactivate::handler(ctx)
     }
 
-    // --- Reservation lottery ---
-    /// A validator opens or joins a per-miner reservation-lottery pool for a pair. First caller pins
-    /// the miner's on-chain quote; every caller pays a flat anti-spam fee to treasury.
-    #[allow(clippy::too_many_arguments)]
+    // --- Reservation lottery (two-phase: bid → draw → finalize) ---
+    /// A router bids into (or opens) a per-miner reservation-lottery pool for a pair. First caller pins
+    /// the miner's on-chain quote; every fresh router pays a flat anti-spam fee to treasury. A bid
+    /// carries no taker and no amounts — the seat winner names those in `finalize_reservation`.
     pub fn open_or_request(
         ctx: Context<OpenOrRequest>,
         from_chain: String,
         to_chain: String,
+    ) -> Result<()> {
+        open_or_request::handler(ctx, from_chain, to_chain)
+    }
+    /// Permissionless: after the window closes, run the stake-weighted draw and create the winner's
+    /// UNFILLED reservation (pins router + miner quote; `reserved_until = 0`).
+    pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
+        resolve_pool::handler(ctx)
+    }
+    /// The seat winner (`reservation.router`) names the taker + amounts, filling the reservation
+    /// (`reserved_until = now + ttl`). Runs the swap-size bounds + collateral gate + the collateral bind.
+    pub fn finalize_reservation(
+        ctx: Context<FinalizeReservation>,
         user: Pubkey,
         user_from_addr: String,
         user_to_addr: String,
-        sol_amount: u64,
+        collateral_amount: u64,
         from_amount: u128,
         to_amount: u128,
     ) -> Result<()> {
-        open_or_request::handler(
+        finalize_reservation::handler(
             ctx,
-            from_chain,
-            to_chain,
             user,
             user_from_addr,
             user_to_addr,
-            sol_amount,
+            collateral_amount,
             from_amount,
             to_amount,
         )
     }
-    /// Permissionless: after the window closes, run the stake-weighted draw and create the winner's
-    /// reservation.
-    pub fn resolve_pool(ctx: Context<ResolvePool>) -> Result<()> {
-        resolve_pool::handler(ctx)
+    /// Permissionless: reap an unfilled reservation past its finalize deadline, freeing the miner.
+    pub fn close_unfilled_reservation(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
+        close_unfilled_reservation::handler(ctx)
     }
 
     // --- Swap lifecycle ---

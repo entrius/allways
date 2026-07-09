@@ -50,7 +50,7 @@ class SolanaSwap:
     miner_from_addr: str
     miner_to_addr: str
     rate: int  # u128 fixed-point, as stored on-chain
-    sol_amount: int
+    collateral_amount: int
     from_amount: int
     to_amount: int
     from_tx_hash: str
@@ -84,7 +84,7 @@ def swap_from_solana(acct, swap_key: Optional[bytes] = None) -> SolanaSwap:
         miner_from_addr=acct.miner_from_addr,
         miner_to_addr=acct.miner_to_addr,
         rate=acct.rate,  # u128 fixed-point, as stored on-chain; calculate_to_amount takes the int directly
-        sol_amount=acct.sol_amount,
+        collateral_amount=acct.collateral_amount,
         from_amount=acct.from_amount,
         to_amount=acct.to_amount,
         from_tx_hash=acct.from_tx_hash,
@@ -313,6 +313,9 @@ class AllwaysSolanaClient:
 
     def set_pool_window(self, secs: int) -> str:
         return self._admin_config('set_pool_window', layouts.IX_I64_ARGS.build({'value': secs}))
+
+    def set_finalize_window(self, secs: int) -> str:
+        return self._admin_config('set_finalize_window', layouts.IX_I64_ARGS.build({'value': secs}))
 
     def set_weights_update_min_interval(self, secs: int) -> str:
         return self._admin_config('set_weights_update_min_interval', layouts.IX_I64_ARGS.build({'value': secs}))
@@ -553,33 +556,14 @@ class AllwaysSolanaClient:
         return self._send([self._ix('extend_reservation', args, metas)])
 
     # ---------- swap intake (Phase 9: reservation-lottery pool) ----------
-    def open_or_request(
-        self,
-        miner,
-        from_chain: str,
-        to_chain: str,
-        user,
-        user_from_addr: str,
-        user_to_addr: str,
-        sol_amount: int,
-        from_amount: int,
-        to_amount: int,
-    ) -> str:
-        """Open (or join) a miner's reservation pool for a pair. Signer/payer = this client's keypair
-        (the router); pays the flat reservation fee. `user` is the taker identity pinned into the request."""
+    def open_or_request(self, miner, from_chain: str, to_chain: str) -> str:
+        """BID into (or open) a miner's reservation pool for a pair. Signer/payer = this client's keypair
+        (the router); pays the flat reservation fee. A bid carries NO taker and NO amounts — the seat
+        winner names those in `finalize_reservation`."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
         args = layouts.IX_OPEN_OR_REQUEST_ARGS.build(
-            {
-                'from_chain': from_chain,
-                'to_chain': to_chain,
-                'user': bytes(_as_pubkey(user)),
-                'user_from_addr': user_from_addr,
-                'user_to_addr': user_to_addr,
-                'sol_amount': sol_amount,
-                'from_amount': from_amount,
-                'to_amount': to_amount,
-            }
+            {'from_chain': from_chain, 'to_chain': to_chain}
         )
         metas = [
             AccountMeta(router, True, True),
@@ -593,6 +577,51 @@ class AllwaysSolanaClient:
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('open_or_request', args, metas)])
+
+    def finalize_reservation(
+        self,
+        miner,
+        user,
+        user_from_addr: str,
+        user_to_addr: str,
+        collateral_amount: int,
+        from_amount: int,
+        to_amount: int,
+    ) -> str:
+        """Fill the reservation this client's keypair won at the draw (signer must == reservation.router).
+        Names the taker + amounts, running the swap-size bounds + collateral gate + the collateral bind."""
+        router = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        args = layouts.IX_FINALIZE_RESERVATION_ARGS.build(
+            {
+                'user': bytes(_as_pubkey(user)),
+                'user_from_addr': user_from_addr,
+                'user_to_addr': user_to_addr,
+                'collateral_amount': collateral_amount,
+                'from_amount': from_amount,
+                'to_amount': to_amount,
+            }
+        )
+        metas = [
+            AccountMeta(router, True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, False),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+        ]
+        return self._send([self._ix('finalize_reservation', args, metas)])
+
+    def close_unfilled_reservation(self, miner) -> str:
+        """Permissionless: reap an unfilled reservation past its finalize deadline, freeing the miner."""
+        caller = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(caller, True, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+        ]
+        return self._send([self._ix('close_unfilled_reservation', b'', metas)])
 
     def resolve_pool(self, miner) -> str:
         """Permissionless crank: after the pool window closes, run the stake-weighted draw and write the

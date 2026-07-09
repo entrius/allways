@@ -47,12 +47,13 @@ def test_minerstate_roundtrip():
 
 def test_reservation_roundtrip_u128_rate_and_strings():
     v = {
+        'router': bytes(range(32)),
         'from_addr': 'userBTCaddr',
         'user': bytes(range(32)),
         'user_to_addr': 'userSOLaddr',
         'from_chain': 'BTC',
         'to_chain': 'SOL',
-        'sol_amount': 2_000_000_000,
+        'collateral_amount': 2_000_000_000,
         'from_amount': 100_000,
         'to_amount': 7,
         'miner_from_addr': 'minerBTCaddr',
@@ -60,12 +61,14 @@ def test_reservation_roundtrip_u128_rate_and_strings():
         'rate': 1_500_000_000_000_000_000,  # 1.5 * RATE_PRECISION
         'created_at': 1_700_000_000,
         'reserved_until': 1_700_001_800,
+        'finalize_by': 1_700_000_060,
         'max_extend_at': 1_700_005_400,
         'claimed_swap_key': bytes(32),
         'bump': 255,
     }
     p = _roundtrip(layouts.Reservation, v)
     assert p.rate == v['rate'] and p.from_chain == 'BTC' and p.created_at == 1_700_000_000
+    assert p.finalize_by == 1_700_000_060 and p.collateral_amount == 2_000_000_000
 
 
 def test_swap_roundtrip_enum_status():
@@ -79,7 +82,7 @@ def test_swap_roundtrip_enum_status():
         'miner_from_addr': 'c',
         'miner_to_addr': 'd',
         'rate': 1_500_000_000_000_000_000,
-        'sol_amount': 1,
+        'collateral_amount': 1,
         'from_amount': 2,
         'to_amount': 3,
         'from_tx_hash': 'deadbeef',
@@ -98,15 +101,7 @@ def test_swap_roundtrip_enum_status():
 
 
 def test_pool_roundtrip_vec_of_request():
-    req = {
-        'router': bytes(32),
-        'user': bytes(range(32)),
-        'user_from_addr': 'u1',
-        'user_to_addr': 'u2',
-        'sol_amount': 9,
-        'from_amount': 1,
-        'to_amount': 2,
-    }
+    req = {'router': bytes(range(32))}
     v = {
         'miner': bytes(32),
         'from_chain': 'BTC',
@@ -121,7 +116,7 @@ def test_pool_roundtrip_vec_of_request():
         'bump': 1,
     }
     p = _roundtrip(layouts.Pool, v)
-    assert len(p.requests) == 2 and p.requests[0].sol_amount == 9
+    assert len(p.requests) == 2 and bytes(p.requests[0].router) == bytes(range(32))
 
 
 def test_config_roundtrip_vec_of_validatorinfo():
@@ -140,6 +135,7 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'halted': False,
         'reservation_fee_lamports': 20_000_000,
         'pool_window_secs': 60,
+        'finalize_window_secs': 60,
         'weights_update_min_interval_secs': 0,
         'max_total_extension_secs': 5400,
         'bump': 1,

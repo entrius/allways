@@ -85,6 +85,12 @@ pub const MAX_ADDR_LEN: usize = 80;
 pub const MAX_CHAIN_LEN: usize = 16;
 pub const MAX_TX_LEN: usize = 128;
 
+/// The collateral currency for the SOL-collateral module (this program). `finalize_reservation` binds
+/// `collateral_amount` to the leg denominated in this chain: `collateral_amount == (from_chain ==
+/// NUMERAIRE_CHAIN ? from_amount : to_amount)`. NOT a global "every swap must have a SOL leg" rule —
+/// it scopes the bind to SOL-collateralized swaps, so a future TAO-collateral module is an added branch.
+pub const NUMERAIRE_CHAIN: &str = "sol";
+
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value
 /// IS the off-chain `rate_fixed` — no decimal-string parse on either side (replaces the old free-form
@@ -112,10 +118,10 @@ const _: () = assert!(
     "COLLATERAL_REQUIREMENT_BPS must be within [1.0x, 2.0x] (10_000..=20_000 bps)"
 );
 
-/// Collateral (lamports) to back a swap of `sol_amount` = `sol_amount × COLLATERAL_REQUIREMENT_BPS
+/// Collateral (lamports) to back a swap of `collateral_amount` = `collateral_amount × COLLATERAL_REQUIREMENT_BPS
 /// / 10_000`, rounded up. u128 math clamped to `u64::MAX` so an extreme size can't wrap.
-pub fn required_collateral(sol_amount: u64) -> u64 {
-    let numer = (sol_amount as u128).saturating_mul(COLLATERAL_REQUIREMENT_BPS as u128);
+pub fn required_collateral(collateral_amount: u64) -> u64 {
+    let numer = (collateral_amount as u128).saturating_mul(COLLATERAL_REQUIREMENT_BPS as u128);
     // round up (ceil-div): require at least the exact fraction.
     let req = numer
         .saturating_add(BPS_DENOMINATOR as u128 - 1)
@@ -154,7 +160,7 @@ pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
 
 // --- Protocol fees & timing ---
 
-/// Protocol fee divisor — 1% (immutable policy), `fee = sol_amount / FEE_DIVISOR`. Compile-time
+/// Protocol fee divisor — 1% (immutable policy), `fee = collateral_amount / FEE_DIVISOR`. Compile-time
 /// only (not promoted to a runtime setter).
 pub const FEE_DIVISOR: u64 = 100;
 
@@ -170,6 +176,19 @@ pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 /// a pool gathers contending requests before the stake-weighted draw. Must stay well below the
 /// reservation TTL. Runtime-adjustable via `set_pool_window` (dev seeds 5s for fast swaps).
 pub const POOL_WINDOW_SECS: i64 = 30;
+
+/// Initial seconds the seat winner has after the draw to `finalize_reservation` (name the fill) before
+/// the unfilled reservation can be reaped. Seeds `Config.finalize_window_secs`; runtime-tunable within
+/// [MIN, MAX]. Must cover a validator's internal auction + tx landing without letting a winner park a
+/// miner for free (the reservation fee is already sunk on abandon).
+pub const FINALIZE_WINDOW_SECS: i64 = 60;
+pub const FINALIZE_WINDOW_SECS_MIN: i64 = 15;
+pub const FINALIZE_WINDOW_SECS_MAX: i64 = 300; // 5 min
+
+const _: () = assert!(
+    FINALIZE_WINDOW_SECS >= FINALIZE_WINDOW_SECS_MIN && FINALIZE_WINDOW_SECS <= FINALIZE_WINDOW_SECS_MAX,
+    "FINALIZE_WINDOW_SECS must be within [15s, 300s]"
+);
 
 /// Initial minimum seconds between successful validator-weight updates (Phase 10) — an anti-thrash
 /// floor, not a schedule. Seeds `Config.weights_update_min_interval_secs`.

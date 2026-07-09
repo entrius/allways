@@ -76,7 +76,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         // Obligation gate: miner must hold the over-collateralization requirement before being bound.
         require!(
             ctx.accounts.miner_state.collateral
-                >= crate::constants::required_collateral(ctx.accounts.swap.sol_amount),
+                >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
             ErrorCode::InsufficientCollateral
         );
     }
@@ -102,7 +102,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         // claim-created swap (copied from the reservation at submit_swap_claim) — no re-copy here.
         let user = ctx.accounts.swap.user;
         let miner = ctx.accounts.swap.miner;
-        let sol_amount = ctx.accounts.swap.sol_amount;
+        let collateral_amount = ctx.accounts.swap.collateral_amount;
         let from_amount = ctx.accounts.swap.from_amount;
         let to_amount = ctx.accounts.swap.to_amount;
 
@@ -122,7 +122,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             swap_key,
             user,
             miner,
-            sol_amount,
+            collateral_amount,
             from_amount,
             to_amount,
             initiated_at: now,

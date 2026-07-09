@@ -122,7 +122,7 @@ def reserve_on_behalf(
     min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
     max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
     collateral = client.get_collateral_lamports(miner_pk) or 0
-    ok, reason = swap_viable(amts.sol_amount, collateral, min_swap, max_swap)
+    ok, reason = swap_viable(amts.collateral_amount, collateral, min_swap, max_swap)
     if not ok:
         return ReserveResult(False, reason)
 
@@ -131,18 +131,13 @@ def reserve_on_behalf(
     except Exception:
         return ReserveResult(False, 'invalid user Solana pubkey')
 
+    # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
+    # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
+    # NOTE: the validator-side finalize/reap sweep is a follow-up wave — until it lands, a
+    # validator-routed reservation draws but expires unfilled (reaped by close_unfilled_reservation).
+    _ = (user_pk, user_from_addr, user_to_addr)  # consumed at finalize (next wave)
     try:
-        sig = client.open_or_request(
-            miner_pk,
-            from_chain,
-            to_chain,
-            user_pk,
-            user_from_addr,
-            user_to_addr,
-            amts.sol_amount,
-            amts.from_amount,
-            amts.to_amount,
-        )
+        sig = client.open_or_request(miner_pk, from_chain, to_chain)
     except Exception as e:
         reason = _contract_reject_reason(e)
         if reason is None:
@@ -222,7 +217,7 @@ class BestQuote:
     miner_hotkey: str
     miner: str  # Solana pubkey (base58)
     rate_display: str
-    sol_amount: int
+    collateral_amount: int
     from_amount: int
     to_amount: int
 
@@ -256,7 +251,7 @@ def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> O
     hotkey = _miner_hotkey_for(validator, cand.miner)
     if hotkey is None:
         return None
-    return BestQuote(hotkey, str(cand.miner), cand.rate_display, amts.sol_amount, amts.from_amount, amts.to_amount)
+    return BestQuote(hotkey, str(cand.miner), cand.rate_display, amts.collateral_amount, amts.from_amount, amts.to_amount)
 
 
 def _miner_hotkey_for(validator, miner_pk) -> Optional[str]:

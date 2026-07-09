@@ -57,7 +57,7 @@ def test_decode_swap_completed_roundtrip():
         {
             'swap_key': bytes(range(32)),
             'miner': bytes(miner),
-            'sol_amount': 2_000_000_000,
+            'collateral_amount': 2_000_000_000,
             'fee': 20_000_000,
             'from_chain': 'btc',
             'to_chain': 'tao',

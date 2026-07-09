@@ -83,7 +83,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
     )?;
 
     if quorum {
-        let sol_amount = ctx.accounts.swap.sol_amount;
+        let collateral_amount = ctx.accounts.swap.collateral_amount;
         let miner = ctx.accounts.swap.miner;
         let min_collateral = ctx.accounts.config.min_collateral;
 
@@ -91,7 +91,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
         // guard + one-swap-at-a-time invariant guarantee the miner can cover it; apply_penalty still
         // clamps to available collateral as a safety net.
-        let penalty = crate::constants::required_collateral(sol_amount);
+        let penalty = crate::constants::required_collateral(collateral_amount);
 
         let slash = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, penalty, now)?;
 
@@ -111,7 +111,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         emit!(SwapTimedOut {
             swap_key,
             miner,
-            sol_amount,
+            collateral_amount,
             slash,
         });
     }

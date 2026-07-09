@@ -42,6 +42,9 @@ pub struct Config {
     pub reservation_fee_lamports: u64,
     /// Reservation-lottery pooling window, seconds (runtime-tunable).
     pub pool_window_secs: i64,
+    /// Seconds the seat winner has after the draw to fill (finalize) its reservation before it can be
+    /// reaped. Runtime-tunable within [MIN, MAX] (see constants.rs). The internal auction runs here.
+    pub finalize_window_secs: i64,
     /// Minimum seconds between consensus weight updates (runtime-tunable anti-thrash floor).
     pub weights_update_min_interval_secs: i64,
     /// Total seconds a reservation/swap deadline may be slid forward, frozen into each at creation as
@@ -123,17 +126,22 @@ pub struct VoteRound {
 
 /// Confirmed reservation for a miner (`seeds = [RESV_SEED, miner]`).
 ///
-/// Created by `resolve_pool` (lottery draw); consumed by `vote_initiate` or left to expire.
-/// `reserved_until`: 0 = empty, >= now = active, 0 < it < now = expired (overwritable).
+/// Created UNFILLED by `resolve_pool` (lottery draw: pins `router` + miner quote, `reserved_until = 0`);
+/// filled by `finalize_reservation` (the winning router names the taker + amounts, sets `reserved_until`);
+/// consumed by `vote_initiate` or reaped (`close_unfilled_reservation` / expiry).
+/// `reserved_until`: 0 = unfilled OR empty, >= now = active, 0 < it < now = expired (overwritable).
 /// `from_addr` is kept so initiate can verify the initiating user matches the reserver.
 #[account]
 #[derive(InitSpace)]
 pub struct Reservation {
-    /// User's source-chain address (the reserver).
+    /// The seat winner (winning lottery Request's router). The ONLY signer permitted to
+    /// `finalize_reservation` (name the fill). Pinned at draw; a bid carries nothing else.
+    pub router: Pubkey,
+    /// User's source-chain address (the reserver). Written at finalize.
     #[max_len(MAX_ADDR_LEN)]
     pub from_addr: String,
-    /// Pinned taker + payout address (from the winning lottery Request) — copied to the Swap at claim
-    /// so the validator-relayed `submit_swap_claim` can't redirect the payout (front-run defense).
+    /// Pinned taker + payout address (named at finalize) — copied to the Swap at claim so the
+    /// validator-relayed `submit_swap_claim` can't redirect the payout (front-run defense).
     pub user: Pubkey,
     #[max_len(MAX_ADDR_LEN)]
     pub user_to_addr: String,
@@ -141,8 +149,9 @@ pub struct Reservation {
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub to_chain: String,
-    /// Collateral-backed swap size (SOL lamports). Bounded by Config min/max_swap_amount.
-    pub sol_amount: u64,
+    /// Collateral-backed swap size, in the collateral currency's smallest unit (SOL lamports today).
+    /// Bounded by Config min/max_swap_amount; must equal the collateral-currency leg (finalize bind).
+    pub collateral_amount: u64,
     /// Off-chain leg amounts in their own assets (u128 to cover wei-scale).
     pub from_amount: u128,
     pub to_amount: u128,
@@ -158,8 +167,11 @@ pub struct Reservation {
     /// deposit must be mined after this (a replayed prior-swap deposit predates it → rejected by the
     /// validator's freshness check, which replaces the source `TxMarker`).
     pub created_at: i64,
-    /// Expiry, unix seconds (0 = empty).
+    /// Expiry, unix seconds (0 = unfilled OR empty). Set by `finalize_reservation` = now + ttl.
     pub reserved_until: i64,
+    /// Fill deadline, unix seconds. Set at draw = now + `finalize_window_secs`. While `reserved_until
+    /// == 0 && now > finalize_by` the unfilled reservation may be reaped (`close_unfilled_reservation`).
+    pub finalize_by: i64,
     /// Absolute ceiling `reserved_until` may be extended to (unix seconds). Frozen at creation =
     /// initial deadline + the Config budget then, so a later retune can't move an in-flight ceiling.
     pub max_extend_at: i64,
@@ -203,8 +215,8 @@ pub struct Swap {
     pub miner_to_addr: String,
     /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
     pub rate: u128,
-    /// Collateral-backed swap size (SOL lamports) — fee/slash basis.
-    pub sol_amount: u64,
+    /// Collateral-backed swap size, collateral-currency smallest unit (SOL lamports) — fee/slash basis.
+    pub collateral_amount: u64,
     pub from_amount: u128,
     pub to_amount: u128,
     #[max_len(MAX_TX_LEN)]
@@ -320,23 +332,14 @@ pub struct HotkeyBinding {
     pub bump: u8,
 }
 
-/// One entry into a reservation lottery `Pool`. Carries only the taker-side intent;
-/// the miner quote is the pool's pinned snapshot, not per-request.
+/// One bid into a reservation lottery `Pool`. A bid is JUST the router competing for the seat — no
+/// taker, no amounts. The winner names the fill later via `finalize_reservation`. The miner quote is
+/// the pool's pinned snapshot, not per-request.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct Request {
-    /// The account that routed this request — a whitelisted validator OR a plain user (entry is
+    /// The account that routed this bid — a whitelisted validator OR a plain user (entry is
     /// permissionless). Also the lottery weight key (0 if not whitelisted) and the dedup key.
     pub router: Pubkey,
-    /// The taker.
-    pub user: Pubkey,
-    #[max_len(MAX_ADDR_LEN)]
-    pub user_from_addr: String,
-    #[max_len(MAX_ADDR_LEN)]
-    pub user_to_addr: String,
-    /// Collateral-backed swap size (SOL lamports). Bounded by Config min/max_swap_amount.
-    pub sol_amount: u64,
-    pub from_amount: u128,
-    pub to_amount: u128,
 }
 
 /// A reservation-lottery contest for one idle miner (`seeds = [POOL_SEED, miner]`).

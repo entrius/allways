@@ -367,7 +367,7 @@ class TestIngestSwapOutcomes:
         idx = SolanaEventIndex(store)
         key = bytes(range(32))
         idx.ingest(
-            [rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, sol_amount=10, slash=1)],
+            [rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, collateral_amount=10, slash=1)],
             ATTR,
         )
         assert store.get_swap_outcome(key.hex()) == 'timed_out'
@@ -387,7 +387,7 @@ class TestIngestSwapOutcomes:
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         key = bytes(range(32))
-        event = rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, sol_amount=10, slash=1)
+        event = rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, collateral_amount=10, slash=1)
         idx.ingest([event], ATTR)
         idx.ingest([event], ATTR)
         assert store.get_swap_outcome(key.hex()) == 'timed_out'

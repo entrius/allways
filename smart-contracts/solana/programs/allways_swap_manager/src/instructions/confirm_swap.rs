@@ -104,7 +104,7 @@ pub fn handler(
     )?;
 
     if quorum {
-        let sol_amount = ctx.accounts.swap.sol_amount;
+        let collateral_amount = ctx.accounts.swap.collateral_amount;
         let miner = ctx.accounts.swap.miner;
         // Read realized direction data off the swap before it's closed below.
         let from_amount = ctx.accounts.swap.from_amount;
@@ -112,7 +112,7 @@ pub fn handler(
         let from_chain = ctx.accounts.swap.from_chain.clone();
         let to_chain = ctx.accounts.swap.to_chain.clone();
         let rate = ctx.accounts.swap.rate;
-        let fee = sol_amount / FEE_DIVISOR;
+        let fee = collateral_amount / FEE_DIVISOR;
         let min_collateral = ctx.accounts.config.min_collateral;
 
         let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;
@@ -159,7 +159,7 @@ pub fn handler(
         emit!(SwapCompleted {
             swap_key,
             miner,
-            sol_amount,
+            collateral_amount,
             fee: actual_fee,
             from_chain,
             to_chain,

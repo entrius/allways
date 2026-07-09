@@ -80,7 +80,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
         min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
     )
     client.open_or_request.return_value = 'sig' * 8
-    amts = types.SimpleNamespace(sol_amount=10**9, from_amount=5000, to_amount=10**9)
+    amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
     cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
 
     argv = ['--from', from_chain, '--to', 'sol', '--amount', '0.00005']

@@ -73,7 +73,7 @@ pub fn handler(
     let swap_bump = ctx.bumps.swap;
 
     // Snapshot the pinned terms out of the reservation (immutable source of truth).
-    let (user, from_chain, to_chain, user_from_addr, user_to_addr, miner_from_addr, miner_to_addr, rate, sol_amount, from_amount, to_amount) = {
+    let (user, from_chain, to_chain, user_from_addr, user_to_addr, miner_from_addr, miner_to_addr, rate, collateral_amount, from_amount, to_amount) = {
         let r = &ctx.accounts.reservation;
         (
             r.user,
@@ -84,7 +84,7 @@ pub fn handler(
             r.miner_from_addr.clone(),
             r.miner_to_addr.clone(),
             r.rate,
-            r.sol_amount,
+            r.collateral_amount,
             r.from_amount,
             r.to_amount,
         )
@@ -100,7 +100,7 @@ pub fn handler(
     swap.miner_from_addr = miner_from_addr;
     swap.miner_to_addr = miner_to_addr;
     swap.rate = rate;
-    swap.sol_amount = sol_amount;
+    swap.collateral_amount = collateral_amount;
     swap.from_amount = from_amount;
     swap.to_amount = to_amount;
     swap.from_tx_hash = from_tx_hash.clone();

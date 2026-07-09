@@ -189,30 +189,36 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         )
     };
 
-    // Create the Reservation for the winner (lottery is the only path to a reservation).
-    let ttl = ctx.accounts.config.reservation_ttl_secs;
-    let extension_budget = ctx.accounts.config.max_total_extension_secs;
+    // Create the UNFILLED reservation for the seat winner: pin `router` + the pool's miner-quote
+    // snapshot + the finalize deadline. The taker + amounts are named later by `finalize_reservation`.
+    let finalize_window = ctx.accounts.config.finalize_window_secs;
     let reservation_bump = ctx.bumps.reservation;
+    let winner_router = winner.router;
     let r = &mut ctx.accounts.reservation;
-    r.from_addr = winner.user_from_addr;
-    r.user = winner.user; // pin taker + payout so the validator-relayed claim can't redirect it
-    r.user_to_addr = winner.user_to_addr;
-    r.from_chain = from_chain;
+    r.router = winner_router; // the ONLY signer allowed to finalize
+    r.from_chain = from_chain; // pinned pair — the finalize collateral bind reads from_chain
     r.to_chain = to_chain;
-    r.sol_amount = winner.sol_amount;
-    r.from_amount = winner.from_amount;
-    r.to_amount = winner.to_amount;
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
-    r.created_at = now; // source-freshness lower bound: the deposit must be mined after this
-    r.reserved_until = now.saturating_add(ttl);
-    r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
-    r.claimed_swap_key = [0u8; 32]; // fresh contest → no live claim (clears any stale prior key)
+    r.finalize_by = now.saturating_add(finalize_window);
+    r.reserved_until = 0; // UNFILLED until finalize (also the sentinel that keeps it non-claimable)
+    r.claimed_swap_key = [0u8; 32];
     r.bump = reservation_bump;
+    // Clear any stale fill data from a prior reused reservation. Invisible while `reserved_until == 0`,
+    // but reset so nothing reads a stale taker/amount during the finalize window.
+    r.from_addr = String::new();
+    r.user = Pubkey::default();
+    r.user_to_addr = String::new();
+    r.collateral_amount = 0;
+    r.from_amount = 0;
+    r.to_amount = 0;
+    r.created_at = 0;
+    r.max_extend_at = 0;
 
-    // Lock the miner busy for the reservation's life (read by deactivate/withdraw, non-bypassable).
-    ctx.accounts.miner_state.busy_until = now.saturating_add(ttl);
+    // Do NOT write busy_until here: the bid set it to cover closes_at + finalize_window + ttl. Writing
+    // `now + ttl` would SHORTEN it and free the miner during the finalize window (a live-reservation
+    // hole where deactivate/withdraw_collateral could fire mid-fill).
 
     // Reset the pool for the next contest (rent stays parked). seed_slot back to 0 so the next
     // pool re-arms instead of inheriting this draw's slot.
@@ -223,8 +229,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
 
     emit!(PoolResolved {
         miner: miner_key,
-        winner: winner.router,
-        user: winner.user,
+        winner: winner_router,
         requests: req_count,
     });
     Ok(())

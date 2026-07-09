@@ -165,7 +165,7 @@ def _fake_swap_account(**over):
         miner_from_addr='bc1qminer',
         miner_to_addr='5Fminer',
         rate=12345,
-        sol_amount=1_000_000,
+        collateral_amount=1_000_000,
         from_amount=500,
         to_amount=600,
         from_tx_hash='deadbeef',

@@ -179,22 +179,16 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
-            user: *user,
-            user_from_addr: FROM_ADDR.to_string(),
-            user_to_addr: "userSOLaddr".to_string(),
-            sol_amount: SOL_AMOUNT,
-            from_amount: 100_000,
-            to_amount: 0,
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
-            router: *validator,
+            router: *router,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -203,6 +197,29 @@ fn open_ix(validator: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
             system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+/// Seat winner fills the reservation (BTC→SOL: to_amount == collateral_amount for the bind).
+fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::FinalizeReservation {
+            user: *user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: "userSOLaddr".to_string(),
+            collateral_amount: SOL_AMOUNT,
+            from_amount: 100_000,
+            to_amount: SOL_AMOUNT as u128,
+        }
+        .data(),
+        allways_swap_manager::accounts::FinalizeReservation {
+            router: *router,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            reservation: resv_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -349,9 +366,10 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair) {
     let setup_ts = BASE_TS - 100;
     set_clock(&mut svm, setup_ts);
     let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, setup_ts + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user), &vals[0].pubkey(), &vals[0]).expect("finalize");
     set_clock(&mut svm, BASE_TS);
     (svm, vals, miner)
 }

@@ -35,14 +35,9 @@ DISCRIMINATORS = {
 # --- nested types ---
 ValidatorInfo = CStruct('key' / Pubkey32, 'weight' / U64)
 
+# A bid carries only the router (two-phase: the seat winner names the fill at finalize).
 Request = CStruct(
     'router' / Pubkey32,
-    'user' / Pubkey32,
-    'user_from_addr' / String,
-    'user_to_addr' / String,
-    'sol_amount' / U64,
-    'from_amount' / U128,
-    'to_amount' / U128,
 )
 
 SwapStatus = Enum('Active', 'Fulfilled', 'PendingAttestation', enum_name='SwapStatus')
@@ -96,13 +91,15 @@ MinerQuote = CStruct(
     'bump' / U8,
 )
 
+# Two-phase: `router` pinned at draw (unfilled, reserved_until==0); the rest written at finalize.
 Reservation = CStruct(
+    'router' / Pubkey32,
     'from_addr' / String,
     'user' / Pubkey32,
     'user_to_addr' / String,
     'from_chain' / String,
     'to_chain' / String,
-    'sol_amount' / U64,
+    'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
     'miner_from_addr' / String,
@@ -110,6 +107,7 @@ Reservation = CStruct(
     'rate' / U128,
     'created_at' / I64,
     'reserved_until' / I64,
+    'finalize_by' / I64,
     'max_extend_at' / I64,
     'claimed_swap_key' / Hash32,
     'bump' / U8,
@@ -125,7 +123,7 @@ Swap = CStruct(
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
-    'sol_amount' / U64,
+    'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
     'from_tx_hash' / String,
@@ -176,6 +174,7 @@ Config = CStruct(
     'halted' / Bool,
     'reservation_fee_lamports' / U64,
     'pool_window_secs' / I64,
+    'finalize_window_secs' / I64,
     'weights_update_min_interval_secs' / I64,
     'max_total_extension_secs' / I64,
     'bump' / U8,
@@ -190,7 +189,7 @@ ACCOUNT_PUBKEY_FIELDS = {
     'MinerState': ['miner'],
     'MinerDirectionStats': ['miner'],
     'MinerQuote': ['miner'],
-    'Reservation': ['user'],
+    'Reservation': ['router', 'user'],
     'Swap': ['user', 'miner'],
     'Pool': ['miner'],
     'CollateralVault': [],
@@ -208,13 +207,16 @@ EVENT_DISCRIMINATORS = {
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
+    'PoolDrawArmed': bytes([56, 138, 178, 84, 109, 162, 248, 202]),
     'PoolOpened': bytes([44, 53, 197, 215, 31, 61, 56, 170]),
     'PoolResolved': bytes([37, 148, 82, 156, 128, 131, 201, 171]),
     'QuoteRemoved': bytes([52, 211, 141, 65, 95, 43, 64, 32]),
     'QuoteSet': bytes([216, 112, 83, 84, 181, 53, 176, 105]),
     'ReservationExtended': bytes([242, 117, 112, 204, 238, 175, 247, 227]),
+    'ReservationFilled': bytes([198, 252, 253, 103, 211, 7, 123, 183]),
     'ReservationRequested': bytes([246, 75, 57, 78, 231, 75, 222, 115]),
     'StaleClaimClosed': bytes([97, 73, 19, 101, 231, 36, 61, 186]),
+    'UnfilledReservationClosed': bytes([36, 72, 242, 60, 28, 44, 38, 55]),
     'SwapClaimed': bytes([2, 124, 144, 84, 160, 92, 158, 1]),
     'SwapCompleted': bytes([118, 93, 218, 77, 215, 165, 112, 76]),
     'SwapFulfilled': bytes([62, 201, 236, 62, 234, 76, 17, 39]),
@@ -240,7 +242,8 @@ EVENT_LAYOUTS = {
         'closes_at' / I64,
         'seed_slot' / U64,
     ),
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'user' / Pubkey32, 'requests' / U8),
+    'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64),
+    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8),
     'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
     'QuoteSet': CStruct(
         'miner' / Pubkey32,
@@ -252,8 +255,20 @@ EVENT_LAYOUTS = {
         'update_fee' / U64,
     ),
     'ReservationExtended': CStruct('miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64),
-    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'user' / Pubkey32, 'requests' / U8),
+    'ReservationFilled': CStruct(
+        'miner' / Pubkey32,
+        'router' / Pubkey32,
+        'user' / Pubkey32,
+        'from_chain' / String,
+        'to_chain' / String,
+        'collateral_amount' / U64,
+        'from_amount' / U128,
+        'to_amount' / U128,
+        'reserved_until' / I64,
+    ),
+    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
+    'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32),
     'SwapClaimed': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
@@ -264,7 +279,7 @@ EVENT_LAYOUTS = {
     'SwapCompleted': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
-        'sol_amount' / U64,
+        'collateral_amount' / U64,
         'fee' / U64,
         'from_chain' / String,
         'to_chain' / String,
@@ -277,12 +292,12 @@ EVENT_LAYOUTS = {
         'swap_key' / Hash32,
         'user' / Pubkey32,
         'miner' / Pubkey32,
-        'sol_amount' / U64,
+        'collateral_amount' / U64,
         'from_amount' / U128,
         'to_amount' / U128,
         'initiated_at' / I64,
     ),
-    'SwapTimedOut': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'sol_amount' / U64, 'slash' / U64),
+    'SwapTimedOut': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'collateral_amount' / U64, 'slash' / U64),
     'SwapTimeoutExtended': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'validator' / Pubkey32, 'timeout_at' / I64),
     'TreasuryWithdrawn': CStruct('recipient' / Pubkey32, 'amount' / U64, 'total' / U64),
     'ValidatorWeightsUpdated': CStruct('count' / U8, 'updated_at' / I64),
@@ -296,13 +311,16 @@ EVENT_PUBKEY_FIELDS = {
     'HotkeyBound': ['miner'],
     'MinerActivated': ['miner'],
     'MinerDeactivated': ['miner'],
+    'PoolDrawArmed': ['miner'],
     'PoolOpened': ['miner', 'opener'],
-    'PoolResolved': ['miner', 'winner', 'user'],
+    'PoolResolved': ['miner', 'winner'],
     'QuoteRemoved': ['miner'],
     'QuoteSet': ['miner'],
     'ReservationExtended': ['miner', 'validator'],
-    'ReservationRequested': ['miner', 'router', 'user'],
+    'ReservationFilled': ['miner', 'router', 'user'],
+    'ReservationRequested': ['miner', 'router'],
     'StaleClaimClosed': ['miner'],
+    'UnfilledReservationClosed': ['miner', 'router'],
     'SwapClaimed': ['miner', 'user'],
     'SwapCompleted': ['miner'],
     'SwapFulfilled': ['miner'],
@@ -350,9 +368,12 @@ IX_DISCRIMINATORS = {
     'set_pool_window': bytes([250, 90, 55, 0, 118, 48, 94, 204]),
     'set_weights_update_min_interval': bytes([185, 134, 117, 75, 73, 184, 80, 123]),
     'set_max_total_extension': bytes([185, 183, 148, 252, 204, 128, 7, 24]),
-    # Phase 9 — swap intake (reservation-lottery pool).
+    # Phase 9 — swap intake (reservation-lottery pool). Two-phase: bid → draw → finalize.
     'open_or_request': bytes([174, 133, 208, 178, 0, 117, 73, 12]),
     'resolve_pool': bytes([191, 164, 190, 142, 178, 198, 162, 249]),  # no args (empty body)
+    'finalize_reservation': bytes([237, 55, 120, 249, 88, 130, 214, 133]),
+    'close_unfilled_reservation': bytes([162, 160, 156, 98, 241, 195, 23, 88]),  # no args (empty body)
+    'set_finalize_window': bytes([84, 242, 160, 48, 107, 111, 170, 241]),  # IX_I64_ARGS
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -384,14 +405,17 @@ IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
 IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String)
-# Phase 9 — open_or_request arg body (resolve_pool takes none). Order = handler param order.
+# Phase 9 — two-phase reservation. A bid is just the pair (resolve_pool / close_unfilled_reservation
+# take no args). The seat winner names the fill in finalize_reservation. Order = handler param order.
 IX_OPEN_OR_REQUEST_ARGS = CStruct(
     'from_chain' / String,
     'to_chain' / String,
+)
+IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'user' / Pubkey32,
     'user_from_addr' / String,
     'user_to_addr' / String,
-    'sol_amount' / U64,
+    'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
 )

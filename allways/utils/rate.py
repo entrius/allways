@@ -101,7 +101,7 @@ def is_executable_rate(
     """True iff the rate is fundably routable in its declared direction.
 
     Crown-eligibility gate against rates that no user can route. The on-chain swap bounds
-    (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg** (``sol_amount``), so SOL is the
+    (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg** (``collateral_amount``), so SOL is the
     bounded asset and ``min_swap_lamports``/``max_swap_lamports`` are SOL lamports. Routable means a source >= the
     source chain's ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
 
@@ -163,7 +163,7 @@ def min_executable_sol_leg(
 ) -> int:
     """Smallest SOL leg (lamports) the rate produces among in-band fundable swaps.
 
-    Shares band math with is_executable_rate; SOL is the bounded asset (``sol_amount``). Returns 0 when
+    Shares band math with is_executable_rate; SOL is the bounded asset (``collateral_amount``). Returns 0 when
     no in-band fundable swap exists (rate unexecutable) — caller treats as "no constraint".
     """
     if not is_executable_rate(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports):

@@ -46,7 +46,7 @@ pub struct SwapInitiated {
     pub swap_key: [u8; 32],
     pub user: Pubkey,
     pub miner: Pubkey,
-    pub sol_amount: u64,
+    pub collateral_amount: u64,
     pub from_amount: u128,
     pub to_amount: u128,
     pub initiated_at: i64,
@@ -65,7 +65,7 @@ pub struct SwapFulfilled {
 pub struct SwapCompleted {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
-    pub sol_amount: u64,
+    pub collateral_amount: u64,
     /// Protocol fee taken from collateral into the treasury (lamports).
     pub fee: u64,
     /// Direction + realized leg amounts + executed rate, for off-chain per-swap history (so indexers
@@ -82,7 +82,7 @@ pub struct SwapCompleted {
 pub struct SwapTimedOut {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
-    pub sol_amount: u64,
+    pub collateral_amount: u64,
     /// Collateral slashed and refunded to the user (lamports).
     pub slash: u64,
 }
@@ -182,9 +182,30 @@ pub struct PoolOpened {
 pub struct ReservationRequested {
     pub miner: Pubkey,
     pub router: Pubkey,
-    pub user: Pubkey,
-    /// Number of requests in the pool after this one.
+    /// Number of bids in the pool after this one.
     pub requests: u8,
+}
+
+/// The seat winner filled its reservation: taker + amounts named, `reserved_until` set. Carries the
+/// fill data the indexer needs for `active_reservations` (formerly on `ReservationRequested`).
+#[event]
+pub struct ReservationFilled {
+    pub miner: Pubkey,
+    pub router: Pubkey,
+    pub user: Pubkey,
+    pub from_chain: String,
+    pub to_chain: String,
+    pub collateral_amount: u64,
+    pub from_amount: u128,
+    pub to_amount: u128,
+    pub reserved_until: i64,
+}
+
+/// An unfilled reservation was reaped after its finalize deadline (miner freed, fee already sunk).
+#[event]
+pub struct UnfilledReservationClosed {
+    pub miner: Pubkey,
+    pub router: Pubkey,
 }
 
 /// The closed pool's draw seed slot has been pinned to a not-yet-produced slot. Re-emitted if that
@@ -198,10 +219,9 @@ pub struct PoolDrawArmed {
 #[event]
 pub struct PoolResolved {
     pub miner: Pubkey,
-    /// The winning router (a validator or a plain user).
+    /// The winning router (a validator or a plain user) — the seat winner that may finalize.
     pub winner: Pubkey,
-    pub user: Pubkey,
-    /// How many requests contended.
+    /// How many bids contended.
     pub requests: u8,
 }
 
