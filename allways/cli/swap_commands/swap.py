@@ -30,7 +30,8 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     to_smallest_units,
 )
-from allways.constants import NUMERAIRE_CHAIN
+from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
+from allways.utils.rate import apply_fee_deduction
 
 
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
@@ -70,16 +71,29 @@ def _self_crank_resolve(client, miner) -> None:
             raise
 
 
+def _drawn_unfilled(resv) -> bool:
+    """A seat freshly won by the draw and not yet named. `created_at == 0` is load-bearing: a
+    reservation that was filled and then consumed also has `reserved_until == 0`, but carries a
+    non-zero `created_at` — matching it would finalize against a dead window. Same guard as the
+    contract's `close_unfilled_reservation`."""
+    if resv is None:
+        return False
+    return (
+        int(resv.reserved_until) == 0
+        and int(resv.created_at) == 0
+        and int(resv.finalize_by) > time.time()
+    )
+
+
 def _poll_drawn(client, miner, user, timeout_secs: int):
-    """Poll until THIS taker's bid draws its UNFILLED reservation (router == us, reserved_until == 0,
-    finalize_by armed), self-cranking `resolve_pool` each pass. Returns the drawn reservation, or None
-    on timeout / if a different router won the seat."""
+    """Poll until THIS taker's bid draws its UNFILLED reservation, self-cranking `resolve_pool` each
+    pass. Returns the drawn reservation, or None on timeout / if a different router won the seat."""
     us = str(user)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         _self_crank_resolve(client, miner)
         resv = client.get_reservation(miner)
-        if resv is not None and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0:
+        if _drawn_unfilled(resv):
             return resv if str(resv.router) == us else None  # seated: us, or someone else won
         time.sleep(3)
     return None
@@ -162,7 +176,9 @@ def swap_now_command(
     if best is None:
         fail('No miner can fund an executable swap for that amount within bounds.')
     cand, amts = best
-    recv = amts.to_amount / 10 ** get_chain(to_chain).decimals
+    # Quote the NET dest leg — the miner delivers `to_amount` less the protocol fee, same as
+    # `alw swap quote`. The gross `to_amount` is what gets pinned on-chain, not what you receive.
+    recv = apply_fee_deduction(amts.to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
 
     console.print(
         f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
@@ -190,7 +206,7 @@ def swap_now_command(
     resv = _poll_reservation(client, cand.miner, timeout_secs=30)
     if resv is None or str(resv.user) != str(user):
         fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
-    recv = int(resv.to_amount) / 10 ** get_chain(to_chain).decimals
+    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
