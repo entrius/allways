@@ -143,10 +143,13 @@ class SolanaProvider(ChainProvider):
         return int(post[i]) - int(pre[i])
 
     def _confirmations(self, slot: Optional[int]) -> int:
-        """Confirmations = slots since the tx's slot (the tx slot counts as 1). 0 if unknown."""
+        """Confirmations = slots since the tx's slot (the tx slot counts as 1). 0 if unknown.
+
+        Reads the pass-cached tip so N legs in one forward pass share a single ``getSlot`` instead
+        of one each — the getSlot count drops from per-leg to per-pass."""
         if slot is None:
             return 0
-        tip = self.get_current_block_height()
+        tip = self.cached_block_height()
         if tip is None:
             return 0
         return max(0, tip - int(slot) + 1)

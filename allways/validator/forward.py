@@ -76,6 +76,7 @@ def clear_provider_caches(self: Validator) -> None:
     for provider in self.chain_providers.values():
         if hasattr(provider, 'clear_cache'):
             provider.clear_cache()
+        provider.clear_pass_tip()  # reset the per-pass hoisted chain tip (one getSlot/pass, not per-leg)
 
 
 def ingest_solana_events(self: Validator) -> None:
