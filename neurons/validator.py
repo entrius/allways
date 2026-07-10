@@ -51,7 +51,7 @@ from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
 from allways.validator.state_store import ValidatorStateStore  # noqa: E402
 from allways.validator.storage import DatabaseStorage  # noqa: E402
-from neurons.base.neuron import validator_dev_mode  # noqa: E402
+from neurons.base.neuron import validator_mode  # noqa: E402
 from neurons.base.validator import BaseValidatorNeuron  # noqa: E402
 
 WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-gittensor')
@@ -101,12 +101,15 @@ class Validator(BaseValidatorNeuron):
         # (getProgramAccounts), decides per status, verifies both legs with
         # replay-freshness gates, and casts the on-chain consensus vote. This
         # subsumes the old substrate swap_tracker discovery + verifier.
-        # Dev/testnet mode (VALIDATOR_DEV_MODE=1): observe-only. The swap loop logs "WOULD …"
-        # instead of voting, and should_set_weights() suppresses weight-setting. See validator_dev_mode().
-        dev_mode = validator_dev_mode()
-        if dev_mode:
-            bt.logging.warning('VALIDATOR_DEV_MODE on — observe-only: no Solana votes, no set_weights.')
-        solana_read_only = dev_mode
+        # VALIDATOR_MODE ladder (see validator_mode()): 'watch' = observe-only (swap loop logs
+        # "WOULD …", no weights), 'vote' = live contract votes but no weights, 'full' = production.
+        # should_set_weights() enforces the weights half; read_only below enforces the vote half.
+        mode = validator_mode()
+        if mode == 'watch':
+            bt.logging.warning('VALIDATOR_MODE=watch — observe-only: no Solana votes, no set_weights.')
+        elif mode == 'vote':
+            bt.logging.warning('VALIDATOR_MODE=vote — Solana contract votes ON, set_weights OFF.')
+        solana_read_only = mode == 'watch'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only

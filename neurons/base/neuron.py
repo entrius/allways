@@ -12,13 +12,30 @@ from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
 
+VALIDATOR_MODES = ('full', 'vote', 'watch')
 
-def validator_dev_mode() -> bool:
-    """Dev / testnet mode: the validator observes but takes no binding actions — it does NOT
-    submit Solana consensus votes (the swap loop logs "WOULD …") and does NOT set Bittensor
-    weights. Enable with VALIDATOR_DEV_MODE=1.
+
+def validator_mode() -> str:
+    """Validator authority mode — a ladder, each level strictly more binding than the last:
+
+      watch — observe-only: no Solana consensus votes (the swap loop logs "WOULD …") and no
+              Bittensor weights. For staging a new validator. (= legacy VALIDATOR_DEV_MODE=1)
+      vote  — casts Solana consensus votes but does NOT set Bittensor weights. For burning in
+              a validator against a live contract without touching emissions.
+      full  — votes and sets weights. Production. (default)
+
+    Set VALIDATOR_MODE=watch|vote|full. Legacy VALIDATOR_DEV_MODE=1 maps to 'watch' and is
+    ignored when VALIDATOR_MODE is set. An unknown VALIDATOR_MODE raises rather than silently
+    running 'full' — a typo must not promote a staging validator to production authority.
     """
-    return os.environ.get('VALIDATOR_DEV_MODE', '0') == '1'
+    raw = os.environ.get('VALIDATOR_MODE', '').strip().lower()
+    if raw:
+        if raw not in VALIDATOR_MODES:
+            raise ValueError(f'VALIDATOR_MODE={raw!r} invalid — want one of {", ".join(VALIDATOR_MODES)}')
+        return raw
+    if os.environ.get('VALIDATOR_DEV_MODE', '0') == '1':
+        return 'watch'
+    return 'full'
 
 
 class BaseNeuron(ABC):
@@ -166,8 +183,8 @@ class BaseNeuron(ABC):
         if self.config.neuron.disable_set_weights:
             return False
 
-        # Dev mode: observe-only — never set weights (mirrors the Solana vote suppression).
-        if validator_dev_mode():
+        # Only 'full' mode sets weights; 'vote' and 'watch' stop at (or before) contract votes.
+        if validator_mode() != 'full':
             return False
 
         return (
