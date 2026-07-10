@@ -151,6 +151,31 @@ def set_pool_window(secs: int):
     )
 
 
+@admin_group.command('set-finalize-window', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_finalize_window(secs: int):
+    """Set the post-draw finalize window in seconds (how long the seat winner has to fill its reservation).
+
+    [dim]The draw creates an UNFILLED reservation; only its router may call finalize_reservation, and only
+    within this window. Too short and a slow RPC round-trip forfeits the seat (fee spent, miner held busy
+    until reaped). The contract clamps this to [15, 300].[/dim]
+
+    [dim]Examples:
+        $ alw admin set-finalize-window 180[/dim]
+    """
+    if not 15 <= secs <= 300:
+        fail('Seconds must be within [15, 300] (the contract clamps this range)')
+    _run_setter(
+        title='Set Finalize Window',
+        getter=lambda c: c.get_config().finalize_window_secs,
+        setter=lambda c: c.set_finalize_window(secs),
+        noun='finalize window',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Finalize window set to {secs_str(secs)}',
+    )
+
+
 @admin_group.command('set-weights-interval', show_disclaimer=True)
 @click.argument('secs', type=int)
 def set_weights_interval(secs: int):
