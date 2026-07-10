@@ -38,6 +38,7 @@ def make_swap(
         to_tx_hash='dsttx',
         miner_from_addr='minerBTC',
         miner_to_addr='minerSOL',
+        user_from_addr='userBTC',
         user_to_addr='userSOL',
         from_amount=from_amount,
         to_amount=to_amount,

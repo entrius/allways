@@ -106,16 +106,17 @@ def test_withdraw_treasury_accepts_explicit_admin_recipient(monkeypatch):
     assert client.withdraw_treasury.call_args.args[0] == admin_pk
 
 
-def test_halt_skips_when_already_halted(monkeypatch):
+def test_halt_submits_without_pre_reading_config(monkeypatch):
+    # A stale RPC read must never block a halt: the command submits unconditionally
+    # (halting an already-halted system is a harmless no-op on-chain).
     client = MagicMock()
-    client.get_config.return_value = _config(halted=True)
     _patch_client(monkeypatch, client)
 
-    result = CliRunner().invoke(admin.admin_group, ['danger', 'halt'])
+    result = CliRunner().invoke(admin.admin_group, ['danger', 'halt'], input='y\n')
 
-    assert result.exit_code == 0
-    assert 'already halted' in result.output
-    client.set_halted.assert_not_called()
+    assert result.exit_code == 0, result.output
+    client.set_halted.assert_called_once_with(True)
+    client.get_config.assert_not_called()
 
 
 def test_set_reservation_fee_converts_sol_to_lamports(monkeypatch):
