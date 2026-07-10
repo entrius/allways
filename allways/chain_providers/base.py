@@ -141,6 +141,21 @@ class ChainProvider(ABC):
 
         return tx_info
 
+    def cached_block_height(self) -> Optional[int]:
+        """Chain tip for the current forward pass. Fetched once via ``get_current_block_height`` and
+        reused, so per-tx confirmation math costs one tip lookup per pass instead of one per leg.
+        Cleared each pass by ``clear_pass_tip``; a failed fetch (None) is not cached, so it retries.
+        A start-of-pass tip biases confirmations slightly low — conservative, never a false confirm."""
+        tip = getattr(self, '_pass_tip', None)
+        if tip is None:
+            tip = self.get_current_block_height()
+            self._pass_tip = tip
+        return tip
+
+    def clear_pass_tip(self) -> None:
+        """Reset the per-pass tip cache — called once per forward pass."""
+        self._pass_tip = None
+
     @abstractmethod
     def get_current_block_height(self) -> Optional[int]:
         """Chain tip block height. None on transient backend failure."""
