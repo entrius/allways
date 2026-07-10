@@ -137,8 +137,7 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
         console.print('[yellow]You hold multiple live reservations — pick one with --miner <pubkey>:[/yellow]')
         for mpk, _hotkey, resv in matches:
             console.print(
-                f'  [cyan]{mpk}[/cyan]  {resv.from_chain}->{resv.to_chain}  '
-                f'send to [dim]{resv.miner_from_addr}[/dim]'
+                f'  [cyan]{mpk}[/cyan]  {resv.from_chain}->{resv.to_chain}  send to [dim]{resv.miner_from_addr}[/dim]'
             )
         return
 

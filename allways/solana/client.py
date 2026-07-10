@@ -562,9 +562,7 @@ class AllwaysSolanaClient:
         winner names those in `finalize_reservation`."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
-        args = layouts.IX_OPEN_OR_REQUEST_ARGS.build(
-            {'from_chain': from_chain, 'to_chain': to_chain}
-        )
+        args = layouts.IX_OPEN_OR_REQUEST_ARGS.build({'from_chain': from_chain, 'to_chain': to_chain})
         metas = [
             AccountMeta(router, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),

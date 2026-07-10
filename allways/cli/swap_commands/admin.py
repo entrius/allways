@@ -430,7 +430,9 @@ def withdraw_treasury(recipient: str | None, amount: float | None, yes: bool):
 
     pk = _parse_pubkey(recipient) if recipient is not None else admin_pk
     if pk != admin_pk:
-        fail(f'The contract only allows treasury withdrawals to the admin ({admin_pk}). Omit RECIPIENT, or move the funds onward from the admin wallet afterwards.')
+        fail(
+            f'The contract only allows treasury withdrawals to the admin ({admin_pk}). Omit RECIPIENT, or move the funds onward from the admin wallet afterwards.'
+        )
     total = treasury.total if treasury is not None else 0
 
     lamports = to_lamports(amount) if amount is not None else total

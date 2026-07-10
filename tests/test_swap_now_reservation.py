@@ -20,7 +20,10 @@ EMPTY = bytes(32)
 def _resv(reserved_until, claimed=EMPTY, user='68ToGUYj'):
     """Stand-in for a decoded Reservation (only the predicate-relevant fields)."""
     return types.SimpleNamespace(
-        reserved_until=reserved_until, claimed_swap_key=claimed, user=user, miner_from_addr='miner-addr',
+        reserved_until=reserved_until,
+        claimed_swap_key=claimed,
+        user=user,
+        miner_from_addr='miner-addr',
         to_amount=10**9,
     )
 
@@ -76,8 +79,9 @@ def _run_swap_now(reserved_until, from_chain='btc'):
     user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
     resv = _resv(reserved_until, user=user)  # the FILLED reservation, post-finalize
     # The drawn (unfilled) reservation this taker gets seated with, before finalize.
-    drawn = types.SimpleNamespace(router=user, reserved_until=0, finalize_by=int(time.time()) + 60,
-                                  rate=int(0.0021 * 10**18))
+    drawn = types.SimpleNamespace(
+        router=user, reserved_until=0, finalize_by=int(time.time()) + 60, rate=int(0.0021 * 10**18)
+    )
     client = MagicMock()
     client.keypair.pubkey.return_value = user
     client.get_config.return_value = types.SimpleNamespace(

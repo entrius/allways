@@ -251,7 +251,9 @@ def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> O
     hotkey = _miner_hotkey_for(validator, cand.miner)
     if hotkey is None:
         return None
-    return BestQuote(hotkey, str(cand.miner), cand.rate_display, amts.collateral_amount, amts.from_amount, amts.to_amount)
+    return BestQuote(
+        hotkey, str(cand.miner), cand.rate_display, amts.collateral_amount, amts.from_amount, amts.to_amount
+    )
 
 
 def _miner_hotkey_for(validator, miner_pk) -> Optional[str]:

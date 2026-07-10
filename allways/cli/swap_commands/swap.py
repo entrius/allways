@@ -78,11 +78,7 @@ def _drawn_unfilled(resv) -> bool:
     contract's `close_unfilled_reservation`."""
     if resv is None:
         return False
-    return (
-        int(resv.reserved_until) == 0
-        and int(resv.created_at) == 0
-        and int(resv.finalize_by) > time.time()
-    )
+    return int(resv.reserved_until) == 0 and int(resv.created_at) == 0 and int(resv.finalize_by) > time.time()
 
 
 def _poll_drawn(client, miner, user, timeout_secs: int):
@@ -194,14 +190,21 @@ def swap_now_command(
     # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
     drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
     if drawn is None:
-        fail('  You were not seated (another bidder won, or the draw did not resolve in time). '
-             'Do NOT send funds; re-run to try again.')
+        fail(
+            '  You were not seated (another bidder won, or the draw did not resolve in time). '
+            'Do NOT send funds; re-run to try again.'
+        )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
     fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
     client.finalize_reservation(
-        cand.miner, user, user_from_addr, receive_address_opt,
-        fill.collateral_amount, fill.from_amount, fill.to_amount,
+        cand.miner,
+        user,
+        user_from_addr,
+        receive_address_opt,
+        fill.collateral_amount,
+        fill.from_amount,
+        fill.to_amount,
     )
     resv = _poll_reservation(client, cand.miner, timeout_secs=30)
     if resv is None or str(resv.user) != str(user):
@@ -213,9 +216,11 @@ def swap_now_command(
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
     remaining = int(resv.reserved_until) - int(time.time())
     if remaining < _SEND_MARGIN_SECS:
-        fail(f'  Reservation has only {remaining}s left — too short to land the claim for your '
-             f'{from_chain.upper()} deposit (needs ~{_SEND_MARGIN_SECS}s to relay it on-chain). '
-             'Do NOT send funds; re-run for a fresh reservation.')
+        fail(
+            f'  Reservation has only {remaining}s left — too short to land the claim for your '
+            f'{from_chain.upper()} deposit (needs ~{_SEND_MARGIN_SECS}s to relay it on-chain). '
+            'Do NOT send funds; re-run for a fresh reservation.'
+        )
 
     _save_pending(cand.miner, from_chain, to_chain)
     console.print(
