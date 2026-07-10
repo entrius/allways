@@ -12,7 +12,6 @@ from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
 
-
 VALIDATOR_MODES = ('full', 'vote', 'watch')
 
 
