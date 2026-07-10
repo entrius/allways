@@ -2,11 +2,13 @@
 
 import math
 from decimal import Decimal
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 from allways.chains import canonical_pair, get_chain
-from allways.classes import Swap
-from allways.constants import RATE_PRECISION, RATE_SIG_FIGS
+from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, RATE_SIG_FIGS
+
+if TYPE_CHECKING:
+    from allways.solana.client import SolanaSwap
 
 
 def normalize_rate(rate: float) -> str:
@@ -16,28 +18,25 @@ def normalize_rate(rate: float) -> str:
 
 def calculate_to_amount(
     from_amount: int,
-    rate: str,
+    rate,
     is_reverse: bool,
     to_decimals: int,
     from_decimals: int,
 ) -> int:
     """Calculate to_amount from from_amount and committed rate using fixed-point arithmetic.
 
-    Rate is 'canonical_dest per 1 canonical_source' in display units (e.g. 345 means 1 BTC = 345 TAO).
-    Uses Decimal for rate conversion to avoid IEEE 754 float rounding artifacts.
-    The rate parameter should be the raw string from the miner's commitment.
-
-    Used by miner (fulfillment), validator (verification), and CLI (display).
-    All three MUST use this function to guarantee identical results.
+    ``rate`` accepts either the on-chain u128 fixed-point int (rate × RATE_PRECISION) OR a display string
+    ('0.0021', '345') — both resolve to the same rate_fixed, so on-chain (int) and CLI/commitment (str)
+    callers agree byte-for-byte. Used by miner (fulfillment), validator (verification), and CLI (display).
 
     Args:
         from_amount: Amount in smallest units (sat, rao, wei, etc.)
-        rate: Canonical dest per 1 canonical source as a string (e.g. '345')
+        rate: u128 fixed-point int, or a 'canonical dest per 1 canonical source' display string
         is_reverse: True when swap direction is opposite of canonical order
         to_decimals: Decimal places for canonical dest chain (e.g. 9 for TAO)
         from_decimals: Decimal places for canonical source chain (e.g. 8 for BTC)
     """
-    rate_fixed = int(Decimal(rate) * RATE_PRECISION)
+    rate_fixed = int(rate) if isinstance(rate, int) else int(Decimal(rate) * RATE_PRECISION)
     if rate_fixed == 0:
         return 0
 
@@ -57,7 +56,7 @@ def calculate_to_amount(
             return from_amount * rate_fixed // (RATE_PRECISION * 10 ** (-decimal_diff))
 
 
-def expected_swap_amounts(swap: Swap, fee_divisor: int) -> Tuple[int, int]:
+def expected_swap_amounts(swap: 'SolanaSwap', fee_divisor: int) -> Tuple[int, int]:
     """Compute expected to_amount and fee-adjusted user_receives from a swap's on-chain fields.
 
     Single source of truth used by both miner (fulfillment) and validator (verification).
@@ -92,154 +91,91 @@ def apply_fee_deduction(to_amount: int, fee_divisor: int) -> int:
     return to_amount - to_amount // fee_divisor
 
 
-def derive_tao_leg(from_chain: str, from_amount: int, to_chain: str, to_amount: int) -> int:
-    """Return the TAO leg (in rao) of a swap, mirroring vote_initiate.
-
-    tao_amount is always the TAO side regardless of direction. Returns 0 if
-    neither side is TAO (no tao leg — currently unreachable since every
-    supported chain bridges through TAO, but kept deterministic).
-    """
-    if from_chain == 'tao':
-        return from_amount
-    if to_chain == 'tao':
-        return to_amount
-    return 0
-
-
-def quote_within_slippage(quoted: int, recomputed: int, slippage_bps: int) -> bool:
-    """True if `recomputed` is no more than `slippage_bps` below `quoted`.
-
-    One-sided (DEX 'minimum received'): a favorable move — recomputed >= quoted —
-    always passes. Pure integer math for determinism across validators. When
-    slippage_bps >= 10_000 the threshold is non-positive, so it always passes.
-    """
-    if quoted <= 0 or recomputed <= 0:
-        return False
-    if recomputed >= quoted:
-        return True
-    return recomputed * 10_000 >= quoted * (10_000 - slippage_bps)
-
-
 def is_executable_rate(
     rate: float,
     from_chain: str,
     to_chain: str,
-    min_swap_rao: int,
-    max_swap_rao: int,
+    min_swap_lamports: int,
+    max_swap_lamports: int,
 ) -> bool:
     """True iff the rate is fundably routable in its declared direction.
 
-    Crown-eligibility gate against rates that no user can route. Routable means
-    a source >= the source chain's ``min_onchain_amount`` (dust / existential
-    deposit) maps a TAO leg into ``[min_swap_rao, max_swap_rao]`` — a rate whose
-    only in-bounds source is sub-dust (e.g. 1 sat -> 0.5 TAO at 5e7 TAO/BTC) is
-    unfundable, so unexecutable.
+    Crown-eligibility gate against rates that no user can route. The on-chain swap bounds
+    (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg** (``collateral_amount``), so SOL is the
+    bounded asset and ``min_swap_lamports``/``max_swap_lamports`` are SOL lamports. Routable means a source >= the
+    source chain's ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
 
-    * BTC→TAO: high-side rates — even the smallest fundable sat maps above
-      ``max_swap_rao``, so no fundable source produces an in-bounds TAO leg.
-    * TAO→BTC: low-side rates — the TAO leg IS the source, so it trivially fits
-      any bounds, but the destination payout is absurd. Caught by the symmetric
-      check on ``1/rate``: if the inverse direction has no fundable source, the
-      original rate is at an extreme of the executable spectrum.
+    * X→SOL: high-side rates — even the smallest fundable source maps above ``max``, so no fundable
+      source produces an in-bounds SOL leg.
+    * SOL→X: the SOL leg IS the source, so it trivially fits any bounds, but absurd rates imply absurd
+      destinations. Caught by the symmetric check on ``1/rate``: if the inverse direction has no fundable
+      source, the original rate is at an extreme of the executable spectrum.
 
-    A bound at ``0`` is the contract's "unset" sentinel and disables that
-    side; both at 0 → permissive (no on-chain bounds yet).
+    A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 → permissive.
+    Non-SOL pairs (no SOL leg) have no bound to enforce → permissive.
     """
     if not math.isfinite(rate) or rate <= 0:
         return False
-    if min_swap_rao <= 0 and max_swap_rao <= 0:
+    if min_swap_lamports <= 0 and max_swap_lamports <= 0:
         return True
 
     def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
-        # For a "src → tao" direction at ``forward_rate`` (tao per src), is
-        # there an src amount that is fundable on-chain (>= the chain's
-        # min_onchain_amount) whose TAO leg lands in bounds?
+        # For a "src → sol" direction at ``forward_rate`` (sol per src), is there an src amount that is
+        # fundable on-chain (>= the chain's min_onchain_amount) whose SOL leg lands in bounds?
         src = get_chain(src_chain)
-        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
-            # rate × decimal_factor overflowed (e.g. 1.797e308 × 10) → smallest
-            # positive integer source already maps above any finite max bound.
+            # rate × decimal_factor overflowed → smallest positive integer source already maps above max.
             return False
-        # Floor at the source chain's dust/existential minimum: a rate whose only
-        # in-bounds source is below it (e.g. 1 sat) is unfundable, so unexecutable.
-        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_rao) / denom))
-        if max_swap_rao <= 0:
+        # Floor at the source chain's dust/existential minimum: a rate whose only in-bounds source is
+        # below it (e.g. 1 sat) is unfundable, so unexecutable.
+        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_lamports) / denom))
+        if max_swap_lamports <= 0:
             return True
-        max_source = math.floor(max_swap_rao / denom)
+        max_source = math.floor(max_swap_lamports / denom)
         return min_source <= max_source
 
-    if to_chain == 'tao':
-        # Forward into TAO: dest_rao = source_units × rate × 10**(tao_dec - src_dec).
+    if to_chain == NUMERAIRE_CHAIN:
+        # Forward into SOL: sol_lamports = source_units × rate × 10**(sol_dec - src_dec).
         return _has_integer_routable_source(rate, from_chain)
 
-    if from_chain == 'tao' and to_chain != 'tao':
-        # Reverse out of TAO: the TAO leg is the source itself, so any positive
-        # rao in [min, max] is trivially in bounds — but absurd-low rates
-        # (e.g. 1e-8 TAO/BTC) imply destinations so large no rational user
-        # would route, and the miner can post them just to win the
-        # lowest-rate-wins crown. Treat ``1/rate`` as a ``to_chain → tao`` rate
-        # and apply the same integer-routability check by symmetry: if the
-        # inverse direction has no routable source either, the original rate
-        # is at an extreme of the executable spectrum.
-        if rate <= 0:
-            return False
+    if from_chain == NUMERAIRE_CHAIN and to_chain != NUMERAIRE_CHAIN:
+        # Reverse out of SOL: the SOL leg is the source itself, so any positive lamport in [min, max] is
+        # trivially in bounds — but absurd rates imply destinations so large no rational user would route,
+        # and the miner can post them just to win the lowest-rate-wins crown. Treat ``1/rate`` as a
+        # ``to_chain → sol`` rate and apply the same integer-routability check by symmetry.
         inverse = 1.0 / rate
         if not math.isfinite(inverse) or inverse <= 0:
             return False
         return _has_integer_routable_source(inverse, to_chain)
 
-    # Non-TAO pairs have no TAO-leg bound to enforce.
+    # Non-SOL pairs have no SOL-leg bound to enforce.
     return True
 
 
-def min_executable_tao_leg(
+def min_executable_sol_leg(
     rate: float,
     from_chain: str,
     to_chain: str,
-    min_swap_rao: int,
-    max_swap_rao: int,
+    min_swap_lamports: int,
+    max_swap_lamports: int,
 ) -> int:
-    """Smallest TAO leg (rao) the rate produces among in-band fundable swaps.
+    """Smallest SOL leg (lamports) the rate produces among in-band fundable swaps.
 
-    Shares band math with is_executable_rate. Returns 0 when no in-band
-    fundable swap exists (rate unexecutable) — caller treats as "no constraint".
+    Shares band math with is_executable_rate; SOL is the bounded asset (``collateral_amount``). Returns 0 when
+    no in-band fundable swap exists (rate unexecutable) — caller treats as "no constraint".
     """
-    if not is_executable_rate(rate, from_chain, to_chain, min_swap_rao, max_swap_rao):
+    if not is_executable_rate(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports):
         return 0
-    if from_chain == 'tao':
-        return max(get_chain('tao').min_onchain_amount, max(0, min_swap_rao))
-    if to_chain == 'tao':
+    if from_chain == NUMERAIRE_CHAIN:
+        return max(get_chain(NUMERAIRE_CHAIN).min_onchain_amount, max(0, min_swap_lamports))
+    if to_chain == NUMERAIRE_CHAIN:
         src = get_chain(from_chain)
-        decimal_factor = 10 ** (get_chain('tao').decimals - src.decimals)
+        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0
-        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_rao) / denom))
+        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_lamports) / denom))
         return int(min_source * denom)
     return 0
-
-
-def check_swap_viability(
-    tao_amount_rao: int,
-    miner_collateral_rao: int,
-    min_swap_rao: int,
-    max_swap_rao: int,
-) -> tuple[bool, str]:
-    """Check whether a swap can pass vote_initiate for a given miner.
-
-    Mirrors the guards in lib.rs::vote_reserve (bounds) and vote_initiate
-    (collateral). Returns (viable, reason) — reason is empty on success.
-
-    The bounds are global, but the TAO leg they apply to is *not* — when the
-    source chain isn't TAO, the TAO leg = to_amount, which depends on the
-    miner's rate. Callers must derive ``tao_amount_rao`` per miner; sampling
-    one rate up front is only safe when ``from_chain == 'tao'``.
-    """
-    if min_swap_rao > 0 and tao_amount_rao < min_swap_rao:
-        return False, f'below min swap ({min_swap_rao / 1_000_000_000:.4f} TAO)'
-    if max_swap_rao > 0 and tao_amount_rao > max_swap_rao:
-        return False, f'above max swap ({max_swap_rao / 1_000_000_000:.4f} TAO)'
-    if tao_amount_rao > miner_collateral_rao:
-        return False, f'insufficient collateral ({tao_amount_rao / 1_000_000_000:.4f} TAO needed)'
-    return True, ''

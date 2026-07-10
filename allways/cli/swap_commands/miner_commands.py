@@ -2,28 +2,24 @@
 
 import asyncio
 import time
-from typing import Optional
 
 import click
 from rich.table import Table
 
-from allways.chains import get_chain
-from allways.classes import SwapStatus
 from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SWAP_STATUS_COLORS,
-    blocks_to_minutes_str,
     console,
-    from_rao,
+    effective_rate,
+    fail,
+    from_lamports,
     get_cli_context,
+    get_solana_cli_context,
     loading,
-    print_contract_error,
-    read_miner_commitment,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR
-from allways.contract_client import ContractError
+from allways.constants import RATE_PRECISION
+from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
 
 
 @click.group('miner', cls=StyledGroup)
@@ -33,82 +29,77 @@ def miner_group():
 
 
 @miner_group.command('status')
-@click.option('--hotkey', default=None, type=str, help='Miner hotkey to check (default: your hotkey)')
-def miner_status(hotkey: str):
-    """View miner status: collateral, committed pair, and active swaps.
+@click.option('--pubkey', default=None, type=str, help='Miner Solana pubkey to check (default: your keypair)')
+def miner_status(pubkey: str):
+    """View miner status: collateral, posted quotes, and active swaps.
 
     [dim]Examples:
         $ alw miner status
-        $ alw miner status --hotkey 5Cxyz...[/dim]
+        $ alw miner status --pubkey 7xKX...[/dim]
     """
-    config, wallet, subtensor, client = get_cli_context()
-    netuid = config['netuid']
+    _, client = get_solana_cli_context()
+    target = pubkey or str(client.keypair.pubkey())
 
-    if not hotkey:
-        hotkey = wallet.hotkey.ss58_address
-
-    console.print(f'\n[bold]Miner Status — {hotkey[:16]}...[/bold]\n')
+    console.print(f'\n[bold]Miner Status — {target[:16]}...[/bold]\n')
 
     # Section 1: Collateral & Status
     try:
         with loading('Reading miner status...'):
-            total_rao = client.get_miner_collateral(hotkey)
-            min_required_rao = client.get_min_collateral()
-            is_active = client.get_miner_active_flag(hotkey)
-            has_active_swap = client.get_miner_has_active_swap(hotkey)
-    except ContractError as e:
-        print_contract_error('Failed to read miner data', e)
-        return
+            collateral_lamports = client.get_collateral_lamports(target) or 0
+            config = client.get_config()
+            ms = client.get_miner_state(target)
+    except SolanaClientError as e:
+        fail(f'Failed to read miner data: {e}')
+
+    is_active = bool(ms and ms.active)
+    has_active_swap = bool(ms and ms.has_active_swap)
+    min_required = config.min_collateral if config is not None else 0
 
     table = Table(title='Collateral & Status', show_header=True)
     table.add_column('Field', style='cyan')
     table.add_column('Value', style='green')
 
-    table.add_row('Collateral', f'{from_rao(total_rao):.4f} TAO')
-    table.add_row('Min Required', f'{from_rao(min_required_rao):.4f} TAO')
-    status_str = '[green]Active[/green]' if is_active else '[red]Inactive[/red]'
-    table.add_row('Status', status_str)
-    swap_str = '[yellow]Yes[/yellow]' if has_active_swap else '[dim]No[/dim]'
-    table.add_row('Has Active Swap', swap_str)
+    table.add_row('Collateral', f'{from_lamports(collateral_lamports):.4f} SOL')
+    table.add_row('Min Required', f'{from_lamports(min_required):.4f} SOL')
+    table.add_row('Status', '[green]Active[/green]' if is_active else '[red]Inactive[/red]')
+    table.add_row('Has Active Swap', '[yellow]Yes[/yellow]' if has_active_swap else '[dim]No[/dim]')
+    if ms is not None:
+        table.add_row('Successful / Failed', f'{ms.successful_swaps} / {ms.failed_swaps}')
 
     console.print(table)
     console.print()
 
-    # Section 2: Committed Pair
-    with loading('Reading committed pair...'):
-        pair = read_miner_commitment(subtensor, netuid, hotkey)
+    # Section 2: Posted Quotes (on-chain MinerQuote PDAs)
+    try:
+        with loading('Reading posted quotes...'):
+            quotes = [q for _pda, q in client.get_all('MinerQuote') if str(q.miner) == target]
+    except SolanaClientError as e:
+        console.print(f'[yellow]Could not read quotes: {e}[/yellow]')
+        quotes = []
 
-    if pair:
-        console.print('[bold]Committed Pair[/bold]\n')
-        src_up, dst_up = pair.from_chain.upper(), pair.to_chain.upper()
-        fwd_disabled = pair.rate == 0
-        ctr_disabled = pair.counter_rate == 0
-        if fwd_disabled or ctr_disabled or pair.rate_str != pair.counter_rate_str:
-            console.print(f'  {src_up} ↔ {dst_up}')
-            if fwd_disabled:
-                console.print(f'    {src_up} → {dst_up}: [yellow]not supported[/yellow]')
-            else:
-                console.print(f'    {src_up} → {dst_up}: [green]send 1 {src_up}, get {pair.rate:g} {dst_up}[/green]')
-            if ctr_disabled:
-                console.print(f'    {dst_up} → {src_up}: [yellow]not supported[/yellow]')
-            else:
-                console.print(
-                    f'    {dst_up} → {src_up}: [green]send {pair.counter_rate:g} {dst_up}, get 1 {src_up}[/green]'
-                )
-        else:
-            console.print(f'  {src_up} ↔ {dst_up} @ [green]{pair.rate:g}[/green]')
-        console.print(f'  Source address: [dim]{pair.from_address}[/dim]')
-        console.print(f'  Dest address:   [dim]{pair.to_address}[/dim]')
+    if quotes:
+        console.print('[bold]Posted Quotes[/bold]\n')
+        for q in quotes:
+            src_up, dst_up = q.from_chain.upper(), q.to_chain.upper()
+            rd = effective_rate(q.from_chain, q.to_chain, f'{q.rate / RATE_PRECISION:g}')
+            console.print(f'  {src_up} → {dst_up}: [green]{rd} {dst_up}/{src_up}[/green]')
+            console.print(f'    receive on {src_up}: [dim]{q.miner_from_addr}[/dim]')
+            console.print(f'    send on {dst_up}:    [dim]{q.miner_to_addr}[/dim]')
     else:
-        console.print('[yellow]No committed pair found[/yellow]')
+        console.print('[yellow]No posted quotes found[/yellow]')
 
     console.print()
 
     # Section 3: Active Swaps
     try:
         with loading('Reading active swaps...'):
-            swaps = client.get_miner_active_swaps(hotkey)
-    except ContractError as e:
+            swaps = [
+                swap_from_solana(s)
+                for status in ('Active', 'Fulfilled')
+                for _pda, s in client.get_swaps(status=status)
+                if str(s.miner) == target
+            ]
+    except SolanaClientError as e:
         console.print(f'[yellow]Could not read active swaps: {e}[/yellow]')
         swaps = []
 
@@ -117,23 +108,17 @@ def miner_status(hotkey: str):
         return
 
     swap_table = Table(title='Active Swaps', show_header=True)
-    swap_table.add_column('ID', style='cyan')
+    swap_table.add_column('Swap Key', style='cyan')
     swap_table.add_column('Pair', style='green')
     swap_table.add_column('Amount', style='yellow')
     swap_table.add_column('Status', style='bold')
-    swap_table.add_column('Block', style='dim')
 
     for swap in swaps:
-        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
-        color = SWAP_STATUS_COLORS.get(swap.status, 'white')
-        status_display = f'[{color}]{swap.status.name}[/{color}]'
-
         swap_table.add_row(
-            str(swap.id),
-            pair_str,
+            swap.key_hex[:16],
+            f'{swap.from_chain.upper()}/{swap.to_chain.upper()}',
             str(swap.from_amount),
-            status_display,
-            str(swap.initiated_block),
+            swap.status,
         )
 
     console.print(swap_table)
@@ -155,28 +140,37 @@ def miner_activate():
 
     from allways.synapses import MinerActivateSynapse
 
-    config, wallet, subtensor, client = get_cli_context()
+    config, wallet, subtensor, _ = get_cli_context(need_client=False)
+    _, client = get_solana_cli_context()
     netuid = config['netuid']
     hotkey = wallet.hotkey.ss58_address
+
+    def _is_active() -> bool:
+        """Resolve active flag off Solana: hotkey → bound pubkey (HotkeyBinding) → MinerState."""
+        try:
+            hk_bytes = bytes.fromhex(bt.Keypair(ss58_address=hotkey).public_key.hex())
+            binding = client.get_hotkey_binding(hk_bytes)
+            if binding is None:
+                return False
+            ms = client.get_miner_state(binding.miner)
+            return bool(ms and ms.active)
+        except Exception:
+            return False
 
     console.print(f'\n[bold]Miner Activate: {hotkey[:16]}...[/bold]\n')
 
     # Pre-flight: check if already active
-    try:
-        if client.get_miner_active_flag(hotkey):
-            console.print('[yellow]Miner is already active.[/yellow]\n')
-            return
-    except ContractError:
-        pass
+    if _is_active():
+        console.print('[yellow]Miner is already active.[/yellow]\n')
+        return
 
-    # Discover whitelisted validators from metagraph
+    # Discover serving validators from metagraph (on-chain whitelist enforced at vote time)
     dendrite = bt.Dendrite(wallet=wallet)
     with loading('Discovering validators...'):
-        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
+        validator_axons = discover_validators(subtensor, netuid)
 
     if not validator_axons:
-        console.print('[red]No validators found on metagraph[/red]\n')
-        return
+        fail('No validators found on metagraph')
 
     # Broadcast, re-signing a fresh timestamp each attempt. On a 429 the request
     # was rejected at the edge proxy and never reached the validator — back off
@@ -216,12 +210,9 @@ def miner_activate():
     with loading('Checking on-chain activation...'):
         for _ in range(15):
             time.sleep(2)
-            try:
-                if client.get_miner_active_flag(hotkey):
-                    activated = True
-                    break
-            except ContractError:
-                pass
+            if _is_active():
+                activated = True
+                break
 
     if activated:
         console.print('[green]Miner activated successfully[/green]\n')
@@ -230,165 +221,101 @@ def miner_activate():
     if accepted == 0 and no_response == len(validator_axons):
         console.print('[dim]The chain may be slow — the vote could still land after this check.[/dim]')
         console.print('[dim]Retry with a longer timeout: ALW_DENDRITE_TIMEOUT=90 alw miner activate[/dim]')
-        console.print('[dim]Or re-run `alw miner status` in a minute to see if activation completed.[/dim]\n')
+        console.print('[dim]Or re-run `alw miner status` in a minute to see if activation completed.[/dim]')
     elif accepted == 0 and info.category in ('', 'mixed', 'unmatched'):
         # Translator couldn't pin down a single cause — fall back to the prerequisites checklist.
         console.print('[dim]Prerequisites for activation:[/dim]')
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
         console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
         console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
-        console.print('[dim]Run `alw miner status` to see which are missing.[/dim]\n')
+        console.print('[dim]Run `alw miner status` to see which are missing.[/dim]')
     elif accepted > 0:
-        console.print(
-            '[yellow]Votes submitted but quorum not yet reached. Check status with: alw miner status[/yellow]\n'
-        )
+        console.print('[dim]Votes submitted but quorum not yet reached. Check status with: alw miner status[/dim]')
+    fail('Activation not confirmed on-chain.')
 
 
 @miner_group.command('deactivate')
 def miner_deactivate():
-    """Deactivate miner directly on contract (permissionless).
+    """Deactivate miner directly on the program (permissionless self-deactivate).
 
-    [dim]Calls deactivate() on the contract directly. No validator needed.
-    After deactivation, must wait 2 * timeout_blocks before withdrawing collateral.[/dim]
+    [dim]Calls deactivate() — no validator needed. After deactivation you must wait
+    2 * fulfillment_timeout before withdrawing collateral.[/dim]
 
     [dim]Examples:
         $ alw miner deactivate[/dim]
     """
-    _, wallet, subtensor, client = get_cli_context()
-    hotkey = wallet.hotkey.ss58_address
+    _, client = get_solana_cli_context()
+    pubkey = client.keypair.pubkey()
 
-    console.print(f'\n[bold]Miner Deactivate: {hotkey[:16]}...[/bold]\n')
+    console.print(f'\n[bold]Miner Deactivate: {str(pubkey)[:16]}...[/bold]\n')
 
-    # Pre-flight: the contract rejects deactivate() with MinerHasActiveSwap or
-    # MinerReserved (lib.rs:935-940). ink! returns those as a raw ContractReverted
-    # with no variant name, so detect them here to show why instead of a module
-    # error dump.
+    # Pre-flight: the program guards deactivate() on no-active-swap + past busy_until.
     try:
-        if client.get_miner_has_active_swap(hotkey):
-            console.print(
-                '[red]Cannot deactivate: you have an active swap.[/red]\n'
-                '[dim]Wait for it to complete or time out, then try again. '
-                'Check with: alw view active-swaps[/dim]\n'
-            )
+        now = int(time.time())
+        ms = client.get_miner_state(pubkey)
+        if ms is None or not ms.active:
+            console.print('[yellow]Miner is not active.[/yellow]\n')
             return
-        reserved_until = client.get_miner_reserved_until(hotkey)
-        current_block = subtensor.get_current_block()
-        if reserved_until > current_block:
-            remaining = reserved_until - current_block
-            console.print(
-                f'[red]Cannot deactivate: you have an active reservation '
-                f'(~{remaining} blocks, ~{remaining * 12 // 60} min left).[/red]\n'
-                '[dim]Wait for it to expire or get consumed, then try again.[/dim]\n'
-            )
-            return
-    except ContractError as e:
-        print_contract_error('Failed to read miner state', e)
-        return
+        if ms.has_active_swap:
+            console.print('[dim]Wait for it to complete or time out, then try again.[/dim]')
+            fail('Cannot deactivate: you have an active swap.')
+        if ms.busy_until > now:
+            remaining = ms.busy_until - now
+            fail(f'Cannot deactivate: you are busy (open pool / held reservation), ~{remaining}s left.')
+    except SolanaClientError as e:
+        fail(f'Failed to read miner state: {e}')
 
     try:
         with loading('Submitting transaction...'):
-            tx_hash = client.deactivate_miner(wallet, hotkey)
-        console.print(f'[green]Deactivated successfully[/green] (tx: {tx_hash[:16]}...)')
-        timeout = client.get_fulfillment_timeout()
-        console.print(
-            f'[dim]Collateral withdrawal available after {timeout * 2} blocks ({blocks_to_minutes_str(timeout * 2)})[/dim]\n'
-        )
-    except ContractError as e:
-        print_contract_error('Failed to deactivate', e)
+            sig = client.deactivate()
+        console.print(f'[green]Deactivated successfully[/green] (sig: {sig[:16]}...)')
+        config = client.get_config()
+        if config is not None:
+            cooldown = config.fulfillment_timeout_secs * 2
+            console.print(f'[dim]Collateral withdrawal available after {cooldown}s (~{cooldown // 60} min)[/dim]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to deactivate: {e}')
 
 
 @miner_group.command('mark-fulfilled')
-@click.option('--swap-id', required=True, type=int, help='Swap ID to mark as fulfilled')
-@click.option('--tx-hash', required=True, type=str, help='Destination chain transaction hash')
-@click.option(
-    '--amount',
-    default=None,
-    type=int,
-    help=(
-        "Amount sent, in the dest chain's smallest unit (rao for TAO, satoshi for BTC). "
-        'Optional — if omitted, the CLI computes the expected amount from the swap struct '
-        '(rate × from_amount − fee).'
-    ),
-)
-@click.option(
-    '--block',
-    default=0,
-    type=int,
-    help='Destination chain block number (default: 0, which tells validators to scan)',
-)
+@click.option('--from-tx-hash', required=True, type=str, help='Source-chain tx hash that identifies the swap')
+@click.option('--to-tx-hash', required=True, type=str, help='Destination chain transaction hash')
+@click.option('--to-tx-block', default=0, type=int, help='Destination chain block number (0 = validators scan)')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: Optional[int], block: int, yes: bool):
-    """Manually mark a swap as fulfilled on the contract.
+def miner_mark_fulfilled(from_tx_hash: str, to_tx_hash: str, to_tx_block: int, yes: bool):
+    """Manually mark a swap as fulfilled on the program.
 
-    [dim]Use this when you've sent destination funds manually (e.g. via external wallet)
-    and need to notify the contract.[/dim]
+    [dim]Use this when you've sent destination funds manually and need to notify the program.
+    The swap is identified by its source tx hash (swap_key = keccak(from_tx_hash)). The payout
+    amount is the pinned reservation value — not operator-supplied.[/dim]
 
     [dim]Examples:
-        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123...           (amount inferred)
-        $ alw miner mark-fulfilled --swap-id 5 --tx-hash abc123... --amount 27500   (override)[/dim]
+        $ alw miner mark-fulfilled --from-tx-hash abc... --to-tx-hash def...[/dim]
     """
-    from allways.utils.rate import expected_swap_amounts
+    _, client = get_solana_cli_context()
+    pubkey = client.keypair.pubkey()
+    swap_key = swap_key_from_tx_hash(from_tx_hash)
 
-    _, wallet, _, client = get_cli_context()
-    hotkey = wallet.hotkey.ss58_address
-
-    # Preflight: the contract rejects mark_fulfilled with InvalidStatus when
-    # status != Active, and we can't give back any of that detail once ink!
-    # raises ContractReverted. Look up the swap ourselves so we can show why.
+    # Preflight: the program rejects mark_fulfilled unless status == Active and the swap is ours.
     try:
-        swap = client.get_swap(swap_id)
-    except ContractError as e:
-        print_contract_error('Failed to read swap', e)
-        return
-    if swap is None:
-        console.print(f'[red]Swap #{swap_id} not found on-chain.[/red]')
-        return
+        acct = client.get_swap(swap_key)
+    except SolanaClientError as e:
+        fail(f'Failed to read swap: {e}')
+    if acct is None:
+        fail(f'Swap {swap_key.hex()[:16]} not found on-chain.')
+    swap = swap_from_solana(acct, swap_key)
 
-    if swap.miner_hotkey != hotkey:
-        console.print(
-            f'[red]Swap #{swap_id} is assigned to a different miner ({swap.miner_hotkey[:16]}...), not you.[/red]\n'
-        )
-        return
+    if str(swap.miner) != str(pubkey):
+        fail(f'Swap {swap.key_hex[:16]} is assigned to a different miner, not you.')
+    if swap.status != 'Active':
+        console.print('[dim]mark_fulfilled is only accepted while the swap is Active.[/dim]')
+        fail(f'Swap {swap.key_hex[:16]} is not Active — current status: {swap.status}.')
 
-    if swap.status != SwapStatus.ACTIVE:
-        console.print(
-            f'[yellow]Swap #{swap_id} is not Active — current status: '
-            f'[bold]{swap.status.name}[/bold].[/yellow]\n'
-            '[dim]mark_fulfilled is only accepted once, while the swap is Active. '
-            'The contract will reject a re-call.[/dim]'
-        )
-        if swap.to_tx_hash:
-            console.print(f'[dim]  Already recorded: tx={swap.to_tx_hash[:20]}..., to_amount={swap.to_amount}[/dim]\n')
-        return
-
-    # Infer the expected dest amount from the swap struct if caller didn't pass one.
-    # Same formula the validator uses (rate × from_amount − fee), so the consensus
-    # path stays aligned regardless of whether the operator guessed a raw number.
-    if amount is None:
-        _, inferred = expected_swap_amounts(swap, FEE_DIVISOR)
-        if inferred == 0:
-            console.print(
-                '[red]Could not infer amount from swap struct (rate produced 0).[/red]\n'
-                '[dim]Pass --amount explicitly (smallest unit of the dest chain).[/dim]'
-            )
-            return
-        amount = inferred
-        amount_source = 'inferred from swap struct'
-    else:
-        amount_source = 'operator-provided'
-
-    to_chain = swap.to_chain
-    to_chain_def = get_chain(to_chain)
-    human_amount = amount / (10**to_chain_def.decimals)
-
-    console.print(f'\n[bold]Mark Fulfilled — Swap #{swap_id}[/bold]\n')
-    console.print(f'  Swap ID:   {swap_id}')
-    console.print(f'  Tx Hash:   {tx_hash}')
-    console.print(
-        f'  Amount:    {amount} {to_chain_def.native_unit}  (~{human_amount:.8f} {to_chain.upper()}, {amount_source})'
-    )
-    console.print(f'  Block:     {block if block else "(validators will scan)"}')
-    console.print(f'  Hotkey:    {hotkey}\n')
+    console.print(f'\n[bold]Mark Fulfilled — {swap.key_hex[:16]}[/bold]\n')
+    console.print(f'  Pair:        {swap.from_chain.upper()} → {swap.to_chain.upper()}')
+    console.print(f'  Payout:      {swap.to_amount} (pinned)')
+    console.print(f'  Dest tx:     {to_tx_hash}')
+    console.print(f'  Dest block:  {to_tx_block if to_tx_block else "(validators will scan)"}\n')
 
     if not yes and not click.confirm('Confirm marking swap as fulfilled?'):
         console.print('[yellow]Cancelled[/yellow]')
@@ -396,13 +323,49 @@ def miner_mark_fulfilled(swap_id: int, tx_hash: str, amount: Optional[int], bloc
 
     try:
         with loading('Submitting transaction...'):
-            result = client.mark_fulfilled(
-                wallet=wallet,
-                swap_id=swap_id,
-                to_tx_hash=tx_hash,
-                to_amount=amount,
-                to_tx_block=block,
-            )
-        console.print(f'[green]Swap #{swap_id} marked as fulfilled[/green] (tx: {result[:16]}...)\n')
-    except ContractError as e:
-        print_contract_error('Failed to mark fulfilled', e)
+            sig = client.mark_fulfilled(swap_key=swap_key, to_tx_hash=to_tx_hash, to_tx_block=to_tx_block)
+        console.print(f'[green]Swap {swap.key_hex[:16]} marked as fulfilled[/green] (sig: {sig[:16]}...)\n')
+    except SolanaClientError as e:
+        fail(f'Failed to mark fulfilled: {e}')
+
+
+@miner_group.command('bind-hotkey')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def miner_bind_hotkey(yes: bool):
+    """Bind your Bittensor hotkey to your Solana pubkey on-chain.
+
+    [dim]The hotkey (sr25519) signs your Solana pubkey; the program stores it so validators attribute
+    your on-chain state (collateral, swaps, stats) to your metagraph UID. Idempotent.[/dim]
+
+    [dim]Examples:
+        $ alw miner bind-hotkey[/dim]
+    """
+    import bittensor as bt
+
+    _, wallet, _, _ = get_cli_context(need_client=False)
+    _, client = get_solana_cli_context()
+    pubkey = client.keypair.pubkey()
+
+    console.print('\n[bold]Bind Hotkey ↔ Solana Pubkey[/bold]\n')
+    console.print(f'  Hotkey:  {wallet.hotkey.ss58_address}')
+    console.print(f'  Pubkey:  {pubkey}\n')
+
+    if client.get_binding(pubkey) is not None:
+        console.print('[yellow]This pubkey is already bound.[/yellow]\n')
+        return
+
+    hotkey_bytes = bytes(wallet.hotkey.public_key)
+    sig = wallet.hotkey.sign(bytes(pubkey))
+    if not bt.Keypair(public_key='0x' + hotkey_bytes.hex()).verify(bytes(pubkey), sig):
+        fail('Local signature verify failed; not submitting.')
+
+    if not yes and not click.confirm('Confirm binding?'):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+
+    try:
+        with loading('Submitting transaction...'):
+            client.bind_hotkey(hotkey_bytes, sig)
+        console.print(f'[green]Bound {wallet.hotkey.ss58_address} → {pubkey}[/green]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to bind hotkey: {e}')

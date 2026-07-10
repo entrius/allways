@@ -1,306 +1,209 @@
-"""SwapFulfiller — timeout cushion, sender verification, send-path, send-cache.
+"""B4.1 — SwapFulfiller against the Solana program.
 
-The cushion/safety tests stay at the verify_swap_safety layer. The send-cache
-tests lock in the idempotency invariant: once dest funds are sent, an unmarked
-cache entry must keep blocking a duplicate send until mark_fulfilled lands or
-the swap is provably past its deadline.
+Deadlines are unix-seconds (``Swap.timeout_at``); the miner sends the full pinned ``to_amount`` (the 1%
+fee is skimmed from collateral at confirm, not this leg); ``mark_fulfilled`` records only the dest tx
+hash/block. The send-cache is keyed by ``swap_key`` hex and locks in the idempotency invariant: once
+dest funds are sent, an unmarked entry keeps blocking a duplicate send until mark_fulfilled lands or the
+swap is provably past its deadline.
 """
 
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from solders.keypair import Keypair
 
-from allways.classes import Swap, SwapStatus
-from allways.constants import (
-    DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS,
-    MAX_EXTENSION_BLOCKS,
-    MAX_EXTENSIONS_PER_SWAP,
-    MINER_TIMEOUT_CUSHION_BLOCKS,
-    SENT_CACHE_DISCARD_MARGIN_BLOCKS,
-)
+from allways.constants import MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
+from allways.miner import fulfillment as fulfillment_mod
 from allways.miner.fulfillment import SentSwap, SwapFulfiller
-from allways.miner.swap_poller import MAX_REFRESH_MISSES, SwapPoller
+from allways.solana.client import SolanaClientError, SolanaSwap
 
 
-def make_fulfiller() -> SwapFulfiller:
-    """Build a SwapFulfiller with mocked deps."""
-    return SwapFulfiller(
-        contract_client=MagicMock(),
-        chain_providers={},
-        wallet=MagicMock(),
-        subtensor=MagicMock(),
-    )
+@pytest.fixture
+def at_now(monkeypatch):
+    """Freeze fulfillment's wall clock; returns a setter."""
+
+    def _set(t: int):
+        monkeypatch.setattr(fulfillment_mod.time, 'time', lambda: t)
+
+    _set(0)
+    return _set
 
 
-def make_swap(timeout_block: int = 500, rate: str = '345', miner_from: str = 'bc1q-miner') -> Swap:
-    return Swap(
-        id=1,
-        user_hotkey='user',
-        miner_hotkey='miner',
+def make_fulfiller(**kw) -> SwapFulfiller:
+    return SwapFulfiller(solana_client=MagicMock(), chain_providers={}, **kw)
+
+
+def make_swap(
+    timeout_at: int = 5000, to_amount: int = 345_000_000, miner_from: str = 'bc1q-miner', sid: int = 1
+) -> SolanaSwap:
+    return SolanaSwap(
+        swap_key=bytes([sid] * 32),
+        miner=Keypair().pubkey(),
+        user=Keypair().pubkey(),
         from_chain='btc',
         to_chain='tao',
+        user_from_addr='bc1q-user',
+        user_to_addr='5user',
+        miner_from_addr=miner_from,
+        miner_to_addr='5miner',
+        rate=345,
+        collateral_amount=1_000_000,
         from_amount=1_000_000,
-        to_amount=345_000_000,
-        tao_amount=345_000_000,
-        user_from_address='bc1q-user',
-        user_to_address='5user',
-        miner_from_address=miner_from,
-        rate=rate,
-        status=SwapStatus.ACTIVE,
-        initiated_block=100,
-        timeout_block=timeout_block,
+        to_amount=to_amount,
+        from_tx_hash='deadbeef',
+        from_tx_block=100,
+        to_tx_hash='',
+        to_tx_block=0,
+        status='Active',
+        initiated_at=1000,
+        timeout_at=timeout_at,
+        max_extend_at=timeout_at + 10_000,
+        fulfilled_at=0,
     )
 
 
 class TestVerifySwapSafetyCushion:
-    """The cushion is a hardcoded constant pinned to EXTEND_THRESHOLD_BLOCKS —
-    miners stop fulfilling that many blocks before the timeout so the
-    validator extension flow still has runway to rescue the swap."""
+    """The cushion is MINER_TIMEOUT_CUSHION_SECS before timeout_at — the miner stops STARTING a fulfill
+    that long before the deadline so the validator extension flow still has runway."""
 
-    def test_allows_swap_well_before_cushion_window(self):
-        fulfiller = make_fulfiller()
-        # Comfortably outside the cushion: deadline = 500 - cushion, current well below.
-        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS - 10
-        result = fulfiller.verify_swap_safety(make_swap(timeout_block=500))
+    def test_allows_swap_well_before_cushion_window(self, at_now):
+        f = make_fulfiller()
+        at_now(5000 - MINER_TIMEOUT_CUSHION_SECS - 100)
+        result = f.verify_swap_safety(make_swap(timeout_at=5000))
         assert result is not None
         assert result[1] == 'bc1q-miner'
 
-    def test_blocks_swap_inside_cushion_window(self):
-        fulfiller = make_fulfiller()
-        # One block inside the cushion: current >= timeout - cushion → refused.
-        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS + 1
-        assert fulfiller.verify_swap_safety(make_swap(timeout_block=500)) is None
+    def test_blocks_swap_inside_cushion_window(self, at_now):
+        f = make_fulfiller()
+        at_now(5000 - MINER_TIMEOUT_CUSHION_SECS + 1)
+        assert f.verify_swap_safety(make_swap(timeout_at=5000)) is None
 
-    def test_blocks_swap_at_cushion_boundary(self):
-        fulfiller = make_fulfiller()
-        # Exact boundary: current == timeout - cushion is unsafe (>= check).
-        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS
-        assert fulfiller.verify_swap_safety(make_swap(timeout_block=500)) is None
+    def test_blocks_swap_at_cushion_boundary(self, at_now):
+        f = make_fulfiller()
+        at_now(5000 - MINER_TIMEOUT_CUSHION_SECS)  # >= check → unsafe at the exact boundary
+        assert f.verify_swap_safety(make_swap(timeout_at=5000)) is None
 
-    def test_missing_rate_or_miner_from_address_fails_safety(self):
-        fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 100
-
-        # Missing rate
-        assert fulfiller.verify_swap_safety(make_swap(rate='')) is None
-        # Missing miner_from_address
-        assert fulfiller.verify_swap_safety(make_swap(miner_from='')) is None
+    def test_missing_miner_from_addr_or_zero_amount_fails_safety(self, at_now):
+        f = make_fulfiller()
+        at_now(0)
+        assert f.verify_swap_safety(make_swap(miner_from='')) is None
+        assert f.verify_swap_safety(make_swap(to_amount=0)) is None
 
 
-class TestVerifySwapSafetyReturnsUserReceives:
-    """After R5 rename, verify_swap_safety returns the POST-fee amount, and
-    that's what the miner sends to the user. Lock in the math."""
+class TestVerifySwapSafetyReturnsPostFeeAmount:
+    """Option A: the miner delivers 99% of the pinned to_amount; the protocol takes its 1% from
+    collateral at confirm. The validator's verify_fulfillment checks for exactly this 99%."""
 
-    def test_return_is_post_fee_not_pre_fee(self):
-        fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 100
-        fulfiller.fee_divisor = 100
-
-        swap = make_swap(timeout_block=500, rate='345')
-        result = fulfiller.verify_swap_safety(swap)
+    def test_returns_post_fee_99_percent(self, at_now):
+        f = make_fulfiller()  # default fee_divisor = 100
+        at_now(0)
+        swap = make_swap(timeout_at=5000, to_amount=3_450_000_000)
+        result = f.verify_swap_safety(swap)
         assert result is not None
-        user_receives_amount, _ = result
-        # Pre-fee: 0.01 BTC @ 345 = 3.45 TAO = 3_450_000_000 rao
-        # Post-fee: 3_450_000_000 - 34_500_000 = 3_415_500_000 rao
+        user_receives_amount, addr = result
+        # 3_450_000_000 - 3_450_000_000 // 100 = 3_415_500_000
         assert user_receives_amount == 3_415_500_000
+        assert addr == 'bc1q-miner'
 
 
 class TestSentCacheCleanup:
-    """cleanup_stale_sends retains unmarked sends to prevent duplicate dest
-    sends, but bounds retention so genuinely-resolved swaps don't leak forever."""
-
-    def test_unmarked_stale_retained_marked_stale_removed_within_deadline(self):
-        fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 100  # well within all deadlines
-        fulfiller.sent = {
-            1: SentSwap('unmarked-stale-tx', 101, marked_fulfilled=False, timeout_block=500),
-            2: SentSwap('marked-stale-tx', 102, marked_fulfilled=True, timeout_block=500),
-            3: SentSwap('active-unmarked-tx', 103, marked_fulfilled=False, timeout_block=500),
+    def test_unmarked_stale_retained_marked_stale_removed_within_deadline(self, at_now):
+        f = make_fulfiller()
+        at_now(100)  # well within all deadlines
+        k1, k2, k3 = 'aa', 'bb', 'cc'
+        f.sent = {
+            k1: SentSwap('unmarked-stale-tx', 101, marked_fulfilled=False, timeout_at=5000),
+            k2: SentSwap('marked-stale-tx', 102, marked_fulfilled=True, timeout_at=5000),
+            k3: SentSwap('active-unmarked-tx', 103, marked_fulfilled=False, timeout_at=5000),
         }
-        fulfiller.mark_fulfilled_attempts = {1: 2, 2: 3, 3: 1}
+        f.mark_fulfilled_attempts = {k1: 2, k2: 3, k3: 1}
 
-        fulfiller.cleanup_stale_sends(active_swap_ids={3})
+        f.cleanup_stale_sends(active_swap_keys={k3})
 
-        # marked stale (2) removed; unmarked stale within deadline (1) retained; active (3) untouched
-        assert set(fulfiller.sent) == {1, 3}
-        assert fulfiller.mark_fulfilled_attempts == {1: 2, 3: 1}
+        assert set(f.sent) == {k1, k3}  # marked-stale removed; unmarked-stale retained; active untouched
+        assert f.mark_fulfilled_attempts == {k1: 2, k3: 1}
 
-    def test_mark_fulfilled_retry_not_gated_by_cushion_after_send(self):
-        # Regression for #462: once dest funds are out, the swap stays Active
-        # until mark_fulfilled lands, and an Active swap is slashed at timeout.
-        # The cushion is scoped to STARTING a fulfill, so it must NOT gate the
-        # post-send mark_fulfilled retry — otherwise a transient mark_fulfilled
-        # failure inside the final cushion window guarantees a slash of a miner
-        # that already paid. Uses the REAL verify_swap_safety (not stubbed) so
-        # the cushion actually runs on the retry path.
-        from allways.contract_client import ContractError
+    def test_mark_fulfilled_retry_not_gated_by_cushion_after_send(self, at_now):
+        # #462: once dest funds are out the swap stays Active until mark_fulfilled lands, so the cushion
+        # (scoped to STARTING a fulfill) must NOT gate the post-send retry. Uses the REAL
+        # verify_swap_safety so the cushion actually runs on the retry path.
+        swap = make_swap(timeout_at=5000)
+        f = make_fulfiller()
+        at_now(5000 - MINER_TIMEOUT_CUSHION_SECS)  # inside cushion: a first SEND would be gated off
+        f.sent[swap.key_hex] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False, timeout_at=5000)
+        f.send_dest_funds = MagicMock()
+        f.client.mark_fulfilled.side_effect = SolanaClientError('transient rpc failure')
 
-        swap = make_swap(timeout_block=500)
-        fulfiller = make_fulfiller()
-        fulfiller.fee_divisor = 100
-        # Inside the cushion window: a first SEND would be gated off here.
-        fulfiller.subtensor.get_current_block.return_value = 500 - MINER_TIMEOUT_CUSHION_BLOCKS
-        # Dest funds already sent on a prior pass, mark_fulfilled not yet landed.
-        fulfiller.sent[swap.id] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False, timeout_block=500)
-        fulfiller.send_dest_funds = MagicMock()
-        # Transient (non-rejection) failure — keeps the entry retryable.
-        fulfiller.client.mark_fulfilled.side_effect = ContractError('transient rpc failure')
+        result = f.process_swap(swap)
 
-        result = fulfiller.process_swap(swap)
-
-        assert result is False  # mark_fulfilled didn't land this pass
-        fulfiller.send_dest_funds.assert_not_called()  # never re-send
-        # The retry was attempted despite being inside the cushion window.
-        fulfiller.client.mark_fulfilled.assert_called_once_with(
-            wallet=fulfiller.wallet,
-            swap_id=swap.id,
+        assert result is False
+        f.send_dest_funds.assert_not_called()  # never re-send
+        f.client.mark_fulfilled.assert_called_once_with(
+            swap_key=swap.swap_key,
             to_tx_hash='already-sent-dest-tx',
-            to_amount=3_415_500_000,
             to_tx_block=777,
         )
-        assert fulfiller.sent[swap.id].marked_fulfilled is False  # still retryable next pass
+        assert f.sent[swap.key_hex].marked_fulfilled is False  # still retryable next pass
 
-    def test_retained_send_blocks_resend_after_poller_misses_and_rediscovery(self):
-        swap = make_swap(timeout_block=500)
-        poll_client = MagicMock()
-        poll_client.get_next_swap_id.return_value = swap.id + 1
-        poll_client.get_swap.return_value = None
-        poller = SwapPoller(contract_client=poll_client, miner_hotkey=swap.miner_hotkey)
-        poller.active[swap.id] = swap
-        poller.last_scanned_id = swap.id
+    def test_retained_send_blocks_resend_when_absent_then_rediscovered(self, at_now):
+        swap = make_swap(timeout_at=5000)
+        f = make_fulfiller()
+        at_now(100)  # within deadline → retain
+        f.sent[swap.key_hex] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False, timeout_at=5000)
 
-        fulfiller = make_fulfiller()
-        fulfiller.subtensor.get_current_block.return_value = 100  # within deadline → retain
-        fulfiller.sent[swap.id] = SentSwap('already-sent-dest-tx', 777, marked_fulfilled=False, timeout_block=500)
-
-        # Transient read gap drops the swap from the poller's active set.
-        for _ in range(MAX_REFRESH_MISSES):
-            poller.poll()
-        assert poller.active == {}
-
-        # Cleanup must NOT drop the unmarked entry while it's only transiently gone.
-        fulfiller.cleanup_stale_sends(active_swap_ids=set(poller.active))
-        assert fulfiller.sent[swap.id].to_tx_hash == 'already-sent-dest-tx'
+        # A transient empty snapshot must NOT drop the unmarked entry.
+        f.cleanup_stale_sends(active_swap_keys=set())
+        assert f.sent[swap.key_hex].to_tx_hash == 'already-sent-dest-tx'
 
         # Swap reappears; process_swap must retry mark_fulfilled, not resend funds.
-        poll_client.get_swap.return_value = swap
-        poller.poll()
-        assert poller.active == {swap.id: swap}
+        f.send_dest_funds = MagicMock(return_value=('second-dest-tx', 888))
+        f.client.mark_fulfilled.side_effect = None
 
-        fulfiller.verify_swap_safety = MagicMock(return_value=(3_415_500_000, swap.miner_from_address))
-        fulfiller.verify_user_sent_funds = MagicMock(return_value=True)
-        fulfiller.send_dest_funds = MagicMock(return_value=('second-dest-tx', 888))
-
-        assert fulfiller.process_swap(swap) is True
-        fulfiller.send_dest_funds.assert_not_called()
-        fulfiller.client.mark_fulfilled.assert_called_once_with(
-            wallet=fulfiller.wallet,
-            swap_id=swap.id,
+        assert f.process_swap(swap) is True
+        f.send_dest_funds.assert_not_called()
+        f.client.mark_fulfilled.assert_called_once_with(
+            swap_key=swap.swap_key,
             to_tx_hash='already-sent-dest-tx',
-            to_amount=3_415_500_000,
             to_tx_block=777,
         )
-        assert fulfiller.sent[swap.id].marked_fulfilled is True
+        assert f.sent[swap.key_hex].marked_fulfilled is True
 
-    def test_unmarked_stale_discarded_once_past_deadline_margin(self):
-        fulfiller = make_fulfiller()
-        fulfiller.sent = {1: SentSwap('leaked-tx', 50, marked_fulfilled=False, timeout_block=100)}
-        # Provably past any possible (even fully-extended) deadline → safe to discard.
-        fulfiller.subtensor.get_current_block.return_value = 100 + SENT_CACHE_DISCARD_MARGIN_BLOCKS + 1
+    def test_unmarked_stale_discarded_once_past_deadline_margin(self, at_now):
+        f = make_fulfiller()
+        f.sent = {'k': SentSwap('leaked-tx', 50, marked_fulfilled=False, timeout_at=1000)}
+        at_now(1000 + SENT_CACHE_DISCARD_MARGIN_SECS + 1)  # provably past any extended deadline
+        f.cleanup_stale_sends(active_swap_keys=set())
+        assert f.sent == {}
 
-        fulfiller.cleanup_stale_sends(active_swap_ids=set())
-        assert fulfiller.sent == {}
+    def test_unmarked_stale_retained_at_margin_boundary(self, at_now):
+        f = make_fulfiller()
+        f.sent = {'k': SentSwap('b', 2, marked_fulfilled=False, timeout_at=1000)}
+        at_now(1000 + SENT_CACHE_DISCARD_MARGIN_SECS)  # exactly at margin → retain (discard uses strict >)
+        f.cleanup_stale_sends(active_swap_keys=set())
+        assert set(f.sent) == {'k'}
 
-    def test_unmarked_stale_retained_inside_deadline_margin(self):
-        fulfiller = make_fulfiller()
-        fulfiller.sent = {
-            1: SentSwap('a', 1, marked_fulfilled=False, timeout_block=100),  # just past timeout
-            2: SentSwap('b', 2, marked_fulfilled=False, timeout_block=100),  # exactly at margin boundary
-        }
-        # id 1: a few blocks past timeout but well inside the margin → retain.
-        # id 2: exactly timeout + margin → retain (discard uses strict >).
-        fulfiller.subtensor.get_current_block.return_value = 100 + SENT_CACHE_DISCARD_MARGIN_BLOCKS
+    def test_legacy_entry_without_deadline_never_discarded(self, at_now):
+        f = make_fulfiller()
+        f.sent = {'k': SentSwap('legacy-tx', 5, marked_fulfilled=False)}  # timeout_at defaults to 0
+        at_now(10**12)
+        f.cleanup_stale_sends(active_swap_keys=set())
+        assert set(f.sent) == {'k'}
 
-        fulfiller.cleanup_stale_sends(active_swap_ids=set())
-        assert set(fulfiller.sent) == {1, 2}
-
-    def test_unmarked_stale_retained_across_two_extensions(self):
-        # Regression for #461: the contract permits MAX_EXTENSIONS_PER_SWAP (2)
-        # timeout extensions, each pushing timeout_block forward by up to
-        # MAX_EXTENSION_BLOCKS relative to its own propose block (not cumulative),
-        # so a live deadline can reach D0 + 2 * MAX_EXTENSION_BLOCKS. If the cached
-        # snapshot predates both extensions (a get_swap gap drops the swap from the
-        # active set, so process_swap never refreshes it), the margin must still
-        # cover the fully-extended deadline. The old margin (1 * MAX_EXTENSION_BLOCKS
-        # + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS) would discard here and re-send on
-        # rediscovery.
-        d0 = 100
-        old_single_extension_margin = MAX_EXTENSION_BLOCKS + DEFAULT_FULFILLMENT_TIMEOUT_BLOCKS
-        live_deadline = d0 + MAX_EXTENSIONS_PER_SWAP * MAX_EXTENSION_BLOCKS
-        # Sanity-check this case actually exercises the gap the fix closes: the
-        # current block is past the old margin but the swap is still live on-chain.
-        current = d0 + old_single_extension_margin + 1
-        assert current > d0 + old_single_extension_margin  # would have been discarded pre-fix
-        assert current <= live_deadline  # but the swap is still active on-chain
-
-        fulfiller = make_fulfiller()
-        fulfiller.sent = {1: SentSwap('twice-extended-tx', 50, marked_fulfilled=False, timeout_block=d0)}
-        fulfiller.subtensor.get_current_block.return_value = current
-
-        fulfiller.cleanup_stale_sends(active_swap_ids=set())
-        assert set(fulfiller.sent) == {1}
-
-    def test_legacy_entry_without_deadline_never_discarded(self):
-        fulfiller = make_fulfiller()
-        fulfiller.sent = {1: SentSwap('legacy-tx', 5, marked_fulfilled=False)}  # timeout_block defaults to 0
-        fulfiller.subtensor.get_current_block.return_value = 10**9
-
-        fulfiller.cleanup_stale_sends(active_swap_ids=set())
-        assert set(fulfiller.sent) == {1}
-
-    def test_subtensor_failure_during_cleanup_retains_unmarked(self):
-        fulfiller = make_fulfiller()
-        fulfiller.sent = {1: SentSwap('tx', 5, marked_fulfilled=False, timeout_block=100)}
-        fulfiller.subtensor.get_current_block.side_effect = RuntimeError('rpc down')
-
-        # No raise, no wipe — without a block height we can't prove expiry.
-        fulfiller.cleanup_stale_sends(active_swap_ids=set())
-        assert set(fulfiller.sent) == {1}
-
-    def test_cache_persistence_roundtrips_timeout_block(self, tmp_path: Path):
+    def test_cache_persistence_roundtrips_timeout_at(self, tmp_path: Path):
         cache_path = tmp_path / 'sent_cache.json'
-        writer = SwapFulfiller(
-            contract_client=MagicMock(),
-            chain_providers={},
-            wallet=MagicMock(),
-            subtensor=MagicMock(),
-            sent_cache_path=cache_path,
-        )
-        writer.sent = {7: SentSwap('tx7', 123, marked_fulfilled=False, timeout_block=456)}
+        writer = make_fulfiller(sent_cache_path=cache_path)
+        writer.sent = {'7e': SentSwap('tx7', 123, marked_fulfilled=False, timeout_at=456)}
         writer.save_sent_cache()
 
-        reader = SwapFulfiller(
-            contract_client=MagicMock(),
-            chain_providers={},
-            wallet=MagicMock(),
-            subtensor=MagicMock(),
-            sent_cache_path=cache_path,
-        )
-        assert reader.sent[7] == SentSwap('tx7', 123, marked_fulfilled=False, timeout_block=456)
+        reader = make_fulfiller(sent_cache_path=cache_path)
+        assert reader.sent['7e'] == SentSwap('tx7', 123, marked_fulfilled=False, timeout_at=456)
 
     def test_legacy_three_element_cache_loads_with_zero_timeout(self, tmp_path: Path):
         cache_path = tmp_path / 'sent_cache.json'
-        cache_path.write_text('{"9": ["legacy-tx", 999, false]}')  # pre-fix 3-element shape
-
-        reader = SwapFulfiller(
-            contract_client=MagicMock(),
-            chain_providers={},
-            wallet=MagicMock(),
-            subtensor=MagicMock(),
-            sent_cache_path=cache_path,
-        )
-        assert reader.sent[9] == SentSwap('legacy-tx', 999, marked_fulfilled=False, timeout_block=0)
+        cache_path.write_text('{"9a": ["legacy-tx", 999, false]}')  # pre-fix 3-element shape
+        reader = make_fulfiller(sent_cache_path=cache_path)
+        assert reader.sent['9a'] == SentSwap('legacy-tx', 999, marked_fulfilled=False, timeout_at=0)
 
 
 if __name__ == '__main__':

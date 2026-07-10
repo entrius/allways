@@ -1,0 +1,50 @@
+[package]
+name = "allways_swap_manager"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "allways_swap_manager"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+
+[dependencies]
+anchor-lang = { version = "1.0.0", features = ["init-if-needed"] }
+solana-keccak-hasher = "3.1.0"
+
+[dev-dependencies]
+litesvm = "0.10.0"
+# SlotHashes: seeded into LiteSVM so resolve_pool's draw runs against the canonical sysvar layout
+# rather than a test-only fallback seed.
+solana-sysvar = "3.1.1"
+solana-slot-hashes = "3.1.0"
+solana-message = "3.0.1"
+solana-transaction = "3.0.2"
+solana-signer = "3.0.0"
+solana-keypair = "3.0.1"
+solana-keccak-hasher = "3.1.0"
+# On-chain integration tests (tests/integration_onchain.rs, all #[ignore]):
+# real transactions to a live solana-test-validator over RPC.
+solana-rpc-client = "3.0.0"
+solana-rpc-client-api = "3.0.0"
+solana-commitment-config = "3.0.0"
+solana-pubkey = "3.0.0"
+solana-hash = "3.1.0"
+solana-instruction = "3.0.0"
+solana-native-token = "3.0.0"
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

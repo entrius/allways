@@ -1,190 +1,104 @@
+"""B4.1 — SwapPoller against the Solana getProgramAccounts snapshot model.
+
+No cursor, no per-id transient miss: each poll is an atomic view. The poller filters the program's
+swaps to this miner's pubkey and splits them into (active, fulfilled).
+"""
+
+import types
 from unittest.mock import MagicMock
 
-from allways.classes import Swap, SwapStatus
-from allways.miner.swap_poller import ACTIVE_STATUSES, MAX_REFRESH_MISSES, RESCAN_WINDOW, SwapPoller
+from solders.keypair import Keypair
+
+from allways.miner.swap_poller import ACTIVE_STATUSES, SwapPoller
 
 
-def make_swap(swap_id: int = 1, status: SwapStatus = SwapStatus.ACTIVE, miner_hotkey: str = 'miner') -> Swap:
-    return Swap(
-        id=swap_id,
-        user_hotkey='user',
-        miner_hotkey=miner_hotkey,
+def _acct(miner_bytes: bytes, from_tx_hash: str, status_name: str = 'Active'):
+    """Stand-in for a decoded `Swap` account (attribute access, miner as raw 32 bytes)."""
+    return types.SimpleNamespace(
+        user=bytes(range(32)),
+        miner=miner_bytes,
         from_chain='btc',
         to_chain='tao',
+        user_from_addr='bc1q-user',
+        user_to_addr='5user',
+        miner_from_addr='bc1q-miner',
+        miner_to_addr='5miner',
+        rate=2,
+        collateral_amount=2_000,
         from_amount=1_000,
         to_amount=2_000,
-        tao_amount=2_000,
-        user_from_address='bc1q-user',
-        user_to_address='5user',
-        miner_from_address='bc1q-miner',
-        miner_to_address='5miner',
-        rate='2',
-        status=status,
-        initiated_block=10,
-        timeout_block=100,
+        from_tx_hash=from_tx_hash,
+        from_tx_block=10,
+        to_tx_hash='',
+        to_tx_block=0,
+        status=types.new_class(status_name)(),
+        initiated_at=1000,
+        timeout_at=4600,
+        max_extend_at=8000,
+        fulfilled_at=0,
     )
 
 
-def make_poller(client: MagicMock | None = None) -> SwapPoller:
-    return SwapPoller(contract_client=client or MagicMock(), miner_hotkey='miner')
-
-
-def assert_poller_invariants(poller: SwapPoller):
-    assert set(poller.active_miss_counts) <= set(poller.active)
-    assert all(swap.status in ACTIVE_STATUSES for swap in poller.active.values())
-    assert all(0 < misses < MAX_REFRESH_MISSES for misses in poller.active_miss_counts.values())
-
-
-def test_active_swap_retained_when_refresh_returns_none():
+def _client(active=(), fulfilled=()):
     client = MagicMock()
-    client.get_next_swap_id.return_value = 2
-    client.get_swap.return_value = None
-    poller = make_poller(client)
-    active_swap = make_swap()
-    poller.active[active_swap.id] = active_swap
-    poller.last_scanned_id = 1
+
+    def get_swaps(status=None):
+        rows = active if status == 'Active' else fulfilled if status == 'Fulfilled' else []
+        return [(f'pda{i}', a) for i, a in enumerate(rows)]
+
+    client.get_swaps.side_effect = get_swaps
+    return client
+
+
+def test_active_statuses_are_active_and_fulfilled():
+    assert ACTIVE_STATUSES == ('Active', 'Fulfilled')
+
+
+def test_filters_to_this_miner_and_splits_active_fulfilled():
+    me = Keypair().pubkey()
+    other = Keypair().pubkey()
+    client = _client(
+        active=[_acct(bytes(me), 'aa'), _acct(bytes(other), 'bb')],
+        fulfilled=[_acct(bytes(me), 'cc', 'Fulfilled')],
+    )
+    poller = SwapPoller(client, me)
 
     active, fulfilled = poller.poll()
 
     assert poller.last_poll_ok is True
-    assert poller.active == {1: active_swap}
-    assert poller.active_miss_counts == {1: 1}
-    assert active == [active_swap]
-    assert fulfilled == []
+    assert [s.from_tx_hash for s in active] == ['aa']  # 'bb' belongs to another miner
+    assert [s.from_tx_hash for s in fulfilled] == ['cc']
+    assert active[0].status == 'Active' and fulfilled[0].status == 'Fulfilled'
 
 
-def test_active_swap_retained_when_refresh_raises():
-    client = MagicMock()
-    client.get_next_swap_id.return_value = 2
-    client.get_swap.side_effect = TimeoutError('temporary substrate miss')
-    poller = make_poller(client)
-    active_swap = make_swap()
-    poller.active[active_swap.id] = active_swap
-    poller.last_scanned_id = 1
-
+def test_empty_when_no_swaps_for_miner():
+    me = Keypair().pubkey()
+    poller = SwapPoller(_client(active=[_acct(bytes(Keypair().pubkey()), 'aa')]), me)
     active, fulfilled = poller.poll()
-
+    assert active == [] and fulfilled == []
     assert poller.last_poll_ok is True
-    assert poller.active == {1: active_swap}
-    assert poller.active_miss_counts == {}
-    assert active == [active_swap]
-    assert fulfilled == []
 
 
-def test_active_swap_removed_after_repeated_refresh_misses():
+def test_rpc_failure_sets_last_poll_not_ok_and_returns_empty():
+    me = Keypair().pubkey()
     client = MagicMock()
-    client.get_next_swap_id.return_value = 2
-    client.get_swap.return_value = None
-    poller = make_poller(client)
-    active_swap = make_swap()
-    poller.active[active_swap.id] = active_swap
-    poller.last_scanned_id = 1
-
-    for _ in range(2):
-        active, fulfilled = poller.poll()
-        assert active == [active_swap]
-        assert fulfilled == []
+    client.get_swaps.side_effect = ConnectionError('rpc down')
+    poller = SwapPoller(client, me)
 
     active, fulfilled = poller.poll()
 
-    assert poller.last_poll_ok is True
-    assert poller.active == {}
-    assert poller.active_miss_counts == {}
-    assert active == []
-    assert fulfilled == []
+    assert active == [] and fulfilled == []
+    assert poller.last_poll_ok is False
 
 
-def test_poll_sequence_preserves_active_state_invariants():
-    """Mixed refresh outcomes must keep poller bookkeeping internally coherent.
+def test_known_set_tracks_live_swaps_only():
+    me = Keypair().pubkey()
+    client = _client(active=[_acct(bytes(me), 'aa')])
+    poller = SwapPoller(client, me)
+    poller.poll()
+    assert len(poller.known) == 1
 
-    This covers the invariant the miner relies on after each poll: every miss
-    counter belongs to a still-active swap, terminal swaps are gone, and a valid
-    refresh clears prior transient-miss state before fulfillment cleanup sees it.
-    """
-    client = MagicMock()
-    client.get_next_swap_id.return_value = 200
-    poller = make_poller(client)
-    poller.last_scanned_id = 199
-    poller.active = {
-        100: make_swap(100),
-        101: make_swap(101, status=SwapStatus.FULFILLED),
-        102: make_swap(102),
-    }
-
-    client.get_swap.side_effect = [None] * RESCAN_WINDOW + [
-        None,
-        TimeoutError('temporary refresh miss'),
-        make_swap(102, status=SwapStatus.COMPLETED),
-    ]
-    active, fulfilled = poller.poll()
-
-    assert_poller_invariants(poller)
-    assert set(poller.active) == {100, 101}
-    assert poller.active_miss_counts == {100: 1}
-    assert active == [poller.active[100]]
-    assert fulfilled == [poller.active[101]]
-
-    client.get_swap.side_effect = [None] * RESCAN_WINDOW + [
-        make_swap(100),
-        make_swap(101, status=SwapStatus.FULFILLED),
-    ]
-    active, fulfilled = poller.poll()
-
-    assert_poller_invariants(poller)
-    assert set(poller.active) == {100, 101}
-    assert poller.active_miss_counts == {}
-    assert active == [poller.active[100]]
-    assert fulfilled == [poller.active[101]]
-
-
-def test_active_swap_removed_on_terminal_status():
-    terminal_swap = make_swap(status=SwapStatus.COMPLETED)
-    client = MagicMock()
-    client.get_next_swap_id.return_value = 2
-    client.get_swap.return_value = terminal_swap
-    poller = make_poller(client)
-    poller.active[terminal_swap.id] = make_swap()
-    poller.last_scanned_id = 1
-
-    active, fulfilled = poller.poll()
-
-    assert poller.last_poll_ok is True
-    assert poller.active == {}
-    assert active == []
-    assert fulfilled == []
-
-
-def test_active_swap_retained_when_discovery_raises():
-    client = MagicMock()
-    active_swap = make_swap()
-    client.get_next_swap_id.return_value = 3
-    client.get_swap.side_effect = [
-        RuntimeError('temporary discovery miss'),
-        None,
-        active_swap,
-    ]
-    poller = make_poller(client)
-    poller.active[active_swap.id] = active_swap
-
-    active, fulfilled = poller.poll()
-
-    assert poller.last_poll_ok is True
-    assert poller.active == {1: active_swap}
-    assert poller.active_miss_counts == {}
-    assert active == [active_swap]
-    assert fulfilled == []
-
-
-def test_discovers_new_active_swap():
-    active_swap = make_swap()
-    client = MagicMock()
-    client.get_next_swap_id.return_value = 2
-    client.get_swap.return_value = active_swap
-    poller = make_poller(client)
-
-    active, fulfilled = poller.poll()
-
-    assert poller.last_poll_ok is True
-    assert poller.active == {1: active_swap}
-    assert active == [active_swap]
-    assert fulfilled == []
+    # Next poll the swap is gone from the snapshot → known shrinks to the live set.
+    client.get_swaps.side_effect = lambda status=None: []
+    poller.poll()
+    assert poller.known == set()

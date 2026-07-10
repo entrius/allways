@@ -1,0 +1,248 @@
+// Phase 6 — admin treasury withdrawal (LiteSVM). Accrues a fee via a full swap+confirm, then
+// withdraws it; checks the admin guard and the over-withdraw guard.
+//   cargo test -p allways_swap_manager --test test_treasury
+use {
+    anchor_lang::{
+        prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
+        AccountDeserialize, InstructionData, ToAccountMetas,
+    },
+    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::state::{Pool, Treasury},
+    litesvm::LiteSVM,
+    solana_hash::Hash,
+    solana_keccak_hasher::hashv,
+    solana_keypair::Keypair,
+    solana_message::{Message, VersionedMessage},
+    solana_signer::Signer,
+    solana_slot_hashes::SlotHashes,
+    solana_transaction::versioned::VersionedTransaction,
+};
+
+const SYS: Pubkey = anchor_lang::solana_program::system_program::ID;
+const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
+const BASE_TS: i64 = 1_700_000_000;
+const SOL_AMOUNT: u64 = 2_000_000_000;
+// LiteSVM's default per-signature fee; the admin is both payer and recipient in the happy path.
+const TX_FEE: u64 = 5_000;
+
+fn pid() -> Pubkey {
+    allways_swap_manager::id()
+}
+fn cfg() -> Pubkey {
+    Pubkey::find_program_address(&[b"config"], &pid()).0
+}
+fn collateral_vault_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"collateral", m.as_ref()], &pid()).0
+}
+fn treasury_pda() -> Pubkey {
+    Pubkey::find_program_address(&[b"treasury"], &pid()).0
+}
+fn miner_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"miner", m.as_ref()], &pid()).0
+}
+fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
+    Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
+}
+fn resv_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+}
+fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+}
+fn pool_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+}
+fn swap_pda(k: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"swap", k], &pid()).0
+}
+fn skey(tx: &str) -> [u8; 32] {
+    hashv(&[tx.as_bytes()]).to_bytes()
+}
+
+fn set_clock(svm: &mut LiteSVM, ts: i64) {
+    let mut c = svm.get_sysvar::<Clock>();
+    c.unix_timestamp = ts;
+    svm.set_sysvar::<Clock>(&c);
+}
+fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, s: &Keypair) -> Result<(), String> {
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&[ix], Some(payer), &bh);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[s]).unwrap();
+    svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+}
+fn treasury(svm: &LiteSVM) -> Treasury {
+    let a = svm.get_account(&treasury_pda()).unwrap();
+    Treasury::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+fn lam(svm: &LiteSVM, p: &Pubkey) -> u64 {
+    svm.get_account(p).map(|a| a.lamports).unwrap_or(0)
+}
+
+fn withdraw_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::WithdrawTreasury { amount }.data(),
+        allways_swap_manager::accounts::WithdrawTreasury {
+            admin: *admin,
+            config: cfg(),
+            treasury: treasury_pda(),
+            recipient: *recipient,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Full flow that accrues treasury (one reservation fee from the lottery + the 1% confirm fee);
+/// returns (svm, admin, total_treasury).
+fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    set_clock(&mut svm, BASE_TS);
+
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    // init: min_collateral 1 SOL, threshold 66, ttl 1800, timeout 3600
+    send(&mut svm, Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::Initialize {
+            min_collateral: 1_000_000_000, max_collateral: 0, fulfillment_timeout_secs: 3_600,
+            consensus_threshold_percent: 66, min_swap_amount: 0, max_swap_amount: 0, reservation_ttl_secs: 1_800,
+        }.data(),
+        allways_swap_manager::accounts::Initialize { admin: admin.pubkey(), config: cfg(), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
+    ), &admin.pubkey(), &admin).expect("init");
+
+    let mut vals = Vec::new();
+    for _ in 0..3 {
+        let v = Keypair::new();
+        svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+        send(&mut svm, Instruction::new_with_bytes(pid(),
+            &allways_swap_manager::instruction::AddValidator { validator: v.pubkey(), weight: 1 }.data(),
+            allways_swap_manager::accounts::AdminConfig { admin: admin.pubkey(), config: cfg() }.to_account_metas(None),
+        ), &admin.pubkey(), &admin).expect("add val");
+        vals.push(v);
+    }
+
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::PostCollateral { amount: 10_000_000_000 }.data(),
+        allways_swap_manager::accounts::PostCollateral { miner: miner.pubkey(), config: cfg(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
+    ), &miner.pubkey(), &miner).expect("post");
+
+    let activate = |svm: &mut LiteSVM, v: &Keypair| {
+        send(svm, Instruction::new_with_bytes(pid(),
+            &allways_swap_manager::instruction::VoteActivate {}.data(),
+            allways_swap_manager::accounts::VoteActivate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(0, miner.pubkey().as_ref()), system_program: SYS }.to_account_metas(None),
+        ), &v.pubkey(), v).expect("activate");
+    };
+    activate(&mut svm, &vals[0]);
+    activate(&mut svm, &vals[1]);
+
+    // Reservation via the lottery (set quote → open → warp past window → resolve; sole entrant wins).
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::SetQuote { from_chain: "BTC".to_string(), to_chain: "SOL".to_string(), miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: 1_000_000_000_000_000_000, liquidity: 1 }.data(),
+        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
+    ), &miner.pubkey(), &miner).expect("set_quote");
+    let pool_user = Keypair::new().pubkey();
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "BTC".to_string(), to_chain: "SOL".to_string() }.data(),
+        allways_swap_manager::accounts::OpenOrRequest { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "BTC", "SOL"), pool: pool_pda(&miner.pubkey()), treasury: treasury_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("open");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    // resolve_pool is two-phase: arm the draw on a future slot, produce it, then draw.
+    let ix = Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::ResolvePool {}.data(),
+        allways_swap_manager::accounts::ResolvePool { caller: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), pool: pool_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), slot_hashes: SLOT_HASHES_ID, system_program: SYS }.to_account_metas(None),
+    );
+    send(&mut svm, ix.clone(), &vals[0].pubkey(), &vals[0]).expect("arm draw");
+    let seed_slot = Pool::try_deserialize(&mut svm.get_account(&pool_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap().seed_slot;
+    let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1].iter().map(|&s| (s, Hash::new_from_array([s as u8; 32]))).collect();
+    svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
+    send(&mut svm, ix, &vals[0].pubkey(), &vals[0]).expect("resolve");
+
+    // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128 }.data(),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()) }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("finalize");
+
+    let key = skey("tx1");
+    // claim the source tx on-chain (PendingAttestation), then attest it to quorum
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::SubmitSwapClaim { swap_key: key, from_tx_hash: "tx1".to_string(), from_tx_block: 1 }.data(),
+        allways_swap_manager::accounts::SubmitSwapClaim { caller: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), reservation: resv_pda(&miner.pubkey()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
+    ), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let initiate = |svm: &mut LiteSVM, v: &Keypair| {
+        send(svm, Instruction::new_with_bytes(pid(),
+            &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, miner.pubkey().as_ref()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
+        ), &v.pubkey(), v).expect("initiate");
+    };
+    initiate(&mut svm, &vals[0]);
+    initiate(&mut svm, &vals[1]);
+
+    send(&mut svm, Instruction::new_with_bytes(pid(),
+        &allways_swap_manager::instruction::MarkFulfilled { swap_key: key, to_tx_hash: "d".to_string(), to_tx_block: 1 }.data(),
+        allways_swap_manager::accounts::MarkFulfilled { miner: miner.pubkey(), swap: swap_pda(&key) }.to_account_metas(None),
+    ), &miner.pubkey(), &miner).expect("fulfill");
+
+    let confirm = |svm: &mut LiteSVM, v: &Keypair| {
+        send(svm, Instruction::new_with_bytes(pid(),
+            &allways_swap_manager::instruction::ConfirmSwap { swap_key: key, from_chain: "BTC".to_string(), to_chain: "SOL".to_string() }.data(),
+            allways_swap_manager::accounts::ConfirmSwap { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), collateral_vault: collateral_vault_pda(&miner.pubkey()), treasury: treasury_pda(), swap: swap_pda(&key), direction_stats: Pubkey::find_program_address(&[b"stats", miner.pubkey().as_ref(), "BTC".as_bytes(), "SOL".as_bytes()], &pid()).0, vote_round: vote_pda(6, &key), system_program: SYS }.to_account_metas(None),
+        ), &v.pubkey(), v).expect("confirm");
+    };
+    confirm(&mut svm, &vals[0]);
+    confirm(&mut svm, &vals[1]);
+
+    // treasury = reservation fee + the 1% confirm fee (quote creation is free).
+    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS)
+}
+
+#[test]
+fn test_withdraw_treasury_happy_path() {
+    let (mut svm, admin, fee) = setup_with_fee();
+    assert_eq!(treasury(&svm).total, fee, "fee accrued");
+
+    // Treasury-side conservation: lamports above the rent reserve always equal `total`.
+    let treasury_rent = lam(&svm, &treasury_pda()) - treasury(&svm).total;
+
+    // Recipient is pinned to the admin on-chain; withdrawing is admin → admin.
+    let before = lam(&svm, &admin.pubkey());
+    send(&mut svm, withdraw_ix(&admin.pubkey(), &admin.pubkey(), fee), &admin.pubkey(), &admin).expect("withdraw");
+
+    assert_eq!(lam(&svm, &admin.pubkey()), before + fee - TX_FEE, "admin received fees (minus tx fee)");
+    assert_eq!(treasury(&svm).total, 0, "treasury drained");
+    // Treasury conserves lamports: lamports == rent + total. (Per-miner collateral-vault conservation
+    // is covered in test_collateral / test_swap.)
+    assert_eq!(lam(&svm, &treasury_pda()), treasury_rent + treasury(&svm).total, "treasury lamports == rent + total");
+}
+
+#[test]
+fn test_non_admin_cannot_withdraw() {
+    let (mut svm, _admin, fee) = setup_with_fee();
+    let outsider = Keypair::new();
+    svm.airdrop(&outsider.pubkey(), 1_000_000_000).unwrap();
+    let res = send(&mut svm, withdraw_ix(&outsider.pubkey(), &outsider.pubkey(), fee), &outsider.pubkey(), &outsider);
+    assert!(res.is_err(), "non-admin withdrawal rejected");
+    assert_eq!(treasury(&svm).total, fee, "treasury untouched");
+}
+
+#[test]
+fn test_cannot_overdraw_treasury() {
+    let (mut svm, admin, fee) = setup_with_fee();
+    let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &admin.pubkey(), fee + 1), &admin.pubkey(), &admin);
+    assert!(res.is_err(), "withdrawing more than treasury rejected");
+    assert_eq!(treasury(&svm).total, fee, "treasury untouched");
+}
+
+#[test]
+fn test_withdraw_to_non_admin_recipient_rejected() {
+    let (mut svm, admin, fee) = setup_with_fee();
+    let recipient = Keypair::new().pubkey();
+    let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee), &admin.pubkey(), &admin);
+    assert!(res.is_err(), "admin-signed withdrawal to a non-admin recipient rejected");
+    assert_eq!(treasury(&svm).total, fee, "treasury untouched");
+    assert_eq!(lam(&svm, &recipient), 0, "recipient received nothing");
+}

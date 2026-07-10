@@ -1,63 +1,48 @@
-"""alw view - View swaps, miners, and rates."""
+"""alw view - Inspect miners, rates, swaps, validators, config, and reservations.
 
+All views read the on-chain Solana program: `config`/`validators` read the Config account; `miners`/`rates`
+aggregate MinerQuote + MinerState; `active-swaps`/`swap` read Swap accounts; `reservation` reads a per-miner
+Reservation. Reads need no keypair. Per-miner reliability is keyed by bittensor hotkey (not the Solana miner
+pubkey these views key on), so it is intentionally omitted here rather than shown against the wrong key.
+"""
+
+import json
 import time
-from dataclasses import replace
 
-import bittensor as bt
 import click
-from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+from solders.pubkey import Pubkey
 
 from allways.chains import SUPPORTED_CHAINS, get_chain
-from allways.classes import SwapStatus
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    SECONDS_PER_BLOCK,
-    SWAP_STATUS_COLORS,
-    blocks_to_minutes_str,
-    clear_pending_swap,
+    FINITE_FLOAT,
+    PENDING_SWAP_FILE,
+    STATUS_SORT_ORDER,
+    STATUS_STYLES,
+    ZERO_SWAP_KEY,
     console,
-    dashboard_url,
-    fetch_miner_reliability,
-    from_rao,
-    get_cli_context,
-    hydrate_pending_swap,
-    load_pending_swap,
-    loading,
-    probe_pending_reservation,
-    read_miner_commitments,
-    reliability_text,
+    effective_rate,
+    fail,
+    from_lamports,
+    get_solana_cli_context,
+    load_miner_book,
+    miner_runtime_status,
+    print_json,
+    safe_read,
+    secs_str,
+    set_json_output,
 )
-from allways.constants import (
-    CHALLENGE_WINDOW_BLOCKS,
-    FEE_DIVISOR,
-    MAX_EXTENSION_BLOCKS,
-    MAX_EXTENSIONS_PER_RESERVATION,
-    MAX_EXTENSIONS_PER_SWAP,
-)
-from allways.contract_client import ContractError
+from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
+from allways.solana.client import swap_from_solana
 
-
-def _dashboard_url() -> str:
-    return dashboard_url()
-
-
-def _reliability_cell(hotkey: str, src: str, dst: str, reliability: dict | None) -> Text:
-    """Combined two-direction success cell for one `view rates` row.
-
-    ``S→D c/t · D→S c/t`` — each side colored by `reliability_text`; the
-    whole cell is a dim ``—`` when reliability is unavailable.
-    """
-    if reliability is None:
-        return Text('—', style='dim')
-    cell = Text()
-    cell.append(f'{src.upper()[0]}→{dst.upper()[0]} ', style='dim')
-    cell.append_text(reliability_text(hotkey, src, dst, reliability))
-    cell.append('  ·  ', style='dim')
-    cell.append(f'{dst.upper()[0]}→{src.upper()[0]} ', style='dim')
-    cell.append_text(reliability_text(hotkey, dst, src, reliability))
-    return cell
+MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
+MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
+RATES_SORT_FIELDS = ['rate', 'capacity', 'pair', 'uid']
+# On-chain Swap accounts only ever hold these live statuses; completed/timed-out swaps are closed on-chain.
+SWAP_STATUS_CHOICES = ['active', 'fulfilled', 'pending-attestation']
+_SWAP_STATUS_VARIANTS = {'active': 'Active', 'fulfilled': 'Fulfilled', 'pending-attestation': 'PendingAttestation'}
 
 
 @click.group('view', cls=StyledGroup)
@@ -66,19 +51,40 @@ def view_group():
     pass
 
 
-MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
-MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
+def _short(s: str, full: bool, n: int = 8) -> str:
+    return s if full else (f'{s[:n]}…' if len(s) > n else s)
+
+
+def _quote_dir(q) -> str:
+    return f'{q.from_chain.upper()}→{q.to_chain.upper()}'
+
+
+def _rate(q) -> str:
+    """Effective directional rate ('to per 1 from') for display — see helpers.effective_rate."""
+    return effective_rate(q.from_chain, q.to_chain, rate_display_from_fixed(q.rate))
+
+
+def _max_rate(entry) -> float:
+    """Highest numeric rate the miner posts (coarse cross-direction proxy for `--sort rate`)."""
+    rates = []
+    for q in entry.quotes:
+        try:
+            rates.append(float(rate_display_from_fixed(q.rate)))
+        except (TypeError, ValueError):
+            continue
+    return max(rates) if rates else 0.0
 
 
 @view_group.command('miners')
-@click.option('--full', is_flag=True, help='Show untruncated addresses and hotkeys')
+@click.option('--full', is_flag=True, help='Show untruncated pubkeys and addresses')
 @click.option(
     '--sort',
     'sort_by',
     type=click.Choice(MINER_SORT_FIELDS, case_sensitive=False),
     default='uid',
     show_default=True,
-    help='Sort field. uid ascends; rate/capacity descend; status groups available→reserved→in-swap→cooldown→offline.',
+    help='Sort field. uid = stable pubkey order; rate/capacity descend; status groups '
+    'available→reserved→in-swap→cooldown→offline.',
 )
 @click.option(
     '--status',
@@ -88,1125 +94,473 @@ MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown
     help='Only show miners in a given runtime state.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
     default=None,
     type=str,
-    help='Case-insensitive substring match against UID, addresses, and hotkey.',
+    help='Case-insensitive substring match against pubkey and posted addresses.',
 )
-def view_miners(
-    full: bool,
-    sort_by: str,
-    status_filter: str | None,
-    min_capacity: float | None,
-    search: str | None,
-):
-    """View every miner on-subnet — operator view.
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
+    """List miners with their runtime status, collateral, and posted directions/rates.
 
-    [dim]Shows all miners (including offline, in-swap, or cooldown) with
-    collateral, runtime status, posted addresses, and hotkey. For a
-    user-shopping view of swappable miners only, use `alw view rates`.
-
-    Status column shows live runtime state: available, reserved (with
-    locked TAO amount), in-swap, offline, or cooldown (withdrawal cooldown
-    blocks remaining after deactivation).
-
-    Rate columns read as direct exchange ratios:
-      BTC→TAO N  reads  1 BTC → N TAO
-      TAO→BTC N  reads  N TAO → 1 BTC[/dim]
-
-    [dim]Examples:
-        $ alw view miners
-        $ alw view miners --full
-        $ alw view miners --sort capacity --status available
-        $ alw view miners --search 5FxbWw
-        $ alw view miners --min-capacity 10[/dim]
-    """
-    config, _, subtensor, client = get_cli_context(need_wallet=False)
-    netuid = config['netuid']
-
-    console.print(f'\n[bold]Miners on SN{netuid}[/bold]\n')
-    with loading('Reading commitments...'):
-        pairs = read_miner_commitments(subtensor, netuid)
-
-    if not pairs:
-        console.print('[yellow]No miner commitments found[/yellow]\n')
-        return
-
-    src_up = pairs[0].from_chain.upper()
-    dst_up = pairs[0].to_chain.upper()
-
-    console.print(
-        f'[dim]{src_up}→{dst_up} N  reads  1 {src_up} → N {dst_up}   |   '
-        f'{dst_up}→{src_up} N  reads  N {dst_up} → 1 {src_up}[/dim]\n'
-    )
-
-    # Withdrawal cooldown = 2 * fulfillment_timeout_blocks after deactivation.
-    try:
-        fulfillment_timeout = client.get_fulfillment_timeout()
-        current_block = subtensor.get_current_block()
-    except ContractError:
-        fulfillment_timeout = 0
-        current_block = 0
-
-    def _trunc(s: str) -> str:
-        if full or not s:
-            return s
-        return s[:16] + '...' if len(s) > 16 else s
-
-    # Build a row-data list first so we can sort/filter before printing.
-    # Each row carries: original MinerPair, derived numeric fields
-    # (collateral_rao, sort-status rank), and the already-formatted strings
-    # used for rendering.
-    status_ranks = {
-        'available': 0,
-        'reserved': 1,
-        'in-swap': 2,
-        'cooldown': 3,
-        'offline': 4,
-        'unknown': 5,
-    }
+    [dim]Miners are Solana pubkeys (no metagraph uid here); '#' is a display index and `--sort uid` means
+    stable pubkey order.[/dim]"""
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    now = int(time.time())
+    book = load_miner_book(client, with_reservation=True)
 
     rows = []
-    for pair in pairs:
-        try:
-            collateral_rao, is_active, has_swap, reserved_until, deactivation_block = client.get_miner_snapshot(
-                pair.hotkey
-            )
-            collateral_str = f'{from_rao(collateral_rao):.4f}'
-            active_str = '[green]Yes[/green]' if is_active else '[red]No[/red]'
-            snapshot_ok = True
-        except ContractError:
-            collateral_rao = 0
-            is_active = False
-            has_swap = False
-            reserved_until = 0
-            deactivation_block = 0
-            collateral_str = '[dim]—[/dim]'
-            active_str = '[dim]—[/dim]'
-            snapshot_ok = False
+    for e in book:
+        status = miner_runtime_status(e.state, e.reservation, now)
+        addrs = ' '.join(f'{q.miner_from_addr} {q.miner_to_addr}' for q in e.quotes)
+        rows.append((e, status, addrs))
 
-        status_parts = []
-        status_tokens = set()
-        if has_swap:
-            status_parts.append('[blue]in-swap[/blue]')
-            status_tokens.add('in-swap')
-        if reserved_until and current_block and reserved_until > current_block:
-            try:
-                resv = client.get_reservation_data(pair.hotkey)
-            except ContractError:
-                resv = None
-            if resv:
-                tao_amount, _, _ = resv
-                status_parts.append(f'[yellow]reserved {from_rao(tao_amount):.4f} TAO[/yellow]')
-            else:
-                status_parts.append('[yellow]reserved[/yellow]')
-            status_tokens.add('reserved')
-        if deactivation_block and fulfillment_timeout and current_block:
-            cooldown_end = deactivation_block + 2 * fulfillment_timeout
-            remaining = cooldown_end - current_block
-            if remaining > 0:
-                status_parts.append(f'[red]cooldown {remaining}b[/red]')
-                status_tokens.add('cooldown')
-
-        if status_parts:
-            status_str = ' · '.join(status_parts)
-            # Sort-key bucket: pick the most specific active state.
-            if 'reserved' in status_tokens:
-                status_sort_token = 'reserved'
-            elif 'in-swap' in status_tokens:
-                status_sort_token = 'in-swap'
-            elif 'cooldown' in status_tokens:
-                status_sort_token = 'cooldown'
-            else:
-                status_sort_token = next(iter(status_tokens))
-        elif not snapshot_ok:
-            status_str = '[dim]—[/dim]'
-            status_sort_token = 'unknown'
-        elif is_active:
-            status_str = '[green]available[/green]'
-            status_sort_token = 'available'
-        else:
-            status_str = '[dim]offline[/dim]'
-            status_sort_token = 'offline'
-
-        fwd_display = f'{pair.rate:g}' if pair.rate > 0 else '[dim]—[/dim]'
-        if pair.counter_rate > 0:
-            ctr_display = f'{pair.counter_rate:g}'
-        elif pair.counter_rate_str:
-            ctr_display = '[dim]—[/dim]'
-        else:
-            ctr_display = f'{pair.rate:g}'
-
-        rows.append(
-            {
-                'pair': pair,
-                'collateral_rao': collateral_rao,
-                'status_token': status_sort_token,
-                'fwd_display': fwd_display,
-                'ctr_display': ctr_display,
-                'collateral_str': collateral_str,
-                'active_str': active_str,
-                'status_str': status_str,
-            }
-        )
-
-    total_before_filter = len(rows)
-
-    # Apply filters
     if status_filter:
-        target = status_filter.lower()
-        rows = [r for r in rows if r['status_token'] == target]
+        rows = [r for r in rows if r[1] == status_filter.lower()]
     if min_capacity is not None:
-        threshold_rao = int(min_capacity * 1_000_000_000)
-        rows = [r for r in rows if r['collateral_rao'] >= threshold_rao]
+        rows = [r for r in rows if from_lamports(r[0].collateral) >= min_capacity]
     if search:
         needle = search.lower()
-        rows = [
-            r
-            for r in rows
-            if needle in str(r['pair'].uid).lower()
-            or needle in r['pair'].hotkey.lower()
-            or needle in (r['pair'].from_address or '').lower()
-            or needle in (r['pair'].to_address or '').lower()
-        ]
+        rows = [r for r in rows if needle in (r[0].pubkey_str + ' ' + r[2]).lower()]
 
-    # Apply sort
-    sort_by = sort_by.lower()
     if sort_by == 'uid':
-        rows.sort(key=lambda r: r['pair'].uid)
+        rows.sort(key=lambda r: r[0].pubkey_str)
     elif sort_by == 'rate':
-        # Sort by strongest of the two quoted rates, desc. Reverse-only miners
-        # with rate=0 still get ranked by their counter_rate.
-        rows.sort(key=lambda r: max(r['pair'].rate, r['pair'].counter_rate), reverse=True)
+        rows.sort(key=lambda r: _max_rate(r[0]), reverse=True)
     elif sort_by == 'capacity':
-        rows.sort(key=lambda r: r['collateral_rao'], reverse=True)
+        rows.sort(key=lambda r: r[0].collateral, reverse=True)
     elif sort_by == 'status':
-        rows.sort(key=lambda r: (status_ranks.get(r['status_token'], 99), r['pair'].uid))
+        rows.sort(key=lambda r: STATUS_SORT_ORDER.index(r[1]))
 
-    if not rows:
-        console.print('[yellow]No miners match the given filters.[/yellow]\n')
+    if as_json:
+        print_json(
+            [
+                {
+                    'miner': e.pubkey_str,
+                    'status': status,
+                    'collateral_sol': from_lamports(e.collateral),
+                    'quotes': [
+                        {
+                            'from': q.from_chain,
+                            'to': q.to_chain,
+                            'rate': _rate(q),
+                            'miner_from_addr': q.miner_from_addr,
+                            'miner_to_addr': q.miner_to_addr,
+                        }
+                        for q in e.quotes
+                    ],
+                }
+                for e, status, _addrs in rows
+            ]
+        )
         return
 
-    table = Table(show_header=True)
-    table.add_column('UID', style='cyan')
-    table.add_column(f'{src_up}→{dst_up}', style='green')
-    table.add_column(f'{dst_up}→{src_up}', style='green')
-    table.add_column('Collateral (TAO)', style='magenta')
-    table.add_column('Active', style='bold')
-    table.add_column('Status', style='yellow')
-    table.add_column(f'{src_up} Addr', style='dim')
-    table.add_column(f'{dst_up} Addr', style='dim')
-    table.add_column('Hotkey', style='dim')
+    if not rows:
+        console.print('[yellow]No miners match those filters.[/yellow]')
+        return
 
-    for r in rows:
-        pair = r['pair']
+    table = Table(title=f'Miners ({len(rows)})', show_header=True, show_lines=True)
+    table.add_column('#', style='dim', justify='right')
+    table.add_column('Miner', style='cyan')
+    table.add_column('Status')
+    table.add_column('Collateral', style='green', justify='right')
+    table.add_column('Directions', style='white')
+    for i, (e, status, _addrs) in enumerate(rows, 1):
+        dirs = Text()
+        for j, q in enumerate(e.quotes):
+            if j:
+                dirs.append('\n')
+            dirs.append(f'{_quote_dir(q)} @ {_rate(q)}')
+            if full:
+                dirs.append(f'  ({q.miner_from_addr}→{q.miner_to_addr})', style='dim')
         table.add_row(
-            str(pair.uid),
-            r['fwd_display'],
-            r['ctr_display'],
-            r['collateral_str'],
-            r['active_str'],
-            r['status_str'],
-            _trunc(pair.from_address),
-            _trunc(pair.to_address),
-            _trunc(pair.hotkey),
+            str(i),
+            _short(e.pubkey_str, full),
+            Text(status, style=STATUS_STYLES.get(status, 'white')),
+            f'{from_lamports(e.collateral):.4f} SOL',
+            dirs,
         )
-
     console.print(table)
-    shown = len(rows)
-    if shown == total_before_filter:
-        console.print(f'\n[dim]Total miners: {shown}[/dim]')
-    else:
-        console.print(f'\n[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
-    console.print(f'[dim]Sorted by: {sort_by}[/dim]')
-    if not full:
-        console.print('[dim]Use --full to show untruncated addresses and hotkeys.[/dim]')
-    console.print()
 
 
-RATES_SORT_FIELDS = ['uid', 'rate', 'fwd', 'rev', 'capacity']
+def _parse_pair(pair: str):
+    """Parse `sol-btc` → ('sol','btc'). Fail (non-zero) on malformed/unknown pair."""
+    parts = pair.lower().split('-')
+    if len(parts) != 2 or parts[0] not in SUPPORTED_CHAINS or parts[1] not in SUPPORTED_CHAINS:
+        fail(f'Invalid --pair {pair!r}. Use <from>-<to> with supported chains, e.g. sol-btc.')
+    return parts[0], parts[1]
 
 
 @view_group.command('rates')
-@click.option('--pair', default=None, type=str, help='Filter by pair (e.g. btc-tao)')
-@click.option('--full', is_flag=True, help='Show untruncated addresses')
+@click.option('--pair', default=None, type=str, help='Filter by direction (e.g. sol-btc)')
+@click.option('--full', is_flag=True, help='Show untruncated pubkeys and addresses')
 @click.option(
     '--sort',
     'sort_by',
     type=click.Choice(RATES_SORT_FIELDS, case_sensitive=False),
     default='rate',
     show_default=True,
-    help='Sort field. rate = best of fwd/rev (desc); fwd/rev = that direction only (desc); uid asc; capacity desc.',
+    help='Sort field. rate descends; capacity descends; pair groups by direction; uid = stable pubkey order.',
 )
 @click.option(
-    '--min-capacity', type=float, default=None, help='Only show miners with at least this much collateral (TAO).'
+    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show miners with at least this much collateral (SOL).'
 )
 @click.option(
     '--search',
     default=None,
     type=str,
-    help='Case-insensitive substring match against UID and posted addresses.',
+    help='Case-insensitive substring match against pubkey and posted addresses.',
 )
-def view_rates(
-    pair: str,
-    full: bool,
-    sort_by: str,
-    min_capacity: float | None,
-    search: str | None,
-):
-    """View current exchange rates — user-shopping view.
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_rates(pair, full, sort_by, min_capacity, search, as_json):
+    """Show posted miner rates, one row per direction."""
+    set_json_output(as_json)
+    want = _parse_pair(pair) if pair else None
+    _, client = get_solana_cli_context(need_keypair=False)
+    now = int(time.time())
+    book = load_miner_book(client, with_reservation=True)
 
-    [dim]Only shows active miners with collateral (i.e. swappable). Each
-    row is a miner's bilateral quote with posted addresses and
-    TAO-denominated capacity.
-
-    Rate columns read as direct exchange ratios:
-      BTC→TAO N  reads:  1 BTC → N TAO
-      TAO→BTC N  reads:  N TAO → 1 BTC
-
-    Capacity (TAO) is the miner's posted collateral — the hard cap on the
-    TAO leg of any single swap.
-
-    Reliability shows completed/resolved swaps per direction over the last
-    30 days (green ≥90%, yellow ≥50%, red below), from the swap-history
-    API — '—' if that API is unreachable.[/dim]
-
-    [dim]Examples:
-        $ alw view rates
-        $ alw view rates --pair btc-tao
-        $ alw view rates --sort capacity
-        $ alw view rates --min-capacity 5
-        $ alw view rates --search bc1q
-        $ alw view rates --full[/dim]
-    """
-    config, _, subtensor, client = get_cli_context(need_wallet=False)
-    netuid = config['netuid']
-
-    console.print(f'\n[bold]Exchange Rates on SN{netuid}[/bold]\n')
-
-    with loading('Reading rates...'):
-        all_pairs = read_miner_commitments(subtensor, netuid)
-
-        # Only show miners that are active and have collateral (i.e. swappable).
-        # Keep the collateral value so we can display capacity without a second fetch.
-        pairs_with_collateral: list[tuple] = []
-        for p in all_pairs:
-            try:
-                is_active = client.get_miner_active_flag(p.hotkey)
-                collateral = client.get_miner_collateral(p.hotkey)
-                if is_active and collateral > 0:
-                    pairs_with_collateral.append((p, collateral))
-            except ContractError:
+    rows = []  # (entry, quote, status)
+    for e in book:
+        status = miner_runtime_status(e.state, e.reservation, now)
+        if min_capacity is not None and from_lamports(e.collateral) < min_capacity:
+            continue
+        for q in e.quotes:
+            if want and (q.from_chain, q.to_chain) != want:
                 continue
+            if search:
+                needle = search.lower()
+                hay = f'{e.pubkey_str} {q.miner_from_addr} {q.miner_to_addr}'.lower()
+                if needle not in hay:
+                    continue
+            rows.append((e, q, status))
 
-        try:
-            min_swap_rao = client.get_min_swap_amount()
-            max_swap_rao = client.get_max_swap_amount()
-        except ContractError:
-            min_swap_rao = 0
-            max_swap_rao = 0
+    if sort_by == 'rate':
+        rows.sort(key=lambda r: float(_rate(r[1]) or 0), reverse=True)
+    elif sort_by == 'capacity':
+        rows.sort(key=lambda r: r[0].collateral, reverse=True)
+    elif sort_by == 'pair':
+        rows.sort(key=lambda r: (r[1].from_chain, r[1].to_chain))
+    elif sort_by == 'uid':
+        rows.sort(key=lambda r: r[0].pubkey_str)
 
-        # Per-miner success rate — fetched from the swap-history API and
-        # aggregated. None if the API is unreachable; the table still renders.
-        reliability = fetch_miner_reliability()
-
-    if pair:
-        parts = pair.lower().split('-')
-        if len(parts) != 2:
-            console.print('[red]Invalid pair format. Use: chain-chain (e.g. btc-tao)[/red]')
-            return
-        src, dst = parts
-        pairs_with_collateral = [
-            (p, c) for (p, c) in pairs_with_collateral if p.from_chain == src and p.to_chain == dst
-        ]
-
-    total_before_filter = len(pairs_with_collateral)
-
-    # Apply row-level filters before grouping so the per-group stats
-    # reflect only the rows that actually render.
-    if min_capacity is not None:
-        threshold_rao = int(min_capacity * 1_000_000_000)
-        pairs_with_collateral = [(p, c) for (p, c) in pairs_with_collateral if c >= threshold_rao]
-    if search:
-        needle = search.lower()
-        pairs_with_collateral = [
-            (p, c)
-            for (p, c) in pairs_with_collateral
-            if needle in str(p.uid).lower()
-            or needle in (p.from_address or '').lower()
-            or needle in (p.to_address or '').lower()
-        ]
-
-    if not pairs_with_collateral:
-        if total_before_filter > 0:
-            console.print('[yellow]No rates match the given filters.[/yellow]\n')
-        else:
-            console.print('[yellow]No rates found[/yellow]\n')
+    if as_json:
+        print_json(
+            [
+                {
+                    'miner': e.pubkey_str,
+                    'from': q.from_chain,
+                    'to': q.to_chain,
+                    'rate': _rate(q),
+                    'collateral_sol': from_lamports(e.collateral),
+                    'status': status,
+                    'miner_from_addr': q.miner_from_addr,
+                    'miner_to_addr': q.miner_to_addr,
+                }
+                for e, q, status in rows
+            ]
+        )
         return
 
-    def _trunc(s: str) -> str:
-        if full or not s:
-            return s
-        return s[:16] + '...' if len(s) > 16 else s
+    if not rows:
+        console.print('[yellow]No posted rates match those filters.[/yellow]')
+        return
 
-    # Group by pair direction
-    grouped: dict[str, list[tuple]] = {}
-    for p, c in pairs_with_collateral:
-        key = f'{p.from_chain}-{p.to_chain}'
-        grouped.setdefault(key, []).append((p, c))
+    table = Table(title=f'Posted Rates ({len(rows)})', show_header=True)
+    table.add_column('Direction', style='cyan')
+    table.add_column('Rate (to/from)', style='green', justify='right')
+    table.add_column('Miner', style='white')
+    table.add_column('Collateral', style='green', justify='right')
+    table.add_column('Status')
+    if full:
+        table.add_column('Addresses', style='dim')
+    for e, q, status in rows:
+        cells = [
+            _quote_dir(q),
+            _rate(q),
+            _short(e.pubkey_str, full),
+            f'{from_lamports(e.collateral):.4f} SOL',
+            Text(status, style=STATUS_STYLES.get(status, 'white')),
+        ]
+        if full:
+            cells.append(f'{q.miner_from_addr} → {q.miner_to_addr}')
+        table.add_row(*cells)
+    console.print(table)
 
-    sort_by = sort_by.lower()
 
-    for pair_key, pair_list in grouped.items():
-        src, dst = pair_key.split('-')
-        src_name = SUPPORTED_CHAINS.get(src, src).name if src in SUPPORTED_CHAINS else src
-        dst_name = SUPPORTED_CHAINS.get(dst, dst).name if dst in SUPPORTED_CHAINS else dst
-        src_up = src.upper()
-        dst_up = dst.upper()
-
-        console.print(f'[bold]{src_name} ↔ {dst_name}[/bold]')
-        console.print(
-            f'[dim]{src_up}→{dst_up} N  reads  1 {src_up} → N {dst_up}   |   '
-            f'{dst_up}→{src_up} N  reads  N {dst_up} → 1 {src_up}[/dim]'
-        )
-
-        table = Table(show_header=True)
-        table.add_column('UID', style='cyan')
-        table.add_column(f'{src_up}→{dst_up}', style='green')
-        table.add_column(f'{dst_up}→{src_up}', style='green')
-        table.add_column('Reliability', no_wrap=True)
-        table.add_column('Capacity (TAO)', style='yellow')
-        table.add_column(f'{src_up} Addr', style='dim')
-        table.add_column(f'{dst_up} Addr', style='dim')
-
-        # Sort rows within this pair group. Default 'rate' = strongest quoted
-        # direction (so reverse-only miners aren't buried at rate=0).
-        if sort_by == 'uid':
-            pair_list.sort(key=lambda x: x[0].uid)
-        elif sort_by == 'fwd':
-            pair_list.sort(key=lambda x: x[0].rate, reverse=True)
-        elif sort_by == 'rev':
-            pair_list.sort(key=lambda x: x[0].counter_rate, reverse=True)
-        elif sort_by == 'capacity':
-            pair_list.sort(key=lambda x: x[1], reverse=True)
-        else:  # 'rate'
-            pair_list.sort(key=lambda x: max(x[0].rate, x[0].counter_rate), reverse=True)
-        for p, collateral in pair_list:
-            fwd = f'{p.rate:g}' if p.rate > 0 else '—'
-            if p.counter_rate > 0:
-                rev = f'{p.counter_rate:g}'
-            elif p.counter_rate_str:
-                rev = '—'
-            else:
-                rev = fwd
-            table.add_row(
-                str(p.uid),
-                fwd,
-                rev,
-                _reliability_cell(p.hotkey, src, dst, reliability),
-                f'{from_rao(collateral):.4f}',
-                _trunc(p.from_address),
-                _trunc(p.to_address),
-            )
-
-        console.print(table)
-
-        # Per-direction stats — excluding miners that don't quote that direction,
-        # so a single reverse-only miner doesn't drag the forward average to zero.
-        fwd_rates = [p.rate for (p, _) in pair_list if p.rate > 0]
-        rev_rates = [p.counter_rate for (p, _) in pair_list if p.counter_rate > 0]
-        stat_lines = []
-        if len(fwd_rates) > 1:
-            stat_lines.append(
-                f'{src_up}→{dst_up}: best {max(fwd_rates):g} | worst {min(fwd_rates):g} | '
-                f'avg {sum(fwd_rates) / len(fwd_rates):.4f}'
-            )
-        if len(rev_rates) > 1:
-            stat_lines.append(
-                f'{dst_up}→{src_up}: best {max(rev_rates):g} | worst {min(rev_rates):g} | '
-                f'avg {sum(rev_rates) / len(rev_rates):.4f}'
-            )
-        for line in stat_lines:
-            console.print(f'  [dim]{line}[/dim]')
-
-        console.print()
-
-    # Do-not-just-send disclaimer. The posted addresses are shown so users
-    # know a miner is reachable — not as a shortcut. Direct transfers
-    # bypass the reservation/validator-consensus flow and will not be
-    # matched to a swap: funds can be lost.
-    console.print(
-        '[yellow]⚠  Do not send funds directly to these addresses.[/yellow] '
-        '[dim]Use [cyan]alw swap quote[/cyan] to preview a rate, then '
-        '[cyan]alw swap now[/cyan] to reserve a miner and complete the swap.[/dim]'
-    )
-
-    # Contract bounds footer — applies to the TAO leg of every swap,
-    # regardless of direction. Helps users understand why tiny or huge
-    # requested amounts get rejected by `alw swap quote`.
-    if min_swap_rao > 0 and max_swap_rao > 0:
-        console.print(
-            f'[dim]Contract swap bounds (TAO leg): {from_rao(min_swap_rao):.4f}–{from_rao(max_swap_rao):.4f} TAO.[/dim]'
-        )
-    elif min_swap_rao > 0:
-        console.print(f'[dim]Contract min swap (TAO leg): {from_rao(min_swap_rao):.4f} TAO.[/dim]')
-    elif max_swap_rao > 0:
-        console.print(f'[dim]Contract max swap (TAO leg): {from_rao(max_swap_rao):.4f} TAO.[/dim]')
-
-    shown = len(pairs_with_collateral)
-    if shown != total_before_filter:
-        console.print(f'[dim]Showing {shown} of {total_before_filter} miners after filters.[/dim]')
-    if reliability is None:
-        console.print('[yellow]Reliability unavailable — swap-history API unreachable.[/yellow]')
-    else:
-        console.print(
-            '[dim]Reliability = completed/resolved swaps per direction; '
-            'green ≥90%, yellow ≥50%, red <50%. A small sample (e.g. 1/1) is '
-            'noisy — prefer miners with a track record.[/dim]'
-        )
-    console.print(f'[dim]Sorted by: {sort_by}[/dim]')
-    if not full:
-        console.print('[dim]Use --full to show untruncated addresses.[/dim]')
-    console.print()
+def _swap_json(s):
+    return {
+        'swap_key': s.key_hex,
+        'miner': str(s.miner),
+        'user': str(s.user),
+        'from_chain': s.from_chain,
+        'to_chain': s.to_chain,
+        'from_amount': s.from_amount,
+        'to_amount': s.to_amount,
+        'collateral_amount': s.collateral_amount,
+        'status': s.status,
+        'from_tx_hash': s.from_tx_hash,
+        'to_tx_hash': s.to_tx_hash,
+        'initiated_at': s.initiated_at,
+        'timeout_at': s.timeout_at,
+        'fulfilled_at': s.fulfilled_at,
+    }
 
 
 @view_group.command('active-swaps')
 @click.option(
     '--status',
+    'status_filter',
     default=None,
-    type=click.Choice(['active', 'fulfilled', 'completed', 'timed_out'], case_sensitive=False),
-    help='Filter by status (active, fulfilled, completed, timed_out)',
+    type=click.Choice(SWAP_STATUS_CHOICES, case_sensitive=False),
+    help='Filter by on-chain status (active, fulfilled, pending-attestation).',
 )
-def view_active_swaps(status: str):
-    """View active swaps on the contract.
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
+def view_active_swaps(status_filter, as_json):
+    """List swaps currently open on-chain (completed/timed-out swaps are closed and not listed)."""
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    variant = _SWAP_STATUS_VARIANTS.get(status_filter.lower()) if status_filter else None
+    raw = safe_read(lambda: client.get_swaps(status=variant), what='read swaps')
+    swaps = [swap_from_solana(s) for _pk, s in raw]
 
-    [dim]Examples:
-        $ alw view active-swaps
-        $ alw view active-swaps --status active[/dim]
-    """
-    _, _, _, client = get_cli_context(need_wallet=False)
-
-    console.print('\n[bold]Active Swaps[/bold]\n')
-
-    try:
-        with loading('Reading swaps...'):
-            swaps = client.get_active_swaps()
-    except ContractError as e:
-        console.print(f'[red]Failed to read swaps: {e}[/red]')
+    if as_json:
+        print_json([_swap_json(s) for s in swaps])
         return
-
-    if status:
-        status_map = {
-            'active': SwapStatus.ACTIVE,
-            'fulfilled': SwapStatus.FULFILLED,
-            'completed': SwapStatus.COMPLETED,
-            'timed_out': SwapStatus.TIMED_OUT,
-        }
-        target_status = status_map.get(status.lower())
-        if target_status is None:
-            console.print(f'[red]Unknown status: {status}. Valid: {", ".join(status_map.keys())}[/red]')
-            return
-        swaps = [s for s in swaps if s.status == target_status]
 
     if not swaps:
-        console.print('[yellow]No swaps found[/yellow]\n')
+        console.print('[yellow]No swaps currently open on-chain.[/yellow]')
         return
 
-    table = Table(show_header=True)
-    table.add_column('ID', style='cyan')
+    table = Table(title=f'Open Swaps ({len(swaps)})', show_header=True)
+    table.add_column('Swap Key', style='cyan')
     table.add_column('Pair', style='green')
-    table.add_column('Amount', style='yellow')
+    table.add_column('From Amt', justify='right')
+    table.add_column('To Amt', justify='right')
     table.add_column('Status', style='bold')
-    table.add_column('Miner UID', style='dim')
-    table.add_column('Block', style='dim')
-
-    for swap in swaps:
-        pair_str = f'{swap.from_chain.upper()}/{swap.to_chain.upper()}'
-        color = SWAP_STATUS_COLORS.get(swap.status, 'white')
-        status_str = f'[{color}]{swap.status.name}[/{color}]'
-
+    for s in swaps:
         table.add_row(
-            str(swap.id),
-            pair_str,
-            str(swap.from_amount),
-            status_str,
-            swap.miner_hotkey[:16] + '...',
-            str(swap.initiated_block),
+            s.key_hex[:16],
+            f'{s.from_chain.upper()}→{s.to_chain.upper()}',
+            str(s.from_amount),
+            str(s.to_amount),
+            s.status,
         )
-
     console.print(table)
-    console.print(f'\n[dim]Total: {len(swaps)} swaps[/dim]\n')
 
 
-def build_swap_text(swap, chain_info=True, current_block: int = 0, client=None):
-    """Build swap display as a Rich markup string.
-
-    ``current_block`` — when > 0 and the swap is still in-flight, a "Now"
-    row is added to the timeline showing how many blocks remain until
-    timeout. Gives the reader a frame of reference without having to
-    cross-check against ``alw status``.
-
-    ``client`` — when provided and the swap is in-flight, the optimistic-
-    extension state (count + any pending proposal) is fetched and rendered.
-    Best-effort: read failures fall back to no extension info rather than
-    aborting the swap render.
-    """
-    color = SWAP_STATUS_COLORS.get(swap.status, 'white')
-    parts = [f'\n[bold]Swap #{swap.id}[/bold] — [{color}]{swap.status.name}[/{color}]']
-
-    # In-flight status hint — answers "what's being waited on" so the
-    # `○ Completed —` row in the timeline below has context. Mirrors the
-    # per-status copy on the dashboard's swap detail page.
-    if swap.status == SwapStatus.ACTIVE:
-        parts.append('  [dim]Awaiting miner fulfillment — destination tx incoming.[/dim]')
-    elif swap.status == SwapStatus.FULFILLED:
-        parts.append('  [dim]Awaiting validator quorum — destination delivered, votes pending.[/dim]')
-    parts.append('')
-
-    src = swap.from_chain.upper()
-    dst = swap.to_chain.upper()
-    src_chain_def = get_chain(swap.from_chain)
-    dst_chain_def = get_chain(swap.to_chain)
-    src_human = swap.from_amount / (10**src_chain_def.decimals)
-    dst_human = swap.to_amount / (10**dst_chain_def.decimals)
-    parts.append(
-        f'  Send [red]{src_human:g} {src}[/red] → Receive [green]{dst_human:.8f} {dst}[/green]  '
-        f'[dim](rate {swap.rate})[/dim]'
-    )
-
-    timed_out = swap.status == SwapStatus.TIMED_OUT
-
-    def step(done, label, value, failed=False):
-        if failed:
-            marker = '[red]✗[/red]'
-            val = f'[red][strike]{label}[/strike][/red]'
-            return f'    {marker} {val}'
-        marker = '[green]●[/green]' if done else '[dim]○[/dim]'
-        val = f'Block {value}' if value else '—'
-        return f'    {marker} {label:<14s} {val}'
-
-    parts.append('\n  [bold]Timeline:[/bold]')
-    parts.append(step(True, 'Initiated', swap.initiated_block))
-    fulfilled_failed = timed_out and not swap.fulfilled_block
-    parts.append(step(bool(swap.fulfilled_block), 'Fulfilled', swap.fulfilled_block, failed=fulfilled_failed))
-    parts.append(step(bool(swap.completed_block), 'Completed', swap.completed_block, failed=timed_out))
-    if timed_out:
-        parts.append(f'    [red]⏱ Timed out     Block {swap.timeout_block}[/red]')
-    else:
-        parts.append(f'    [dim]⏱ Timeout       Block {swap.timeout_block}[/dim]')
-
-    in_flight = swap.status not in (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
-    if current_block > 0 and in_flight:
-        blocks_left = swap.timeout_block - current_block
-        if blocks_left > 0:
-            minutes_left = blocks_left * SECONDS_PER_BLOCK // 60
-            parts.append(
-                f'    [cyan]⏲ Now            Block {current_block}[/cyan]  '
-                f'[dim](~{blocks_left} blocks / ~{minutes_left} min until timeout)[/dim]'
-            )
-        else:
-            parts.append(f'    [cyan]⏲ Now            Block {current_block}[/cyan]  [red](past timeout)[/red]')
-
-    if client is not None and in_flight:
-        try:
-            ext_count = client.get_swap_extension_count(swap.id)
-        except ContractError:
-            ext_count = None
-        try:
-            pending = client.get_pending_timeout_extension(swap.id)
-        except ContractError:
-            pending = None
-        if ext_count is not None or pending is not None:
-            parts.append('')
-            parts.append('  [bold]Extensions:[/bold]')
-            if ext_count is not None:
-                parts.append(f'    Used: {ext_count}/{MAX_EXTENSIONS_PER_SWAP}')
-            if pending is not None and current_block > 0:
-                finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
-                blocks_until_finalize = max(0, finalize_at - current_block)
-                target_blocks = max(0, pending.target_block - current_block)
-                target_min = target_blocks * SECONDS_PER_BLOCK / 60
-                if blocks_until_finalize > 0:
-                    finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
-                else:
-                    finalize_hint = 'finalize window open'
-                parts.append(
-                    f'    Pending: target block {pending.target_block} (~{target_min:.0f} min) · '
-                    f'{finalize_hint} · by {pending.submitter[:16]}...'
-                )
-
-    parts.append('')
-    parts.append(f'  Source TX:  {swap.from_tx_hash or "—"}')
-    parts.append(f'  Dest TX:   {swap.to_tx_hash or "—"}')
-
-    if chain_info:
-        parts.append('')
-        parts.append(f'  User:      {swap.user_hotkey}')
-        parts.append(f'  Miner:     {swap.miner_hotkey}')
-        # user_from_address = user's own source-chain address (funds
-        # originated here). user_to_address = user's dest-chain address
-        # (funds land here). The old "Send to" label read like
-        # user_from_address was a destination — misleading.
-        parts.append(f'  From addr: {swap.user_from_address}')
-        parts.append(f'  To addr:   {swap.user_to_address}')
-
-    parts.append('')
-    return '\n'.join(parts)
-
-
-def display_swap(swap, chain_info=True, current_block: int = 0, client=None):
-    """Render a single swap with timeline view."""
-    console.print(build_swap_text(swap, chain_info=chain_info, current_block=current_block, client=client))
+def _render_swap_detail(s):
+    to_dec = get_chain(s.to_chain).decimals
+    from_dec = get_chain(s.from_chain).decimals
+    console.print(f'\n[bold]Swap {s.key_hex[:16]}[/bold]\n')
+    console.print(f'  Status:      [bold]{s.status}[/bold]')
+    console.print(f'  Pair:        {s.from_chain.upper()} → {s.to_chain.upper()}')
+    console.print(f'  Miner:       {s.miner}')
+    console.print(f'  User:        {s.user}')
+    console.print(f'  Send:        {s.from_amount / 10**from_dec:g} {s.from_chain.upper()}')
+    console.print(f'  Receive:     {s.to_amount / 10**to_dec:g} {s.to_chain.upper()} (pinned payout)')
+    console.print(f'  User from:   {s.user_from_addr}')
+    console.print(f'  Miner to:    {s.miner_to_addr}')
+    console.print(f'  Source tx:   {s.from_tx_hash or "[dim](none)[/dim]"}')
+    console.print(f'  Dest tx:     {s.to_tx_hash or "[dim](none)[/dim]"}')
+    console.print(f'  Initiated:   {s.initiated_at}')
+    console.print(f'  Timeout at:  {s.timeout_at}')
+    console.print(f'  Fulfilled:   {s.fulfilled_at or "[dim](not yet)[/dim]"}\n')
 
 
 @view_group.command('swap')
-@click.argument('swap_id', type=int)
+@click.argument('swap_key_hex', type=str)
 @click.option('--watch', '-w', is_flag=True, help='Poll and refresh until swap completes or times out')
-def view_swap(swap_id: int, watch: bool):
-    """View details of a specific swap.
-
-    If the swap is no longer in contract storage (completed or timed out), a
-    dashboard URL is shown where resolved swap history is available.
-
-    [dim]Examples:
-        $ alw view swap 42
-        $ alw view swap 42 --watch[/dim]
-    """
-    _, _, subtensor, client = get_cli_context(need_wallet=False)
-
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
+def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
+    """Inspect a single swap by its 32-byte hex swap_key."""
+    set_json_output(as_json)
     try:
-        with loading('Reading swap...'):
-            swap = client.get_swap(swap_id)
-    except ContractError as e:
-        console.print(f'[red]Failed to read swap: {e}[/red]')
-        return
+        key = bytes.fromhex(swap_key_hex)
+    except ValueError:
+        fail(f'Invalid swap_key {swap_key_hex!r}: expected hex (the 32-byte swap_key, not an integer id).')
 
-    if not swap:
-        try:
-            next_id = client.get_next_swap_id()
-        except ContractError:
-            next_id = None
+    _, client = get_solana_cli_context(need_keypair=False)
 
-        if next_id is not None and swap_id < next_id:
-            console.print(
-                f'[green]Swap {swap_id} has been resolved (completed or timed out).[/green]\n'
-                f'[dim]Resolved swaps are removed from on-chain storage. '
-                f'View history at:[/dim] {_dashboard_url()}/swap/{swap_id}'
-            )
-        elif next_id is not None:
-            console.print(f'[red]Swap {swap_id} does not exist. Next swap ID: {next_id}.[/red]')
-        else:
-            console.print(f'[red]Swap {swap_id} not found[/red]')
+    def _load():
+        acct = safe_read(lambda: client.get_swap(key), what='read swap')
+        return swap_from_solana(acct, key) if acct is not None else None
+
+    s = _load()
+    if s is None:
+        fail(f'No swap found for swap_key {swap_key_hex}.')
+
+    if as_json:
+        print_json(_swap_json(s))
         return
 
     if not watch:
-        try:
-            current_block = subtensor.get_current_block()
-        except Exception:
-            current_block = 0
-        display_swap(swap, current_block=current_block, client=client)
+        _render_swap_detail(s)
         return
 
-    watch_swap(client, swap_id, swap)
+    terminal = {'PendingAttestation'}
+    while True:
+        console.clear()
+        _render_swap_detail(s)
+        if s.status in terminal:
+            console.print('[dim]Swap reached a terminal on-chain status.[/dim]')
+            return
+        time.sleep(5)
+        s = _load()
+        if s is None:
+            console.print('[dim]Swap account closed (resolved and cleaned up on-chain).[/dim]')
+            return
 
 
-def watch_swap(client, swap_id: int, swap=None):
-    """Poll and display a swap until it reaches a terminal state.
-
-    Uses Rich Live display to update in-place without clearing the screen.
-    Returns the final swap object (with inferred terminal status), or None on error/Ctrl+C.
-    """
-    if swap is None:
-        try:
-            swap = client.get_swap(swap_id)
-        except ContractError:
-            console.print(f'[red]Failed to read swap {swap_id}[/red]')
-            return None
-        if not swap:
-            console.print(f'[yellow]Swap {swap_id} not found on-chain.[/yellow]')
-            return None
-
-    terminal = (SwapStatus.COMPLETED, SwapStatus.TIMED_OUT)
-    if swap.status in terminal:
-        display_swap(swap)
-        return swap
-
-    def current_block_or_zero():
-        try:
-            return client.subtensor.get_current_block()
-        except Exception:
-            return 0
-
-    def render(s, chain_info=True, watching=True, current_block=0):
-        markup = build_swap_text(s, chain_info=chain_info, current_block=current_block, client=client)
-        if watching:
-            markup += '\n[dim]Watching for updates (Ctrl+C to stop)...[/dim]\n'
-        return Text.from_markup(markup)
-
-    last_swap = swap
-    try:
-        with Live(render(swap, current_block=current_block_or_zero()), console=console, refresh_per_second=1) as live:
-            while True:
-                time.sleep(SECONDS_PER_BLOCK)
-                try:
-                    swap = client.get_swap(swap_id)
-                except ContractError:
-                    continue
-                if not swap:
-                    # Swap resolved — infer final status from last known state.
-                    try:
-                        current_block = client.subtensor.get_current_block()
-                    except Exception:
-                        current_block = 0
-                    timed_out = last_swap.timeout_block > 0 and current_block >= last_swap.timeout_block
-                    if timed_out:
-                        final = replace(last_swap, status=SwapStatus.TIMED_OUT)
-                    else:
-                        final = replace(
-                            last_swap,
-                            status=SwapStatus.COMPLETED,
-                            completed_block=last_swap.fulfilled_block or last_swap.initiated_block,
-                        )
-                    live.update(render(final, chain_info=False, watching=False))
-                    return final
-                last_swap = swap
-                live.update(render(swap, current_block=current_block_or_zero()))
-                if swap.status in terminal:
-                    live.update(render(swap, watching=False, current_block=current_block_or_zero()))
-                    return swap
-    except KeyboardInterrupt:
-        console.print(f'\n[dim]Stopped watching. Resume with: alw view swap {swap_id} --watch[/dim]\n')
-        return None
+def _sol_or(amount: int, zero_label: str) -> str:
+    return f'{from_lamports(amount):.4f} SOL' + (f' ({zero_label})' if amount == 0 else '')
 
 
-@view_group.command('contract')
-def view_contract():
-    """View contract parameters.
-
-    [dim]Examples:
-        $ alw view contract[/dim]
-    """
-    config, wallet, _, client = get_cli_context(need_wallet=False)
-
-    console.print('\n[bold]Contract Parameters[/bold]\n')
-
-    try:
-        with loading('Reading contract parameters...'):
-            timeout_blocks = client.get_fulfillment_timeout()
-            reservation_ttl_blocks = client.get_reservation_ttl()
-            consensus_threshold = client.get_consensus_threshold()
-            min_collateral_rao = client.get_min_collateral()
-            max_collateral_rao = client.get_max_collateral()
-            validator_count = client.get_validator_count()
-            required_votes = max(1, (validator_count * consensus_threshold + 99) // 100) if validator_count > 0 else 1
-            next_swap_id = client.get_next_swap_id()
-            min_swap_rao = client.get_min_swap_amount()
-            max_swap_rao = client.get_max_swap_amount()
-            accumulated_fees_rao = client.get_accumulated_fees()
-            total_recycled_rao = client.get_total_recycled_fees()
-            owner = client.get_owner()
-            recycle_address = client.get_recycle_address()
-            staking_hotkey = client.get_staking_hotkey()
-            recycle_netuid = client.get_netuid()
-            chain_ext_enabled = client.get_chain_ext_enabled()
-            halted = client.get_halted()
-    except ContractError as e:
-        console.print(f'[red]Failed to read contract parameters: {e}[/red]')
-        return
-
-    table = Table(show_header=True)
-    table.add_column('Parameter', style='cyan')
-    table.add_column('Value', style='green')
-
-    table.add_row('Fulfillment Timeout', f'{timeout_blocks} blocks ({blocks_to_minutes_str(timeout_blocks)})')
-    table.add_row(
-        'Reservation TTL', f'{reservation_ttl_blocks} blocks ({blocks_to_minutes_str(reservation_ttl_blocks)})'
-    )
-    fee_pct = 100 / FEE_DIVISOR
-    table.add_row('Fee', f'{fee_pct:g}% (hardcoded)')
-    # Collapsed: the threshold is the knob, required_votes is what it resolves
-    # to at current validator_count — showing both on separate rows read as
-    # redundant (especially on small validator sets where they coincide).
-    # Consensus quorum applies to vote_reserve / vote_initiate / vote_confirm /
-    # vote_timeout — extensions follow the optimistic propose/challenge/finalize
-    # path instead, so this row deliberately does not cover them.
-    table.add_row(
-        'Consensus (reserve/initiate/confirm/timeout)',
-        f'{consensus_threshold}% → {required_votes} of {validator_count} validators needed',
-    )
-    # Contract treats 0 as "bound disabled" (see lib.rs::vote_reserve — the
-    # `if self.min_swap_amount > 0 &&` guard skips the check at 0). Render
-    # the sentinel explicitly instead of a bare `0.0000 TAO` that reads
-    # like a real threshold.
-    table.add_row(
-        'Min Collateral',
-        f'{from_rao(min_collateral_rao):.4f} TAO' if min_collateral_rao > 0 else 'No minimum',
-    )
-    table.add_row(
-        'Max Collateral',
-        f'{from_rao(max_collateral_rao):.4f} TAO' if max_collateral_rao > 0 else 'Unlimited',
-    )
-    table.add_row(
-        'Min Swap Amount',
-        f'{from_rao(min_swap_rao):.4f} TAO' if min_swap_rao > 0 else 'No minimum',
-    )
-    table.add_row(
-        'Max Swap Amount',
-        f'{from_rao(max_swap_rao):.4f} TAO' if max_swap_rao > 0 else 'Unlimited',
-    )
-    # Optimistic extension parameters. These are contract constants (no
-    # on-chain getter), mirrored from allways/constants.py and held in lock-
-    # step with smart-contracts/ink/lib.rs — a redeploy is the only way to
-    # change them. Surfaced here so users can predict how long their swap
-    # can be held alive before forced timeout.
-    challenge_window_minutes = CHALLENGE_WINDOW_BLOCKS * SECONDS_PER_BLOCK / 60
-    max_ext_minutes = MAX_EXTENSION_BLOCKS * SECONDS_PER_BLOCK / 60
-    table.add_row(
-        'Extension Challenge Window',
-        f'{CHALLENGE_WINDOW_BLOCKS} blocks (~{challenge_window_minutes:.0f} min)',
-    )
-    table.add_row(
-        'Max Extension Length',
-        f'{MAX_EXTENSION_BLOCKS} blocks (~{max_ext_minutes:.0f} min) per finalize',
-    )
-    table.add_row('Max Extensions / Reservation', str(MAX_EXTENSIONS_PER_RESERVATION))
-    table.add_row('Max Extensions / Swap', str(MAX_EXTENSIONS_PER_SWAP))
-    table.add_row('Next Swap ID', str(next_swap_id))
-    table.add_row('Accumulated Fees', f'{from_rao(accumulated_fees_rao):.4f} TAO')
-    table.add_row('Total Recycled Fees', f'{from_rao(total_recycled_rao):.4f} TAO')
-    table.add_row('Owner', owner)
-    # Recycle path. Pre-latch (chain_ext_enabled = false): `recycle_fees`
-    # transfers to the immutable custodial fallback. Post-latch: dispatches
-    # via the subtensor `add_stake_recycle` chain extension to
-    # (staking_hotkey, netuid). The latch is one-way; flipped by the owner
-    # via `alw admin enable-chain-ext`.
-    if chain_ext_enabled:
-        table.add_row(
-            'Recycle Path', f'[green]chain ext (latched)[/green] → {staking_hotkey} on netuid {recycle_netuid}'
+@view_group.command('config')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of text.')
+def view_config(as_json):
+    """Show the current on-chain program Config (bounds, fees, windows, threshold). Read-only."""
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    cfg = safe_read(lambda: client.get_config(), what='read config')
+    if cfg is None:
+        print_json({'initialized': False}) if as_json else console.print(
+            '[yellow]Program is not initialized (no Config account).[/yellow]'
         )
-    else:
-        table.add_row('Recycle Path', f'[yellow]custodial (pre-latch)[/yellow] → {recycle_address}')
-        table.add_row('Latch Target', f'{staking_hotkey} on netuid {recycle_netuid}')
-    table.add_row('System Status', '[red]HALTED[/red]' if halted else '[green]Running[/green]')
-
-    console.print(table)
-    console.print()
+        return
+    if as_json:
+        print_json(
+            {
+                'admin': str(cfg.admin),
+                'version': cfg.version,
+                'halted': bool(cfg.halted),
+                'consensus_threshold_percent': cfg.consensus_threshold_percent,
+                'reservation_fee_sol': from_lamports(cfg.reservation_fee_lamports),
+                'min_collateral_sol': from_lamports(cfg.min_collateral),
+                'max_collateral_sol': from_lamports(cfg.max_collateral),
+                'min_swap_amount_sol': from_lamports(cfg.min_swap_amount),
+                'max_swap_amount_sol': from_lamports(cfg.max_swap_amount),
+                'fulfillment_timeout_secs': cfg.fulfillment_timeout_secs,
+                'reservation_ttl_secs': cfg.reservation_ttl_secs,
+                'pool_window_secs': cfg.pool_window_secs,
+                'weights_update_min_interval_secs': cfg.weights_update_min_interval_secs,
+                'max_total_extension_secs': cfg.max_total_extension_secs,
+                'validator_count': len(cfg.validators),
+            }
+        )
+        return
+    console.print('\n[bold]Program Config[/bold]\n')
+    console.print(f'  Admin:                {cfg.admin}')
+    console.print(f'  Version:              {cfg.version}')
+    console.print(f'  Halted:               {"yes" if cfg.halted else "no"}')
+    console.print(f'  Consensus threshold:  {cfg.consensus_threshold_percent}%')
+    console.print(f'  Reservation fee:      {from_lamports(cfg.reservation_fee_lamports):.6f} SOL')
+    console.print(f'  Min collateral:       {from_lamports(cfg.min_collateral):.4f} SOL')
+    console.print(f'  Max collateral:       {_sol_or(cfg.max_collateral, "unlimited")}')
+    console.print(f'  Min swap amount:      {_sol_or(cfg.min_swap_amount, "no minimum")}')
+    console.print(f'  Max swap amount:      {_sol_or(cfg.max_swap_amount, "no maximum")}')
+    console.print(f'  Fulfillment timeout:  {secs_str(cfg.fulfillment_timeout_secs)}')
+    console.print(f'  Reservation TTL:      {secs_str(cfg.reservation_ttl_secs)}')
+    console.print(f'  Pool window:          {secs_str(cfg.pool_window_secs)}')
+    console.print(f'  Weights interval:     {secs_str(cfg.weights_update_min_interval_secs)}')
+    console.print(f'  Max total extension:  {secs_str(cfg.max_total_extension_secs)}')
+    console.print(f'  Validators:           {len(cfg.validators)}\n')
 
 
 @view_group.command('validators')
-def view_validators():
-    """View whitelisted validators on the contract.
-
-    [dim]Reads the validator allowlist the owner has registered via
-    `alw admin add-vali` / `alw admin remove-vali`. Each listed validator
-    is one of the keys that can sign vote_* messages (reserve, initiate,
-    confirm, timeout, activate, etc.).
-
-    The Identity column shows the on-chain IdentitiesV2 display name
-    registered against the validator's coldkey, when one exists. Owner-
-    tagged rows match the contract owner.[/dim]
-
-    [dim]Examples:
-        $ alw view validators[/dim]
-    """
-    config, _, subtensor, client = get_cli_context(need_wallet=False)
-    netuid = config['netuid']
-
-    console.print('\n[bold]Whitelisted Validators[/bold]\n')
-
-    try:
-        with loading('Reading validator set...'):
-            validators = client.get_validators()
-            consensus_threshold = client.get_consensus_threshold()
-            owner = client.get_owner()
-    except ContractError as e:
-        console.print(f'[red]Failed to read validators: {e}[/red]')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of text.')
+def view_validators(as_json):
+    """List the registered validators with their lottery weights and the consensus threshold."""
+    set_json_output(as_json)
+    _, client = get_solana_cli_context(need_keypair=False)
+    cfg = safe_read(lambda: client.get_config(), what='read config')
+    if cfg is None:
+        print_json({'initialized': False, 'validators': []}) if as_json else console.print(
+            '[yellow]Program is not initialized (no Config account).[/yellow]'
+        )
         return
-
+    validators = [{'pubkey': str(Pubkey.from_bytes(bytes(v.key))), 'weight': v.weight} for v in cfg.validators]
+    if as_json:
+        print_json({'consensus_threshold_percent': cfg.consensus_threshold_percent, 'validators': validators})
+        return
+    console.print('\n[bold]Validators[/bold]\n')
+    console.print(f'  Consensus threshold: {cfg.consensus_threshold_percent}%\n')
     if not validators:
-        console.print('[yellow]No validators whitelisted.[/yellow]\n')
+        console.print('  [yellow]No validators registered.[/yellow]\n')
         return
+    for v in validators:
+        console.print(f'  {v["pubkey"]}  weight={v["weight"]}')
+    console.print()
 
-    # On-chain identities are keyed by coldkey in the SubtensorModule.
-    # IdentitiesV2 map. Resolve each validator hotkey → coldkey through the
-    # subnet metagraph; skip silently when a hotkey isn't registered on this
-    # netuid (possible if the whitelist includes off-subnet validators) or
-    # the RPC fails — the column just renders as a dim dash.
-    hotkey_to_identity: dict[str, str] = {}
+
+def _pending_miner():
+    """Return the miner pubkey string saved by `alw swap now` in pending_swap.json, or None."""
+    if not PENDING_SWAP_FILE.exists():
+        return None
     try:
-        with loading('Reading on-chain identities...'):
-            metagraph = subtensor.metagraph(netuid)
-            hotkey_to_coldkey = {metagraph.hotkeys[i]: metagraph.coldkeys[i] for i in range(metagraph.n.item())}
-            for hk in validators:
-                ck = hotkey_to_coldkey.get(hk)
-                if not ck:
-                    continue
-                try:
-                    identity = subtensor.query_identity(ck)
-                except Exception:
-                    identity = None
-                if identity and getattr(identity, 'name', ''):
-                    hotkey_to_identity[hk] = identity.name
-    except Exception as e:
-        bt.logging.debug(f'Identity lookup failed: {e}')
-
-    required = max(1, (len(validators) * consensus_threshold + 99) // 100)
-
-    table = Table(show_header=True)
-    table.add_column('#', style='dim')
-    table.add_column('Hotkey', style='cyan')
-    table.add_column('Identity', style='green')
-
-    for idx, hotkey in enumerate(validators, 1):
-        hotkey_display = hotkey
-        if hotkey == owner:
-            hotkey_display = f'{hotkey} [yellow](owner)[/yellow]'
-        identity_display = hotkey_to_identity.get(hotkey, '[dim]—[/dim]')
-        table.add_row(str(idx), hotkey_display, identity_display)
-
-    console.print(table)
-    console.print(
-        f'\n[dim]Total: {len(validators)} validators · '
-        f'consensus {consensus_threshold}% → {required} votes needed for quorum on '
-        f'reserve/initiate/confirm/timeout. Optimistic extensions use propose+challenge instead.[/dim]\n'
-    )
+        return json.loads(PENDING_SWAP_FILE.read_text()).get('miner')
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 @view_group.command('reservation')
-def view_reservation():
-    """View your active swap reservation.
+@click.option('--miner', 'miner_pk', default=None, type=str, help='Miner pubkey whose reservation to inspect')
+@click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of detail text.')
+def view_reservation(miner_pk, as_json):
+    """Show the reservation held on a miner (reservations are keyed by the miner pubkey)."""
+    set_json_output(as_json)
+    target = miner_pk or _pending_miner()
+    if not target:
+        fail('No miner specified and no saved swap found. Pass --miner <pubkey>.')
+    try:
+        miner = Pubkey.from_string(target)
+    except (ValueError, TypeError):
+        fail(f'Invalid miner pubkey: {target}')
 
-    [dim]Reads local state file and validates against on-chain data.[/dim]
+    _, client = get_solana_cli_context(need_keypair=False)
+    resv = safe_read(lambda: client.get_reservation(miner), what='read reservation')
 
-    [dim]Examples:
-        $ alw view reservation[/dim]
-    """
-    _, _, subtensor, client = get_cli_context(need_wallet=False)
-
-    state = load_pending_swap()
-    if not state:
-        console.print('\n[yellow]No active reservation found.[/yellow]')
-        console.print('[dim]Run `alw swap now` to initiate a swap.[/dim]\n')
-        return
-    hydrated = hydrate_pending_swap(state, client)
-
-    current_block = subtensor.get_current_block()
-    with loading('Reading reservation...'):
-        status = probe_pending_reservation(client, state, current_block)
-
-    if status.kind == 'rpc_error':
-        console.print('[red]Failed to read reservation status from contract.[/red]')
+    if resv is None:
+        if as_json:
+            print_json({'miner': str(miner), 'reservation': None})
+            return
+        console.print(f'[yellow]No active reservation on miner {target}.[/yellow]')
         return
 
-    # No matching on-chain reservation — local file is stale; clearing it
-    # also avoids a `get_chain('')` crash in the table renderer below.
-    if not hydrated:
-        console.print('\n[yellow]No active reservation.[/yellow]')
-        console.print(
-            '[dim]Local state referenced a reservation that is no longer on-chain — cleared. '
-            'If your reservation already advanced into a swap, check: [cyan]alw view active-swaps[/cyan][/dim]\n'
+    now = int(time.time())
+    remaining = max(0, int(resv.reserved_until) - now)
+    claimed = bytes(resv.claimed_swap_key) != ZERO_SWAP_KEY
+    to_dec = get_chain(resv.to_chain).decimals
+    from_dec = get_chain(resv.from_chain).decimals
+
+    if as_json:
+        print_json(
+            {
+                'miner': str(miner),
+                'user': str(resv.user),
+                'from_chain': resv.from_chain,
+                'to_chain': resv.to_chain,
+                'from_amount': resv.from_amount,
+                'to_amount': resv.to_amount,
+                'collateral_amount': resv.collateral_amount,
+                'reserved_until': int(resv.reserved_until),
+                'remaining_secs': remaining,
+                'deposit_claimed': claimed,
+                'miner_from_addr': resv.miner_from_addr,
+            }
         )
-        clear_pending_swap()
         return
 
-    console.print('\n[bold]Swap Reservation[/bold]\n')
-
-    table = Table(show_header=True)
-    table.add_column('Field', style='cyan')
-    table.add_column('Value', style='green')
-
-    chain = get_chain(state.from_chain)
-    human_send = state.from_amount / (10**chain.decimals)
-    to_chain_def = get_chain(state.to_chain)
-    human_receive = state.user_receives / (10**to_chain_def.decimals)
-
-    src_up = state.from_chain.upper()
-    dst_up = state.to_chain.upper()
-    table.add_row('Direction', f'Send {src_up} → Receive {dst_up}')
-    table.add_row(f'Send {src_up}', f'{human_send} {src_up}')
-    table.add_row(f'  from (your {src_up})', state.user_from_address)
-    table.add_row(f'  to (miner {src_up})', state.miner_from_address)
-    table.add_row(f'Receive {dst_up}', f'{human_receive:.8f} {dst_up}')
-    table.add_row(f'  to (your {dst_up})', state.receive_address)
-    table.add_row('Miner', f'UID {state.miner_uid} ({state.miner_hotkey[:16]}...)')
-
-    if status.kind == 'ours_active':
-        table.add_row('Chain Amounts', f'[green]✓ locked {from_rao(state.tao_amount):.4f} TAO[/green]')
-
-    sent_tx_hash = (state.from_tx_hash or '').strip()
-
-    if status.kind == 'ours_active':
-        remaining = max(0, status.reserved_until - current_block)
-        table.add_row('Status', '[green]ACTIVE[/green]')
-        table.add_row('Time Remaining', f'~{remaining} blocks ({blocks_to_minutes_str(remaining)})')
-        # Optimistic-extension visibility — silent on read failure: best-effort
-        # signal, not core to the reservation status.
-        try:
-            ext_count = client.get_reservation_extension_count(state.miner_hotkey)
-            table.add_row('Extensions', f'{ext_count}/{MAX_EXTENSIONS_PER_RESERVATION}')
-        except ContractError:
-            pass
-        try:
-            pending = client.get_pending_reservation_extension(state.miner_hotkey)
-        except ContractError:
-            pending = None
-        if pending is not None:
-            finalize_at = pending.proposed_at + CHALLENGE_WINDOW_BLOCKS
-            blocks_until_finalize = max(0, finalize_at - current_block)
-            target_blocks = max(0, pending.target_block - current_block)
-            if blocks_until_finalize > 0:
-                finalize_hint = f'finalizable in {blocks_until_finalize} blocks'
-            else:
-                finalize_hint = 'finalize window open'
-            table.add_row(
-                'Pending Extension',
-                f'target block {pending.target_block} ({blocks_to_minutes_str(target_blocks)}) · {finalize_hint} · '
-                f'by {pending.submitter[:16]}...',
-            )
-        if sent_tx_hash:
-            tx_display = sent_tx_hash if len(sent_tx_hash) <= 24 else sent_tx_hash[:24] + '...'
-            table.add_row(f'Source TX ({src_up})', tx_display)
-    elif status.kind == 'our_swap':
-        table.add_row('Status', f'[green]INITIATED (swap #{status.swap.id})[/green]')
-        table.add_row('Swap Status', status.swap.status.name)
-    else:  # 'replaced' or 'expired'
-        table.add_row('Status', '[yellow]NO LONGER ACTIVE[/yellow]')
-        table.add_row('Time Remaining', '—')
-
-    console.print(table)
-    console.print(f'\n[dim]Dashboard: {_dashboard_url()}/reservations/by-source/{state.user_from_address}[/dim]')
-
-    if status.kind == 'ours_active':
-        if sent_tx_hash:
-            console.print(f'\n[green]Source tx already broadcast:[/green] [cyan]{sent_tx_hash}[/cyan]')
-            console.print(
-                '[dim]Validators are waiting on source-chain confirmations before initiating the swap '
-                'on-chain. Nothing more to do — leave this reservation alone until it either initiates '
-                'or expires.[/dim]'
-            )
-            console.print('\n[dim]If validators never picked up your confirm, re-broadcast it with:[/dim]')
-            console.print(f'  [bold cyan]alw swap post-tx {sent_tx_hash}[/bold cyan]\n')
-        else:
-            console.print(
-                f'\n[bold]Next step:[/bold] Send {human_send} {state.from_chain.upper()} '
-                f'from [yellow]{state.user_from_address}[/yellow] to [yellow]{state.miner_from_address}[/yellow], then run:'
-            )
-            console.print('  [bold cyan]alw swap post-tx <your_transaction_hash>[/bold cyan]\n')
-    elif status.kind == 'our_swap':
-        console.print(
-            f'\n[green]Reservation was consumed into swap #{status.swap.id} — it is in progress on-chain.[/green]'
-        )
-        console.print(f'[dim]Watch with: alw view swap {status.swap.id} --watch[/dim]')
-        clear_pending_swap()
-        console.print('[dim]Local reservation state cleared.[/dim]\n')
-    else:  # 'replaced' or 'expired'
-        console.print(
-            '\n[yellow]Reservation is no longer active on-chain.[/yellow]\n'
-            '[dim]Either the reservation expired before you sent funds, or your swap already '
-            'initiated and has since completed. Check: alw view active-swaps[/dim]'
-        )
-        clear_pending_swap()
-        console.print('[dim]Local reservation state cleared.[/dim]\n')
+    console.print('\n[bold]Reservation[/bold]\n')
+    console.print(f'  Miner:       {miner}')
+    console.print(f'  User:        {resv.user}')
+    console.print(f'  Pair:        {resv.from_chain.upper()} → {resv.to_chain.upper()}')
+    console.print(f'  Send:        {resv.from_amount / 10**from_dec:g} {resv.from_chain.upper()}')
+    console.print(f'  Receive:     {resv.to_amount / 10**to_dec:g} {resv.to_chain.upper()}')
+    console.print(f'  Send to:     {resv.miner_from_addr}')
+    console.print(f'  Reserved:    {"expired" if remaining == 0 else secs_str(remaining) + " remaining"}')
+    console.print(f'  Deposit:     {"claimed" if claimed else "[dim]not yet sent[/dim]"}\n')

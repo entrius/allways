@@ -7,11 +7,9 @@ Users don't have TAO wallets. This module provides:
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import bittensor as bt
-
-from allways.contract_client import AllwaysContractClient
 
 EPHEMERAL_WALLET_DIR = Path.home() / '.allways' / 'ephemeral_wallet'
 EPHEMERAL_WALLET_NAME = 'allways_ephemeral'
@@ -40,14 +38,12 @@ def get_ephemeral_wallet() -> bt.Wallet:
 def discover_validators(
     subtensor: bt.Subtensor,
     netuid: int,
-    contract_client: Optional[AllwaysContractClient] = None,
 ) -> List[bt.AxonInfo]:
     """Discover validator axon endpoints from metagraph.
 
-    Filters for UIDs with validator_permit=True and is_serving=True.
-    When contract_client is provided, also filters to only whitelisted validators.
-    Returns list of axon endpoints.
-    """
+    Filters for UIDs with validator_permit=True and is_serving=True. The
+    contract-side whitelist is enforced on-chain at vote time (Config.validators),
+    so the announce hop just reaches every serving validator."""
     metagraph = subtensor.metagraph(netuid=netuid)
     axons = []
 
@@ -57,12 +53,6 @@ def discover_validators(
         axon = metagraph.axons[uid]
         if not axon.is_serving:
             continue
-        if contract_client:
-            try:
-                if not contract_client.is_validator(metagraph.hotkeys[uid]):
-                    continue
-            except Exception:
-                pass
         axons.append(axon)
 
     return axons

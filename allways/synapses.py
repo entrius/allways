@@ -10,8 +10,6 @@ from typing import Optional
 
 import bittensor as bt
 
-from allways.constants import RESERVE_SLIPPAGE_DEFAULT_BPS
-
 
 class MinerActivateSynapse(bt.Synapse):
     """Miner broadcasts activation request to all validators.
@@ -31,27 +29,26 @@ class MinerActivateSynapse(bt.Synapse):
 
 
 class SwapReserveSynapse(bt.Synapse):
-    """User broadcasts swap reservation request to all validators via dendrite-lite.
+    """User (or a routing offering) asks a validator to enter a miner's reservation pool on their behalf.
 
-    Validators verify the source address proof, check miner eligibility,
-    compute the request hash, and vote_reserve on the contract.
+    The validator computes the dest amount from the pinned/live rate and submits open_or_request as the
+    router. All amounts are SOL-numeraire (``from_amount`` is source smallest-units); the taker identity is
+    the user's Solana ``user_pubkey``, pinned into the reservation.
     """
 
-    # Request fields (user fills)
+    # Request fields (caller fills)
     miner_hotkey: str
-    tao_amount: int
-    from_amount: int
-    to_amount: int
-    from_address: str
-    from_address_proof: str
-    block_anchor: int
-    from_chain: str = ''  # User's source chain (for bilateral pair support)
-    to_chain: str = ''  # User's dest chain
-    slippage_bps: int = RESERVE_SLIPPAGE_DEFAULT_BPS
+    from_chain: str
+    to_chain: str
+    user_pubkey: str  # Solana taker/payout identity (base58)
+    user_from_addr: str  # source-chain address the user sends from
+    user_to_addr: str  # dest-chain address the user receives at
+    from_amount: int  # source leg, smallest units
 
     # Response fields (validator fills)
     accepted: Optional[bool] = None
     rejection_reason: Optional[str] = None
+    pool_closes_at: Optional[int] = None  # unix secs the on-chain window closes (caller times its follow-up)
 
 
 class SwapConfirmSynapse(bt.Synapse):

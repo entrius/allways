@@ -12,18 +12,21 @@ import time
 from pathlib import Path
 from typing import Dict
 
-import bittensor as bt
 from dotenv import load_dotenv
 
-from allways.chain_providers import create_chain_providers
-from allways.commitments import read_miner_commitment
-from allways.constants import FEE_DIVISOR, FORWARD_STALL_THRESHOLD_SECONDS
-from allways.contract_client import AllwaysContractClient
-from allways.miner.fulfillment import SwapFulfiller
-from allways.miner.swap_poller import SwapPoller
-from neurons.base.miner import BaseMinerNeuron
-
+# Must precede the allways imports: they resolve env-backed settings, and a later load would be a no-op.
 load_dotenv()
+
+import bittensor as bt  # noqa: E402
+from bittensor import Keypair as BtKeypair  # noqa: E402
+
+from allways.chain_providers import create_chain_providers  # noqa: E402
+from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS  # noqa: E402
+from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
+from allways.miner.swap_poller import SwapPoller  # noqa: E402
+from allways.solana import keys  # noqa: E402
+from allways.solana.client import AllwaysSolanaClient  # noqa: E402
+from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
 class Miner(BaseMinerNeuron):
@@ -39,16 +42,24 @@ class Miner(BaseMinerNeuron):
 
         self.unlock_coldkey()
 
-        self.contract_client = AllwaysContractClient(
+        # Solana program client (signer = the miner's Solana keypair; separate from the bt wallet).
+        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        self.solana_pubkey = self.solana_client.keypair.pubkey()
+        # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer
+        # user↔miner transfer; separate from the program client that never custodies swap assets).
+        self.chain_providers = create_chain_providers(
+            check=True,
             subtensor=self.subtensor,
-            reconnect_subtensor=self.reconnect_and_propagate,
+            wallet=self.wallet,
+            solana_rpc_url=solana_rpc_url,
+            solana_keypair=self.solana_client.keypair,
         )
-        self.chain_providers = create_chain_providers(check=True, subtensor=self.subtensor, wallet=self.wallet)
 
-        self.swap_poller = SwapPoller(
-            contract_client=self.contract_client,
-            miner_hotkey=self.wallet.hotkey.ss58_address,
-        )
+        # Bind the bt hotkey ↔ Solana pubkey so on-chain state (keyed by pubkey) attributes to this UID.
+        self.ensure_hotkey_bound()
+
+        self.swap_poller = SwapPoller(self.solana_client, self.solana_pubkey)
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
@@ -57,18 +68,42 @@ class Miner(BaseMinerNeuron):
         self.my_addresses: Dict[str, str] = self.load_my_addresses()
 
         self.swap_fulfiller = SwapFulfiller(
-            contract_client=self.contract_client,
+            solana_client=self.solana_client,
             chain_providers=self.chain_providers,
-            wallet=self.wallet,
-            subtensor=self.subtensor,
-            fee_divisor=FEE_DIVISOR,
             sent_cache_path=sent_cache_path,
             my_addresses=self.my_addresses,
         )
 
         self.consecutive_poll_failures = 0
 
-        bt.logging.info(f'Miner initialized: hotkey={self.wallet.hotkey.ss58_address} | addresses={self.my_addresses}')
+        bt.logging.info(
+            f'Miner initialized: hotkey={hotkey} | pubkey={self.solana_pubkey} | addresses={self.my_addresses}'
+        )
+
+    def ensure_hotkey_bound(self) -> None:
+        """Best-effort: bind the bt hotkey to this Solana pubkey if not already bound.
+
+        The miner's hotkey (sr25519) signs its own Solana pubkey bytes; the contract stores the hotkey +
+        signature on a per-miner `Binding` PDA and validators verify it off-chain. Idempotent — skips if
+        a binding already exists. On failure the miner keeps running; `alw miner bind-hotkey` can retry.
+        """
+        try:
+            if self.solana_client.get_binding(self.solana_pubkey) is not None:
+                return
+        except Exception as e:
+            bt.logging.warning(f'Could not read binding state: {e}; skipping auto-bind')
+            return
+        hotkey_bytes = bytes(self.wallet.hotkey.public_key)
+        sig = self.wallet.hotkey.sign(bytes(self.solana_pubkey))
+        # Sanity: re-verify locally exactly as the validator will (sr25519 hotkey over the pubkey bytes).
+        if not BtKeypair(public_key='0x' + hotkey_bytes.hex()).verify(bytes(self.solana_pubkey), sig):
+            bt.logging.error('Self-produced hotkey binding failed local verify; not submitting')
+            return
+        try:
+            self.solana_client.bind_hotkey(hotkey_bytes, sig)
+            bt.logging.success(f'Bound hotkey {self.wallet.hotkey.ss58_address} → Solana pubkey {self.solana_pubkey}')
+        except Exception as e:
+            bt.logging.error(f'bind_hotkey failed (run `alw miner bind-hotkey` to retry): {e}')
 
     def unlock_coldkey(self) -> None:
         """Cache the coldkey password through bittensor's keyfile so every
@@ -94,29 +129,35 @@ class Miner(BaseMinerNeuron):
         bt.logging.info('Bittensor coldkey unlocked')
 
     def load_my_addresses(self) -> Dict[str, str]:
-        """Read this miner's committed pair once and map chain → address.
+        """Read this miner's on-chain quotes once and map chain → address.
 
-        Stored as ``self.my_addresses`` and shared with ``SwapFulfiller`` so
-        the fulfill path doesn't need to reach back into substrate storage on
-        every send. Refreshed whenever the CLI signals a rate post via the
-        flag file written by ``alw miner post``.
+        Each `MinerQuote` PDA carries the miner's address on both legs of a pair
+        (``miner_from_addr`` on ``from_chain``, ``miner_to_addr`` on ``to_chain``).
+        Stored as ``self.my_addresses`` and shared with ``SwapFulfiller`` so the
+        fulfill path has the dest-chain sending address without a per-send read.
+        Refreshed whenever the CLI signals a quote post via the flag file written
+        by ``alw miner post``.
         """
-        hotkey = self.wallet.hotkey.ss58_address
+        my = str(self.solana_pubkey)
+        addrs: Dict[str, str] = {}
         try:
-            pair = read_miner_commitment(self.subtensor, self.config.netuid, hotkey, metagraph=self.metagraph)
+            for _pda, q in self.solana_client.get_all('MinerQuote'):
+                if str(q.miner) != my:
+                    continue
+                addrs[q.from_chain] = q.miner_from_addr
+                addrs[q.to_chain] = q.miner_to_addr
         except Exception as e:
-            bt.logging.warning(f'Could not read own commitment at startup: {e}')
+            bt.logging.warning(f'Could not read own quotes at startup: {e}')
             return {}
-        if pair is None:
+        if not addrs:
             bt.logging.warning(
-                f'No on-chain commitment found for hotkey {hotkey}; miner will not be able to fulfill swaps '
-                'until `alw miner post` is run'
+                'No on-chain quotes found for this miner; it will not be able to fulfill swaps until '
+                '`alw miner post` is run'
             )
-            return {}
-        return {pair.from_chain: pair.from_address, pair.to_chain: pair.to_address}
+        return addrs
 
     def maybe_reload_my_addresses(self) -> None:
-        """If the CLI wrote a rate-posted flag, refresh the address cache."""
+        """If the CLI wrote a quote-posted flag, refresh the address cache."""
         try:
             if not self.rate_flag_path.exists():
                 return
@@ -124,20 +165,22 @@ class Miner(BaseMinerNeuron):
             if fresh:
                 self.my_addresses.clear()
                 self.my_addresses.update(fresh)
-                bt.logging.info(f'Miner addresses refreshed after rate post: {self.my_addresses}')
+                bt.logging.info(f'Miner addresses refreshed after quote post: {self.my_addresses}')
             else:
                 bt.logging.warning(
-                    'Rate-posted flag set but no commitment readable on chain yet; address cache left untouched'
+                    'Quote-posted flag set but no quote readable on chain yet; address cache left untouched'
                 )
             self.rate_flag_path.unlink(missing_ok=True)
         except Exception as e:
-            bt.logging.debug(f'Rate-posted flag check failed: {e}')
+            bt.logging.debug(f'Quote-posted flag check failed: {e}')
 
     def reconnect_and_propagate(self):
-        """Reconnect subtensor and propagate the new connection to all dependents."""
+        """Reconnect subtensor and propagate the new connection to its dependents.
+
+        The Solana client uses its own RPC (not subtensor), so only the subtensor-backed
+        chain providers need the refreshed connection.
+        """
         self.reconnect_subtensor()
-        self.contract_client.subtensor = self.subtensor
-        self.swap_fulfiller.subtensor = self.subtensor
         tao_provider = self.chain_providers.get('tao')
         if tao_provider and hasattr(tao_provider, 'subtensor'):
             tao_provider.subtensor = self.subtensor
@@ -147,7 +190,7 @@ class Miner(BaseMinerNeuron):
         self.check_block_progress(self.reconnect_and_propagate)
         self.maybe_reload_my_addresses()
 
-        active_swaps, _fulfilled = self.swap_poller.poll()
+        active_swaps, fulfilled_swaps = self.swap_poller.poll()
 
         if not self.swap_poller.last_poll_ok:
             self.consecutive_poll_failures += 1
@@ -162,14 +205,14 @@ class Miner(BaseMinerNeuron):
             bt.logging.info(f'Poll recovered after {self.consecutive_poll_failures} consecutive failure(s)')
         self.consecutive_poll_failures = 0
 
-        active_count = len(self.swap_poller.active)
-
-        self.swap_fulfiller.cleanup_stale_sends(set(self.swap_poller.active.keys()))
+        # Retain send-cache entries for every swap still live on-chain (Active or Fulfilled-awaiting-confirm).
+        live_keys = {s.key_hex for s in active_swaps} | {s.key_hex for s in fulfilled_swaps}
+        self.swap_fulfiller.cleanup_stale_sends(live_keys)
 
         if active_swaps:
             bt.logging.debug(f'Processing {len(active_swaps)} active swap(s)')
-        elif active_count > 0:
-            bt.logging.debug(f'Tracking {active_count} active swap(s)')
+        elif live_keys:
+            bt.logging.debug(f'Tracking {len(live_keys)} live swap(s)')
         else:
             bt.logging.debug('Polling... no active swaps')
 
@@ -177,7 +220,7 @@ class Miner(BaseMinerNeuron):
             try:
                 self.swap_fulfiller.process_swap(swap)
             except Exception as e:
-                bt.logging.error(f'Error processing swap {swap.id}: {type(e).__name__}: {e}')
+                bt.logging.error(f'Error processing swap {swap.key_hex[:16]}: {type(e).__name__}: {e}')
 
 
 # Main entry point

@@ -19,10 +19,20 @@ except ImportError:
 # statement_timeout cancels anything that blocks past this.
 STATEMENT_TIMEOUT_MS = 2000
 # Single connect attempt with the same 2s ceiling. If Postgres isn't
-# reachable at validator boot, storage stays disabled for the lifetime of
-# the process; caller (DatabaseStorage.__init__) logs the outcome and
-# proceeds with writes disabled.
+# reachable, this attempt fails fast; DatabaseStorage retries lazily on a
+# later write (rate-limited), so a slow-booting or restarted aw-db only
+# pauses dashboard writes instead of disabling them for the process.
 CONNECT_TIMEOUT_SEC = 2
+
+# psycopg exception class names that mean the connection itself is dead or unusable
+# (server restart, network drop, closed connection) — DatabaseStorage drops and lazily
+# reconnects on these. Matched by MRO class name rather than isinstance so the check
+# (and its tests) work even where psycopg isn't importable.
+_CONNECTION_ERROR_NAMES = frozenset({'OperationalError', 'InterfaceError'})
+
+
+def is_connection_failure(ex: Exception) -> bool:
+    return any(c.__name__ in _CONNECTION_ERROR_NAMES for c in type(ex).__mro__)
 
 
 def create_database_connection() -> Optional[Any]:

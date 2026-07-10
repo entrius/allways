@@ -1,39 +1,335 @@
 import json
+import math
 import os
 import sys
-import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import bittensor as bt
 import click
 import requests
+from bittensor.utils import ss58_encode
 from rich.console import Console
 from rich.text import Text
 
-from allways.chain_providers.base import ProviderUnreachableError
-from allways.classes import MinerPair, Swap, SwapStatus
-from allways.commitments import parse_commitment_data, read_miner_commitment, read_miner_commitments  # noqa: F401
-from allways.constants import CONTRACT_ADDRESS as DEFAULT_CONTRACT_ADDRESS
-from allways.constants import (
-    FEE_DIVISOR,
-    MAX_EXTENSION_BLOCKS,
-    MAX_EXTENSIONS_PER_RESERVATION,
-    NETUID_FINNEY,
-    TAO_TO_RAO,
-)
-from allways.contract_client import AllwaysContractClient, ContractError, is_contract_rejection
-from allways.utils.rate import apply_fee_deduction
+from allways.classes import SwapStatus
+from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.solana.client import SolanaClientError
+from allways.solana.rpc import SolanaRpcError
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
 PENDING_SWAP_FILE = ALLWAYS_DIR / 'pending_swap.json'
 
+# ─── Per-chain network resolution ────────────────────────────────────────────
+# Each chain takes a simple network NAME (alw config set solana-network devnet); the code
+# maps it to an endpoint so operators never hand-copy RPC URLs. Raw-URL escape hatches still
+# win for paid/custom RPCs (SOLANA_RPC_URL env / solana-rpc config; BTC_ESPLORA_URLS env).
+# The Solana SIGNER resolves the same way: SOLANA_KEYPAIR_PATH env wins, else the
+# solana-keypair config path, else the solana-CLI default ~/.solana/id.json.
+SOLANA_NETWORKS = {
+    'devnet': 'https://api.devnet.solana.com',
+    'mainnet': 'https://api.mainnet-beta.solana.com',
+    'localnet': 'http://127.0.0.1:8899',
+}
+# Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
+BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
+# One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid.
+ENV_BUNDLES = {
+    'testnet': {'network': 'test', 'solana-network': 'devnet', 'btc-network': 'testnet4', 'netuid': '19'},
+    'mainnet': {'network': 'finney', 'solana-network': 'mainnet', 'btc-network': 'mainnet', 'netuid': '7'},
+}
+
+
+def resolve_solana_rpc(config: dict) -> str:
+    """Solana RPC precedence: SOLANA_RPC_URL env / solana-rpc config (raw URL — paid/custom) win;
+    else the solana-network name resolves to a public endpoint; else localnet default."""
+    raw = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc')
+    if raw:
+        return raw
+    name = config.get('solana-network')
+    if name:
+        url = SOLANA_NETWORKS.get(name)
+        if url:
+            return url
+        console.print(
+            f'[yellow]Unknown solana-network {name!r} (expected {list(SOLANA_NETWORKS)}); using localnet.[/yellow]'
+        )
+    return 'http://127.0.0.1:8899'
+
+
+def resolve_solana_keypair_path(config: dict) -> str:
+    """Solana keypair precedence: SOLANA_KEYPAIR_PATH env (raw path escape hatch) wins;
+    else the solana-keypair config path; else the solana-CLI default ~/.solana/id.json."""
+    raw = os.environ.get('SOLANA_KEYPAIR_PATH') or config.get('solana-keypair')
+    if raw:
+        return os.path.expanduser(raw)
+    return str(Path.home() / '.solana' / 'id.json')
+
+
+def load_cli_keypair(config: dict):
+    """Load the CLI signing keypair from the resolved path (see resolve_solana_keypair_path).
+
+    An explicitly pointed-at path (env/config) must exist — minting a fresh key there would
+    silently sign with an unfunded, non-authority identity. Only the bare ~/.solana/id.json
+    default keeps the auto-generate convenience."""
+    from allways.solana import keys
+
+    path = resolve_solana_keypair_path(config)
+    explicit = os.environ.get('SOLANA_KEYPAIR_PATH') or config.get('solana-keypair')
+    if explicit and not os.path.exists(path):
+        fail(
+            f'Configured solana-keypair {path} not found (from SOLANA_KEYPAIR_PATH env or `alw config set solana-keypair`).'
+        )
+    return keys.load_or_create(path)
+
+
+def apply_btc_network_env(config: dict) -> None:
+    """Feed btc-network config into the BTC provider, which reads BTC_NETWORK from the env.
+    A real BTC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
+    if not os.environ.get('BTC_NETWORK') and config.get('btc-network'):
+        os.environ['BTC_NETWORK'] = config['btc-network']
+
+
+# Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().
+QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < secs, lamports); else free
+
+
+def quote_update_fee_lamports(elapsed_secs: int) -> int:
+    """Churn fee (lamports) to re-quote a direction ``elapsed_secs`` after its last update: 0.01 SOL
+    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Creation is free. Mirrors the contract."""
+    for below, fee in QUOTE_UPDATE_FEE_TIERS:
+        if elapsed_secs < below:
+            return fee
+    return 0
+
+
 console = Console()
 
-SECONDS_PER_BLOCK = 12
+# The taker fund-relay path (post-tx / claim / resume) verifies deposits against a chain provider before it
+# can advance a swap; that verification isn't wired into the CLI yet. Until it is, those commands point at the
+# working browser flow. Keep this URL in one place so every pointer agrees.
+BROWSER_SWAP_URL = 'http://localhost:9090'
+
+
+class CliError(Exception):
+    """Local CLI/Solana error type — replaces the deleted ink! contract error."""
+
+
+# NOT_IMPLEMENTED_EXIT: distinct from Click's usage-error code (2) so a script can tell "deferred CLI
+# path" apart from "you passed bad args". EX_UNAVAILABLE (sysexits.h) = 69.
+NOT_IMPLEMENTED_EXIT = 69
+
+# When a --json command is running, errors must stay machine-readable — `fail()` emits `{"error": ...}`
+# instead of Rich text so a consumer piping --json never chokes on a plain-text error. Set per command.
+_JSON_OUTPUT = False
+
+
+def set_json_output(enabled: bool) -> None:
+    """Mark the current command as JSON-mode so `fail()` (and thus `safe_read`) emit JSON errors."""
+    global _JSON_OUTPUT
+    _JSON_OUTPUT = bool(enabled)
+
+
+class FiniteFloatType(click.ParamType):
+    """A float option that rejects nan/inf at parse time with a clean Click usage error — so
+    user-supplied `--amount nan/inf/1e999` never reaches an `int()` cast and dumps a traceback."""
+
+    name = 'number'
+
+    def convert(self, value, param, ctx):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            self.fail(f'{value!r} is not a number', param, ctx)
+        if not math.isfinite(f):
+            self.fail(f'{value!r} must be a finite number (not nan/inf)', param, ctx)
+        return f
+
+
+FINITE_FLOAT = FiniteFloatType()
+
+
+def fail(message: str, code: int = 1) -> None:
+    """Single error-exit path: exit non-zero so `$?` reflects failure. In JSON mode emits
+    `{"error": ...}`; otherwise prints the message in red.
+
+    Every command rejection/error across the CLI routes through here — that is what makes the CLI script-safe."""
+    if _JSON_OUTPUT:
+        click.echo(json.dumps({'error': message}))
+    else:
+        console.print(f'[red]{message}[/red]')
+    raise SystemExit(code)
+
+
+def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
+    """Honest exit for the fund-moving relays (post-tx / claim / resume) that need chain-provider verification.
+
+    Points at the working browser flow and exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so
+    scripts can tell a deferred path apart from bad args. The read views are all live on Solana now."""
+    console.print(
+        f'[yellow]{what} is not available from the CLI yet.[/yellow]\n'
+        f'[dim]This step verifies your deposit against the source chain, which the CLI taker path does not do '
+        f'yet. Use the browser swap flow at {BROWSER_SWAP_URL} to complete a swap end-to-end; '
+        f'`alw swap now` originates a reservation on-chain.[/dim]'
+    )
+    raise SystemExit(code)
+
+
+# --- Pending swap context (taker reserve → post-tx handoff) ---------------
+# `alw swap now` stashes the just-reserved miner pubkey via `_save_pending` (see swap.py). That gives
+# `alw swap post-tx` a fast, unambiguous handle on the winning miner; post-tx re-validates it against
+# the chain and falls back to scanning all bindings if it's missing (e.g. run from another machine).
+# The confirm relay is keyed by the miner's Bittensor hotkey (reservations are keyed by miner), so
+# post-tx resolves the pubkey → hotkey via the on-chain binding. Non-authoritative cache — safe to delete.
+def hotkey_bytes_to_ss58(hotkey: bytes) -> str:
+    """32-byte sr25519 public key → ss58 (Bittensor format 42). Empty on bad input."""
+    try:
+        return ss58_encode(bytes(hotkey), ss58_format=42)
+    except Exception:
+        return ''
+
+
+def load_pending_swap() -> Optional[dict]:
+    """Read the stashed swap context, or None if absent/unreadable."""
+    try:
+        return json.loads(PENDING_SWAP_FILE.read_text())
+    except Exception:
+        return None
+
+
+def clear_pending_swap() -> None:
+    """Remove the stashed context once the confirm relay is accepted."""
+    try:
+        PENDING_SWAP_FILE.unlink()
+    except Exception:
+        pass
+
+
+EMPTY_SWAP_KEY = bytes(32)
+
+
+def live_unclaimed(resv) -> bool:
+    """Shared 'usable reservation' predicate for BOTH origination (`swap now`) and confirm (`post-tx`),
+    so the two paths can never disagree about what counts as a resolved reservation.
+
+    A reservation must exist, still be within its TTL (``reserved_until > now``), and carry no claim yet
+    (empty ``claimed_swap_key``). Crucially, ``reserved_until != 0`` alone is NOT sufficient: a reservation
+    left over from an abandoned reserve keeps its non-zero-but-past ``reserved_until`` indefinitely (nothing
+    reaps it on-chain), and treating that stale value as 'the draw resolved' is what let `swap now` tell a
+    taker to send funds before the pool draw ran — an unrecoverable loss."""
+    if resv is None:
+        return False
+    now = int(time.time())
+    return int(resv.reserved_until) > now and bytes(resv.claimed_swap_key) == EMPTY_SWAP_KEY
+
+
+def print_json(data) -> None:
+    """Emit a value as pretty JSON (str fallback for non-serializable types like Pubkey)."""
+    click.echo(json.dumps(data, indent=2, default=str))
+
+
+def effective_rate(from_chain: str, to_chain: str, rate_display: str) -> str:
+    """Directional 'to per 1 from' rate for display. Stored quotes are canonical 'dest per 1 hub', which
+    reads backwards for a spoke→hub direction (BTC→SOL stored 0.0021 really means ~476 SOL per BTC).
+    Return the reciprocal for spoke→hub so `amount × shown-rate ≈ you receive` always reconciles."""
+    from allways.constants import NUMERAIRE_CHAIN
+
+    try:
+        r = float(rate_display)
+    except (TypeError, ValueError):
+        return rate_display
+    if to_chain == NUMERAIRE_CHAIN and r > 0:
+        r = 1.0 / r
+    return f'{r:.8g}'
+
+
+def safe_read(fn: Callable, what: str = 'read from Solana'):
+    """Run a client read, converting any RPC/decode/transport failure into a clean non-zero `fail`.
+
+    Reads raise `SolanaClientError` (decode), `SolanaRpcError` (RPC-level error), or a bare
+    `requests` transport error (unreachable RPC). All three must surface as a script-safe failure,
+    never a stacktrace."""
+    try:
+        return fn()
+    except (SolanaClientError, SolanaRpcError) as e:
+        fail(f'Failed to {what}: {e}')
+    except requests.RequestException:
+        fail(f'Could not reach the Solana RPC to {what}. Is the node up at the configured solana-rpc?')
+
+
+ZERO_SWAP_KEY = bytes(32)
+
+
+@dataclass
+class MinerBookEntry:
+    """One miner's aggregated on-chain view: its posted quotes (one per direction) plus runtime state.
+
+    Taker views key by the Solana miner pubkey (a miner has no bittensor uid here), so `miner` is the identity."""
+
+    miner: object  # solders Pubkey
+    quotes: List[object] = field(default_factory=list)  # MinerQuote rows, one per direction
+    collateral: int = 0  # lamports
+    state: Optional[object] = None  # MinerState | None
+    reservation: Optional[object] = None  # Reservation | None
+
+    @property
+    def pubkey_str(self) -> str:
+        return str(self.miner)
+
+
+def load_miner_book(client, with_reservation: bool = True) -> List[MinerBookEntry]:
+    """Group all on-chain MinerQuote rows by miner and attach collateral + state (+ reservation).
+
+    One `MinerBookEntry` per distinct miner pubkey; `quotes` holds its per-direction rows. Any read failure
+    routes through `safe_read` (clean non-zero exit)."""
+    rows = safe_read(lambda: client.get_all('MinerQuote'), what='read miner quotes')
+    by_miner: dict = {}
+    for _pk, q in rows:
+        by_miner.setdefault(bytes(q.miner), MinerBookEntry(miner=q.miner)).quotes.append(q)
+    book = list(by_miner.values())
+    for entry in book:
+        entry.collateral = (
+            safe_read(lambda m=entry.miner: client.get_collateral_lamports(m), what='read collateral') or 0
+        )
+        entry.state = safe_read(lambda m=entry.miner: client.get_miner_state(m), what='read miner state')
+        if with_reservation:
+            entry.reservation = safe_read(lambda m=entry.miner: client.get_reservation(m), what='read reservation')
+    return book
+
+
+def miner_runtime_status(state, reservation, now: int) -> str:
+    """Collapse on-chain miner state into one runtime label the taker views sort/filter on.
+
+    offline (not registered / inactive) → in-swap → reserved (live reservation, no deposit claimed yet) →
+    cooldown (busy) → available."""
+    if state is None or not state.active:
+        return 'offline'
+    if state.has_active_swap:
+        return 'in-swap'
+    if (
+        reservation is not None
+        and int(getattr(reservation, 'reserved_until', 0)) > now
+        and bytes(getattr(reservation, 'claimed_swap_key', ZERO_SWAP_KEY)) == ZERO_SWAP_KEY
+    ):
+        return 'reserved'
+    if int(getattr(state, 'busy_until', 0)) > now:
+        return 'cooldown'
+    return 'available'
+
+
+STATUS_STYLES = {
+    'available': 'green',
+    'reserved': 'cyan',
+    'in-swap': 'yellow',
+    'cooldown': 'magenta',
+    'offline': 'dim',
+}
+# Deterministic sort order for `--sort status`: most-available first.
+STATUS_SORT_ORDER = ['available', 'reserved', 'in-swap', 'cooldown', 'offline']
+
 
 # --- Miner reliability (swap success rate) -------------------------------
 # Per-miner success rate is not on-chain. `view rates` and `swap now` pull a
@@ -122,11 +418,6 @@ def reliability_text(hotkey: str, src: str, dst: str, reliability: Optional[dict
     return Text(f'{comp}/{tot}', style=style)
 
 
-def blocks_to_minutes_str(blocks: int) -> str:
-    """Render a block count as an approximate minutes string like '~5 min'."""
-    return f'~{blocks * SECONDS_PER_BLOCK / 60:.0f} min'
-
-
 SWAP_STATUS_COLORS = {
     SwapStatus.ACTIVE: 'yellow',
     SwapStatus.FULFILLED: 'blue',
@@ -140,21 +431,6 @@ def loading(message: str, spinner: str = 'dots', color: str = 'cyan'):
     return console.status(f'[{color}]{message}[/{color}]', spinner=spinner, spinner_style=color)
 
 
-def print_contract_error(action: str, e: BaseException) -> None:
-    """Print a contract error with contract-rejection vs RPC-failure distinction.
-
-    Contract rejections (NotOwner, NotValidator, InvalidStatus, etc.) are the
-    user's expected failure mode for bad state and we surface the variant
-    name plainly. RPC or client-side failures get a retryable framing so the
-    user knows to check connectivity rather than their input.
-    """
-    if isinstance(e, ContractError) and is_contract_rejection(e):
-        console.print(f'[red]{action}: contract rejected — {e}[/red]')
-    else:
-        console.print(f'[red]{action}: {e}[/red]')
-        console.print('[dim]This looks like an RPC or client failure — try again.[/dim]')
-
-
 def sign_or_prompt_external(
     provider,
     address: str,
@@ -165,7 +441,7 @@ def sign_or_prompt_external(
 ) -> str:
     """Sign a proof-of-ownership message, falling back to externally-pasted signature.
 
-    Tries internal signing first (env var WIF, wallet coldkey, Bitcoin Core RPC).
+    Tries internal signing first (env var WIF, wallet coldkey).
     On failure for BTC source swaps in interactive mode, prompts the user to
     sign the exact message in an external wallet (Electrum, Sparrow, Trezor,
     Bitcoin Core) and paste the base64 BIP-137 signature. Verifies the pasted
@@ -281,6 +557,43 @@ def from_rao(amount_rao: int) -> float:
     return amount_rao / TAO_TO_RAO
 
 
+LAMPORTS_PER_SOL = 1_000_000_000
+
+
+def to_lamports(amount_sol: float) -> int:
+    """Convert SOL to lamports."""
+    return int(amount_sol * LAMPORTS_PER_SOL)
+
+
+def from_lamports(amount_lamports: int) -> float:
+    """Convert lamports to SOL."""
+    return amount_lamports / LAMPORTS_PER_SOL
+
+
+def secs_str(secs: int) -> str:
+    """Render a seconds duration for admin setters + view dumps: bare `45s` under a minute, `600s (~10m)` above."""
+    if secs < 60:
+        return f'{secs}s'
+    return f'{secs}s (~{secs // 60}m)'
+
+
+def get_solana_cli_context(need_keypair: bool = True):
+    """Solana CLI setup for the B4-repointed miner/admin commands → (config, solana_client).
+
+    The miner/admin identity is the Solana keypair (SOLANA_KEYPAIR_PATH env / solana-keypair config /
+    ~/.solana/id.json), NOT the bt wallet — collateral, quotes, and config are keyed by that pubkey on the
+    program. The bt wallet is only needed where a command links the two identities (`alw miner bind-hotkey`).
+    """
+    from allways.solana.client import AllwaysSolanaClient
+    from allways.solana.program import resolve_program_id
+
+    config = get_effective_config()
+    rpc_url = resolve_solana_rpc(config)
+    program_id = resolve_program_id(config)
+    keypair = load_cli_keypair(config) if need_keypair else None
+    return config, AllwaysSolanaClient(rpc_url, program_id=program_id, keypair=keypair)
+
+
 def load_cli_config() -> dict:
     """Load CLI configuration from ~/.allways/config.json."""
     if not CONFIG_FILE.exists():
@@ -339,12 +652,13 @@ def get_effective_config() -> dict:
 
 def get_cli_context(
     need_wallet: bool = True,
-    need_client: bool = True,
-) -> Tuple[dict, Optional[bt.Wallet], bt.Subtensor, Optional[AllwaysContractClient]]:
-    """Standard CLI context setup: config, wallet, subtensor, contract client.
+    need_client: bool = False,
+) -> Tuple[dict, Optional[bt.Wallet], bt.Subtensor, None]:
+    """Standard bt-side CLI context: config, wallet, subtensor (no contract client).
 
-    CLI flags (--network, --wallet, --hotkey, --netuid) override config file values.
-    """
+    The ink! contract client is gone (B6); the 4th tuple slot stays ``None`` so the
+    bt-wallet callers keep their unpacking. ``need_client`` is accepted for call-site
+    compatibility but no longer builds anything."""
     config = get_effective_config()
     network = config.get('network', 'finney')
     with console.status(
@@ -357,394 +671,9 @@ def get_cli_context(
                 name=config.get('wallet', 'default'),
                 hotkey=config.get('hotkey', 'default'),
             )
-        contract_addr = config.get('contract-address') or config.get('contract_address') or DEFAULT_CONTRACT_ADDRESS
-        client = AllwaysContractClient(contract_address=contract_addr, subtensor=subtensor) if need_client else None
     # Ensure netuid is resolved for callers
     if 'netuid' not in config:
         config['netuid'] = NETUID_FINNEY
     else:
         config['netuid'] = int(config['netuid'])
-    return config, wallet, subtensor, client
-
-
-# =========================================================================
-# Pending swap state persistence
-# =========================================================================
-
-
-@dataclass
-class PendingSwapState:
-    """In-memory view of a user's pending swap.
-
-    Persisted fields (written to ~/.allways/pending_swap.json) are only those
-    the contract / current_miners table can't tell us:
-      miner_hotkey, request_hash, receive_address, netuid, wallet_name,
-      hotkey_name, from_tx_hash.
-
-    Everything else (chains, amounts, miner addresses, etc.) is hydrated from
-    `client.get_reservation(miner_hotkey)` + the miner commitment in
-    ``hydrate_pending_swap`` so the contract stays the source of truth.
-    """
-
-    # Persisted (user-only — contract can't tell us)
-    miner_hotkey: str
-    receive_address: str
-    netuid: int
-    wallet_name: str
-    hotkey_name: str
-    from_tx_hash: str = ''
-    # Contract correlation key — keys our reservation lookup. Default-empty
-    # for backwards compat with state files written before this PR.
-    request_hash: str = ''
-    # Hydrated lazily from the contract — see ``hydrate_pending_swap``.
-    miner_uid: int = 0
-    from_chain: str = ''
-    to_chain: str = ''
-    from_amount: int = 0
-    to_amount: int = 0
-    tao_amount: int = 0
-    user_receives: int = 0
-    rate_str: str = ''
-    miner_from_address: str = ''
-    user_from_address: str = ''
-    reserved_until_block: int = 0
-    created_at: float = 0.0
-
-
-# Persisted subset — contract owns the rest.
-_PERSISTED_FIELDS = {
-    'miner_hotkey',
-    'receive_address',
-    'netuid',
-    'wallet_name',
-    'hotkey_name',
-    'from_tx_hash',
-    'request_hash',
-    # created_at is local timing — not derivable from the contract
-    # (the on-chain MinerReserved event has a block, not a wall-clock).
-    'created_at',
-}
-
-
-def save_pending_swap(state: PendingSwapState) -> None:
-    """Atomically write pending swap state to ~/.allways/pending_swap.json."""
-    ALLWAYS_DIR.mkdir(parents=True, exist_ok=True)
-    full = asdict(state)
-    slim = {k: v for k, v in full.items() if k in _PERSISTED_FIELDS}
-    data = json.dumps(slim, indent=2)
-    fd, tmp_path = tempfile.mkstemp(dir=ALLWAYS_DIR, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w') as f:
-            f.write(data)
-        os.replace(tmp_path, PENDING_SWAP_FILE)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
-
-
-def load_pending_swap() -> Optional[PendingSwapState]:
-    """Load pending swap state. Returns None if file doesn't exist or is invalid.
-
-    Only the user-only fields are persisted; call ``hydrate_pending_swap``
-    afterwards with a contract client to populate the contract-derived fields.
-    Older fat state files still load (extra keys are accepted via setattr).
-    """
-    if not PENDING_SWAP_FILE.exists():
-        return None
-    try:
-        data = json.loads(PENDING_SWAP_FILE.read_text())
-        # Accept legacy state files with the old fat shape — keep only fields
-        # the dataclass knows about so unknown keys don't crash construction.
-        known = {f.name for f in PendingSwapState.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in known}
-        return PendingSwapState(**filtered)
-    except Exception:
-        return None
-
-
-def hydrate_pending_swap(state: PendingSwapState, client) -> bool:
-    """Fill contract-derivable fields on ``state`` in place.
-
-    Returns True when the on-chain reservation matches state.request_hash and
-    fields were populated. Returns False if the reservation is gone or the
-    hash doesn't match; caller can still read whatever derivable fields were
-    already populated (legacy state, post-broadcast cache).
-    """
-    if not state.miner_hotkey:
-        return False
-    try:
-        res = client.get_reservation(state.miner_hotkey)
-    except ContractError:
-        return False
-    if not res:
-        return False
-    if state.request_hash and res.hash != state.request_hash:
-        return False
-    state.from_chain = res.from_chain
-    state.to_chain = res.to_chain
-    state.from_amount = res.from_amount
-    state.to_amount = res.to_amount
-    state.tao_amount = res.tao_amount
-    state.user_from_address = res.from_addr
-    state.reserved_until_block = res.reserved_until
-    if not state.request_hash:
-        state.request_hash = res.hash
-    # Miner-commitment fields (rate, miner source addr, uid) live in
-    # current_miners — best-effort fetch, leave defaults on miss.
-    try:
-        from allways.commitments import read_miner_commitment
-
-        subtensor = getattr(client, 'subtensor', None)
-        metagraph = subtensor.metagraph(state.netuid) if subtensor is not None else None
-        miner_pair = read_miner_commitment(subtensor, state.netuid, state.miner_hotkey, metagraph=metagraph)
-        if miner_pair:
-            state.miner_uid = miner_pair.uid
-            # Commitment is stored canonical (alphabetical chains). For a
-            # reverse-direction swap the miner's receiving address lives in
-            # ``to_address``, not ``from_address`` — keep the side that
-            # matches state.from_chain so view-reservation labels line up.
-            if state.from_chain == miner_pair.from_chain:
-                state.miner_from_address = miner_pair.from_address
-                state.rate_str = miner_pair.rate_str
-            else:
-                state.miner_from_address = miner_pair.to_address
-                state.rate_str = miner_pair.counter_rate_str
-    except Exception:
-        pass
-    # User receives = gross dest amount minus 1% protocol fee.
-    if state.to_amount and not state.user_receives:
-        state.user_receives = apply_fee_deduction(state.to_amount, FEE_DIVISOR)
-    return True
-
-
-def clear_pending_swap() -> None:
-    """Remove the pending swap state file."""
-    PENDING_SWAP_FILE.unlink(missing_ok=True)
-
-
-def mark_pending_swap_tx_sent(tx_hash: str) -> None:
-    """Record that the source-chain tx has been broadcast for the pending swap.
-
-    Best-effort — silently no-ops when the pending file is missing or the hash
-    is empty. Without this, `alw view reservation` keeps instructing the user
-    to send funds even after they already have, and the wizard's polling /
-    Ctrl+C exit paths leave that state behind.
-    """
-    tx_hash = (tx_hash or '').strip()
-    if not tx_hash:
-        return
-    state = load_pending_swap()
-    if not state:
-        return
-    state.from_tx_hash = tx_hash
-    save_pending_swap(state)
-
-
-# Fallback when the contract's reservation TTL can't be read. Mirrors the
-# contract default (see ``reservation_ttl`` init in
-# allways/smart-contracts/ink/lib.rs); update both together.
-_DEFAULT_RESERVATION_TTL_BLOCKS = 50  # ~10 min
-
-
-@dataclass
-class ReservationStatus:
-    """Result of reconciling pending_swap.json against on-chain state.
-
-    ``kind`` is one of:
-      - ``ours_active``: reservation still on chain and matches our local row
-      - ``our_swap``: reservation already advanced into a swap on the same
-        miner that matches our user addresses; ``swap`` is set
-      - ``replaced``: a different reservation now occupies the miner — ours
-        is gone (expired or consumed-and-completed)
-      - ``expired``: no reservation on chain and no matching active swap
-      - ``rpc_error``: contract reads failed; caller should not act on result
-    """
-
-    kind: str
-    swap: Optional[Swap] = None
-    reserved_until: int = 0
-
-
-def probe_pending_reservation(client, state: PendingSwapState, current_block: int) -> ReservationStatus:
-    """Reconcile a saved pending_swap.json against on-chain state.
-
-    The naive ``reserved_until > current_block`` check (the old logic) breaks
-    in two ways:
-
-      1. ``finalize_extend_reservation`` advances ``reserved_until`` in-place
-         when a validator's optimistic propose lands, so the saved value can
-         legitimately lag the on-chain value. Equality with the saved block is wrong.
-      2. After our reservation is consumed (vote_initiate) and the resulting
-         swap completes, the swap is pruned but the miner can be re-reserved
-         by another user. The miner's new ``reserved_until`` is in the future
-         — the old check then mis-reports our stale local row as "ACTIVE".
-
-    Resolution order (strongest signal first):
-
-      Step 1 — probe ``get_miner_active_swaps`` and match by user addresses.
-        Survives extension and into FULFILLED. If hit, our reservation has
-        already advanced into a swap.
-
-      Step 2 — read on-chain reservation. No row + no swap match means our
-        reservation is gone (expired or consumed-and-pruned) — ``expired``.
-
-      Step 3 — ``reserved_until`` is in the past. The contract leaves expired
-        rows in the map until the miner is re-reserved (lazy clear in
-        ``vote_reserve``), so a non-zero stale row is still expired — ours
-        if amounts match, someone else's if not, but either way the local
-        file is dead. ``expired``.
-
-      Step 4 — if a row exists but the amounts differ from our saved state,
-        it's someone else's reservation — ``replaced``.
-
-      Step 5 — amounts match but ``reserved_until`` has grown beyond what
-        the optimistic-extension flow could legitimately push it to: each
-        finalize bumps reserved_until by at most ``MAX_EXTENSION_BLOCKS``,
-        and the contract caps the count at ``MAX_EXTENSIONS_PER_RESERVATION``.
-        So total growth from our saved value is bounded by their product;
-        anything beyond is a replacement that happens to share our amounts —
-        ``replaced``.
-
-      Step 6 — within tolerance: ``ours_active``.
-    """
-    # Cheap-bool short-circuit: skip the swap-range scan when the miner has
-    # no active swap, which is the common case for the status/swap-now path.
-    try:
-        if client.get_miner_has_active_swap(state.miner_hotkey):
-            for swap in client.get_miner_active_swaps(state.miner_hotkey):
-                if swap.user_from_address == state.user_from_address and swap.user_to_address == state.receive_address:
-                    return ReservationStatus(kind='our_swap', swap=swap)
-    except ContractError:
-        return ReservationStatus(kind='rpc_error')
-
-    # Strongest signal: the contract returns the full Reservation including the
-    # request_hash. If our saved hash matches, the row is ours full stop. Saved
-    # state from before request_hash was tracked falls through to the legacy
-    # amount-based reconciliation below.
-    if state.request_hash:
-        try:
-            on_chain = client.get_reservation(state.miner_hotkey)
-        except ContractError:
-            return ReservationStatus(kind='rpc_error')
-        if on_chain is None or on_chain.reserved_until < current_block:
-            return ReservationStatus(kind='expired')
-        if on_chain.hash != state.request_hash:
-            return ReservationStatus(kind='replaced')
-        return ReservationStatus(kind='ours_active', reserved_until=on_chain.reserved_until)
-
-    try:
-        reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-        on_chain = client.get_reservation_data(state.miner_hotkey)
-    except ContractError:
-        return ReservationStatus(kind='rpc_error')
-
-    if reserved_until == 0 or on_chain is None or reserved_until < current_block:
-        return ReservationStatus(kind='expired')
-
-    chain_tao, chain_from, chain_to = on_chain
-    if chain_tao != state.tao_amount or chain_from != state.from_amount or chain_to != state.to_amount:
-        return ReservationStatus(kind='replaced')
-
-    max_extension_growth = MAX_EXTENSIONS_PER_RESERVATION * MAX_EXTENSION_BLOCKS
-    if reserved_until - state.reserved_until_block > max_extension_growth:
-        return ReservationStatus(kind='replaced')
-
-    return ReservationStatus(kind='ours_active', reserved_until=reserved_until)
-
-
-def resolve_source_tx_block(
-    provider,
-    tx_hash: str,
-    expected_recipient: str,
-    expected_amount: int,
-    subtensor,
-    client,
-    reserved_until_block: int,
-) -> int:
-    """Find the source tx's block so SwapConfirmSynapse can ±3-hint validators.
-
-    Scans far enough back to cover the entire reservation lifetime — a tx can't
-    validly pre-date reservation creation, so that window is the true upper
-    bound. Prints a short status line either way so users aren't left guessing
-    whether the CLI found the tx. Returns the block number or 0 on miss; the
-    caller falls back to the flag-supplied override or a validator-side scan.
-    """
-    try:
-        current_block = subtensor.get_current_block()
-    except Exception as e:
-        # If we can't reach subtensor the lookup can't proceed anyway — bail
-        # honestly rather than fake a current-block guess and crash on the
-        # first verify_transaction RPC.
-        console.print(f'[yellow]Skipping client-side tx lookup — subtensor unreachable ({type(e).__name__}).[/yellow]')
-        return 0
-    try:
-        reservation_ttl = int(client.get_reservation_ttl())
-    except ContractError:
-        reservation_ttl = _DEFAULT_RESERVATION_TTL_BLOCKS
-    # Reservation lifetime so far, plus a few blocks of slack around start.
-    initiated_block = max(0, reserved_until_block - reservation_ttl)
-    max_scan_blocks = max(150, current_block - initiated_block + 10)
-
-    console.print('[dim]Looking up source tx on chain...[/dim]')
-    try:
-        with loading('Scanning...'):
-            tx_info = provider.verify_transaction(
-                tx_hash=tx_hash,
-                expected_recipient=expected_recipient,
-                expected_amount=expected_amount,
-                max_scan_blocks=max_scan_blocks,
-            )
-    except ProviderUnreachableError as e:
-        console.print(f'[yellow]  Provider unreachable ({e}). Validators will scan on their end.[/yellow]')
-        return 0
-
-    if tx_info and tx_info.block_number:
-        console.print(f'[green]  ✓ found at block {tx_info.block_number}[/green]')
-        return int(tx_info.block_number)
-
-    # In lightweight mode there is no local node — the lookup goes through a
-    # remote API (e.g. Blockstream for BTC), so don't claim "your local node".
-    source = (
-        'via lightweight wallet lookup' if getattr(provider, 'mode', None) == 'lightweight' else 'on your local node'
-    )
-    console.print(f'[yellow]  ✗ tx not found in last {max_scan_blocks} blocks {source}.[/yellow]')
-    console.print(
-        '[dim]  Validators will scan too; if they reject, retry with: '
-        '[cyan]alw swap post-tx <hash> --block <N>[/cyan][/dim]'
-    )
-    return 0
-
-
-def find_matching_miners(all_pairs, from_chain: str, to_chain: str):
-    """Filter and normalize miner pairs for a given swap direction (bilateral matching).
-
-    Handles both direct matches and reverse-direction pairs (using counter_rate for the
-    reverse direction). Returns list of MinerPair with source/dest matching the requested
-    direction. For reverse-direction matches, the returned MinerPair carries the full
-    bidirectional view: `rate` is the selected-direction rate, `counter_rate` preserves
-    the original canonical rate so `get_rate_for_direction` still works on the result.
-    """
-    matching = []
-    for p in all_pairs:
-        if p.from_chain == from_chain and p.to_chain == to_chain:
-            if p.rate > 0:
-                matching.append(p)
-        elif p.from_chain == to_chain and p.to_chain == from_chain:
-            rev_rate, rev_rate_str = p.get_rate_for_direction(from_chain)
-            if rev_rate > 0:
-                matching.append(
-                    MinerPair(
-                        uid=p.uid,
-                        hotkey=p.hotkey,
-                        from_chain=p.to_chain,
-                        from_address=p.to_address,
-                        to_chain=p.from_chain,
-                        to_address=p.from_address,
-                        rate=rev_rate,
-                        rate_str=rev_rate_str,
-                        counter_rate=p.rate,
-                        counter_rate_str=p.rate_str,
-                    )
-                )
-    return matching
+    return config, wallet, subtensor, None

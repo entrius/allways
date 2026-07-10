@@ -1,25 +1,74 @@
-"""alw swap post-tx - Submit source transaction hash for a pending swap reservation."""
+"""alw swap post-tx - Confirm a swap by relaying your source-chain deposit to the validators.
+
+After `alw swap now` reserves a miner and you've sent the source funds to that miner's address, this
+command relays the source-tx hash to every serving validator via a ``SwapConfirmSynapse``. Each
+validator independently verifies the deposit against the pinned on-chain ``Reservation`` — recipient =
+the reserved miner address, amount = the reserved amount, and crucially **sender = the reservation's
+pinned taker address** — then submits ``submit_swap_claim`` on-chain (→ ``PendingAttestation``).
+
+Auth model: the confirm carries no taker identity. The relay is signed by a throwaway *ephemeral*
+Bittensor hotkey (``dendrite_lite.get_ephemeral_wallet``) purely as transport — validators do NOT
+blacklist on it. The real proof is the on-chain source deposit itself: it can only have come from the
+taker who won the draw, because ``Reservation.from_addr`` is pinned at reserve time. So anyone may
+relay the confirm, but only the winner's deposit verifies.
+"""
 
 import click
 
-from allways.chain_providers import create_chain_providers
-from allways.cli.dendrite_lite import discover_validators, get_ephemeral_wallet
+from allways.cli.dendrite_lite import (
+    broadcast_synapse,
+    discover_validators,
+    get_ephemeral_wallet,
+)
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    blocks_to_minutes_str,
     clear_pending_swap,
     console,
     get_cli_context,
-    hydrate_pending_swap,
+    get_solana_cli_context,
+    hotkey_bytes_to_ss58,
+    live_unclaimed,
     load_pending_swap,
     loading,
-    mark_pending_swap_tx_sent,
-    print_contract_error,
-    resolve_source_tx_block,
 )
-from allways.cli.swap_commands.swap import from_smallest_unit, poll_for_swap_creation, sign_and_broadcast_confirm
-from allways.constants import NETUID_FINNEY
-from allways.contract_client import ContractError
+from allways.cli.validator_rejections import render_and_aggregate
+from allways.synapses import SwapConfirmSynapse
+
+
+def _find_reservations(client, user, miner_hint, require_user):
+    """Locate the live, unclaimed reservation(s) to confirm.
+
+    Targeted (miner_hint set — an explicit --miner or the stash from `alw swap now`): return that
+    one miner's reservation. Scan (no hint): walk every on-chain Binding (each carries its miner
+    pubkey + hotkey) and collect reservations belonging to this user. ``require_user`` gates the
+    user-match: True for auto-discovery ("find MY reservation"), False for an explicit --miner relay
+    (confirm is permissionless — the on-chain deposit is the auth, not the caller). Returns a list of
+    (miner_pubkey, hotkey_ss58, reservation) so the caller can disambiguate ties.
+    """
+    from solders.pubkey import Pubkey
+
+    def _hotkey(miner_pk):
+        b = client.get_binding(miner_pk)
+        return hotkey_bytes_to_ss58(b.hotkey) if b else ''
+
+    if miner_hint:
+        try:
+            mpk = Pubkey.from_string(miner_hint)
+        except Exception:
+            console.print(f'[red]Invalid miner pubkey: {miner_hint}[/red]')
+            return []
+        resv = client.get_reservation(mpk)
+        if live_unclaimed(resv) and (not require_user or str(resv.user) == str(user)):
+            return [(mpk, _hotkey(mpk), resv)]
+        return []
+
+    found = []
+    for _pda, binding in client.get_all('Binding'):
+        mpk = binding.miner
+        resv = client.get_reservation(mpk)
+        if live_unclaimed(resv) and str(resv.user) == str(user):
+            found.append((mpk, hotkey_bytes_to_ss58(binding.hotkey), resv))
+    return found
 
 
 @click.command('post-tx', cls=StyledCommand, show_disclaimer=True)
@@ -30,144 +79,126 @@ from allways.contract_client import ContractError
     type=int,
     default=0,
     help=(
-        'Override the source-tx block number. Usually unnecessary — the CLI '
-        'looks it up automatically across the whole reservation window. Use '
-        'this only when automatic lookup fails (e.g. running against a node '
-        'that has pruned block bodies, or the tx landed on a different node).'
+        'Override the source-tx slot number. Usually unnecessary — the CLI looks it up '
+        'automatically. Use this only when automatic lookup fails (e.g. the node has pruned the tx).'
     ),
 )
-def post_tx_command(tx_hash: str, tx_block: int):
-    """Submit your source transaction hash for a pending swap reservation.
+@click.option(
+    '--miner',
+    'miner_hint',
+    default=None,
+    help='Miner Solana pubkey to confirm against (disambiguates if you hold multiple reservations).',
+)
+def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
+    """Confirm your swap by relaying the source-tx hash to the validators.
 
-    [dim]Reads reservation context from ~/.allways/pending_swap.json (saved by `alw swap now`).[/dim]
+    [dim]Run this after `alw swap now` reserves a miner and you've sent your source funds to the
+    miner's address. The validators verify the on-chain deposit against your pinned reservation and
+    submit the claim; the miner then fulfils the destination leg.[/dim]
+
+    [dim]Reservation context is read from ~/.allways/pending_swap.json (saved by `alw swap now`); if
+    it's missing the CLI finds your live reservation on-chain.[/dim]
 
     [dim]Examples:
-        $ alw swap post-tx abc123def...
-        $ alw swap post-tx abc123def... --block 12345   (escape hatch)
-        $ alw swap post-tx  (prompts for tx hash)[/dim]
+        $ alw swap post-tx 54foaURhGH...
+        $ alw swap post-tx 54foaURhGH... --miner ER9Jt5...        (pick a specific reservation)
+        $ alw swap post-tx 54foaURhGH... --block 371234567        (escape hatch)[/dim]
     """
-    config, wallet, subtensor, client = get_cli_context()
-    # --netuid handled globally in main.py; config['netuid'] already resolved.
-    netuid = int(config.get('netuid', NETUID_FINNEY))
-
-    # Load pending swap state
-    state = load_pending_swap()
-    if not state:
-        console.print('[red]No pending swap found.[/red]')
-        console.print('[dim]Run `alw swap now` to initiate a swap first.[/dim]')
-        return
-    # Hydrate from contract — local file is the slim user-only set; chains,
-    # amounts, miner addresses are pulled live from get_reservation.
-    hydrate_pending_swap(state, client)
-
-    # Validate reservation is still active on-chain
-    try:
-        with loading('Reading reservation status...'):
-            reserved_until = client.get_miner_reserved_until(state.miner_hotkey)
-            current_block = subtensor.get_current_block()
-    except ContractError as e:
-        print_contract_error('Failed to read reservation status', e)
-        return
-
-    if reserved_until <= current_block:
-        clear_pending_swap()
-        console.print('[red]Reservation has expired.[/red]')
-        console.print('[dim]Run `alw swap now` to start a new swap.[/dim]')
-        return
-
-    remaining = reserved_until - current_block
-    human_amount = from_smallest_unit(state.from_amount, state.from_chain)
-
-    console.print('\n[bold]Pending Swap[/bold]\n')
-    console.print(f'  Pair:    {state.from_chain.upper()} -> {state.to_chain.upper()}')
-    console.print(f'  Send:    {human_amount} {state.from_chain.upper()}')
-    console.print(f'  To:      {state.miner_from_address}')
-    console.print(f'  Miner:   UID {state.miner_uid}')
-    console.print(f'  Expires: ~{remaining} blocks ({blocks_to_minutes_str(remaining)})\n')
-
-    # Get transaction hash
     if not tx_hash:
-        tx_hash = click.prompt('Enter your source transaction hash')
-
-    if not tx_hash or not tx_hash.strip():
-        console.print('[red]Transaction hash is required[/red]')
-        return
-
-    tx_hash = tx_hash.strip()
-    # The user is asserting they've sent funds — record it so that even if
-    # validators reject the confirm, `alw view reservation` reflects reality.
-    mark_pending_swap_tx_sent(tx_hash)
-
-    # Set up chain provider and signing key
-    chain_providers = create_chain_providers(subtensor=subtensor)
-    provider = chain_providers.get(state.from_chain)
-    if not provider:
-        console.print(f'[red]No chain provider for {state.from_chain}[/red]')
-        return
-
-    from_key = wallet.coldkey if state.from_chain == 'tao' else None
-
-    # Resolve the tx's block so validators can ±3-hint rather than scan.
-    # --block wins; otherwise a reservation-wide scan via the shared helper.
-    from_tx_block = tx_block
-    if from_tx_block > 0:
-        console.print(f'[dim]Using --block {from_tx_block} (skipping lookup).[/dim]')
+        tx_hash = click.prompt('Source transaction hash').strip()
     else:
-        from_tx_block = resolve_source_tx_block(
-            provider=provider,
-            tx_hash=tx_hash,
-            expected_recipient=state.miner_from_address,
-            expected_amount=state.from_amount,
-            subtensor=subtensor,
-            client=client,
-            reserved_until_block=reserved_until,
-        )
-
-    # Discover validators
-    with loading('Discovering validators...'):
-        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
-    if not validator_axons:
-        console.print('[red]No validators found on metagraph[/red]')
+        tx_hash = tx_hash.strip()
+    if not tx_hash:
+        console.print('[red]A source transaction hash is required.[/red]')
         return
 
-    ephemeral_wallet = get_ephemeral_wallet()
+    _config, client = get_solana_cli_context(need_keypair=True)
+    user = client.keypair.pubkey()
 
-    # Sign and broadcast confirm synapse
-    accepted, queued, info = sign_and_broadcast_confirm(
-        provider,
-        state.user_from_address,
-        from_key,
-        tx_hash,
-        state.miner_hotkey,
-        state.receive_address,
-        validator_axons,
-        ephemeral_wallet,
-        from_chain=state.from_chain,
-        to_chain=state.to_chain,
-        from_tx_block=from_tx_block,
-        miner_uid=state.miner_uid,
+    # Explicit --miner is a permissionless relay (confirm any live reservation for that miner);
+    # otherwise auto-discover this keypair's own reservation, preferring the stash from `alw swap now`.
+    pending = load_pending_swap() or {}
+    if miner_hint:
+        matches = _find_reservations(client, user, miner_hint, require_user=False)
+    else:
+        matches = _find_reservations(client, user, pending.get('miner'), require_user=True)
+        if not matches and pending.get('miner'):
+            # Stashed miner no longer valid (expired/claimed/superseded) — scan for any live one.
+            matches = _find_reservations(client, user, None, require_user=True)
+
+    if not matches:
+        console.print(
+            '[yellow]No live, unclaimed reservation found for your address.[/yellow]\n'
+            '[dim]Reserve one with `alw swap now` first, and confirm before it expires. '
+            'Check status with `alw view reservation`.[/dim]'
+        )
+        return
+    if len(matches) > 1:
+        console.print('[yellow]You hold multiple live reservations — pick one with --miner <pubkey>:[/yellow]')
+        for mpk, _hotkey, resv in matches:
+            console.print(
+                f'  [cyan]{mpk}[/cyan]  {resv.from_chain}->{resv.to_chain}  send to [dim]{resv.miner_from_addr}[/dim]'
+            )
+        return
+
+    miner_pk, miner_hotkey, resv = matches[0]
+    if not miner_hotkey:
+        console.print(
+            f'[red]Miner {miner_pk} has no verifiable hotkey binding — validators cannot resolve the '
+            'reservation. The miner must `alw miner bind-hotkey` before this swap can be confirmed.[/red]'
+        )
+        return
+
+    # Resolve the source-tx slot as a verification hint (validators can scan without it, but a slot
+    # makes it O(1)). Best-effort: fall back to 0 (server-side lookup) or the --block override.
+    if tx_block == 0:
+        try:
+            info = client.rpc.get_transaction(tx_hash)
+            if info and info.get('slot'):
+                tx_block = int(info['slot'])
+        except Exception:
+            pass
+
+    on_behalf = '' if str(resv.user) == str(user) else f'  [dim](relaying on behalf of {str(resv.user)[:8]}…)[/dim]'
+    console.print(
+        f'\n[bold]Confirming deposit[/bold] for {resv.from_chain.upper()}->{resv.to_chain.upper()} swap{on_behalf}\n'
+        f'  Miner:   [dim]{miner_hotkey[:16]}… ({str(miner_pk)[:8]}…)[/dim]\n'
+        f'  Deposit: [cyan]{tx_hash}[/cyan]{f" [dim](slot {tx_block})[/dim]" if tx_block else ""}\n'
     )
 
-    if accepted == 0:
-        # Translator already printed the headline. Suppress retry hint when the
-        # failure is deterministic — the same tx hash will reject the same way.
-        if not info.deterministic:
-            console.print('[dim]You can retry this command.[/dim]')
+    synapse = SwapConfirmSynapse(
+        reservation_id=miner_hotkey,
+        from_tx_hash=tx_hash,
+        from_tx_proof='',  # Solana: the tx hash is the proof — validators look it up on-chain.
+        from_address=resv.from_addr,
+        from_tx_block=tx_block,
+        to_address=resv.user_to_addr,
+        from_chain=resv.from_chain,
+        to_chain=resv.to_chain,
+    )
+
+    config, _wallet, subtensor, _ = get_cli_context(need_wallet=False)
+    netuid = int(config['netuid'])
+    validator_axons = discover_validators(subtensor, netuid)
+    if not validator_axons:
+        console.print('[red]No serving validators found on the metagraph.[/red]')
         return
 
-    if queued > 0 and queued == accepted:
-        console.print('\n[green]Validators queued your transaction for auto-confirmation.[/green]')
-        console.print(
-            '[dim]Swap will be initiated once confirmations are reached. Check progress: alw view reservation[/dim]\n'
-        )
-        return
+    wallet = get_ephemeral_wallet()  # transport-only throwaway hotkey; auth is the on-chain deposit
+    with loading(f'Relaying deposit to {len(validator_axons)} validator(s)...'):
+        responses = broadcast_synapse(wallet, validator_axons, synapse, timeout=60.0)
 
-    # Poll for swap creation
-    swap_id = poll_for_swap_creation(client, state.miner_hotkey)
-    if swap_id is not None:
+    info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': miner_hotkey})
+    if info.accepted:
         clear_pending_swap()
-        console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
-        console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
+        console.print(
+            f'\n[green]Deposit confirmed by {info.accepted} validator(s).[/green] '
+            'The miner will fulfil the destination leg once the claim is attested.\n'
+            '[dim]Track it with `alw view swap`.[/dim]'
+        )
     else:
-        console.print('[yellow]Votes submitted but swap not yet on-chain. Check: alw view reservation[/yellow]')
-        console.print('[dim]State file kept — you can retry this command.[/dim]\n')
+        console.print(
+            '\n[yellow]No validator accepted the confirm yet.[/yellow]\n'
+            '[dim]Re-run `alw swap post-tx` with the same hash in a moment. If it keeps failing, '
+            'check the reservation is still active with `alw view reservation`.[/dim]'
+        )

@@ -1,184 +1,311 @@
-"""alw admin - Contract administration commands (owner-only)."""
+"""alw admin - Program administration commands (admin-only, signed by the Solana keypair)."""
+
+import os
 
 import click
+from solders.pubkey import Pubkey
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    blocks_to_minutes_str,
+    FINITE_FLOAT,
     console,
-    from_rao,
-    get_cli_context,
-    is_valid_ss58,
+    fail,
+    from_lamports,
+    get_solana_cli_context,
     loading,
-    print_contract_error,
-    to_rao,
+    secs_str,
+    to_lamports,
 )
-from allways.contract_client import ContractError
+from allways.solana.client import SolanaClientError
+
+
+def _parse_pubkey(s: str):
+    try:
+        return Pubkey.from_string(s)
+    except Exception:
+        fail(f'Not a valid Solana pubkey: {s}')
+
+
+def _confirm(prompt: str) -> bool:
+    """Confirm interactively, unless a group-level `admin --yes` (or ALW_ASSUME_YES env) opts out — this
+    is what makes the admin commands scriptable/headless without dropping the interactive safety prompt."""
+    ctx = click.get_current_context(silent=True)
+    if (ctx is not None and ctx.obj and ctx.obj.get('yes')) or os.environ.get('ALW_ASSUME_YES'):
+        return True
+    return click.confirm(prompt)
 
 
 def _run_setter(title, getter, setter, noun, format_current, new_display, success_msg):
-    _, wallet, _, client = get_cli_context()
+    _, client = get_solana_cli_context()
     try:
         current = getter(client)
-    except ContractError as e:
-        print_contract_error(f'Failed to read {noun}', e)
-        return
+    except SolanaClientError as e:
+        fail(f'Failed to read {noun}: {e}')
     console.print(f'\n[bold]{title}[/bold]\n')
     console.print(f'  Current: {format_current(current)}')
     console.print(f'  New:     {new_display}\n')
-    if not click.confirm(f'Confirm updating {noun}?'):
+    if not _confirm(f'Confirm updating {noun}?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
     try:
         with loading('Submitting transaction...'):
-            setter(client, wallet)
+            setter(client)
         console.print(f'[green]{success_msg}[/green]\n')
-    except ContractError as e:
-        print_contract_error(f'Failed to set {noun}', e)
+    except SolanaClientError as e:
+        fail(f'Failed to set {noun}: {e}')
 
 
 @click.group('admin', cls=StyledGroup, show_disclaimer=True)
-def admin_group():
-    """Contract administration commands (owner-only)."""
-    pass
+@click.option('--yes', '-y', 'assume_yes', is_flag=True, help='Skip confirmation prompts (for scripting).')
+@click.pass_context
+def admin_group(ctx, assume_yes):
+    """Program administration commands (admin-only).
+
+    [dim]Pass --yes before the subcommand (e.g. `alw admin --yes set-max-swap 50`) or set
+    ALW_ASSUME_YES=1 to run headless.[/dim]"""
+    ctx.obj = {'yes': assume_yes}
 
 
 @admin_group.command('set-timeout', show_disclaimer=True)
-@click.argument('blocks', type=int)
-def set_timeout(blocks: int):
-    """Set the fulfillment timeout in blocks (minimum 10).
+@click.argument('secs', type=int)
+def set_timeout(secs: int):
+    """Set the fulfillment timeout in seconds (minimum 60).
 
     [dim]Examples:
-        $ alw admin set-timeout 300[/dim]
+        $ alw admin set-timeout 600[/dim]
     """
-    if blocks < 10:
-        console.print('[red]Blocks must be >= 10 (contract minimum)[/red]')
-        return
+    if secs < 60:
+        fail('Seconds must be >= 60')
     _run_setter(
         title='Set Fulfillment Timeout',
-        getter=lambda c: c.get_fulfillment_timeout(),
-        setter=lambda c, w: c.set_fulfillment_timeout(wallet=w, blocks=blocks),
+        getter=lambda c: c.get_config().fulfillment_timeout_secs,
+        setter=lambda c: c.set_fulfillment_timeout(secs),
         noun='fulfillment timeout',
-        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
-        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
-        success_msg=f'Fulfillment timeout set to {blocks} blocks',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Fulfillment timeout set to {secs_str(secs)}',
     )
 
 
 @admin_group.command('set-reservation-ttl', show_disclaimer=True)
-@click.argument('blocks', type=int)
-def set_reservation_ttl(blocks: int):
-    """Set the reservation TTL in blocks (how long a user has to send funds).
+@click.argument('secs', type=int)
+def set_reservation_ttl(secs: int):
+    """Set the reservation TTL in seconds (how long a user has to send funds).
 
     [dim]Examples:
-        $ alw admin set-reservation-ttl 50[/dim]
+        $ alw admin set-reservation-ttl 600[/dim]
     """
-    if blocks <= 0:
-        console.print('[red]Blocks must be positive[/red]')
-        return
+    if secs <= 0:
+        fail('Seconds must be positive')
     _run_setter(
         title='Set Reservation TTL',
-        getter=lambda c: c.get_reservation_ttl(),
-        setter=lambda c, w: c.set_reservation_ttl(wallet=w, blocks=blocks),
+        getter=lambda c: c.get_config().reservation_ttl_secs,
+        setter=lambda c: c.set_reservation_ttl(secs),
         noun='reservation TTL',
-        format_current=lambda v: f'{v} blocks ({blocks_to_minutes_str(v)})',
-        new_display=f'{blocks} blocks ({blocks_to_minutes_str(blocks)})',
-        success_msg=f'Reservation TTL set to {blocks} blocks',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Reservation TTL set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-reservation-fee', show_disclaimer=True)
+@click.argument('amount_sol', type=FINITE_FLOAT)
+def set_reservation_fee(amount_sol: float):
+    """Set the flat per-request reservation fee (in SOL).
+
+    [dim]Examples:
+        $ alw admin set-reservation-fee 0.001[/dim]
+    """
+    if amount_sol < 0:
+        fail('Amount must be non-negative')
+    lamports = to_lamports(amount_sol)
+    _run_setter(
+        title='Set Reservation Fee',
+        getter=lambda c: c.get_config().reservation_fee_lamports,
+        setter=lambda c: c.set_reservation_fee(lamports),
+        noun='reservation fee',
+        format_current=lambda v: f'{from_lamports(v):.6f} SOL',
+        new_display=f'{amount_sol:.6f} SOL',
+        success_msg=f'Reservation fee set to {amount_sol:.6f} SOL',
+    )
+
+
+@admin_group.command('set-pool-window', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_pool_window(secs: int):
+    """Set the reservation-pool window in seconds (how long a pool collects requests before the draw).
+
+    [dim]Examples:
+        $ alw admin set-pool-window 60[/dim]
+    """
+    if secs <= 0:
+        fail('Seconds must be positive')
+    _run_setter(
+        title='Set Pool Window',
+        getter=lambda c: c.get_config().pool_window_secs,
+        setter=lambda c: c.set_pool_window(secs),
+        noun='pool window',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Pool window set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-finalize-window', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_finalize_window(secs: int):
+    """Set the post-draw finalize window in seconds (how long the seat winner has to fill its reservation).
+
+    [dim]The draw creates an UNFILLED reservation; only its router may call finalize_reservation, and only
+    within this window. Too short and a slow RPC round-trip forfeits the seat (fee spent, miner held busy
+    until reaped). The contract clamps this to [15, 300].[/dim]
+
+    [dim]Examples:
+        $ alw admin set-finalize-window 180[/dim]
+    """
+    if not 15 <= secs <= 300:
+        fail('Seconds must be within [15, 300] (the contract clamps this range)')
+    _run_setter(
+        title='Set Finalize Window',
+        getter=lambda c: c.get_config().finalize_window_secs,
+        setter=lambda c: c.set_finalize_window(secs),
+        noun='finalize window',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Finalize window set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-weights-interval', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_weights_interval(secs: int):
+    """Set the minimum interval between validator weight updates (seconds).
+
+    [dim]Examples:
+        $ alw admin set-weights-interval 1200[/dim]
+    """
+    if secs <= 0:
+        fail('Seconds must be positive')
+    _run_setter(
+        title='Set Weights Update Interval',
+        getter=lambda c: c.get_config().weights_update_min_interval_secs,
+        setter=lambda c: c.set_weights_update_min_interval(secs),
+        noun='weights update interval',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Weights update interval set to {secs_str(secs)}',
+    )
+
+
+@admin_group.command('set-max-extension', show_disclaimer=True)
+@click.argument('secs', type=int)
+def set_max_extension(secs: int):
+    """Set the max total timeout/reservation extension a single swap may accrue (seconds).
+
+    [dim]Examples:
+        $ alw admin set-max-extension 3600[/dim]
+    """
+    if secs < 0:
+        fail('Seconds must be non-negative')
+    _run_setter(
+        title='Set Max Total Extension',
+        getter=lambda c: c.get_config().max_total_extension_secs,
+        setter=lambda c: c.set_max_total_extension(secs),
+        noun='max total extension',
+        format_current=lambda v: secs_str(v),
+        new_display=secs_str(secs),
+        success_msg=f'Max total extension set to {secs_str(secs)}',
     )
 
 
 @admin_group.command('set-min-collateral', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def set_min_collateral(amount_tao: float):
-    """Set the minimum collateral amount (in TAO).
+@click.argument('amount_sol', type=FINITE_FLOAT)
+def set_min_collateral(amount_sol: float):
+    """Set the minimum collateral amount (in SOL).
 
     [dim]Examples:
         $ alw admin set-min-collateral 2.0[/dim]
     """
-    if amount_tao <= 0:
-        console.print('[red]Amount must be positive[/red]')
-        return
-    amount_rao = to_rao(amount_tao)
+    if amount_sol <= 0:
+        fail('Amount must be positive')
+    lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Minimum Collateral',
-        getter=lambda c: c.get_min_collateral(),
-        setter=lambda c, w: c.set_min_collateral_amount(wallet=w, amount_rao=amount_rao),
+        getter=lambda c: c.get_config().min_collateral,
+        setter=lambda c: c.set_min_collateral(lamports),
         noun='minimum collateral',
-        format_current=lambda v: f'{from_rao(v):.4f} TAO',
-        new_display=f'{amount_tao:.4f} TAO',
-        success_msg=f'Minimum collateral set to {amount_tao:.4f} TAO',
+        format_current=lambda v: f'{from_lamports(v):.4f} SOL',
+        new_display=f'{amount_sol:.4f} SOL',
+        success_msg=f'Minimum collateral set to {amount_sol:.4f} SOL',
     )
 
 
 @admin_group.command('set-max-collateral', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def set_max_collateral(amount_tao: float):
-    """Set the maximum collateral amount (in TAO). Use 0 to remove the cap.
+@click.argument('amount_sol', type=FINITE_FLOAT)
+def set_max_collateral(amount_sol: float):
+    """Set the maximum collateral amount (in SOL). Use 0 to remove the cap.
 
     [dim]Examples:
         $ alw admin set-max-collateral 100.0
         $ alw admin set-max-collateral 0[/dim]
     """
-    if amount_tao < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
-    amount_rao = to_rao(amount_tao)
+    if amount_sol < 0:
+        fail('Amount must be non-negative')
+    lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Maximum Collateral',
-        getter=lambda c: c.get_max_collateral(),
-        setter=lambda c, w: c.set_max_collateral_amount(wallet=w, amount_rao=amount_rao),
+        getter=lambda c: c.get_config().max_collateral,
+        setter=lambda c: c.set_max_collateral(lamports),
         noun='maximum collateral',
-        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (unlimited)" if v == 0 else ""}',
-        new_display=f'{amount_tao:.4f} TAO{" (unlimited)" if amount_rao == 0 else ""}',
-        success_msg=f'Maximum collateral set to {amount_tao:.4f} TAO',
+        format_current=lambda v: f'{from_lamports(v):.4f} SOL{" (unlimited)" if v == 0 else ""}',
+        new_display=f'{amount_sol:.4f} SOL{" (unlimited)" if lamports == 0 else ""}',
+        success_msg=f'Maximum collateral set to {amount_sol:.4f} SOL',
     )
 
 
 @admin_group.command('set-min-swap', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def set_min_swap(amount_tao: float):
-    """Set the minimum swap amount in TAO. Use 0 to remove the minimum.
+@click.argument('amount_sol', type=FINITE_FLOAT)
+def set_min_swap(amount_sol: float):
+    """Set the minimum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
 
     [dim]Examples:
         $ alw admin set-min-swap 1.0
         $ alw admin set-min-swap 0[/dim]
     """
-    if amount_tao < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
-    amount_rao = to_rao(amount_tao)
+    if amount_sol < 0:
+        fail('Amount must be non-negative')
+    lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Minimum Swap Amount',
-        getter=lambda c: c.get_min_swap_amount(),
-        setter=lambda c, w: c.set_min_swap_amount(wallet=w, amount_rao=amount_rao),
+        getter=lambda c: c.get_config().min_swap_amount,
+        setter=lambda c: c.set_min_swap_amount(lamports),
         noun='minimum swap amount',
-        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (no minimum)" if v == 0 else ""}',
-        new_display=f'{amount_tao:.4f} TAO{" (no minimum)" if amount_rao == 0 else ""}',
-        success_msg=f'Minimum swap amount set to {amount_tao:.4f} TAO',
+        format_current=lambda v: f'{from_lamports(v):.4f} SOL{" (no minimum)" if v == 0 else ""}',
+        new_display=f'{amount_sol:.4f} SOL{" (no minimum)" if lamports == 0 else ""}',
+        success_msg=f'Minimum swap amount set to {amount_sol:.4f} SOL',
     )
 
 
 @admin_group.command('set-max-swap', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def set_max_swap(amount_tao: float):
-    """Set the maximum swap amount in TAO. Use 0 to remove the maximum.
+@click.argument('amount_sol', type=FINITE_FLOAT)
+def set_max_swap(amount_sol: float):
+    """Set the maximum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
 
     [dim]Examples:
         $ alw admin set-max-swap 50.0
         $ alw admin set-max-swap 0[/dim]
     """
-    if amount_tao < 0:
-        console.print('[red]Amount must be non-negative[/red]')
-        return
-    amount_rao = to_rao(amount_tao)
+    if amount_sol < 0:
+        fail('Amount must be non-negative')
+    lamports = to_lamports(amount_sol)
     _run_setter(
         title='Set Maximum Swap Amount',
-        getter=lambda c: c.get_max_swap_amount(),
-        setter=lambda c, w: c.set_max_swap_amount(wallet=w, amount_rao=amount_rao),
+        getter=lambda c: c.get_config().max_swap_amount,
+        setter=lambda c: c.set_max_swap_amount(lamports),
         noun='maximum swap amount',
-        format_current=lambda v: f'{from_rao(v):.4f} TAO{" (no maximum)" if v == 0 else ""}',
-        new_display=f'{amount_tao:.4f} TAO{" (no maximum)" if amount_rao == 0 else ""}',
-        success_msg=f'Maximum swap amount set to {amount_tao:.4f} TAO',
+        format_current=lambda v: f'{from_lamports(v):.4f} SOL{" (no maximum)" if v == 0 else ""}',
+        new_display=f'{amount_sol:.4f} SOL{" (no maximum)" if lamports == 0 else ""}',
+        success_msg=f'Maximum swap amount set to {amount_sol:.4f} SOL',
     )
 
 
@@ -191,12 +318,11 @@ def set_threshold(percent: int):
         $ alw admin set-threshold 67[/dim]
     """
     if percent <= 0 or percent > 100:
-        console.print('[red]Threshold must be 1-100[/red]')
-        return
+        fail('Threshold must be 1-100')
     _run_setter(
         title='Set Consensus Threshold',
-        getter=lambda c: c.get_consensus_threshold(),
-        setter=lambda c, w: c.set_consensus_threshold(wallet=w, percent=percent),
+        getter=lambda c: c.get_config().consensus_threshold_percent,
+        setter=lambda c: c.set_consensus_threshold(percent),
         noun='consensus threshold',
         format_current=lambda v: f'{v}%',
         new_display=f'{percent}%',
@@ -204,210 +330,132 @@ def set_threshold(percent: int):
     )
 
 
+def _is_validator(config, pubkey: Pubkey) -> bool:
+    target = bytes(pubkey)
+    return any(bytes(v.key) == target for v in config.validators)
+
+
 @admin_group.command('add-vali', show_disclaimer=True)
-@click.argument('hotkey', type=str)
-def add_vali(hotkey: str):
-    """Add a validator to the contract.
+@click.argument('pubkey', type=str)
+@click.option('--weight', default=1, type=int, help='Stake-draw weight for the Phase-9 lottery (default 1)')
+def add_vali(pubkey: str, weight: int):
+    """Add a validator to the program (by Solana pubkey).
 
     [dim]Examples:
-        $ alw admin add-vali 5Cxyz...[/dim]
+        $ alw admin add-vali <pubkey> --weight 1[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    pk = _parse_pubkey(pubkey)
+    _, client = get_solana_cli_context()
 
     try:
-        already_registered = client.is_validator(hotkey)
-    except ContractError as e:
-        print_contract_error('Failed to check validator status', e)
-        return
+        already = _is_validator(client.get_config(), pk)
+    except SolanaClientError as e:
+        fail(f'Failed to read validator set: {e}')
 
     console.print('\n[bold]Add Validator[/bold]\n')
-    console.print(f'  Hotkey: {hotkey}')
-
-    if already_registered:
-        console.print('  [yellow]Warning: This hotkey is already a registered validator[/yellow]')
-
+    console.print(f'  Pubkey: {pk}')
+    console.print(f'  Weight: {weight}')
+    if already:
+        console.print('  [yellow]Warning: this pubkey is already a registered validator[/yellow]')
     console.print()
 
-    if not click.confirm('Confirm adding validator?'):
+    if not _confirm('Confirm adding validator?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
         with loading('Submitting transaction...'):
-            client.add_validator(wallet=wallet, validator=hotkey)
-        console.print(f'[green]Validator {hotkey} added[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to add validator', e)
+            client.add_validator(pk, weight)
+        console.print(f'[green]Validator {pk} added[/green]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to add validator: {e}')
 
 
 @admin_group.command('remove-vali', show_disclaimer=True)
-@click.argument('hotkey', type=str)
-def remove_vali(hotkey: str):
-    """Remove a validator from the contract.
+@click.argument('pubkey', type=str)
+def remove_vali(pubkey: str):
+    """Remove a validator from the program (by Solana pubkey).
 
     [dim]Examples:
-        $ alw admin remove-vali 5Cxyz...[/dim]
+        $ alw admin remove-vali <pubkey>[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    pk = _parse_pubkey(pubkey)
+    _, client = get_solana_cli_context()
 
     try:
-        is_registered = client.is_validator(hotkey)
-    except ContractError as e:
-        print_contract_error('Failed to check validator status', e)
-        return
+        registered = _is_validator(client.get_config(), pk)
+    except SolanaClientError as e:
+        fail(f'Failed to read validator set: {e}')
 
     console.print('\n[bold]Remove Validator[/bold]\n')
-    console.print(f'  Hotkey: {hotkey}')
-
-    if not is_registered:
-        console.print('  [yellow]Warning: This hotkey is not a registered validator[/yellow]')
-
+    console.print(f'  Pubkey: {pk}')
+    if not registered:
+        console.print('  [yellow]Warning: this pubkey is not a registered validator[/yellow]')
     console.print()
 
-    if not click.confirm('Confirm removing validator?'):
+    if not _confirm('Confirm removing validator?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
         with loading('Submitting transaction...'):
-            client.remove_validator(wallet=wallet, validator=hotkey)
-        console.print(f'[green]Validator {hotkey} removed[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to remove validator', e)
+            client.remove_validator(pk)
+        console.print(f'[green]Validator {pk} removed[/green]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to remove validator: {e}')
 
 
-@admin_group.command('recycle-fees', show_disclaimer=True)
-def recycle_fees():
-    """Recycle accumulated fees. Pre-latch: transfers to the custodial
-    fallback. Post-latch (after `enable-chain-ext`): dispatches via the
-    subtensor `add_stake_recycle` chain extension.
+@admin_group.command('withdraw-treasury', show_disclaimer=True)
+@click.argument('recipient', type=str, required=False)
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in SOL (default: withdraw the full balance)')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def withdraw_treasury(recipient: str | None, amount: float | None, yes: bool):
+    """Withdraw accrued protocol fees from the treasury to the admin wallet.
 
-    [dim]Examples:
-        $ alw admin recycle-fees[/dim]
+    [dim]Replaces the ink! fee-recycle: on Solana fees accrue in a treasury PDA the admin draws down.
+    The contract pins the recipient to the admin; onward distribution is a second, admin-signed hop.
+
+    Examples:
+        $ alw admin withdraw-treasury
+        $ alw admin withdraw-treasury --amount 1.5[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    _, client = get_solana_cli_context()
 
     try:
-        accumulated = client.get_accumulated_fees()
-        custodial = client.get_recycle_address()
-        staking_hotkey = client.get_staking_hotkey()
-        netuid = client.get_netuid()
-        latched = client.get_chain_ext_enabled()
-        total_recycled = client.get_total_recycled_fees()
-    except ContractError as e:
-        print_contract_error('Failed to read fee state', e)
-        return
+        config = client.get_config()
+        treasury = client.get_treasury()
+    except SolanaClientError as e:
+        fail(f'Failed to read config/treasury: {e}')
+    admin_pk = config.admin
 
-    console.print('\n[bold]Recycle Fees[/bold]\n')
-    console.print(f'  Amount:       {from_rao(accumulated):.6f} TAO')
-    if latched:
-        console.print(f'  Path:         chain extension → hotkey {staking_hotkey} on netuid {netuid}')
-    else:
-        console.print(f'  Path:         custodial transfer → {custodial}')
-        console.print(
-            '  [dim]Chain extension not latched yet (run `alw admin enable-chain-ext` once subtensor PR #2560 is live).[/dim]'
+    pk = _parse_pubkey(recipient) if recipient is not None else admin_pk
+    if pk != admin_pk:
+        fail(
+            f'The contract only allows treasury withdrawals to the admin ({admin_pk}). Omit RECIPIENT, or move the funds onward from the admin wallet afterwards.'
         )
-    console.print(f'  Total recycled so far: {from_rao(total_recycled):.6f} TAO\n')
+    total = treasury.total if treasury is not None else 0
 
-    if accumulated == 0:
-        console.print('[yellow]No fees to recycle.[/yellow]')
-        return
+    lamports = to_lamports(amount) if amount is not None else total
+    console.print('\n[bold]Withdraw Treasury[/bold]\n')
+    console.print(f'  Accrued:   {from_lamports(total):.6f} SOL')
+    console.print(f'  Withdraw:  {from_lamports(lamports):.6f} SOL')
+    console.print(f'  Recipient: {pk}\n')
 
-    if not click.confirm('Confirm recycling fees?'):
+    if lamports <= 0:
+        fail('Nothing to withdraw (treasury is empty or amount is zero).')
+    if lamports > total:
+        fail('Requested amount exceeds the accrued treasury balance.')
+
+    if not yes and not _confirm('Confirm withdrawing treasury fees?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
         with loading('Submitting transaction...'):
-            client.recycle_fees(wallet=wallet)
-        console.print(f'[green]Recycled {from_rao(accumulated):.6f} TAO[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to recycle fees', e)
-
-
-@admin_group.command('enable-chain-ext', show_disclaimer=True)
-def enable_chain_ext():
-    """One-way latch: switch `recycle_fees` from the custodial fallback to
-    the subtensor `add_stake_recycle` chain extension. Owner-only.
-
-    Run this once subtensor PR #2560 is live on the network this contract
-    is deployed to AND `staking_hotkey` is registered on `netuid`.
-    Cannot be undone — the contract is non-upgradeable.
-
-    [dim]Examples:
-        $ alw admin enable-chain-ext[/dim]
-    """
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        latched = client.get_chain_ext_enabled()
-        staking_hotkey = client.get_staking_hotkey()
-        netuid = client.get_netuid()
-    except ContractError as e:
-        print_contract_error('Failed to read latch state', e)
-        return
-
-    if latched:
-        console.print('[yellow]Chain extension already latched. Nothing to do.[/yellow]')
-        return
-
-    console.print('\n[bold]Enable Chain Extension[/bold]\n')
-    console.print(f'  Staking hotkey: {staking_hotkey}')
-    console.print(f'  Netuid:         {netuid}')
-    console.print('  [red]This is one-way. After this lands the custodial fallback is dead.[/red]\n')
-
-    if not click.confirm('Confirm latching the chain extension?'):
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.enable_chain_ext(wallet=wallet)
-        console.print('[green]Chain extension latched.[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to latch chain extension', e)
-
-
-@admin_group.command('transfer-ownership', show_disclaimer=True)
-@click.argument('account_id', type=str)
-def transfer_ownership(account_id: str):
-    """Transfer contract ownership to a new account. This is irreversible.
-
-    [dim]Examples:
-        $ alw admin transfer-ownership 5Cxyz...[/dim]
-    """
-    if not is_valid_ss58(account_id):
-        console.print('[red]Not a valid SS58 address[/red]')
-        return
-
-    _, wallet, _, client = get_cli_context()
-
-    try:
-        current_owner = client.get_owner()
-    except ContractError as e:
-        print_contract_error('Failed to read current owner', e)
-        return
-
-    if current_owner == account_id:
-        console.print('[yellow]This account is already the owner. Nothing to do.[/yellow]')
-        return
-
-    console.print('\n[bold red]Transfer Ownership[/bold red]\n')
-    console.print(f'  Current owner: {current_owner}')
-    console.print(f'  New owner:     {account_id}')
-    console.print('\n  [bold red]WARNING: This action is irreversible![/bold red]\n')
-
-    confirmation = click.prompt('Type "TRANSFER" to confirm')
-    if confirmation != 'TRANSFER':
-        console.print('[yellow]Cancelled[/yellow]')
-        return
-
-    try:
-        with loading('Submitting transaction...'):
-            client.transfer_ownership(wallet=wallet, new_owner=account_id)
-        console.print(f'[green]Ownership transferred to {account_id}[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to transfer ownership', e)
+            client.withdraw_treasury(pk, lamports)
+        console.print(f'[green]Withdrew {from_lamports(lamports):.6f} SOL to {pk}[/green]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to withdraw treasury: {e}')
 
 
 @click.group('danger', cls=StyledGroup, show_disclaimer=True)
@@ -418,79 +466,59 @@ def danger_group():
 
 @danger_group.command('halt', show_disclaimer=True)
 def halt_system():
-    """Halt the system — blocks all new swap reservations.
+    """Halt the system — blocks new deposits, activations, and reservation pools.
 
-    [dim]Existing in-flight swaps will continue through their lifecycle.[/dim]
+    [dim]Existing in-flight swaps continue through their lifecycle.
 
-    [dim]Examples:
+    Examples:
         $ alw admin danger halt[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    _, client = get_solana_cli_context()
 
-    try:
-        already_halted = client.get_halted()
-    except ContractError as e:
-        print_contract_error('Failed to read halt status', e)
-        return
-
-    if already_halted:
-        console.print('[yellow]System is already halted[/yellow]')
-        return
-
-    try:
-        active_swaps = client.get_active_swaps()
-    except ContractError:
-        active_swaps = []
-
+    # Do NOT gate on a pre-read of `halted` — against a load-balanced RPC a stale node can
+    # misreport the state and block a legitimate halt. Just submit; the on-chain state is the
+    # source of truth (setting halted=true when already halted is a harmless no-op).
     console.print('\n[bold red]Halt System[/bold red]\n')
-    console.print('  This will block all new swap reservations.')
-    console.print('  Existing swaps will continue to completion.\n')
-    console.print(f'  In-flight swaps that will be unaffected: {len(active_swaps)}\n')
+    console.print('  This blocks new deposits / activations / reservation pools.')
+    console.print('  Existing swaps continue to completion.\n')
 
-    if not click.confirm('Confirm halting the system?'):
+    if not _confirm('Confirm halting the system?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
         with loading('Submitting transaction...'):
-            client.set_halted(wallet=wallet, halted=True)
-        console.print('[red]System is now halted — no new reservations[/red]\n')
-    except ContractError as e:
-        print_contract_error('Failed to halt system', e)
+            client.set_halted(True)
+        console.print('[red]System is now halted[/red]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to halt system: {e}')
 
 
 @danger_group.command('resume', show_disclaimer=True)
 def resume_system():
-    """Resume the system — allows new swap reservations again.
+    """Resume the system — allows new deposits, activations, and pools again.
 
     [dim]Examples:
         $ alw admin danger resume[/dim]
     """
-    _, wallet, _, client = get_cli_context()
+    _, client = get_solana_cli_context()
 
-    try:
-        is_halted = client.get_halted()
-    except ContractError as e:
-        print_contract_error('Failed to read halt status', e)
-        return
-
-    if not is_halted:
-        console.print('[yellow]System is not halted[/yellow]')
-        return
-
+    # Do NOT gate on a pre-read of `halted` — a stale RPC node can misreport it and refuse a
+    # legitimate resume (observed on public devnet). Just submit; on-chain is the source of truth
+    # (setting halted=false when already live is a harmless no-op).
     console.print('\n[bold]Resume System[/bold]\n')
-    console.print('  This will allow new swap reservations again.\n')
+    console.print('  This allows new deposits / activations / pools again.\n')
 
-    if not click.confirm('Confirm resuming the system?'):
+    if not _confirm('Confirm resuming the system?'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
         with loading('Submitting transaction...'):
-            client.set_halted(wallet=wallet, halted=False)
-        console.print('[green]System resumed — new reservations are now allowed[/green]\n')
-    except ContractError as e:
-        print_contract_error('Failed to resume system', e)
+            client.set_halted(False)
+        console.print('[green]System resumed[/green]\n')
+    except SolanaClientError as e:
+        fail(f'Failed to resume system: {e}')
 
 
 admin_group.add_command(danger_group)

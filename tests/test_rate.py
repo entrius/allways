@@ -277,94 +277,114 @@ class TestNormalizeRate:
 class TestIsExecutableRate:
     """Crown-eligibility gate against sentinel quotes that no user can route.
 
-    Bounds chosen to match live SN7 contract: ``min_swap=0.1 TAO``,
-    ``max_swap=0.5 TAO`` (in rao).
+    SOL is the bounded asset (``collateral_amount``): the contract's ``min_swap_amount``/``max_swap_amount``
+    constrain the SOL leg, in lamports. Bounds: ``min_swap=0.1 SOL``, ``max_swap=0.5 SOL``. (BTC decimals
+    8, SOL/TAO 9 → btc↔sol decimal_factor 10, same boundary arithmetic as the retired btc↔tao gate.)
     """
 
-    MIN = 100_000_000  # 0.1 TAO
-    MAX = 500_000_000  # 0.5 TAO
+    MIN = 100_000_000  # 0.1 SOL
+    MAX = 500_000_000  # 0.5 SOL
 
-    def test_sane_btc_to_tao_rate_executable(self):
-        assert is_executable_rate(326.0, 'btc', 'tao', self.MIN, self.MAX) is True
+    def test_sane_btc_to_sol_rate_executable(self):
+        assert is_executable_rate(326.0, 'btc', 'sol', self.MIN, self.MAX) is True
 
-    def test_sane_tao_to_btc_rate_executable(self):
-        assert is_executable_rate(326.0, 'tao', 'btc', self.MIN, self.MAX) is True
+    def test_sane_sol_to_btc_rate_executable(self):
+        assert is_executable_rate(326.0, 'sol', 'btc', self.MIN, self.MAX) is True
 
-    def test_huge_btc_to_tao_rate_rejected(self):
-        """1e10 TAO/BTC: 1 sat → 1e11 rao = 100 TAO, far above 0.5 TAO max.
-        No positive integer sat lands in [0.1, 0.5] TAO."""
-        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, self.MAX) is False
+    def test_huge_btc_to_sol_rate_rejected(self):
+        """1e10 SOL/BTC: 1 sat → 1e11 lamports = 100 SOL, far above 0.5 SOL max.
+        No positive integer sat lands in [0.1, 0.5] SOL."""
+        assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, self.MAX) is False
 
-    def test_float_max_btc_to_tao_rate_rejected(self):
+    def test_float_max_btc_to_sol_rate_rejected(self):
         """The other sentinel miners post: float-max wins the rate sort but
         overflows the conversion math entirely."""
-        assert is_executable_rate(1.797e308, 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(1.797e308, 'btc', 'sol', self.MIN, self.MAX) is False
 
     def test_zero_rate_rejected(self):
-        assert is_executable_rate(0.0, 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(0.0, 'btc', 'sol', self.MIN, self.MAX) is False
 
     def test_negative_rate_rejected(self):
-        assert is_executable_rate(-1.0, 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(-1.0, 'btc', 'sol', self.MIN, self.MAX) is False
 
     def test_non_finite_rate_rejected(self):
-        assert is_executable_rate(float('inf'), 'btc', 'tao', self.MIN, self.MAX) is False
-        assert is_executable_rate(float('nan'), 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(float('inf'), 'btc', 'sol', self.MIN, self.MAX) is False
+        assert is_executable_rate(float('nan'), 'btc', 'sol', self.MIN, self.MAX) is False
 
     def test_bounds_unset_is_permissive(self):
         """Both bounds at 0 → no on-chain limit configured → don't filter.
         Matches the contract's unset-bounds sentinel."""
-        assert is_executable_rate(1e10, 'btc', 'tao', 0, 0) is True
-        assert is_executable_rate(1e-10, 'tao', 'btc', 0, 0) is True
+        assert is_executable_rate(1e10, 'btc', 'sol', 0, 0) is True
+        assert is_executable_rate(1e-10, 'sol', 'btc', 0, 0) is True
 
     def test_max_unset_only_lower_bound_enforced(self):
         """If only min_swap is set, every rate above the floor is executable."""
-        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, 0) is True
+        assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, 0) is True
 
-    def test_tao_to_btc_lowball_rate_rejected(self):
-        """tao→btc with rate=1e-8 implies 0.1 TAO buys 1e7 BTC — destination
+    def test_sol_to_btc_lowball_rate_rejected(self):
+        """sol→btc with rate=1e-8 implies 0.1 SOL buys 1e7 BTC — destination
         absurdity, not a granularity miss. Caught by the symmetric check:
-        treating 1/r = 1e8 as a btc→tao rate, 1 sat already overshoots
-        max_swap on the TAO leg, so the original rate is sentinel-low."""
-        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is False
+        treating 1/r = 1e8 as a btc→sol rate, 1 sat already overshoots
+        max_swap on the SOL leg, so the original rate is sentinel-low."""
+        assert is_executable_rate(1e-8, 'sol', 'btc', self.MIN, self.MAX) is False
+
+    def test_non_sol_pair_is_permissive(self):
+        """A pair with no SOL leg (e.g. legacy btc↔tao) has no SOL bound to
+        enforce → permissive regardless of rate."""
+        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, self.MAX) is True
+        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is True
+
+    def test_sane_tao_sol_rates_executable(self):
+        """tao↔sol: both 9-decimal, decimal_factor 1. A ~1:1 rate routes."""
+        assert is_executable_rate(1.0, 'tao', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(1.0, 'sol', 'tao', self.MIN, self.MAX) is True
+
+    def test_huge_tao_to_sol_rate_rejected(self):
+        """1e10 SOL/TAO: the smallest fundable TAO source maps far above max_swap."""
+        assert is_executable_rate(1e10, 'tao', 'sol', self.MIN, self.MAX) is False
+
+    def test_lowball_sol_to_tao_rate_rejected(self):
+        """Symmetric out of SOL: 1e-10 TAO/SOL → inverse 1e10 overshoots on the SOL leg."""
+        assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
 
     DUST = get_chain('btc').min_onchain_amount  # smallest fundable BTC source
 
     def test_sub_dust_boundary_rate_rejected(self):
         """At max_swap/10, the only in-bounds source is 1 sat — below the BTC
         dust floor, so unfundable. Rejected (the crown-squat rate)."""
-        rate = self.MAX / 10  # TAO leg at 1 sat == max_swap; 1 sat < dust
-        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False
+        rate = self.MAX / 10  # SOL leg at 1 sat == max_swap; 1 sat < dust
+        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
 
     def test_dust_floor_boundary_rate_executable(self):
         """At the rate where the dust floor maps exactly to max_swap, the
         smallest fundable source is in-bounds — just executable."""
-        rate = self.MAX / (10 * self.DUST)  # DUST sat → max_swap on the TAO leg
-        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is True
+        rate = self.MAX / (10 * self.DUST)  # DUST sat → max_swap on the SOL leg
+        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is True
 
     def test_just_past_dust_floor_boundary_rejected(self):
         """Just above the boundary, even the dust floor overshoots max_swap →
         no fundable source routes."""
         rate = (self.MAX / (10 * self.DUST)) * 1.0001
-        assert is_executable_rate(rate, 'btc', 'tao', self.MIN, self.MAX) is False
+        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
 
-    def test_tao_to_btc_sub_dust_boundary_rate_rejected(self):
+    def test_sol_to_btc_sub_dust_boundary_rate_rejected(self):
         """Symmetric: r = 10/max_swap maps 1 sat (sub-dust) to max_swap on the
-        inverse leg — rejected (the swap-1670 tao→btc crown-squat rate)."""
+        inverse leg — rejected (the crown-squat rate)."""
         rate = 10 / self.MAX
-        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is False
+        assert is_executable_rate(rate, 'sol', 'btc', self.MIN, self.MAX) is False
 
-    def test_tao_to_btc_dust_floor_boundary_executable(self):
+    def test_sol_to_btc_dust_floor_boundary_executable(self):
         """Symmetric boundary at the dust floor: the dust-clearing inverse
         source maps in-bounds — just executable."""
         rate = (10 * self.DUST) / self.MAX
-        assert is_executable_rate(rate, 'tao', 'btc', self.MIN, self.MAX) is True
+        assert is_executable_rate(rate, 'sol', 'btc', self.MIN, self.MAX) is True
 
-    def test_tao_to_btc_sentinel_unset_bounds_still_permissive(self):
+    def test_sol_to_btc_sentinel_unset_bounds_still_permissive(self):
         """Unset bounds disable the gate in both directions — keeps the
         legacy "no on-chain bounds yet" path permissive."""
-        assert is_executable_rate(1e-8, 'tao', 'btc', 0, 0) is True
+        assert is_executable_rate(1e-8, 'sol', 'btc', 0, 0) is True
 
-    def test_tao_to_btc_zero_max_only_min_set_is_permissive(self):
+    def test_sol_to_btc_zero_max_only_min_set_is_permissive(self):
         """If only min_swap is set (max_swap=0), any rate above the floor
         symmetry still passes. Mirrors test_max_unset_only_lower_bound_enforced."""
-        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, 0) is True
+        assert is_executable_rate(1e-8, 'sol', 'btc', self.MIN, 0) is True

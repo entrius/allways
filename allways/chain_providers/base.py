@@ -20,6 +20,7 @@ class TransactionInfo:
     amount: int  # Smallest unit (satoshis / rao)
     block_number: Optional[int] = None
     confirmations: int = 0
+    block_time: Optional[int] = None  # Block's mined time, unix seconds (replay-freshness floor; B2)
 
 
 class ChainProvider(ABC):

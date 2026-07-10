@@ -1,586 +1,37 @@
-"""alw swap - Guided interactive swap with automatic fund sending."""
+"""alw swap - Execute and manage cross-chain swaps.
 
-import os
-import sys
+Origination is on-chain on Solana, two-phase: the taker BIDS into a per-miner reservation pool
+(`open_or_request`, pair only), a permissionless stake-weighted draw (`resolve_pool`) seats a winner,
+then the seat winner FILLS the reservation (`finalize_reservation`, naming the taker + amounts). `swap
+now` is the unrouted-taker path — the taker is its own router: bid → self-crank the draw → finalize
+against the pinned rate → then send source funds + `swap post-tx`. Self-cranking the draw means an
+unrouted taker never waits on validator liveness."""
+
+import json
 import time
-from typing import Optional, Tuple
+from typing import List, Optional
 
-import bittensor as bt
 import click
-from rich.panel import Panel
-from rich.table import Table
 
-from allways.chain_providers import create_chain_providers
-from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain
-from allways.classes import SwapStatus
-from allways.cli.dendrite_lite import broadcast_synapse, discover_validators, get_ephemeral_wallet
+from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    PendingSwapState,
-    blocks_to_minutes_str,
-    clear_pending_swap,
+    FINITE_FLOAT,
+    PENDING_SWAP_FILE,
     console,
-    dashboard_url,
-    fetch_miner_reliability,
-    find_matching_miners,
-    from_rao,
-    get_cli_context,
-    is_local_network,
-    load_pending_swap,
-    loading,
-    mark_pending_swap_tx_sent,
-    probe_pending_reservation,
-    reliability_text,
-    resolve_source_tx_block,
-    save_pending_swap,
-    sign_or_prompt_external,
+    fail,
+    get_solana_cli_context,
+    live_unclaimed,
 )
-from allways.cli.validator_rejections import RejectionInfo, render_and_aggregate
-from allways.commitments import read_miner_commitment, read_miner_commitments
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, RESERVE_SLIPPAGE_DEFAULT_BPS, RESERVE_SLIPPAGE_MAX_BPS
-from allways.contract_client import ContractError
-from allways.synapses import SwapConfirmSynapse, SwapReserveSynapse
-from allways.utils.proofs import reserve_proof_message, swap_proof_message
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount, check_swap_viability, derive_tao_leg
-
-
-def to_smallest_unit(amount: float, chain_id: str) -> int:
-    """Convert a human-readable amount to the smallest unit for a chain.
-
-    Uses Decimal to avoid IEEE 754 float artifacts (e.g. 0.1 * 10^9 = 99999999).
-    """
-    from decimal import Decimal
-
-    chain = get_chain(chain_id)
-    return int(Decimal(str(amount)) * (10**chain.decimals))
-
-
-def from_smallest_unit(amount: int, chain_id: str) -> float:
-    """Convert from smallest unit to human-readable amount."""
-    chain = get_chain(chain_id)
-    return amount / (10**chain.decimals)
-
-
-# =========================================================================
-# Shared functions (used by swap command, post_tx command)
-# =========================================================================
-
-
-def sign_and_broadcast_confirm(
-    provider,
-    user_from_address: str,
-    from_key,
-    from_tx_hash: str,
-    miner_hotkey: str,
-    receive_address: str,
-    validator_axons: list,
-    ephemeral_wallet,
-    from_chain: str = '',
-    to_chain: str = '',
-    skip_confirm: bool = False,
-    from_tx_block: int = 0,
-    miner_uid: Optional[int] = None,
-) -> tuple:
-    """Sign source tx proof and broadcast SwapConfirmSynapse to validators.
-
-    Returns (accepted_count, queued_count, info). ``info`` is a RejectionInfo
-    with aggregate counts and — when accepted == 0 — a translated headline +
-    deterministic flag so callers can decide whether to prompt for retry.
-    """
-    # Signing is fast for the internal path and may prompt interactively for
-    # the external (paste-a-signature) path — never wrap it in a spinner.
-    from_proof = sign_or_prompt_external(
-        provider,
-        user_from_address,
-        swap_proof_message(from_tx_hash),
-        key=from_key,
-        chain=from_chain,
-        skip_confirm=skip_confirm,
-    )
-    if not from_proof:
-        console.print('[red]Could not obtain source tx proof signature — cannot confirm swap.[/red]')
-        return 0, 0, RejectionInfo()
-
-    confirm_synapse = SwapConfirmSynapse(
-        reservation_id=miner_hotkey,
-        from_tx_hash=from_tx_hash,
-        from_tx_proof=from_proof,
-        from_address=user_from_address,
-        from_tx_block=from_tx_block,
-        to_address=receive_address,
-        from_chain=from_chain,
-        to_chain=to_chain,
-    )
-
-    # The confirm proof is over the tx hash (not block-anchored), so the synapse
-    # is stable across retries. On a 429 the request was rejected at the edge
-    # proxy and never reached the validator — back off and re-broadcast rather
-    # than failing the user mid-confirm (the worst place to drop them).
-    confirm_max_retries = 2
-    for attempt in range(confirm_max_retries + 1):
-        with loading(f'Broadcasting confirmation to {len(validator_axons)} validators...'):
-            confirm_responses = broadcast_synapse(ephemeral_wallet, validator_axons, confirm_synapse, timeout=60.0)
-
-        info = render_and_aggregate(
-            console,
-            confirm_responses,
-            label='V',
-            context={
-                'from_chain': from_chain,
-                'from_chain_upper': from_chain.upper(),
-                'to_chain': to_chain,
-                'to_chain_upper': to_chain.upper(),
-                'from_address': user_from_address,
-                'miner_hotkey': miner_hotkey,
-                'miner_uid': miner_uid,
-            },
-        )
-
-        if info.category == 'rate_limited' and attempt < confirm_max_retries:
-            backoff_s = 6
-            with console.status(f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'):
-                time.sleep(backoff_s)
-            continue
-        break
-
-    if info.accepted == 0 and info.headline:
-        # tx_not_found is almost always propagation lag, not a real failure —
-        # render it in yellow so it doesn't scan as "your swap broke".
-        color = 'yellow' if info.category == 'tx_not_found' else 'red'
-        console.print(f'\n[{color}]{info.headline}[/{color}]')
-
-    return info.accepted, info.queued, info
-
-
-def resolve_recent_swap_id(client, miner_hotkey: str) -> Optional[int]:
-    """Return the miner's active swap id, or None if they have none.
-
-    Delegates to ``get_miner_active_swaps``, which scans backward from
-    ``next_id - 1`` stopping on consecutive pruned/resolved gaps — so
-    correctness does not depend on a guessed window size. The contract
-    guarantees at most one active swap per miner. Raises ``ContractError``
-    on RPC failure so callers can distinguish "RPC broken" from "no swap
-    yet" — the Ctrl+C-exit path suppresses; ``poll_for_swap_creation``
-    counts for its retry warning.
-    """
-    if not client.get_miner_has_active_swap(miner_hotkey):
-        return None
-    active = client.get_miner_active_swaps(miner_hotkey)
-    # One active swap per miner, so [0] is guaranteed to be it.
-    return active[0].id if active else None
-
-
-def poll_for_swap_creation(client, miner_hotkey: str) -> Optional[int]:
-    """Poll contract until miner has an active swap. Returns swap_id or None."""
-    with console.status('[dim]Waiting for swap to appear on-chain...[/dim]'):
-        errors = 0
-        for _ in range(60):
-            time.sleep(3)
-            try:
-                swap_id = resolve_recent_swap_id(client, miner_hotkey)
-                if swap_id is not None:
-                    return swap_id
-                errors = 0
-            except ContractError:
-                errors += 1
-                if errors >= 5:
-                    console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
-                    errors = 0
-    return None
-
-
-def broadcast_reserve_with_retry(
-    subtensor,
-    client,
-    provider,
-    selected_pair,
-    from_chain: str,
-    to_chain: str,
-    from_amount: int,
-    to_amount: int,
-    tao_amount: int,
-    user_from_address: str,
-    from_key,
-    netuid: int,
-    skip_confirm: bool = False,
-    max_retries: int = 2,
-    slippage_bps: int = RESERVE_SLIPPAGE_DEFAULT_BPS,
-):
-    """Reserve miner via multi-validator consensus with retry.
-
-    Returns (reserved_until, validator_axons, ephemeral_wallet) on success, None on failure.
-    """
-    ephemeral_wallet = get_ephemeral_wallet()
-    with loading('Discovering validators...'):
-        validator_axons = discover_validators(subtensor, netuid, contract_client=client)
-    if not validator_axons:
-        console.print('[red]No validators found on metagraph[/red]')
-        return None
-
-    from_amount_human = from_smallest_unit(from_amount, from_chain)
-    rejection_context = {
-        'from_chain': from_chain,
-        'from_chain_upper': from_chain.upper(),
-        'to_chain': to_chain,
-        'to_chain_upper': to_chain.upper(),
-        'from_address': user_from_address,
-        'from_amount_human': f'{from_amount_human:g}',
-        'miner_uid': selected_pair.uid,
-        'miner_hotkey': selected_pair.hotkey,
-    }
-
-    reserved = False
-    reserved_until = 0
-    for attempt in range(max_retries + 1):
-        current_block = subtensor.get_current_block()
-        # Signing is fast internally and may prompt interactively for external
-        # signers — never wrap it in a spinner.
-        from_address_proof = sign_or_prompt_external(
-            provider,
-            user_from_address,
-            reserve_proof_message(user_from_address, current_block),
-            key=from_key,
-            chain=from_chain,
-            skip_confirm=skip_confirm,
-        )
-        if not from_address_proof:
-            console.print('[red]Could not obtain reserve signature — cannot reserve miner.[/red]')
-            return None
-        synapse = SwapReserveSynapse(
-            miner_hotkey=selected_pair.hotkey,
-            tao_amount=tao_amount,
-            from_amount=from_amount,
-            to_amount=to_amount,
-            from_address=user_from_address,
-            from_address_proof=from_address_proof,
-            block_anchor=current_block,
-            from_chain=from_chain,
-            to_chain=to_chain,
-            slippage_bps=slippage_bps,
-        )
-
-        with loading(f'Broadcasting reservation to {len(validator_axons)} validators...'):
-            responses = broadcast_synapse(ephemeral_wallet, validator_axons, synapse, timeout=60.0)
-
-        info = render_and_aggregate(console, responses, label='V', context=rejection_context)
-        accepted = info.accepted
-
-        if accepted == 0:
-            # Rate limited at the validator edge proxy (429) — transient and
-            # self-healing. Back off and retry automatically; an instant retry
-            # would just re-trip the limit (tokens refill over a few seconds).
-            if info.category == 'rate_limited':
-                if attempt < max_retries:
-                    backoff_s = 6
-                    with console.status(f'[yellow]Rate limited by validator(s) — retrying in {backoff_s}s...[/yellow]'):
-                        time.sleep(backoff_s)
-                    continue
-                console.print('\n[red]Still rate limited after retries — wait a minute and try again.[/red]')
-                return None
-
-            if info.headline:
-                console.print(f'\n[red]{info.headline}[/red]')
-            else:
-                console.print('\n[red]No validators accepted the reservation.[/red]')
-            # Deterministic failures (insufficient balance, invalid proof, wrong direction…)
-            # cannot succeed by retrying with the same inputs — skip the retry prompt.
-            if info.deterministic:
-                console.print(
-                    '[dim]Retrying with the same inputs will not change this — fix the underlying issue first.[/dim]'
-                )
-                return None
-            if attempt < max_retries and not skip_confirm and click.confirm('Retry?', default=False):
-                console.print('[dim]Retrying reservation...[/dim]')
-                continue
-            return None
-
-        # Countdown the quorum wait so users see progress, not just a spinner.
-        quorum_total_s = 60
-        quorum_started = time.time()
-        try:
-            with console.status(
-                f'[dim]Waiting for on-chain quorum — 0/{accepted} broadcast votes confirmed '
-                f'(~{quorum_total_s}s)...[/dim]'
-            ) as status:
-                quorum_errors = 0
-                for _ in range(30):
-                    time.sleep(2)
-                    try:
-                        reserved_until = client.get_miner_reserved_until(selected_pair.hotkey)
-                        if reserved_until > current_block:
-                            reserved = True
-                            break
-                        vote_count = client.get_pending_reserve_vote_count(selected_pair.hotkey)
-                        elapsed = int(time.time() - quorum_started)
-                        remaining = max(0, quorum_total_s - elapsed)
-                        status.update(
-                            f'[dim]Waiting for on-chain quorum — {vote_count}/{accepted} votes confirmed, '
-                            f'{elapsed}s elapsed (~{remaining}s remaining)...[/dim]'
-                        )
-                        quorum_errors = 0
-                    except ContractError:
-                        quorum_errors += 1
-                        if quorum_errors >= 5:
-                            console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
-                            quorum_errors = 0
-        except KeyboardInterrupt:
-            # Mirror the confirm-path behaviour: give a clean exit banner
-            # instead of a raw traceback when the user bails during the wait.
-            console.print('\n[yellow]Aborted — reservation may still confirm on-chain.[/yellow]')
-            console.print(
-                f'[dim]Check with: alw view miners (miner UID {selected_pair.uid}) or alw view reservation[/dim]'
-            )
-            return None
-        if reserved:
-            ttl_remaining = reserved_until - subtensor.get_current_block()
-            console.print(
-                f'[green]Miner reserved! You have {blocks_to_minutes_str(ttl_remaining)} to send your funds '
-                f'before the reservation expires.[/green]'
-            )
-            console.print(
-                '[yellow]Please account for network latency — give your tx a couple of minutes '
-                'to land in a block. Do NOT send near or after the reservation window closes, '
-                'or your transaction may not confirm in time and the reservation will expire.[/yellow]'
-            )
-
-        if reserved:
-            break
-
-        if attempt < max_retries:
-            console.print(
-                f"[yellow]Reservation quorum not reached ({accepted} broadcast votes didn't make it on-chain within "
-                f'{quorum_total_s}s).[/yellow]'
-            )
-            # Default yes since we had >=1 accept — usually a transient chain
-            # delay and a second attempt works without changing anything.
-            if not skip_confirm and click.confirm('Retry?', default=True):
-                console.print('[dim]Retrying reservation...[/dim]')
-            else:
-                return None
-        else:
-            console.print('[red]Reservation failed — quorum not reached after retries.[/red]')
-            return None
-
-    return (reserved_until, validator_axons, ephemeral_wallet)
-
-
-# =========================================================================
-# Swap-specific helpers
-# =========================================================================
-
-
-def display_timeout_notice(swap, dashboard_url: str):
-    """Explain a TIMED_OUT result to the user after `alw swap now` watches through termination.
-
-    The timeout path looks silent from the CLI's perspective — the contract
-    refunds directly and removes the swap from storage — so surface what
-    actually happened: the miner failed to fulfill, they're slashed, and the
-    user is made whole in TAO from the slashed collateral.
-    """
-    tao_human = swap.tao_amount / (10**9) if swap.tao_amount else 0.0
-    amount_line = f'[bold]{tao_human:g} TAO[/bold]' if tao_human else 'TAO equivalent to your swap'
-
-    notice = (
-        '[bold]Miner failed to fulfill within the timeout window.[/bold]\n'
-        '\n'
-        f"  You're made whole: {amount_line} is slashed from the miner's\n"
-        '  collateral and sent directly to your TAO wallet.\n'
-        '\n'
-        '  If the on-chain transfer could not settle, the slash is held\n'
-        f'  pending — claim it with: [cyan]alw claim {swap.id}[/cyan]\n'
-        '\n'
-        f'  Details: [cyan]{dashboard_url}/swap/{swap.id}[/cyan]'
-    )
-    console.print()
-    console.print(Panel(notice, title='[bold red]Swap Timed Out[/bold red]', expand=False))
-    console.print()
-
-
-def display_receipt(swap):
-    """Show a rich completion receipt after a successful swap."""
-    src_chain_def = get_chain(swap.from_chain)
-    dst_chain_def = get_chain(swap.to_chain)
-    src_human = swap.from_amount / (10**src_chain_def.decimals)
-    dst_human = swap.to_amount / (10**dst_chain_def.decimals)
-    tao_human = swap.tao_amount / (10**9)
-
-    # swap.to_amount is the post-fee amount the miner sent (see
-    # fulfillment.py::send_dest_funds). The raw rate-quoted amount was
-    # to_amount / (1 - 1/FEE_DIVISOR), and the protocol fee is 1/FEE_DIVISOR
-    # of that raw amount. Shown in TAO since that's the side the fee is
-    # recorded against (mirrors accumulated_fees on-chain).
-    fee_pct = 100 / FEE_DIVISOR
-    protocol_fee_tao = tao_human / FEE_DIVISOR
-
-    src_tx = swap.from_tx_hash[:20] + '...' if len(swap.from_tx_hash) > 20 else swap.from_tx_hash
-    dst_tx = swap.to_tx_hash[:20] + '...' if len(swap.to_tx_hash) > 20 else swap.to_tx_hash
-
-    receipt = (
-        f'  [green]Sent:      {src_human:g} {swap.from_chain.upper()}[/green]\n'
-        f'  [green]Received:  {dst_human:.8f} {swap.to_chain.upper()}[/green]\n'
-        f'  [dim]Protocol fee: {protocol_fee_tao:.6f} TAO ({fee_pct:g}% of swap)[/dim]\n'
-        f'\n'
-        f'  Source TX: [cyan]{src_tx}[/cyan]\n'
-        f'  Dest TX:   [cyan]{dst_tx}[/cyan]\n'
-        f'\n'
-        f'  Timeline:\n'
-        f'    [green]●[/green] Initiated   Block {swap.initiated_block}\n'
-        f'    [green]●[/green] Fulfilled   Block {swap.fulfilled_block}\n'
-        f'    [green]●[/green] Completed   Block {swap.completed_block}'
-    )
-    console.print()
-    console.print(Panel(receipt, title='[bold green]Swap Complete[/bold green]', expand=False))
-    console.print()
-
-
-def poll_for_swap_with_progress(client, miner_hotkey: str, from_chain: str, max_polls: int = 60):
-    """Poll for swap creation with a live progress display."""
-    with console.status('') as status:
-        errors = 0
-        for i in range(max_polls):
-            elapsed = i * 3
-            mins = elapsed // 60
-            secs = elapsed % 60
-            status.update(
-                f'[dim]Waiting for validators to confirm and initiate swap... {mins}:{secs:02d} elapsed[/dim]'
-            )
-
-            time.sleep(3)
-            try:
-                swap_id = resolve_recent_swap_id(client, miner_hotkey)
-                if swap_id is not None:
-                    return swap_id
-                errors = 0
-            except ContractError:
-                errors += 1
-                if errors >= 5:
-                    console.print('[yellow]Warning: contract unreachable, still waiting...[/yellow]')
-                    errors = 0
-    return None
-
-
-def send_btc(
-    chain_providers,
-    config,
-    to_address: str,
-    amount_sat: int,
-    from_address: str = None,
-    fee_rate_override: Optional[int] = None,
-    interactive: bool = True,
-):
-    """Send BTC, retry on failure, fall back to manual tx-hash entry.
-
-    In lightweight mode there is no Bitcoin Core fallback — both paths route
-    through the same Blockstream API — so we don't pretend otherwise.
-
-    ``interactive`` controls the failure path: when False (e.g. ``alw swap
-    resume-reservation --send``), broadcast errors return None instead of
-    prompting for a retry or a manual tx hash, so scripted callers get a
-    deterministic exit instead of a hung prompt.
-
-    Returns (tx_hash, block_number) or None.
-    """
-    provider = chain_providers.get('btc')
-    is_local = is_local_network(config.get('network', 'finney'))
-    human_amount = amount_sat / 100_000_000
-    is_lightweight = getattr(provider, 'mode', None) == 'lightweight'
-
-    def attempt_send():
-        if not is_local and hasattr(provider, 'send_amount_lightweight'):
-            console.print('[dim]Sending BTC via lightweight wallet...[/dim]')
-            result = provider.send_amount_lightweight(
-                to_address, amount_sat, from_address=from_address, fee_rate_override=fee_rate_override
-            )
-            if result:
-                return result
-            if is_lightweight:
-                return None
-        console.print('[dim]Sending BTC via Bitcoin Core RPC...[/dim]')
-        return provider.send_amount(to_address, amount_sat)
-
-    max_retries = 2 if interactive else 0
-    for attempt in range(max_retries + 1):
-        result = attempt_send()
-        if result:
-            console.print(f'[green]BTC sent (tx: {result[0]})[/green]')
-            return result
-
-        # Drain async log output so the reason lands above the Retry prompt
-        # rather than after it.
-        sys.stderr.flush()
-        time.sleep(0.2)
-
-        reason = getattr(provider, 'last_send_error', None)
-        if reason:
-            console.print(f'[yellow]BTC send failed:[/yellow] {reason}')
-        else:
-            console.print('[yellow]BTC send failed.[/yellow]')
-
-        if not interactive:
-            return None
-        if attempt >= max_retries:
-            console.print('[yellow]Giving up after retries.[/yellow]')
-            break
-        if not click.confirm('Retry?', default=True):
-            break
-        # Brief backoff so a flaky upstream (Blockstream/Core) has a moment to
-        # recover before we hammer it again.
-        time.sleep(1)
-        console.print('[dim]Retrying...[/dim]')
-
-    # Manual fallback
-    console.print(f'\n  Send [green]{human_amount} BTC[/green] to: [cyan]{to_address}[/cyan]\n')
-    tx_hash = click.prompt('Enter transaction hash after sending (or "skip" to exit)', default='')
-    if not tx_hash or tx_hash.lower() == 'skip':
-        console.print(
-            '[yellow]Swap paused. Run [cyan]alw view reservation[/cyan] to see your '
-            'reservation status and the resume command once you have a tx hash.[/yellow]'
-        )
-        return None
-    return (tx_hash.strip(), 0)
-
-
-def send_tao_transfer(wallet, subtensor, to_address: str, amount_rao: int) -> Optional[Tuple[str, int]]:
-    """Single attempt at a TAO coldkey transfer.
-
-    Returns ``(tx_hash, block_number)`` on success, ``None`` on failure
-    (caller decides whether to retry / surface the error).
-    """
-    try:
-        with loading('Submitting TAO transfer to chain...'):
-            response = subtensor.transfer(
-                wallet=wallet,
-                destination_ss58=to_address,
-                amount=bt.Balance.from_rao(amount_rao),
-                wait_for_inclusion=True,
-                wait_for_finalization=False,
-            )
-    except Exception as e:
-        console.print(f'[red]Transfer error ({type(e).__name__}): {e}[/red]')
-        return None
-
-    if not response.success:
-        # Extrinsic may have been submitted but rejected on-chain;
-        # post-tx is a valid recovery if the user has the hash.
-        console.print(f'[red]TAO transfer failed: {response.message}[/red]')
-        return None
-
-    try:
-        receipt = response.extrinsic_receipt
-        tx_hash = receipt.extrinsic_hash
-        block = 0
-        if getattr(receipt, 'block_hash', None):
-            block = subtensor.substrate.get_block_number(receipt.block_hash) or 0
-    except Exception:
-        tx_hash = getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', '') or 'tao_transfer'
-        block = 0
-    console.print(f'[green]TAO sent (tx: {tx_hash})[/green]')
-    return (tx_hash, int(block))
-
-
-# =========================================================================
-# CLI command
-# =========================================================================
+from allways.cli.swap_commands.swap_intake import (
+    MinerCandidate,
+    compute_intake_amounts,
+    rate_display_from_fixed,
+    select_best_miner,
+    to_smallest_units,
+)
+from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
+from allways.utils.rate import apply_fee_deduction
 
 
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
@@ -588,26 +39,82 @@ def swap_group():
     """Execute and manage cross-chain swaps."""
 
 
+def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
+    """All miners with a posted quote for this exact direction, with their collateral attached."""
+    out: List[MinerCandidate] = []
+    for _pk, q in client.get_all('MinerQuote'):
+        if q.from_chain != from_chain or q.to_chain != to_chain:
+            continue
+        collateral = client.get_collateral_lamports(q.miner) or 0
+        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
+    return out
+
+
+# Minimum reservation life required before we'll instruct a send. The reservation must outlive
+# broadcast -> mempool visibility -> post-tx relay -> submit_swap_claim landing, which is all the
+# on-chain claim gate checks (`reserved_until >= now`, empty claim slot). Chain-independent by
+# construction: 60s post-tx dendrite timeout + ~60s Solana claim landing + 60s slack.
+_SEND_MARGIN_SECS = 180
+
+
+_BENIGN_CRANK = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests')
+
+
+def _self_crank_resolve(client, miner) -> None:
+    """Permissionless arm-then-draw crank. An unrouted taker cranks its own pool so the draw never
+    waits on validator liveness. Benign races (window not closed, seed slot not produced yet, already
+    resolved) are expected and retried on the next poll."""
+    try:
+        client.resolve_pool(miner)
+    except Exception as e:  # noqa: BLE001
+        if not any(m in str(e) for m in _BENIGN_CRANK):
+            raise
+
+
+def _drawn_unfilled(resv) -> bool:
+    """A seat freshly won by the draw and not yet named. `created_at == 0` is load-bearing: a
+    reservation that was filled and then consumed also has `reserved_until == 0`, but carries a
+    non-zero `created_at` — matching it would finalize against a dead window. Same guard as the
+    contract's `close_unfilled_reservation`."""
+    if resv is None:
+        return False
+    return int(resv.reserved_until) == 0 and int(resv.created_at) == 0 and int(resv.finalize_by) > time.time()
+
+
+def _poll_drawn(client, miner, user, timeout_secs: int):
+    """Poll until THIS taker's bid draws its UNFILLED reservation, self-cranking `resolve_pool` each
+    pass. Returns the drawn reservation, or None on timeout / if a different router won the seat."""
+    us = str(user)
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        _self_crank_resolve(client, miner)
+        resv = client.get_reservation(miner)
+        if _drawn_unfilled(resv):
+            return resv if str(resv.router) == us else None  # seated: us, or someone else won
+        time.sleep(3)
+    return None
+
+
+def _poll_reservation(client, miner, timeout_secs: int):
+    """Poll until a live, unclaimed Reservation exists — the shared ``live_unclaimed`` predicate (same
+    one `post-tx` uses). Post-finalize the reservation is live; this guards against a lagging read."""
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        resv = client.get_reservation(miner)
+        if live_unclaimed(resv):
+            return resv
+        time.sleep(3)
+    return None
+
+
 @swap_group.command('now', show_disclaimer=True)
 @click.option('--from', 'from_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--to', 'to_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
-@click.option('--amount', 'amount_opt', default=None, type=float, help='Amount to send in source chain units')
+@click.option('--amount', 'amount_opt', default=None, type=FINITE_FLOAT, help='Amount to send in source chain units')
 @click.option('--receive-address', 'receive_address_opt', default=None, help='Receive address on destination chain')
 @click.option('--from-address', 'from_address_opt', default=None, help='Source address on source chain')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
-@click.option('--auto', 'auto_select', is_flag=True, help='Auto-select best rate miner')
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
-@click.option(
-    '--slippage',
-    'slippage',
-    type=float,
-    default=2.0,
-    help=(
-        'Maximum rate slippage as a percent (e.g. 2.0 means 2%) between your quote and '
-        "the reservation. The reservation is rejected if the miner's current rate would "
-        'give you more than this percentage less than your quoted amount. Default: 2.0%.'
-    ),
-)
 @click.option(
     '--btc-fee-rate',
     'btc_fee_rate_opt',
@@ -627,651 +134,105 @@ def swap_now_command(
     receive_address_opt: Optional[str],
     from_address_opt: Optional[str],
     from_tx_hash_opt: Optional[str],
-    auto_select: bool,
     skip_confirm: bool,
-    slippage: float,
     btc_fee_rate_opt: Optional[int],
 ):
-    """Guided interactive swap - step by step.
+    """Originate a swap: reserve a miner on-chain, then send source funds.
 
-    [dim]Walks through a complete swap from start to finish:
-    - Select swap direction and miner
-    - Enter amount and addresses
-    - Funds are sent automatically when possible
-    - Transaction hash is posted to validators automatically[/dim]
-
-    [dim]Non-interactive mode (for scripting/testing):
-        $ alw swap now --from btc --to tao --amount 0.001 \\
-            --receive-address 5C... --from-address bc1q... \\
-            --from-tx-hash abc123... --auto --yes[/dim]
-
-    [dim]Interactive mode:
-        $ alw swap now[/dim]
+    [dim]Flag-driven form (interactive prompts + auto fund-sending land next):
+        alw swap now --from sol --to btc --amount 1.0 --receive-address <btc-addr> --yes[/dim]
     """
-    config, wallet, subtensor, client = get_cli_context()
-    # --netuid handled globally in main.py; config['netuid'] already resolved.
-    netuid = int(config.get('netuid', NETUID_FINNEY))
-
-    try:
-        if client.get_halted():
-            console.print('[red]System is halted — no new swaps can be initiated. Please try again later.[/red]')
-            return
-    except ContractError:
-        pass
-
-    # Validate provided chain options early
-    if from_chain_opt and from_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown source chain: {from_chain_opt}[/red]')
-        return
-    if to_chain_opt and to_chain_opt not in SUPPORTED_CHAINS:
-        console.print(f'[red]Unknown destination chain: {to_chain_opt}[/red]')
-        return
-    if from_chain_opt and to_chain_opt and from_chain_opt == to_chain_opt:
-        console.print('[red]Source and destination chains must be different[/red]')
-        return
-
-    # Non-TAO source needs --from-address up front; otherwise the later prompt aborts under --yes.
-    if skip_confirm and from_chain_opt and from_chain_opt != 'tao' and not from_address_opt:
-        console.print(
-            f'[red]--from-address is required for {from_chain_opt.upper()} source in non-interactive mode (--yes).[/red]\n'
-            f'[dim]Pass your {from_chain_opt.upper()} source address explicitly, e.g. --from-address bc1q...[/dim]'
-        )
-        return
-
-    console.print('\n[bold]Allways Swap[/bold]\n')
-
-    # Check for pending reservation
-    existing = load_pending_swap()
-    if existing:
-        current_block = subtensor.get_current_block()
-        status = probe_pending_reservation(client, existing, current_block)
-        if status.kind == 'rpc_error':
-            console.print('[yellow]Could not verify existing reservation (contract unreachable)[/yellow]')
-        elif status.kind == 'ours_active':
-            remaining = max(0, status.reserved_until - current_block)
-            console.print(
-                f'[yellow]You have a pending reservation (~{remaining} blocks, {blocks_to_minutes_str(remaining)} left).[/yellow]'
-            )
-            console.print('  Complete it with: [cyan]alw swap post-tx <tx_hash>[/cyan]\n')
-            if not skip_confirm and not click.confirm('Start a new swap instead?'):
-                return
-        elif status.kind == 'our_swap':
-            console.print(
-                f'[dim]Previous reservation is now swap #{status.swap.id} ({status.swap.status.name}) — '
-                f'cleared local state. Watch with: alw view swap {status.swap.id} --watch[/dim]\n'
-            )
-            clear_pending_swap()
-        else:  # 'replaced' or 'expired'
-            console.print('[dim]Previous reservation is no longer active — cleared local state.[/dim]\n')
-            clear_pending_swap()
-
-    # Interactive mode: force lightweight BTC (no local Bitcoin node needed).
-    # Non-interactive mode: respect environment config (local dev uses node mode for RPC signing).
-    # Always respect an explicitly-set BTC_MODE.
-    if 'BTC_MODE' not in os.environ and not skip_confirm:
-        os.environ['BTC_MODE'] = 'lightweight'
-    chain_providers = create_chain_providers(subtensor=subtensor)
-
-    # Step 1: Select swap direction
-    if from_chain_opt and to_chain_opt:
-        from_chain = from_chain_opt
-        to_chain = to_chain_opt
-    else:
-        chain_ids = list(SUPPORTED_CHAINS.keys())
-        directions = [(s, d) for s in chain_ids for d in chain_ids if s != d]
-
-        console.print('[bold]What would you like to swap?[/bold]\n')
-        for idx, (src, dst) in enumerate(directions, 1):
-            console.print(f'  {idx}. {SUPPORTED_CHAINS[src].name} -> {SUPPORTED_CHAINS[dst].name}')
-
-        choice = click.prompt('\nSelect', type=int, default=1)
-        if choice < 1 or choice > len(directions):
-            console.print('[red]Invalid selection[/red]')
-            return
-        from_chain, to_chain = directions[choice - 1]
-
-    # Step 2: Find available miners (bilateral matching).
-    # Done BEFORE any confirm prompts — if no miner can fill this swap, bail
-    # out before the user wastes time answering BTC-signing questions.
-    with loading('Reading miner commitments from chain...'):
-        all_pairs = read_miner_commitments(subtensor, netuid)
-
-    matching_pairs = find_matching_miners(all_pairs, from_chain, to_chain)
-
-    if not matching_pairs:
-        console.print(f'\n[yellow]No miners currently post rates for {from_chain.upper()}/{to_chain.upper()}.[/yellow]')
-        console.print('[dim]Run [cyan]alw view rates[/cyan] to see active pairs, or try again later.[/dim]\n')
-        return
-
-    available_miners = []
-    try:
-        with loading(f'Checking eligibility for {len(matching_pairs)} miner(s)...'):
-            for pair in matching_pairs:
-                is_active = client.get_miner_active_flag(pair.hotkey)
-                has_swap = client.get_miner_has_active_swap(pair.hotkey)
-                collateral = client.get_miner_collateral(pair.hotkey)
-                if is_active and not has_swap and collateral > 0:
-                    available_miners.append((pair, collateral))
-    except ContractError as e:
-        console.print(f'[red]Failed to read miner data: {e}[/red]')
-        return
-
-    if not available_miners:
-        console.print(
-            f'[yellow]Miners post rates for {from_chain.upper()}/{to_chain.upper()}, '
-            f'but none are currently eligible.[/yellow]'
-        )
-        console.print(
-            '[dim]They may be inactive, already fulfilling another swap, or without collateral.\n'
-            'Run [cyan]alw view miners[/cyan] to inspect status and try again in a few blocks.[/dim]\n'
-        )
-        return
-
-    # Show send capability for the source chain (skip in non-interactive mode).
-    # Only asked once we know a miner can actually fill this swap. The TAO
-    # auto-send notice is deferred to the unlock step, nearer the password prompt.
-    if not skip_confirm and from_chain != 'tao':
-        # Prefix-check the value (not just truthy): dotenv can leak an inline comment as the var.
-        wif_raw = (os.environ.get('BTC_PRIVATE_KEY') or '').strip()
-        has_private_key = bool(wif_raw) and wif_raw[0] in '5KLc9'
-        btc_mode = os.environ.get('BTC_MODE', 'lightweight')
-        is_local = is_local_network(config.get('network', 'finney'))
-
-        if has_private_key and not is_local:
-            console.print('\n  [green]BTC_PRIVATE_KEY set — will sign and attempt BTC sends locally.[/green]')
-        else:
-            # External signing path — covers both the lightweight/no-key
-            # case and any other environment without automatic BTC sending.
-            # Taproot caveat only applies to the BYO-sig flow.
-            taproot_note = ' Taproot (bc1p…) unsupported.' if btc_mode == 'lightweight' and not has_private_key else ''
-            console.print(
-                f'\n  [yellow]BTC signing & sending are external — you will sign at reserve/confirm'
-                f' and run [cyan]alw swap post-tx <tx_hash>[/cyan] after broadcasting.{taproot_note}[/yellow]'
-            )
-            if not click.confirm('  Continue?', default=True):
-                console.print('[yellow]Cancelled[/yellow]')
-                return
-
-    # Rate is TAO/BTC: highest is best when receiving TAO, lowest when sending TAO.
-    canon_from, canon_to = canonical_pair(from_chain, to_chain)
-    canon_is_reverse = from_chain != canon_from
-    available_miners.sort(key=lambda x: x[0].rate, reverse=not canon_is_reverse)
-
-    # Per-miner success rate for this direction (None if the API is down).
-    with loading('Checking miner reliability...'):
-        reliability = fetch_miner_reliability()
-
-    # Show miners table
-    table = Table(title='Available Miners', show_header=True)
-    table.add_column('#', style='dim')
-    table.add_column('UID', style='cyan')
-    table.add_column('Rate (TAO)', style='green')
-    table.add_column('Reliability', no_wrap=True)
-    table.add_column('Collateral (TAO)', style='yellow')
-
-    for idx, (pair, collateral) in enumerate(available_miners, 1):
-        table.add_row(
-            str(idx),
-            str(pair.uid),
-            f'{pair.rate:g}',
-            reliability_text(pair.hotkey, from_chain, to_chain, reliability),
-            f'{from_rao(collateral):.4f}',
-        )
-
-    console.print(table)
-    if reliability is None:
-        console.print('[dim]Reliability unavailable — swap-history API unreachable.[/dim]')
-    else:
-        console.print(
-            f'[dim]Reliability = {from_chain.upper()}→{to_chain.upper()} swaps completed/resolved '
-            'over the last 30 days; green ≥90%, yellow ≥50%, red <50%.[/dim]'
-        )
-
-    # Step 3: Select miner (default to best rate)
-    best_pair = available_miners[0][0]
-    if canon_is_reverse:
-        best_rate_line = (
-            f'send {best_pair.rate:g} {from_chain.upper()} to get 1 {to_chain.upper()} (Miner UID {best_pair.uid})'
-        )
-    else:
-        best_rate_line = (
-            f'send 1 {from_chain.upper()} to get {best_pair.rate:g} {to_chain.upper()} (Miner UID {best_pair.uid})'
-        )
-    # Skip the "Best rate:" hint when there is only one miner — the table and
-    # the upcoming summary already show the rate, so it'd be a third echo.
-    if len(available_miners) > 1:
-        console.print(f'\n  Best rate: {best_rate_line}')
-
-    if auto_select or len(available_miners) == 1:
-        selected_pair, selected_collateral = available_miners[0]
-    else:
-        choice = click.prompt('Select miner #', type=int, default=1)
-        if choice < 1 or choice > len(available_miners):
-            console.print('[red]Invalid selection[/red]')
-            return
-        selected_pair, selected_collateral = available_miners[choice - 1]
-
-    # Step 4: Enter amount
-    amount = (
-        amount_opt if amount_opt is not None else click.prompt(f'\nAmount to send ({from_chain.upper()})', type=float)
-    )
-    if amount <= 0:
-        console.print('[red]Amount must be positive[/red]')
-        return
-
-    from_amount = to_smallest_unit(amount, from_chain)
-    is_reverse = from_chain != canon_from
-    to_amount = calculate_to_amount(
-        from_amount,
-        selected_pair.rate_str,
-        is_reverse,
-        get_chain(canon_to).decimals,
-        get_chain(canon_from).decimals,
-    )
-
-    # Show estimated receive inline — fee is a hardcoded protocol constant.
-    preview_receives = apply_fee_deduction(to_amount, FEE_DIVISOR)
-    preview_fee_pct = 100 / FEE_DIVISOR
-    console.print(
-        f'  You will receive: ~[green]{from_smallest_unit(preview_receives, to_chain):.8f} {to_chain.upper()}[/green]'
-        f' (after {preview_fee_pct:g}% fee)'
-    )
-
-    # Convert slippage percent to bps and apply the ceiling clamp.
-    slippage_bps = round(slippage * 100)
-    if slippage_bps > RESERVE_SLIPPAGE_MAX_BPS:
-        console.print(
-            f'[yellow]Warning: --slippage {slippage}% exceeds the protocol ceiling '
-            f'({RESERVE_SLIPPAGE_MAX_BPS // 100}%) — will be capped.[/yellow]'
-        )
-        slippage_bps = RESERVE_SLIPPAGE_MAX_BPS
-    if slippage > 10.0:
-        console.print(
-            f'[yellow]Warning: slippage is set to {slippage}%, which is unusually high. '
-            'Consider a lower value to protect against adverse rate moves.[/yellow]'
-        )
-    console.print(
-        f"  Slippage {slippage:g}% — reservation is rejected if the miner's rate has moved "
-        f'more than {slippage:g}% below your quote.'
-    )
-
-    tao_amount = derive_tao_leg(from_chain, from_amount, to_chain, to_amount)
-
-    # Validate against contract min/max swap bounds + selected miner's
-    # collateral. Mirrors vote_reserve (bounds) and vote_initiate
-    # (collateral) so we fail loudly here instead of after the user has
-    # reserved and sent funds.
-    try:
-        with loading('Reading protocol swap bounds...'):
-            min_swap = client.get_min_swap_amount()
-            max_swap = client.get_max_swap_amount()
-    except ContractError:
-        console.print('[yellow]Warning: could not verify swap bounds (contract unreachable)[/yellow]')
-        min_swap, max_swap = 0, 0
-
-    viable, reason = check_swap_viability(tao_amount, selected_collateral, min_swap, max_swap)
-    if not viable:
-        console.print(
-            f'[red]Swap cannot be initiated at this amount: {reason} '
-            f'(you entered {from_rao(tao_amount):.4f} TAO equivalent).[/red]'
-        )
-        console.print(
-            '[dim]Try a different amount, pick another miner, or run `alw swap quote` to see viable rows.[/dim]'
-        )
-        return
-
-    fee_divisor = FEE_DIVISOR
-    user_receives = apply_fee_deduction(to_amount, fee_divisor)
-    fee_percent = 100 / fee_divisor
-
-    # Step 5: Enter receive address
+    from_chain = (from_chain_opt or '').lower()
+    to_chain = (to_chain_opt or '').lower()
+    if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
+        fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
+    if from_chain == to_chain or NUMERAIRE_CHAIN not in (from_chain, to_chain):
+        fail(f'A launch swap must have a {NUMERAIRE_CHAIN.upper()} leg (every pair is hub<->spoke).')
+    if amount_opt is None or amount_opt <= 0:
+        fail('--amount (source-chain units) is required.')
     if not receive_address_opt:
-        console.print(
-            f'  [dim]Enter only your PUBLIC {to_chain.upper()} address. '
-            f'Never paste a private key, seed phrase, or WIF here.[/dim]'
-        )
-    receive_address = receive_address_opt or click.prompt(f'Your {to_chain.upper()} receive address')
-    to_provider = chain_providers.get(to_chain)
-    if not to_provider:
-        console.print(f'[red]No chain provider for {to_chain.upper()}[/red]')
-        return
-    if not to_provider.is_valid_address(receive_address):
-        console.print(f'[red]Invalid {to_chain.upper()} address: {receive_address}[/red]')
-        return
+        fail('--receive-address (destination chain) is required.')
 
-    # Step 6: Source address (use public key — no password needed yet)
-    if from_address_opt:
-        user_from_address = from_address_opt
-    elif from_chain == 'tao':
-        # Sourced from the wallet coldkey; the Summary panel renders it as
-        # the "From:" row right below, so no need for a standalone line here.
-        user_from_address = wallet.coldkeypub.ss58_address
-    else:
-        console.print(
-            f'  [dim]Enter only your PUBLIC {from_chain.upper()} address. Never paste a private key or WIF here.[/dim]'
-        )
-        user_from_address = click.prompt(f'Your {from_chain.upper()} source address')
+    _config, client = get_solana_cli_context(need_keypair=True)
+    user = client.keypair.pubkey()
+    user_from_addr = str(user) if from_chain == NUMERAIRE_CHAIN else (from_address_opt or '')
+    if not user_from_addr:
+        fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
 
-    # Step 6b: Verify sender has enough funds
-    if from_chain == 'tao':
-        with loading('Checking TAO balance...'):
-            tao_balance = subtensor.get_balance(wallet.coldkeypub.ss58_address)
-        if tao_balance.rao < from_amount:
-            console.print(
-                f'[red]Insufficient balance: you have {tao_balance} but need {bt.Balance.from_rao(from_amount)}[/red]'
-            )
-            return
+    cfg = client.get_config()
+    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
+    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
 
-    # Step 7: Confirm summary
-    fee_in_dest = to_amount - user_receives
-    src_up = from_chain.upper()
-    dst_up = to_chain.upper()
+    from_amount = to_smallest_units(amount_opt, from_chain)
+    candidates = _candidate_miners(client, from_chain, to_chain)
+    if not candidates:
+        fail(f'No miners quoting {from_chain}->{to_chain} right now.')
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+    if best is None:
+        fail('No miner can fund an executable swap for that amount within bounds.')
+    cand, amts = best
+    # Quote the NET dest leg — the miner delivers `to_amount` less the protocol fee, same as
+    # `alw swap quote`. The gross `to_amount` is what gets pinned on-chain, not what you receive.
+    recv = apply_fee_deduction(amts.to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
 
-    # Use the forward rate for display — matches the miner's posted forward
-    # quote regardless of swap direction (calculate_to_amount just toggles
-    # is_reverse). For reverse swaps this reads as "send N dst to get 1 src".
-    if is_reverse:
-        rate_line = f'send {selected_pair.rate:g} {src_up} to get 1 {dst_up}'
-    else:
-        rate_line = f'send 1 {src_up} to get {selected_pair.rate:g} {dst_up}'
-
-    # Split send/receive into two rows each — amount on one line, address
-    # on the next — so there is no "amount → address" arrow that can be
-    # misread as "send the funds TO that address." The From address is
-    # where the user's source tx must originate; the To address is where
-    # the miner will deliver the destination funds.
-    receive_human = from_smallest_unit(user_receives, to_chain)
-    fee_human = from_smallest_unit(fee_in_dest, to_chain)
-
-    # Pin the fee rate at summary time so the send path uses the exact rate
-    # the user agreed to — also avoids a second Blockstream round-trip.
-    btc_fee_line = ''
-    pinned_btc_fee_rate: Optional[int] = btc_fee_rate_opt
-    btc_provider = chain_providers.get('btc')
-    if (
-        from_chain == 'btc'
-        and btc_provider is not None
-        and getattr(btc_provider, 'mode', None) == 'lightweight'
-        and hasattr(btc_provider, 'estimate_fee_rate')
-    ):
-        try:
-            pinned_btc_fee_rate = btc_provider.estimate_fee_rate(override=btc_fee_rate_opt)
-            if btc_fee_rate_opt is not None:
-                origin = 'override via --btc-fee-rate'
-            else:
-                # estimate_fee_rate targets 2-3 block confirmation. Surface that
-                # so the user knows the auto-estimate is not next-block urgent
-                # and won't compare it against a "too low" mempool reading.
-                origin = 'auto-estimated · targets 2-3 block confirmation (~20-30 min on mainnet)'
-            btc_fee_line = f'  BTC Fee Rate: ~{pinned_btc_fee_rate} sat/vB  [dim]({origin})[/dim]\n'
-        except Exception:
-            pass  # display-only; send path will fall back to estimating itself
-
-    summary = (
-        f'  You Send:     [red]{amount} {src_up}[/red]\n'
-        f'    From:       [yellow]{user_from_address}[/yellow]  [dim](your {src_up} address)[/dim]\n'
-        f'\n'
-        f'  You Receive:  [green]{receive_human:.8f} {dst_up}[/green]\n'
-        f'    To:         [yellow]{receive_address}[/yellow]  [dim](your {dst_up} address)[/dim]\n'
-        f'\n'
-        f'  Protocol Fee: {fee_percent:g}% ({fee_human:.8f} {dst_up})\n'
-        f'{btc_fee_line}'
-        f'  Rate:         {rate_line}\n'
-        f'  Miner:        UID {selected_pair.uid}'
-    )
-    console.print()
-    console.print(Panel(summary, title='[bold]Swap Summary[/bold]', expand=False))
     console.print(
-        f'  [yellow]⚠  You must send the source funds from the "From" {src_up} address above.[/yellow]\n'
-        '  [dim]Validators reject swaps where the source tx sender does not match the reserved address.[/dim]'
+        f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
+        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
     )
-    console.print()
-
-    if not skip_confirm and not click.confirm('Proceed?'):
-        console.print('[yellow]Cancelled[/yellow]')
+    if not skip_confirm and not click.confirm('  Bid on this miner on-chain?', default=False):
         return
 
-    # Unlock coldkey (password prompt) to sign the reservation proof.
-    if from_chain == 'tao':
-        console.print(f"\n  [green]TAO sends automatically from your wallet '[bold]{wallet.name}[/bold]'.[/green]")
-        console.print(
-            '  [dim]Password = your Bittensor coldkey password. This first unlock signs the reservation '
-            'proof (proving you own the source address).[/dim]'
+    # Phase 1 — BID (pair only; no taker, no amounts).
+    sig = client.open_or_request(cand.miner, from_chain, to_chain)
+    console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
+
+    # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
+    drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
+    if drawn is None:
+        fail(
+            '  You were not seated (another bidder won, or the draw did not resolve in time). '
+            'Do NOT send funds; re-run to try again.'
         )
-        from_key = wallet.coldkey
-    else:
-        from_key = None
 
-    # Step 8: Reserve miner
-    console.print('\n[dim]Step 1/3: Reserving miner...[/dim]')
-
-    provider = chain_providers.get(from_chain)
-    if not provider:
-        console.print(f'[red]No chain provider for {from_chain}[/red]')
-        return
-
-    result = broadcast_reserve_with_retry(
-        subtensor,
-        client,
-        provider,
-        selected_pair,
-        from_chain,
-        to_chain,
-        from_amount,
-        to_amount,
-        tao_amount,
-        user_from_address,
-        from_key,
-        netuid,
-        skip_confirm=skip_confirm,
-        slippage_bps=slippage_bps,
+    # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
+    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
+    client.finalize_reservation(
+        cand.miner,
+        user,
+        user_from_addr,
+        receive_address_opt,
+        fill.collateral_amount,
+        fill.from_amount,
+        fill.to_amount,
     )
-    if result is None:
-        return
+    resv = _poll_reservation(client, cand.miner, timeout_secs=30)
+    if resv is None or str(resv.user) != str(user):
+        fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
+    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
+    # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
+    # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
+    # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
+    remaining = int(resv.reserved_until) - int(time.time())
+    if remaining < _SEND_MARGIN_SECS:
+        fail(
+            f'  Reservation has only {remaining}s left — too short to land the claim for your '
+            f'{from_chain.upper()} deposit (needs ~{_SEND_MARGIN_SECS}s to relay it on-chain). '
+            'Do NOT send funds; re-run for a fresh reservation.'
+        )
 
-    reserved_until, validator_axons, ephemeral_wallet = result
+    _save_pending(cand.miner, from_chain, to_chain)
+    console.print(
+        f'[green]  Reserved.[/green] Send [cyan]{amount_opt} {from_chain.upper()}[/cyan] to '
+        f'[cyan]{resv.miner_from_addr}[/cyan], then run [bold]alw swap post-tx[/bold] with the tx hash.'
+    )
 
-    # Send to the miner's deposit address as of the reservation block — the
-    # snapshot the validator pins and verifies against, not the quote-time value
-    # (a miner could move its address between quote and reserve). Fall back to
-    # the quoted address on any read failure.
-    deposit_address = selected_pair.from_address
+
+def _save_pending(miner, from_chain: str, to_chain: str) -> None:
+    """Persist the reserved miner so `alw view reservation` / `alw status` can find it without a flag."""
     try:
-        reserve_block = reserved_until - client.get_reservation_ttl()
-        pinned = read_miner_commitment(subtensor, netuid, selected_pair.hotkey, block=reserve_block)
-        pinned_match = find_matching_miners([pinned], from_chain, to_chain) if pinned else []
-        if pinned_match:
-            deposit_address = pinned_match[0].from_address
-    except Exception:
-        pass
-
-    # Pull the contract-side request_hash so the local state can correlate to
-    # active_reservations and the user can deep-link to the dashboard. A
-    # transient RPC failure here must not abort the swap — fall back to the
-    # legacy amount-triple reconciliation in probe_pending_reservation.
-    try:
-        chain_reservation = client.get_reservation(selected_pair.hotkey)
-        request_hash = chain_reservation.hash if chain_reservation else ''
-    except ContractError:
-        request_hash = ''
-
-    # Save pending swap state as backup
-    state = PendingSwapState(
-        miner_hotkey=selected_pair.hotkey,
-        miner_uid=selected_pair.uid,
-        from_chain=from_chain,
-        to_chain=to_chain,
-        from_amount=from_amount,
-        to_amount=to_amount,
-        tao_amount=tao_amount,
-        user_receives=user_receives,
-        rate_str=selected_pair.rate_str,
-        miner_from_address=deposit_address,
-        user_from_address=user_from_address,
-        receive_address=receive_address,
-        reserved_until_block=reserved_until,
-        netuid=netuid,
-        wallet_name=wallet.name,
-        hotkey_name=wallet.hotkey_str,
-        created_at=time.time(),
-        request_hash=request_hash,
-    )
-    save_pending_swap(state)
-
-    if request_hash:
-        dashboard = dashboard_url(config.get('network'))
-        console.print(f'  [dim]Reservation:[/dim] [cyan]{dashboard}/reservations/{request_hash}[/cyan]')
-
-    # Step 9: Send funds (or use pre-provided tx hash)
-    from_tx_block = 0  # Set below so confirm synapse can give validators a ±3 hint.
-    if from_tx_hash_opt:
-        # Funds already sent externally — use provided tx hash
-        from_tx_hash = from_tx_hash_opt
-        console.print(f'[dim]Using provided source tx: {from_tx_hash[:16]}...[/dim]')
-        mark_pending_swap_tx_sent(from_tx_hash)
-        from_tx_block = resolve_source_tx_block(
-            provider=provider,
-            tx_hash=from_tx_hash,
-            expected_recipient=deposit_address,
-            expected_amount=from_amount,
-            subtensor=subtensor,
-            client=client,
-            reserved_until_block=reserved_until,
-        )
-    else:
-        human_send = from_smallest_unit(from_amount, from_chain)
-        console.print(
-            f'\n  Ready to send [bold]{human_send} {from_chain.upper()}[/bold] to miner at [cyan]{deposit_address}[/cyan]'
-        )
-        if not skip_confirm and not click.confirm('  Send now?', default=True):
-            console.print('[yellow]Swap paused. Resume with: alw swap post-tx <tx_hash>[/yellow]')
-            return
-
-        console.print(f'\n[dim]Step 2/3: Sending {from_chain.upper()}...[/dim]')
-
-        from_tx_hash = None
-        if from_chain == 'tao':
-            console.print(
-                '  [dim]Enter your coldkey password again — this unlock signs and broadcasts the TAO transfer.[/dim]'
-            )
-            for attempt in range(2):
-                send_result = send_tao_transfer(wallet, subtensor, deposit_address, from_amount)
-                if send_result is not None:
-                    from_tx_hash, from_tx_block = send_result
-                    mark_pending_swap_tx_sent(from_tx_hash)
-                    break
-                if attempt == 0 and click.confirm('Retry?', default=True):
-                    time.sleep(1)
-                    continue
-                # Either the transfer landed but was rejected (post-tx recovery
-                # would apply if the user has the hash) or the broadcast itself
-                # failed (no hash — just let the reservation lapse).
-                console.print(
-                    '[yellow]If the tx did broadcast, resume with: alw swap post-tx <tx_hash>. '
-                    'Otherwise the reservation will expire on its own — start a new swap when ready.[/yellow]'
-                )
-                return
-        else:
-            send_result = send_btc(
-                chain_providers,
-                config,
-                deposit_address,
-                from_amount,
-                from_address=user_from_address,
-                fee_rate_override=pinned_btc_fee_rate,
-            )
-            if send_result is None:
-                return
-            from_tx_hash = send_result[0]
-            mark_pending_swap_tx_sent(from_tx_hash)
-            # send_btc returns (tx_hash, block_number). 0 means unknown
-            # (e.g. lightweight broadcaster); that's fine — validator falls
-            # back to the scan path.
-            if len(send_result) > 1 and send_result[1]:
-                from_tx_block = int(send_result[1])
-
-    # Step 10: Post tx hash to validators
-    console.print('\n[dim]Step 3/3: Confirming with validators...[/dim]')
-
-    accepted, queued, _ = sign_and_broadcast_confirm(
-        provider,
-        user_from_address,
-        from_key,
-        from_tx_hash,
-        selected_pair.hotkey,
-        receive_address,
-        validator_axons,
-        ephemeral_wallet,
-        from_chain=from_chain,
-        to_chain=to_chain,
-        from_tx_block=from_tx_block,
-        miner_uid=selected_pair.uid,
-    )
-
-    if accepted == 0:
-        console.print(f'[dim]Resume with: [cyan]alw swap post-tx {from_tx_hash}[/cyan][/dim]')
-        return
-
-    all_queued = queued > 0 and queued == accepted
-
-    if all_queued:
-        # Validators queued — wait for confirmations with live progress
-        chain_def = get_chain(from_chain)
-        est_secs = chain_def.min_confirmations * chain_def.seconds_per_block
-        est_min = est_secs / 60
-
-        console.print(
-            f'\n  Waiting for [bold]{chain_def.min_confirmations} {from_chain.upper()}[/bold]'
-            f' confirmation(s) (~{est_min:.0f} min). '
-            "We'll drop into live status the moment the swap is initiated on-chain."
-        )
-        console.print(
-            '\n  [dim]If you need to step away: Ctrl+C detaches, resume anytime with `alw view reservation`.[/dim]'
-        )
-
-    # Poll for swap creation (longer timeout when queued)
-    max_polls = 600 if all_queued else 60
-    try:
-        swap_id = poll_for_swap_with_progress(client, selected_pair.hotkey, from_chain, max_polls)
-    except KeyboardInterrupt:
-        # One last best-effort resolve before handing back — the swap may
-        # have just been initiated while we were printing, and a concrete
-        # ID in the exit banner beats telling the user to grep.
-        try:
-            swap_id = resolve_recent_swap_id(client, selected_pair.hotkey)
-        except ContractError:
-            swap_id = None
-        console.print('\n\n[green]Your swap is still being processed by validators.[/green]')
-        if swap_id is not None:
-            clear_pending_swap()
-            console.print(f'[green bold]Swap ID: {swap_id}[/green bold]')
-            console.print(f'[dim]Watch with: alw view swap {swap_id} --watch[/dim]\n')
-        else:
-            console.print(f'[dim]Miner UID {selected_pair.uid} — check progress with: alw view reservation[/dim]\n')
-        return
-
-    if swap_id is None:
-        console.print('\n[yellow]Swap not yet initiated. Validators may still be waiting for confirmations.[/yellow]')
-        console.print(
-            f'[dim]Miner UID {selected_pair.uid} — check: alw view reservation '
-            '(pending_swap.json kept for retry with `alw swap resume-reservation`)[/dim]\n'
-        )
-        return
-
-    clear_pending_swap()
-    console.print(f'\n[green bold]Swap initiated! ID: {swap_id}[/green bold]')
-
-    # In non-interactive mode, just print the ID and exit (let caller handle watching)
-    if skip_confirm:
-        return
-
-    # Watch swap through lifecycle
-    from allways.cli.swap_commands.view import watch_swap
-
-    final_swap = watch_swap(client, swap_id)
-
-    # Show completion receipt / timeout notice
-    if final_swap and final_swap.status == SwapStatus.COMPLETED:
-        display_receipt(final_swap)
-    elif final_swap and final_swap.status == SwapStatus.TIMED_OUT:
-        display_timeout_notice(final_swap, dashboard_url(config.get('network')))
+        PENDING_SWAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PENDING_SWAP_FILE.write_text(json.dumps({'miner': str(miner), 'from_chain': from_chain, 'to_chain': to_chain}))
+    except OSError:
+        pass  # best-effort convenience; not required for the swap to proceed

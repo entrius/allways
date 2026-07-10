@@ -12,12 +12,10 @@ import numpy as np
 
 from allways.chains import canonical_pair
 from allways.constants import (
-    CREDIBILITY_MAX_TIMEOUTS,
-    CREDIBILITY_RAMP_OBSERVATIONS,
     RECYCLE_UID,
     TAO_TO_RAO,
 )
-from allways.utils.rate import min_executable_tao_leg
+from allways.utils.rate import min_executable_sol_leg
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace
@@ -29,12 +27,13 @@ NON_EARNER_LINE_CAP = 30
 
 @dataclass
 class WeightingTrace:
-    """Per-hotkey capacity + volume + credibility factors for the scoring log.
+    """Per-hotkey capacity + volume + eligibility factors for the scoring log.
 
     ``capacity_factor`` is the time-weighted average of
     ``min(1, collateral / max_swap)`` over the miner's crown intervals — the
     per-block series lives in the event watcher, so a post-window collateral
-    top-up cannot retroactively scale it (#409)."""
+    top-up cannot retroactively scale it (#409). ``eligible`` is the flat 0/1
+    crown gate read off the on-chain MinerState counters (B3.3)."""
 
     capacity_factor: float = 1.0
     volume_rao: int = 0
@@ -42,8 +41,7 @@ class WeightingTrace:
     volume_share: float = 0.0
     participation: float = 1.0
     volume_factor: float = 1.0
-    closed_swaps: int = 0
-    credibility_ramp: float = 0.0
+    eligible: bool = False
 
     def record_capacity(self, factor: float) -> None:
         self.capacity_factor = factor
@@ -55,12 +53,8 @@ class WeightingTrace:
         self.participation = min(1.0, self.volume_share / crown_share) if crown_share > 0 else 1.0
         self.volume_factor = factor
 
-    def record_credibility(self, closed_swaps: int, ramp_target: int, timed_out: int = 0) -> None:
-        self.closed_swaps = closed_swaps
-        if timed_out > CREDIBILITY_MAX_TIMEOUTS:
-            self.credibility_ramp = 0.0
-        else:
-            self.credibility_ramp = min(1.0, closed_swaps / ramp_target) if ramp_target > 0 else 1.0
+    def record_eligibility(self, eligible: bool) -> None:
+        self.eligible = eligible
 
 
 def log_scoring_trace(
@@ -70,12 +64,12 @@ def log_scoring_trace(
     window_end: int,
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     rewards: np.ndarray,
-    success_rates: Dict[str, float],
+    eligibility: Dict[str, bool],
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -88,59 +82,54 @@ def log_scoring_trace(
 
     for (from_c, to_c), trace in direction_traces.items():
         holders = ', '.join(
-            f'UID{hotkey_to_uid[hk]}: {blk:.0f} blk'
-            for hk, blk in sorted(trace.crown_blocks.items(), key=lambda kv: -kv[1])
+            f'UID{hotkey_to_uid[hk]}: {secs:.0f}s'
+            for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
             if hk in hotkey_to_uid
         )
-        lines.append(
-            f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_blocks} blk'
-        )
+        lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
 
     for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
-        crown_blk = sum(t.crown_blocks.get(hk, 0.0) for t in direction_traces.values())
-        if uid == recycle_uid and crown_blk == 0:
+        crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
+        if uid == recycle_uid and crown_secs == 0:
             continue
         crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
-        sr = success_rates.get(hk, 0.0)
+        eligible = eligibility.get(hk, False)
         wt = weighting_traces.get(hk)
         extras = ''
         if wt is not None:
             extras = (
-                f' ({wt.closed_swaps}/{CREDIBILITY_RAMP_OBSERVATIONS} closed, ramp={wt.credibility_ramp:.2f})'
                 f' cap={wt.capacity_factor:.2f}'
                 f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
                 f' crown_share={wt.crown_share:.2f} vol_f={wt.volume_factor:.2f}'
             )
         lines.append(
-            f'  uid={uid} hotkey={hk[:8]}.. crown_blk={crown_blk:.0f} sr={sr:.3f}{extras} reward={crown_reward:.3f}'
+            f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
         )
 
     # Collateral as-of window_start mirrors the scoring replay's starting
     # state, so the non-earner diagnosis can tell "excluded by collateral"
     # from "genuinely outbid". Absent hotkey == unknown (fail-open), per the
     # gate in scoring.py.
-    collaterals = dict(self.event_watcher.get_miner_collaterals_at(window_start))
+    collaterals = dict(self.event_index.get_miner_collaterals_at(window_start))
     lines.extend(
         non_earner_lines(
             self,
             window_start,
             window_end,
             rewards,
-            success_rates,
+            eligibility,
             direction_traces,
             recycle_uid,
             collaterals,
-            min_swap_rao,
-            max_swap_rao,
+            min_swap_lamports,
+            max_swap_lamports,
         )
     )
 
     if recycled > 0:
         parts = [
-            f'{t.unfilled_blocks} unfilled blk in {f}→{to}'
-            for (f, to), t in direction_traces.items()
-            if t.unfilled_blocks > 0
+            f'{t.unfilled_time}s unfilled in {f}→{to}' for (f, to), t in direction_traces.items() if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
@@ -153,16 +142,16 @@ def non_earner_lines(
     window_start: int,
     window_end: int,
     rewards: np.ndarray,
-    success_rates: Dict[str, float],
+    eligibility: Dict[str, bool],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> List[str]:
     collaterals = collaterals or {}
-    ever_active = set(self.event_watcher.get_active_miners_at(window_start))
-    for e in self.event_watcher.get_active_events_in_range(window_start, window_end):
+    ever_active = set(self.event_index.get_active_miners_at(window_start))
+    for e in self.event_index.get_active_events_in_range(window_start, window_end):
         if e['active']:
             ever_active.add(e['hotkey'])
 
@@ -178,11 +167,11 @@ def non_earner_lines(
         latest_rates = rates_by_hotkey.get(hk, {})
         if not latest_rates and hk not in ever_active:
             continue
-        sr = success_rates.get(hk, 1.0)
+        eligible = eligibility.get(hk, False)
         reason = diagnose_non_earner(
-            hk, latest_rates, sr, ever_active, direction_traces, collaterals, min_swap_rao, max_swap_rao
+            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, min_swap_lamports, max_swap_lamports
         )
-        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_blk=0 reason="{reason}" sr={sr:.3f}')
+        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_s=0 reason="{reason}" eligible={eligible}')
         if len(out) >= NON_EARNER_LINE_CAP:
             break
     return out
@@ -191,12 +180,12 @@ def non_earner_lines(
 def diagnose_non_earner(
     hotkey: str,
     latest_rates: Dict[Tuple[str, str], float],
-    sr: float,
+    eligible: bool,
     ever_active: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_rao: int = 0,
-    max_swap_rao: int = 0,
+    min_swap_lamports: int = 0,
+    max_swap_lamports: int = 0,
 ) -> str:
     """Best-effort reason a miner earned no crown. Direction-aware: tao→btc is
     lower-rate-wins, btc→tao higher-wins, so "outbid" only fires when the
@@ -208,8 +197,8 @@ def diagnose_non_earner(
         return 'no_rate_posted'
     if hotkey not in ever_active:
         return 'not_active_during_window'
-    if sr <= 0:
-        return 'credibility_zero'  # zero observations OR all-timeout history
+    if not eligible:
+        return 'ineligible'  # < MIN_SUCCESSFUL_SWAPS successes or > MAX_FAILED_SWAPS failures
 
     outbid_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():
@@ -227,7 +216,7 @@ def diagnose_non_earner(
         # qualification gate dropped this miner. Collateral is the usual cause.
         if hotkey not in collaterals:
             return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
-        min_leg = min_executable_tao_leg(own, from_c, to_c, min_swap_rao, max_swap_rao)
+        min_leg = min_executable_sol_leg(own, from_c, to_c, min_swap_lamports, max_swap_lamports)
         have = collaterals[hotkey]
         if min_leg > 0 and have < min_leg:
             return (

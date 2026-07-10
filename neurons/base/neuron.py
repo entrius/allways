@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 from abc import ABC, abstractmethod
 from typing import Callable
@@ -10,6 +11,14 @@ from allways import __spec_version__ as spec_version
 from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
+
+
+def validator_dev_mode() -> bool:
+    """Dev / testnet mode: the validator observes but takes no binding actions — it does NOT
+    submit Solana consensus votes (the swap loop logs "WOULD …") and does NOT set Bittensor
+    weights. Enable with VALIDATOR_DEV_MODE=1.
+    """
+    return os.environ.get('VALIDATOR_DEV_MODE', '0') == '1'
 
 
 class BaseNeuron(ABC):
@@ -155,6 +164,10 @@ class BaseNeuron(ABC):
             return False
 
         if self.config.neuron.disable_set_weights:
+            return False
+
+        # Dev mode: observe-only — never set weights (mirrors the Solana vote suppression).
+        if validator_dev_mode():
             return False
 
         return (

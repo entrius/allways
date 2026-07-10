@@ -54,7 +54,7 @@ class Repository(BaseRepository):
         rows: List[Tuple[str, str, str, float, int]],
         commit: bool = True,
     ) -> int:
-        """Upsert rate commitments. Rows: (hotkey, from_chain, to_chain, rate, block)."""
+        """Upsert rate quotes. Rows: (hotkey, from_chain, to_chain, rate, ts)."""
         if not rows:
             return 0
         try:
@@ -73,25 +73,25 @@ class Repository(BaseRepository):
         self,
         from_chain: str,
         to_chain: str,
-        lo_block: int,
-        hi_block: int,
+        lo_ts: int,
+        hi_ts: int,
         commit: bool = True,
     ) -> bool:
-        """Wipe crown_holders rows in [lo_block, hi_block) for one direction."""
-        if hi_block <= lo_block:
+        """Wipe crown_holders intervals starting in [lo_ts, hi_ts) for one direction."""
+        if hi_ts <= lo_ts:
             return True
         return self.execute_command(
             DELETE_CROWN_IN_RANGE,
-            (from_chain, to_chain, lo_block, hi_block),
+            (from_chain, to_chain, lo_ts, hi_ts),
             commit=commit,
         )
 
     def store_crown_holders_bulk(
         self,
-        rows: List[Tuple[int, str, str, str, float, float]],
+        rows: List[Tuple[int, int, str, str, str, float, float]],
         commit: bool = True,
     ) -> int:
-        """Upsert crown winners. Rows: (block, from_chain, to_chain, hotkey, credit, rate)."""
+        """Upsert crown intervals. Rows: (started_at, ended_at, from_chain, to_chain, hotkey, credit, rate)."""
         if not rows:
             return 0
         try:
@@ -118,6 +118,7 @@ class Repository(BaseRepository):
         commit: bool = True,
     ) -> int:
         """Replace current_crown_holders rows for each given direction.
+        Row tail int is the snapshot unix ts (was block).
 
         Per direction: delete all existing rows, then insert the supplied
         winners. Wrapped in one transaction so a tied k-way holder set is
