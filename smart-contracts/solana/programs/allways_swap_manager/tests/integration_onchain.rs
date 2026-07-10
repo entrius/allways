@@ -842,15 +842,15 @@ fn onchain_withdraw_treasury_happy_path() {
     let treasury_before = read_treasury(&rpc).total;
     assert!(treasury_before >= fee, "treasury holds at least this swap's fee");
 
-    let recipient = Keypair::new().pubkey();
-    let recip_before = rpc.get_account(&recipient).map(|a| a.lamports).unwrap_or(0);
-    send(&rpc, withdraw_treasury_ix(&admin.pubkey(), &recipient, fee), &admin.pubkey(), &admin)
+    // Recipient is pinned to the admin on-chain; the admin also pays the tx fee.
+    let admin_before = rpc.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    send(&rpc, withdraw_treasury_ix(&admin.pubkey(), &admin.pubkey(), fee), &admin.pubkey(), &admin)
         .expect("withdraw treasury");
 
     assert_eq!(
-        rpc.get_account(&recipient).map(|a| a.lamports).unwrap_or(0),
-        recip_before + fee,
-        "recipient received the fee"
+        rpc.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0),
+        admin_before + fee - 5_000,
+        "admin received the fee (minus tx fee)"
     );
     assert_eq!(read_treasury(&rpc).total, treasury_before - fee, "treasury drained by fee");
 }

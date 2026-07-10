@@ -406,25 +406,31 @@ def remove_vali(pubkey: str):
 
 
 @admin_group.command('withdraw-treasury', show_disclaimer=True)
-@click.argument('recipient', type=str)
+@click.argument('recipient', type=str, required=False)
 @click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in SOL (default: withdraw the full balance)')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def withdraw_treasury(recipient: str, amount: float | None, yes: bool):
-    """Withdraw accrued protocol fees from the treasury to a recipient.
+def withdraw_treasury(recipient: str | None, amount: float | None, yes: bool):
+    """Withdraw accrued protocol fees from the treasury to the admin wallet.
 
     [dim]Replaces the ink! fee-recycle: on Solana fees accrue in a treasury PDA the admin draws down.
+    The contract pins the recipient to the admin; onward distribution is a second, admin-signed hop.
 
     Examples:
-        $ alw admin withdraw-treasury <pubkey>
-        $ alw admin withdraw-treasury <pubkey> --amount 1.5[/dim]
+        $ alw admin withdraw-treasury
+        $ alw admin withdraw-treasury --amount 1.5[/dim]
     """
-    pk = _parse_pubkey(recipient)
     _, client = get_solana_cli_context()
 
     try:
+        config = client.get_config()
         treasury = client.get_treasury()
     except SolanaClientError as e:
-        fail(f'Failed to read treasury: {e}')
+        fail(f'Failed to read config/treasury: {e}')
+    admin_pk = config.admin
+
+    pk = _parse_pubkey(recipient) if recipient is not None else admin_pk
+    if pk != admin_pk:
+        fail(f'The contract only allows treasury withdrawals to the admin ({admin_pk}). Omit RECIPIENT, or move the funds onward from the admin wallet afterwards.')
     total = treasury.total if treasury is not None else 0
 
     lamports = to_lamports(amount) if amount is not None else total

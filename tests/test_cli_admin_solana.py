@@ -64,17 +64,46 @@ def test_add_vali_calls_add_validator_with_weight(monkeypatch):
     assert str(args[0]) == pk and args[1] == 3
 
 
-def test_withdraw_treasury_defaults_to_full_balance(monkeypatch):
+def test_withdraw_treasury_defaults_to_admin_and_full_balance(monkeypatch):
     client = MagicMock()
+    admin_pk = Keypair().pubkey()
+    client.get_config.return_value = _config(admin=admin_pk)
     client.get_treasury.return_value = types.SimpleNamespace(total=2_000_000_000)  # 2 SOL
     _patch_client(monkeypatch, client)
-    pk = str(Keypair().pubkey())
 
-    result = CliRunner().invoke(admin.admin_group, ['withdraw-treasury', pk, '--yes'])
+    result = CliRunner().invoke(admin.admin_group, ['withdraw-treasury', '--yes'])
 
     assert result.exit_code == 0, result.output
     args = client.withdraw_treasury.call_args.args
-    assert str(args[0]) == pk and args[1] == 2_000_000_000
+    assert args[0] == admin_pk and args[1] == 2_000_000_000
+
+
+def test_withdraw_treasury_rejects_non_admin_recipient(monkeypatch):
+    client = MagicMock()
+    admin_pk = Keypair().pubkey()
+    client.get_config.return_value = _config(admin=admin_pk)
+    client.get_treasury.return_value = types.SimpleNamespace(total=2_000_000_000)
+    _patch_client(monkeypatch, client)
+    outsider = str(Keypair().pubkey())
+
+    result = CliRunner().invoke(admin.admin_group, ['withdraw-treasury', outsider, '--yes'])
+
+    assert result.exit_code != 0
+    assert 'only allows treasury withdrawals to the admin' in result.output
+    client.withdraw_treasury.assert_not_called()
+
+
+def test_withdraw_treasury_accepts_explicit_admin_recipient(monkeypatch):
+    client = MagicMock()
+    admin_pk = Keypair().pubkey()
+    client.get_config.return_value = _config(admin=admin_pk)
+    client.get_treasury.return_value = types.SimpleNamespace(total=2_000_000_000)
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(admin.admin_group, ['withdraw-treasury', str(admin_pk), '--yes'])
+
+    assert result.exit_code == 0, result.output
+    assert client.withdraw_treasury.call_args.args[0] == admin_pk
 
 
 def test_halt_skips_when_already_halted(monkeypatch):

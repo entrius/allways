@@ -22,6 +22,8 @@ const SYS: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const BASE_TS: i64 = 1_700_000_000;
 const SOL_AMOUNT: u64 = 2_000_000_000;
+// LiteSVM's default per-signature fee; the admin is both payer and recipient in the happy path.
+const TX_FEE: u64 = 5_000;
 
 fn pid() -> Pubkey {
     allways_swap_manager::id()
@@ -206,11 +208,11 @@ fn test_withdraw_treasury_happy_path() {
     // Treasury-side conservation: lamports above the rent reserve always equal `total`.
     let treasury_rent = lam(&svm, &treasury_pda()) - treasury(&svm).total;
 
-    let recipient = Keypair::new().pubkey();
-    let before = lam(&svm, &recipient);
-    send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee), &admin.pubkey(), &admin).expect("withdraw");
+    // Recipient is pinned to the admin on-chain; withdrawing is admin → admin.
+    let before = lam(&svm, &admin.pubkey());
+    send(&mut svm, withdraw_ix(&admin.pubkey(), &admin.pubkey(), fee), &admin.pubkey(), &admin).expect("withdraw");
 
-    assert_eq!(lam(&svm, &recipient), before + fee, "recipient received fees");
+    assert_eq!(lam(&svm, &admin.pubkey()), before + fee - TX_FEE, "admin received fees (minus tx fee)");
     assert_eq!(treasury(&svm).total, 0, "treasury drained");
     // Treasury conserves lamports: lamports == rent + total. (Per-miner collateral-vault conservation
     // is covered in test_collateral / test_swap.)
@@ -230,8 +232,17 @@ fn test_non_admin_cannot_withdraw() {
 #[test]
 fn test_cannot_overdraw_treasury() {
     let (mut svm, admin, fee) = setup_with_fee();
-    let recipient = Keypair::new().pubkey();
-    let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee + 1), &admin.pubkey(), &admin);
+    let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &admin.pubkey(), fee + 1), &admin.pubkey(), &admin);
     assert!(res.is_err(), "withdrawing more than treasury rejected");
     assert_eq!(treasury(&svm).total, fee, "treasury untouched");
+}
+
+#[test]
+fn test_withdraw_to_non_admin_recipient_rejected() {
+    let (mut svm, admin, fee) = setup_with_fee();
+    let recipient = Keypair::new().pubkey();
+    let res = send(&mut svm, withdraw_ix(&admin.pubkey(), &recipient, fee), &admin.pubkey(), &admin);
+    assert!(res.is_err(), "admin-signed withdrawal to a non-admin recipient rejected");
+    assert_eq!(treasury(&svm).total, fee, "treasury untouched");
+    assert_eq!(lam(&svm, &recipient), 0, "recipient received nothing");
 }

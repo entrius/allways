@@ -125,4 +125,8 @@ pub enum ErrorCode {
     // --- A5: hotkey binding ---
     #[msg("This hotkey is already bound to a different pubkey (set-once)")]
     HotkeyAlreadyBound,
+
+    // --- Treasury hardening ---
+    #[msg("Treasury withdrawals may only be sent to the admin")]
+    TreasuryRecipientNotAdmin,
 }
