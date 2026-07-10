@@ -1,3 +1,4 @@
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -141,19 +142,30 @@ class ChainProvider(ABC):
 
         return tx_info
 
+    # A cached tip is reused for at most this long. The validator clears it each forward pass (one
+    # getSlot/pass); this TTL is the safety net for callers that never clear (e.g. the miner), so the
+    # tip can never freeze — it self-refreshes at least this often. Slightly longer than a subtensor
+    # block so a validator pass stays on one fetch.
+    _TIP_TTL_SECONDS = 15.0
+
     def cached_block_height(self) -> Optional[int]:
-        """Chain tip for the current forward pass. Fetched once via ``get_current_block_height`` and
-        reused, so per-tx confirmation math costs one tip lookup per pass instead of one per leg.
-        Cleared each pass by ``clear_pass_tip``; a failed fetch (None) is not cached, so it retries.
-        A start-of-pass tip biases confirmations slightly low — conservative, never a false confirm."""
+        """Chain tip, cached so per-tx confirmation math shares one lookup instead of one per leg.
+
+        The validator clears this each pass (``clear_pass_tip``) → one ``getSlot`` per pass. The TTL
+        caps staleness for callers that never clear (the miner), so the tip can never freeze. A start-
+        of-pass/slightly-stale tip biases confirmations low — conservative, never a false confirm. A
+        failed fetch (None) is not cached, so it retries."""
         tip = getattr(self, '_pass_tip', None)
-        if tip is None:
-            tip = self.get_current_block_height()
+        if tip is not None and time.monotonic() - getattr(self, '_pass_tip_ts', 0.0) < self._TIP_TTL_SECONDS:
+            return tip
+        tip = self.get_current_block_height()
+        if tip is not None:
             self._pass_tip = tip
+            self._pass_tip_ts = time.monotonic()
         return tip
 
     def clear_pass_tip(self) -> None:
-        """Reset the per-pass tip cache — called once per forward pass."""
+        """Expire the cached tip — the validator calls this once per pass for a fresh start-of-pass tip."""
         self._pass_tip = None
 
     @abstractmethod
