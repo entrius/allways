@@ -473,13 +473,9 @@ def halt_system():
     """
     _, client = get_solana_cli_context()
 
-    try:
-        if client.get_config().halted:
-            console.print('[yellow]System is already halted[/yellow]')
-            return
-    except SolanaClientError as e:
-        fail(f'Failed to read halt status: {e}')
-
+    # Do NOT gate on a pre-read of `halted` — against a load-balanced RPC a stale node can
+    # misreport the state and block a legitimate halt. Just submit; the on-chain state is the
+    # source of truth (setting halted=true when already halted is a harmless no-op).
     console.print('\n[bold red]Halt System[/bold red]\n')
     console.print('  This blocks new deposits / activations / reservation pools.')
     console.print('  Existing swaps continue to completion.\n')
@@ -505,13 +501,9 @@ def resume_system():
     """
     _, client = get_solana_cli_context()
 
-    try:
-        if not client.get_config().halted:
-            console.print('[yellow]System is not halted[/yellow]')
-            return
-    except SolanaClientError as e:
-        fail(f'Failed to read halt status: {e}')
-
+    # Do NOT gate on a pre-read of `halted` — a stale RPC node can misreport it and refuse a
+    # legitimate resume (observed on public devnet). Just submit; on-chain is the source of truth
+    # (setting halted=false when already live is a harmless no-op).
     console.print('\n[bold]Resume System[/bold]\n')
     console.print('  This allows new deposits / activations / pools again.\n')
 

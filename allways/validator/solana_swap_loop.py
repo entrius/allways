@@ -234,6 +234,7 @@ class SolanaSwapLoop:
             swap.miner_from_addr,
             int(swap.from_amount),
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
+            sender=swap.user_from_addr,
         )
         if s_status == 'down':
             return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
@@ -309,13 +310,15 @@ class SolanaSwapLoop:
         if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
             self._reject_logged(swap, expected_to)
             return SwapAction(SwapDecision.REJECT, reason=f'to_amount {swap.to_amount} != pinned-rate {expected_to}')
-        # Source deposit must exist, confirm, AND be fresh vs the Reservation before we'd attest.
+        # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
+        # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(
             swap.from_chain,
             swap.from_tx_hash,
             swap.miner_from_addr,
             int(swap.from_amount),
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
+            sender=swap.user_from_addr,
         )
         if s_status == 'down':
             return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
