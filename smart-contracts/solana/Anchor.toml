@@ -6,17 +6,17 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-allways_swap_manager = "EhFT382UbUyzD56vv4kFJE3shtxqDgfpwErhJ7L1qeMf"
+allways_swap_manager = "6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD"
 
 # Same program id across all clusters (persistent keypair in custody; see
 # alw-utils/dev-environment/solana/migration-runbook.md). deploy.sh drives the
 # cluster/wallet via --provider.cluster/--provider.wallet, so these are for
 # `anchor deploy --provider.cluster devnet` / IDL tooling parity.
 [programs.devnet]
-allways_swap_manager = "EhFT382UbUyzD56vv4kFJE3shtxqDgfpwErhJ7L1qeMf"
+allways_swap_manager = "6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD"
 
 [programs.mainnet]
-allways_swap_manager = "EhFT382UbUyzD56vv4kFJE3shtxqDgfpwErhJ7L1qeMf"
+allways_swap_manager = "6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD"
 
 [provider]
 cluster = "localnet"
