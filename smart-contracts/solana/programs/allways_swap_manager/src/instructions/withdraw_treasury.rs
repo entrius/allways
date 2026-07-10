@@ -5,8 +5,8 @@ use crate::error::ErrorCode;
 use crate::events::TreasuryWithdrawn;
 use crate::state::{Config, Treasury};
 
-/// Admin withdraws accrued subnet revenue from the treasury to a recipient. Native-lamport move
-/// (treasury → recipient) + decrement of `total`, preserving the treasury invariant
+/// Admin withdraws accrued subnet revenue from the treasury to the admin wallet. Native-lamport
+/// move (treasury → admin) + decrement of `total`, preserving the treasury invariant
 /// (`lamports == rent + total`). Structurally cannot touch collateral — that lives in a separate PDA.
 #[derive(Accounts)]
 pub struct WithdrawTreasury<'info> {
@@ -18,8 +18,9 @@ pub struct WithdrawTreasury<'info> {
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
 
-    /// CHECK: receives the withdrawn fees; admin chooses the destination.
-    #[account(mut)]
+    /// CHECK: pinned to the admin so a bad CLI argument or compromised tooling cannot route
+    /// fees to an arbitrary address; onward distribution is a second, admin-signed hop.
+    #[account(mut, constraint = recipient.key() == config.admin @ ErrorCode::TreasuryRecipientNotAdmin)]
     pub recipient: UncheckedAccount<'info>,
 }
 
