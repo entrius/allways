@@ -826,6 +826,9 @@ fn test_contract_no_longer_blocks_reused_tx() {
     send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
 
     // miner freed → re-reserve, re-claim + re-attest the SAME from_tx_hash → now permitted on-chain.
+    // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
+    let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, fb + 1);
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice()).unwrap();
@@ -846,7 +849,10 @@ fn test_stats_accumulate_same_direction() {
     run_full_swap(&mut svm, &vals, &miner, "srctx1");
     assert_eq!(direction_stats(&svm, &miner.pubkey(), FROM_CHAIN, TO_CHAIN).completed, 1);
 
-    // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction
+    // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction.
+    // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
+    let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, fb + 1);
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     run_full_swap(&mut svm, &vals, &miner, "srctx2");
 

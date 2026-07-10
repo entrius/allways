@@ -181,7 +181,7 @@ pub const POOL_WINDOW_SECS: i64 = 30;
 /// the unfilled reservation can be reaped. Seeds `Config.finalize_window_secs`; runtime-tunable within
 /// [MIN, MAX]. Must cover a validator's internal auction + tx landing without letting a winner park a
 /// miner for free (the reservation fee is already sunk on abandon).
-pub const FINALIZE_WINDOW_SECS: i64 = 60;
+pub const FINALIZE_WINDOW_SECS: i64 = 150;
 pub const FINALIZE_WINDOW_SECS_MIN: i64 = 15;
 pub const FINALIZE_WINDOW_SECS_MAX: i64 = 300; // 5 min
 
