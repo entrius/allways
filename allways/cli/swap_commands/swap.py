@@ -1,10 +1,11 @@
 """alw swap - Execute and manage cross-chain swaps.
 
-Origination is on-chain on Solana: the taker opens a per-miner reservation pool (`open_or_request`), a
-permissionless stake-weighted draw (`resolve_pool`, run by the validator crank) picks the winning request,
-then the taker sends source funds to the winning miner's address. `swap now` wires the flag-driven
-origination slice (select miner → compute amounts → open_or_request → poll for the reservation). Auto
-fund-sending + post-tx (`swap post-tx`) land next."""
+Origination is on-chain on Solana, two-phase: the taker BIDS into a per-miner reservation pool
+(`open_or_request`, pair only), a permissionless stake-weighted draw (`resolve_pool`) seats a winner,
+then the seat winner FILLS the reservation (`finalize_reservation`, naming the taker + amounts). `swap
+now` is the unrouted-taker path — the taker is its own router: bid → self-crank the draw → finalize
+against the pinned rate → then send source funds + `swap post-tx`. Self-cranking the draw means an
+unrouted taker never waits on validator liveness."""
 
 import json
 import time
@@ -24,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
+    compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
     to_smallest_units,
@@ -54,14 +56,38 @@ def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandi
 _SEND_MARGIN_SECS = 180
 
 
-def _poll_reservation(client, miner, timeout_secs: int):
-    """Poll until THIS request's draw writes a live, unclaimed Reservation — or we time out.
+_BENIGN_CRANK = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests')
 
-    Uses the shared ``live_unclaimed`` predicate (same one `post-tx` uses), NOT ``reserved_until != 0``.
-    A reservation left over from an abandoned reserve keeps a non-zero-but-past ``reserved_until``
-    indefinitely; the old check matched it instantly and made `swap now` tell the taker to send funds
-    before ``resolve_pool`` ran. Requiring liveness means we keep waiting through both the pre-draw
-    (``reserved_until == 0``) and the stale-leftover (expired) states until the draw writes a fresh one."""
+
+def _self_crank_resolve(client, miner) -> None:
+    """Permissionless arm-then-draw crank. An unrouted taker cranks its own pool so the draw never
+    waits on validator liveness. Benign races (window not closed, seed slot not produced yet, already
+    resolved) are expected and retried on the next poll."""
+    try:
+        client.resolve_pool(miner)
+    except Exception as e:  # noqa: BLE001
+        if not any(m in str(e) for m in _BENIGN_CRANK):
+            raise
+
+
+def _poll_drawn(client, miner, user, timeout_secs: int):
+    """Poll until THIS taker's bid draws its UNFILLED reservation (router == us, reserved_until == 0,
+    finalize_by armed), self-cranking `resolve_pool` each pass. Returns the drawn reservation, or None
+    on timeout / if a different router won the seat."""
+    us = str(user)
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        _self_crank_resolve(client, miner)
+        resv = client.get_reservation(miner)
+        if resv is not None and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0:
+            return resv if str(resv.router) == us else None  # seated: us, or someone else won
+        time.sleep(3)
+    return None
+
+
+def _poll_reservation(client, miner, timeout_secs: int):
+    """Poll until a live, unclaimed Reservation exists — the shared ``live_unclaimed`` predicate (same
+    one `post-tx` uses). Post-finalize the reservation is live; this guards against a lagging read."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         resv = client.get_reservation(miner)
@@ -142,28 +168,30 @@ def swap_now_command(
         f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
         f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
     )
-    if not skip_confirm and not click.confirm('  Reserve this miner on-chain?', default=False):
+    if not skip_confirm and not click.confirm('  Bid on this miner on-chain?', default=False):
         return
 
-    sig = client.open_or_request(
-        cand.miner,
-        from_chain,
-        to_chain,
-        user,
-        user_from_addr,
-        receive_address_opt,
-        amts.collateral_amount,
-        amts.from_amount,
-        amts.to_amount,
-    )
-    console.print(f'[green]  Reservation requested[/green] (tx {sig[:16]}…). Waiting for the draw to resolve…')
+    # Phase 1 — BID (pair only; no taker, no amounts).
+    sig = client.open_or_request(cand.miner, from_chain, to_chain)
+    console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
 
-    resv = _poll_reservation(client, cand.miner, timeout_secs=pool_window + 60)
-    if resv is None:
-        fail('  Draw did not resolve into a live reservation in time — no reservation won. '
-             'Do NOT send funds; check `alw view reservation` and re-run.')
-    if str(resv.user) != str(user):
-        fail("  Another taker won this miner's draw. Do NOT send funds; re-run to try again.")
+    # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
+    drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
+    if drawn is None:
+        fail('  You were not seated (another bidder won, or the draw did not resolve in time). '
+             'Do NOT send funds; re-run to try again.')
+
+    # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
+    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
+    client.finalize_reservation(
+        cand.miner, user, user_from_addr, receive_address_opt,
+        fill.collateral_amount, fill.from_amount, fill.to_amount,
+    )
+    resv = _poll_reservation(client, cand.miner, timeout_secs=30)
+    if resv is None or str(resv.user) != str(user):
+        fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
+    recv = int(resv.to_amount) / 10 ** get_chain(to_chain).decimals
+    console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
