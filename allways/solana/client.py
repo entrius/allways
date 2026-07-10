@@ -606,7 +606,7 @@ class AllwaysSolanaClient:
             AccountMeta(router, True, False),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
-            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),  # mut: finalize writes busy_until
             AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
         ]
         return self._send([self._ix('finalize_reservation', args, metas)])
