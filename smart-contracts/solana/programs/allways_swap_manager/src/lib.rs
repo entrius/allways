@@ -14,7 +14,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("EhFT382UbUyzD56vv4kFJE3shtxqDgfpwErhJ7L1qeMf");
+declare_id!("6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD");
 
 #[program]
 pub mod allways_swap_manager {
