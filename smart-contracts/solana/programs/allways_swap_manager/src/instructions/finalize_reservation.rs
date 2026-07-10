@@ -61,9 +61,15 @@ pub fn handler(
     let now = Clock::get()?.unix_timestamp;
     let cfg = &ctx.accounts.config;
 
-    // Fill exactly once, and only inside the finalize window.
+    // Fill exactly once, and only inside the finalize window. Both sentinels are load-bearing:
+    // `reserved_until == 0` alone means "not currently live", which a reservation CONSUMED by
+    // `vote_initiate` also satisfies (it zeroes reserved_until and frees the claim slot). Only
+    // `created_at == 0` says "drawn but never filled". Without it, the seat winner could re-fill a
+    // consumed reservation while `finalize_by` is still ahead, minting a second live hold on a miner
+    // that already has an active swap — and each fill's 1.10x collateral gate is checked in isolation.
+    // Same guard `close_unfilled_reservation` relies on; do not let these two drift apart.
     require!(
-        ctx.accounts.reservation.reserved_until == 0,
+        ctx.accounts.reservation.reserved_until == 0 && ctx.accounts.reservation.created_at == 0,
         ErrorCode::AlreadyFilled
     );
     require!(

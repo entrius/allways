@@ -871,3 +871,54 @@ fn test_stats_separate_per_direction() {
         "reverse-direction stats PDA not created"
     );
 }
+
+/// A reservation CONSUMED by `vote_initiate` (reserved_until back to 0, claim slot cleared) must not be
+/// re-fillable — even while `finalize_by` is still in the future.
+///
+/// `created_at != 0` is the only field distinguishing a consumed reservation from a fresh drawn seat;
+/// both carry `reserved_until == 0`. It is the exact guard `close_unfilled_reservation` relies on.
+/// Without the same guard here, the seat winner can mint a SECOND live reservation on a miner that
+/// already has an active swap — and each fill's 1.10x collateral gate is checked in isolation, so the
+/// miner ends up backing two obligations with collateral sized for one.
+///
+/// Reaching the overlap needs the whole finalize -> claim -> quorum path to land inside the finalize
+/// window. At the 60s default that is impractical, which is why `finalize_by` alone has masked this so
+/// far. `set-finalize-window` (settable to 300s) widens it, so the invariant is made explicit here
+/// rather than left to a timing coincidence.
+#[test]
+fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
+    let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
+
+    // setup_full leaves the clock past finalize_by; step back inside the window so this test exercises
+    // the created_at guard rather than the deadline.
+    let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, finalize_by - 5);
+
+    // Drive the filled reservation to an Active swap. vote_initiate consumes it.
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+
+    let now = svm.get_sysvar::<Clock>().unix_timestamp;
+    let r = reservation_acct(&svm, &miner.pubkey());
+    assert_eq!(r.reserved_until, 0, "vote_initiate consumed the reservation");
+    assert_eq!(r.claimed_swap_key, [0u8; 32], "and freed the claim slot");
+    assert_ne!(r.created_at, 0, "but it WAS filled — not a fresh drawn seat");
+    assert!(now <= r.finalize_by, "and the finalize window is still open (the dangerous overlap)");
+    assert!(miner_state(&svm, &miner.pubkey()).has_active_swap, "miner is mid-swap");
+
+    let res = send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER),
+        &vals[0].pubkey(),
+        &vals[0],
+    );
+    assert!(res.is_err(), "a consumed reservation must not be re-filled inside its finalize window");
+    assert_eq!(
+        reservation_acct(&svm, &miner.pubkey()).reserved_until,
+        0,
+        "reservation stays consumed — no second live hold on a miner with an active swap"
+    );
+}
+
+fn reservation_acct(svm: &LiteSVM, miner: &Pubkey) -> Reservation {
+    Reservation::try_deserialize(&mut svm.get_account(&resv_pda(miner)).unwrap().data.as_slice()).unwrap()
+}
