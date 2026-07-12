@@ -121,3 +121,43 @@ def test_reservation_with_seconds_left_still_refuses_the_send():
     assert result.exit_code != 0
     assert 'too short' in result.output
     assert 'Do NOT send funds' in result.output
+
+
+# ── benign crank-race handling: a lost resolve_pool must not abort `swap now` ───────────────────────
+# The self-crank races the validator (and peer takers) to resolve the pool. When it loses, the tx can
+# fail two ways: rejected in simulation (error carries the Anchor NAME) or landed-failed (the confirm
+# path stringifies status["err"] with only the numeric `{'Custom': N}` code). Both are benign — the
+# draw still happened, we keep polling for our seat. Matching names alone missed the code-only form,
+# which re-raised and abandoned the taker's already-paid, since-drawn seat (F2, 2026-07-12 mainnet run).
+
+
+def _crank_raising(err_text):
+    from allways.cli.swap_commands.swap import _self_crank_resolve
+
+    client = MagicMock()
+    client.resolve_pool.side_effect = RuntimeError(err_text)
+    _self_crank_resolve(client, 'miner-pubkey')  # must NOT raise
+
+
+def test_crank_swallows_benign_race_by_name():
+    # pre-flight simulation rejection — carries the Anchor error name
+    for name in ('PoolNotClosed', 'NoRequests', 'SeedSlotNotYetProduced', 'AlreadyFilled'):
+        _crank_raising(f'Program log: AnchorError ... Error Code: {name}. Error Number: 60xx')
+
+
+def test_crank_swallows_benign_race_by_numeric_code():
+    # landed-then-failed tx — confirm() surfaces only the numeric code, no name (the F2 miss)
+    for code in (6042, 6044, 6045, 6046):
+        _crank_raising(f"tx 5abc failed: {{'InstructionError': [0, {{'Custom': {code}}}]}}")
+
+
+def test_crank_reraises_a_real_error():
+    import pytest
+
+    from allways.cli.swap_commands.swap import _self_crank_resolve
+
+    client = MagicMock()
+    # a non-benign failure (e.g. MinerReserved 6022) must still propagate
+    client.resolve_pool.side_effect = RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
+    with pytest.raises(RuntimeError):
+        _self_crank_resolve(client, 'miner-pubkey')

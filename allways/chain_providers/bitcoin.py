@@ -179,15 +179,16 @@ class BitcoinProvider(ChainProvider):
     # The sole data source for tx verification, confirmations, and balances.
 
     def api_calc_confirmations(self, block_number: int) -> int:
-        """Fetch the chain tip from Esplora and calculate confirmations for a block."""
-        try:
-            tip_resp = self.btc_api_get('/blocks/tip/height', timeout=10)
-            if tip_resp.ok:
-                tip_height = int(tip_resp.text.strip())
-                return tip_height - block_number + 1
-        except Exception:
-            pass
-        return 0
+        """Confirmations for a mined block from the pass-cached chain tip, so N BTC legs in one
+        forward pass share a single ``/blocks/tip/height`` instead of one each (mirrors the shipped
+        SOL hoist, #542/#543). The validator clears the tip each pass (one fetch/pass); the base's
+        15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
+        tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
+        confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
+        tip_height = self.cached_block_height()
+        if tip_height is None:
+            return 0
+        return max(0, tip_height - block_number + 1)
 
     def api_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
