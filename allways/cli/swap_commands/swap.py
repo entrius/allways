@@ -57,17 +57,28 @@ def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandi
 _SEND_MARGIN_SECS = 180
 
 
-_BENIGN_CRANK = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests')
+# Benign crank races — `resolve_pool` lost to another cranker (the validator, or a peer taker) or ran
+# before the draw was possible. Each surfaces in TWO string forms depending on where it was caught:
+#   • Anchor error NAME — when the tx is rejected in pre-flight simulation (e.g. "PoolNotClosed").
+#   • numeric CODE only — when the tx is submitted and *lands* in a failed state; the confirm path
+#     stringifies `status["err"]` as `{'InstructionError': [0, {'Custom': 6044}]}`, with no name.
+# Matching names alone (the old behavior) missed the code-only form, so a benign race that reached the
+# chain re-raised and aborted `swap now` — abandoning the taker's already-paid, since-drawn seat until
+# it expired (fee forfeited, miner locked busy_until). Match both forms. Codes are ErrorCode indices.
+_BENIGN_CRANK_NAMES = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests', 'AlreadyFilled')
+_BENIGN_CRANK_CODES = (6045, 6042, 6044, 6046)  # same order as the names above
 
 
 def _self_crank_resolve(client, miner) -> None:
     """Permissionless arm-then-draw crank. An unrouted taker cranks its own pool so the draw never
     waits on validator liveness. Benign races (window not closed, seed slot not produced yet, already
-    resolved) are expected and retried on the next poll."""
+    resolved/filled) are expected and retried on the next poll."""
     try:
         client.resolve_pool(miner)
     except Exception as e:  # noqa: BLE001
-        if not any(m in str(e) for m in _BENIGN_CRANK):
+        msg = str(e)
+        benign = any(n in msg for n in _BENIGN_CRANK_NAMES) or any(f"'Custom': {c}" in msg for c in _BENIGN_CRANK_CODES)
+        if not benign:
             raise
 
 
