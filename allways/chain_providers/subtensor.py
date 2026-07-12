@@ -216,12 +216,33 @@ class SubtensorProvider(ChainProvider):
             window = max(1, int(max_scan_blocks))
             blocks_to_check = [current_block - offset for offset in range(window) if current_block - offset >= 0]
 
+        # --- F1 diagnostics (2026-07-12): a delivered TAO leg was reported NOT FOUND -> miner slashed.
+        # A hinted scan has no wide-scan fallback, so it silently fails whenever the node cannot see the
+        # hinted blocks. Log enough to tell the three cases apart when it recurs:
+        #   (a) head < hint      -> our node hasn't imported the block yet (stale view, NOT the miner's fault)
+        #   (b) blocks all None  -> node couldn't serve the hinted blocks (stale view / RPC gap)
+        #   (c) blocks retrieved, tx absent -> the HINT itself points at the wrong blocks
+        bt.logging.debug(
+            f'{LOG_SUB} verify tx={tx_hash[:16]}… hint={block_hint} head={current_block} '
+            f'window=[{blocks_to_check[0]}..{blocks_to_check[-1]}] want>={expected_amount} to={expected_recipient[:8]}…'
+        )
+        if block_hint > 0 and current_block < block_hint:
+            bt.logging.warning(
+                f'{LOG_SUB} verify: node HEAD {current_block} is BEHIND hinted block {block_hint} by '
+                f'{block_hint - current_block} — dest leg not visible yet; a NOT-FOUND here is a stale-view '
+                f'false negative, not an absent tx. tx={tx_hash[:16]}…'
+            )
+
         try:
             tx_hash_seen = False
+            retrieved = 0
+            unretrievable = []
             for block_num in blocks_to_check:
                 block = self.get_block(block_num)
                 if not block or 'extrinsics' not in block:
+                    unretrievable.append(block_num)
                     continue
+                retrieved += 1
 
                 is_raw = block.get('_raw', False)
 
@@ -250,7 +271,18 @@ class SubtensorProvider(ChainProvider):
                     f'{LOG_SUB} scan: tx {tx_hash[:16]}... found but no transfer pays {expected_recipient} >= {expected_amount} rao'
                 )
             else:
-                bt.logging.debug(f'{LOG_SUB} scan: tx {tx_hash[:16]}... not found in scan window')
+                # Enriched NOT-FOUND: whether the window was even retrievable tells stale-view apart from
+                # a genuinely-absent tx / wrong hint. All-None on a hinted scan == our node couldn't see it.
+                summary = (
+                    f'{LOG_SUB} scan: tx {tx_hash[:16]}... NOT FOUND — hint={block_hint} head={current_block} '
+                    f'retrieved={retrieved}/{len(blocks_to_check)} unretrievable={unretrievable[:8]}'
+                )
+                if block_hint > 0 and retrieved == 0:
+                    bt.logging.warning(summary + ' — ALL hinted blocks unretrievable (stale node view, not an absent tx)')
+                elif block_hint > 0 and not tx_hash_seen and retrieved > 0:
+                    bt.logging.warning(summary + ' — hinted blocks retrieved but tx absent from them (hint points at wrong blocks?)')
+                else:
+                    bt.logging.debug(summary)
             return None
         except ProviderUnreachableError:
             raise

@@ -317,6 +317,13 @@ class SwapFulfiller:
             bt.logging.info(f'Swap {key[:16]}: retrying mark_fulfilled for cached send tx {sent.to_tx_hash[:16]}...')
 
         # Mark fulfilled on-chain — records only the dest tx hash/block (to_amount is the pinned value).
+        # F1 diagnostics (2026-07-12): to_tx_block written here becomes the validator's dest-leg
+        # `block_hint`. Log it so it can be cross-checked against the validator's `verify … hint=` line —
+        # a divergence means the recorded/decoded block is wrong; a match points at the node's chain view.
+        bt.logging.debug(
+            f'Swap {key[:16]}: mark_fulfilled to_tx_hash={sent.to_tx_hash[:16]}… to_tx_block={sent.to_tx_block} '
+            f'({swap.to_chain} dest leg)'
+        )
         try:
             self.client.mark_fulfilled(
                 swap_key=swap.swap_key,
