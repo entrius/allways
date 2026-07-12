@@ -130,8 +130,10 @@ def test_reservation_with_seconds_left_still_refuses_the_send():
 # draw still happened, we keep polling for our seat. Matching names alone missed the code-only form,
 # which re-raised and abandoned the taker's already-paid, since-drawn seat (F2, 2026-07-12 mainnet run).
 
+
 def _crank_raising(err_text):
     from allways.cli.swap_commands.swap import _self_crank_resolve
+
     client = MagicMock()
     client.resolve_pool.side_effect = RuntimeError(err_text)
     _self_crank_resolve(client, 'miner-pubkey')  # must NOT raise
@@ -151,7 +153,9 @@ def test_crank_swallows_benign_race_by_numeric_code():
 
 def test_crank_reraises_a_real_error():
     import pytest
+
     from allways.cli.swap_commands.swap import _self_crank_resolve
+
     client = MagicMock()
     # a non-benign failure (e.g. MinerReserved 6022) must still propagate
     client.resolve_pool.side_effect = RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
