@@ -120,6 +120,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
     client.get_config.return_value = types.SimpleNamespace(
         min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
     )
+    client.get_reservation.return_value = None  # no seat held yet -> normal bid path (not a resume)
     client.open_or_request.return_value = 'sig' * 8
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
     cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
@@ -276,3 +277,71 @@ def test_lost_seat_to_is_none_when_no_seat_is_drawn_yet():
         reserved_until=0, created_at=0, finalize_by=now - 100, router='RIVAL'
     )
     assert _lost_seat_to(client, 'miner', 'ME') is None
+
+
+# ── resumability: recover an already-held seat instead of paying for a second bid ────────────────────
+# A prior `swap now` can bid + draw (or even finalize) and then crash on a transient RPC before it
+# instructs the send. Re-running must RESUME the reused per-miner reservation for this taker — not
+# re-bid (double fee) — by reading `get_reservation` up front.
+
+def _run_resume(existing, poll_resv):
+    from click.testing import CliRunner
+
+    from allways.cli.swap_commands.swap import swap_now_command
+
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    client = MagicMock()
+    client.keypair.pubkey.return_value = user
+    client.get_config.return_value = types.SimpleNamespace(
+        min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
+    )
+    client.get_reservation.return_value = existing
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
+    argv = ['--from', 'btc', '--to', 'sol', '--amount', '0.00005', '--from-address', 'tb1qsrc', '--receive-address', user, '--yes']
+    with (
+        patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
+        patch('allways.cli.swap_commands.swap._poll_drawn', return_value=None),  # unused on a resume; keeps the foreign-seat fall-through fast
+        patch('allways.cli.swap_commands.swap._poll_reservation', return_value=poll_resv),
+        patch('allways.cli.swap_commands.swap._save_pending'),
+    ):
+        return client, CliRunner().invoke(swap_now_command, argv)
+
+
+def test_swap_now_resumes_a_drawn_seat_without_re_bidding():
+    now = int(time.time())
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    # a seat drawn to us but not finalized (reserved_until==0, created_at==0, finalize_by ahead)
+    drawn = types.SimpleNamespace(reserved_until=0, created_at=0, finalize_by=now + 120, router=user, rate=int(0.0021 * 10**18))
+    live = _resv(now + 400, user=user)  # what finalize produces (returned by the patched _poll_reservation)
+    client, result = _run_resume(drawn, poll_resv=live)
+    assert result.exit_code == 0, result.output
+    assert 'Resuming the seat you already drew' in result.output
+    assert 'Reserved.' in result.output
+    client.open_or_request.assert_not_called()  # NO second bid / second fee
+    client.finalize_reservation.assert_called_once()  # but it did finalize the held seat
+
+
+def test_swap_now_resumes_a_live_reservation_without_bidding_or_finalizing():
+    now = int(time.time())
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    live = _resv(now + 400, user=user)  # already finalized, ours, unclaimed — just needs the send
+    client, result = _run_resume(live, poll_resv=None)
+    assert result.exit_code == 0, result.output
+    assert 'Resuming the reservation you already hold' in result.output
+    assert 'Reserved.' in result.output
+    client.open_or_request.assert_not_called()
+    client.finalize_reservation.assert_not_called()
+
+
+def test_swap_now_does_not_resume_a_foreign_seat():
+    now = int(time.time())
+    other = 'SOMEONE_ELSE'
+    # a live reservation owned by a different taker must NOT be treated as ours -> falls through to bid
+    foreign = _resv(now + 400, user=other)
+    client, result = _run_resume(foreign, poll_resv=_resv(now + 400, user='68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'))
+    # with no _poll_drawn patched, the bid path runs its self-crank; we only assert it did NOT short-circuit
+    # into a resume (no "Resuming" banner) — it treated the foreign seat as not-ours.
+    assert 'Resuming' not in result.output
