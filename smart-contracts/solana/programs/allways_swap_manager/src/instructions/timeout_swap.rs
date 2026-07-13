@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::{record_vote, reset_round, swap_request_hash};
+use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{COLLATERAL_SEED, CONFIG_SEED, MINER_SEED, REQ_TIMEOUT, SWAP_SEED, VOTE_SEED};
 use crate::error::ErrorCode;
 use crate::events::SwapTimedOut;
@@ -105,7 +105,11 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         ctx.accounts.miner_state.failed_swaps =
             ctx.accounts.miner_state.failed_swaps.saturating_add(1);
 
-        reset_round(&mut ctx.accounts.vote_round);
+        // Close the per-swap round (unique swap_key seed → never reused) and refund its rent to the
+        // validator instead of parking it on-chain forever. Safe: the swap closes just below in this
+        // same terminal branch, and `swap` is resolved before `vote_round` in the accounts struct, so a
+        // straggler validator's late timeout reverts on the gone swap before it could re-create the round.
+        ctx.accounts.vote_round.close(ctx.accounts.validator.to_account_info())?;
         ctx.accounts.swap.close(ctx.accounts.validator.to_account_info())?;
 
         emit!(SwapTimedOut {
