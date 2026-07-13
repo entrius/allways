@@ -31,6 +31,7 @@ from allways.cli.swap_commands.swap_intake import (
     to_smallest_units,
 )
 from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
+from allways.solana.rpc import TransientRpcError
 from allways.utils.rate import apply_fee_deduction
 
 
@@ -75,6 +76,9 @@ def _self_crank_resolve(client, miner) -> None:
     resolved/filled) are expected and retried on the next poll."""
     try:
         client.resolve_pool(miner)
+    except TransientRpcError:
+        return  # RPC hiccup while nudging the pool — the poll loop re-cranks and re-reads the real
+        # outcome (the reservation). If this resolve_pool actually landed, the next pass sees the seat.
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         benign = any(n in msg for n in _BENIGN_CRANK_NAMES) or any(f"'Custom': {c}" in msg for c in _BENIGN_CRANK_CODES)

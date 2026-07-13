@@ -16,6 +16,29 @@ class SolanaRpcError(Exception):
     pass
 
 
+class TransientRpcError(SolanaRpcError):
+    """A transient transport/server fault — request timeout, HTTP 429/5xx, or a JSON-RPC transient code
+    (-32603 internal error, -32005 node-unhealthy/behind, block-not-yet-available, …). Idempotent reads
+    are retried automatically inside `_call`; a state-changing re-send is left to the caller, since the
+    request may already have landed. Subclasses SolanaRpcError so existing `except SolanaRpcError`
+    handlers keep working."""
+
+
+# JSON-RPC error codes that mean "try again", not "your request was malformed / the tx failed".
+_TRANSIENT_RPC_CODES = frozenset({-32603, -32005, -32004, -32014, -32016})
+# HTTP statuses that are the provider hiccuping, not a client-side error.
+_TRANSIENT_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
+# Side-effect-free methods (+ read-only simulate) — safe to auto-retry. sendTransaction and
+# requestAirdrop are deliberately excluded: a duplicate submit is the caller's decision (the pool crank
+# already re-sends on its next pass, and a double resolve_pool reverts benignly).
+_RETRYABLE_METHODS = frozenset({
+    'getAccountInfo', 'getProgramAccounts', 'getSlot', 'getBalance', 'getLatestBlockhash',
+    'getSignaturesForAddress', 'getTransaction', 'getSignatureStatuses', 'simulateTransaction',
+})
+_MAX_READ_RETRIES = 4
+_RETRY_BACKOFF_BASE = 0.25  # seconds; doubles each attempt → 0.25, 0.5, 1.0, 2.0
+
+
 class SolanaRpc:
     def __init__(self, url: str, timeout: int = 30):
         self.url = url
@@ -26,12 +49,30 @@ class SolanaRpc:
     def _call(self, method: str, params: list) -> Any:
         self._id += 1
         payload = {'jsonrpc': '2.0', 'id': self._id, 'method': method, 'params': params}
-        resp = self._session.post(self.url, json=payload, timeout=self.timeout)
-        resp.raise_for_status()
-        body = resp.json()
-        if 'error' in body:
-            raise SolanaRpcError(f'{method}: {body["error"]}')
-        return body['result']
+        attempt = 0
+        while True:
+            try:
+                resp = self._session.post(self.url, json=payload, timeout=self.timeout)
+                if resp.status_code in _TRANSIENT_HTTP_STATUS:
+                    raise TransientRpcError(f'{method}: HTTP {resp.status_code}')
+                resp.raise_for_status()
+                body = resp.json()
+                if 'error' in body:
+                    err = body['error']
+                    code = err.get('code') if isinstance(err, dict) else None
+                    if code in _TRANSIENT_RPC_CODES:
+                        raise TransientRpcError(f'{method}: {err}')
+                    raise SolanaRpcError(f'{method}: {err}')
+                return body['result']
+            except (requests.Timeout, requests.ConnectionError) as e:
+                transient: TransientRpcError = TransientRpcError(f'{method}: {type(e).__name__}: {e}')
+            except TransientRpcError as e:
+                transient = e
+            # Retry side-effect-free reads with exponential backoff; surface everything else at once.
+            attempt += 1
+            if method not in _RETRYABLE_METHODS or attempt > _MAX_READ_RETRIES:
+                raise transient
+            time.sleep(_RETRY_BACKOFF_BASE * (2 ** (attempt - 1)))
 
     # --- reads ---
     def get_account_info(self, pubkey, commitment: str = 'confirmed') -> Optional[bytes]:
@@ -121,10 +162,17 @@ class SolanaRpc:
         return res['value']
 
     def confirm(self, signature: str, timeout: float = 30.0, poll: float = 0.4) -> dict:
-        """Block until the signature reaches `confirmed`; raise on error or timeout."""
+        """Block until the signature reaches `confirmed`; raise on tx error or timeout. A transient RPC
+        fault while polling the status is retried until the deadline: a status we cannot read is
+        'unknown', not 'failed', and must never be mistaken for a failed tx (that false negative is what
+        aborted an in-flight swap origination whose tx had actually landed)."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status = self.get_signature_statuses([signature])[0]
+            try:
+                status = self.get_signature_statuses([signature])[0]
+            except TransientRpcError:
+                time.sleep(poll)
+                continue
             if status is not None:
                 if status.get('err') is not None:
                     raise SolanaRpcError(f'tx {signature} failed: {status["err"]}')
