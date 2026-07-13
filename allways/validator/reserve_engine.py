@@ -29,15 +29,26 @@ EMPTY_SWAP_KEY = b'\x00' * 32
 
 
 def _contract_reject_reason(err: Exception) -> Optional[str]:
-    """A deliberate on-chain program rejection (AnchorError / custom program error) is a normal domain
-    rejection — e.g. the miner got reserved between our pre-check and this tx (a race the contract, as
-    final arbiter, closes). Return a clean human reason so the seam answers 422, not a 500. Returns None
-    for a genuine transport/RPC fault, which must still surface as an error."""
+    """A deliberate on-chain program rejection is a normal domain rejection — e.g. the miner got
+    reserved between our pre-check and this tx (a race the contract, as final arbiter, closes). Return a
+    clean human reason so the seam answers 422, not a 500. Returns None for a genuine transport/RPC
+    fault, which must still surface as an error.
+
+    A program rejection surfaces two ways: a PRE-FLIGHT simulation reject carries the Anchor name /
+    'custom program error' text; a tx that is submitted and LANDS failed surfaces through the confirm
+    path as `{'InstructionError': [0, {'Custom': N}]}` — a numeric code with neither phrase. Both are
+    contract domain rejections (a transport fault has no Custom program code), so 422 for both."""
     s = str(err)
-    if 'custom program error' not in s.lower() and 'anchorerror' not in s.lower():
+    sl = s.lower()
+    if not ('custom program error' in sl or 'anchorerror' in sl or 'instructionerror' in sl or "'custom':" in sl):
         return None
     m = re.search(r'Error Message: ([^.\"\']+)', s)
-    return m.group(1).strip() if m else 'miner is not available for reservation right now'
+    if m:
+        return m.group(1).strip()
+    code = re.search(r"'Custom':\s*(\d+)", s)  # landed-tx form has no human message — surface the code
+    if code:
+        return f'miner is not available for reservation right now (contract error {code.group(1)})'
+    return 'miner is not available for reservation right now'
 
 
 def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
