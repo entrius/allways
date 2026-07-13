@@ -225,19 +225,17 @@ class SolanaSwapLoop:
         return SwapAction(SwapDecision.EXTEND_TIMEOUT, target) if target else SwapAction(SwapDecision.WAIT)
 
     def _decide_fulfilled(self, swap: Any, now: int, overdue: bool) -> SwapAction:
-        """Verify source (user funded miner) + dest (miner delivered 99% to user, fresh). CONFIRM when both
-        verify; EXTEND_TIMEOUT a valid-but-unconfirmed dest near timeout; TIMEOUT an overdue swap whose dest
-        is absent/mismatched (the contract slashes Fulfilled too). Source freshness was gated at attestation."""
-        s_status, _ = self._fetch_leg(
-            swap.from_chain,
-            swap.from_tx_hash,
-            swap.miner_from_addr,
-            int(swap.from_amount),
-            block_hint=int(getattr(swap, 'from_tx_block', 0)),
-            sender=swap.user_from_addr,
-        )
-        if s_status == 'down':
-            return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
+        """Verify the DEST leg (miner delivered 99% to user, fresh) and decide. CONFIRM when dest verifies;
+        EXTEND_TIMEOUT a valid-but-unconfirmed dest near timeout; TIMEOUT an overdue swap whose dest is
+        absent/mismatched (the contract slashes Fulfilled too).
+
+        The SOURCE leg is NOT re-fetched here. A swap can only reach Fulfilled via PendingAttestation →
+        attest quorum (`vote_initiate`, which verifies source + freshness) → Active → `mark_fulfilled`, so
+        the source was already verified, freshness-checked, and frozen — a confirmed tx can't regress.
+        Re-fetching it every 12s pass added only RPC load, and worse: a transient node-view gap on that
+        re-fetch could return non-`ok` and slash an already-attested payout (the same false-negative class
+        as the dest-leg stale-view issue). Source is therefore a settled `ok` by construction."""
+        s_status = 'ok'  # source verified + frozen at attestation (Fulfilled ⟹ attested); see docstring
         d_status, d_info = self._fetch_leg(
             swap.to_chain,
             swap.to_tx_hash,

@@ -104,16 +104,25 @@ def test_expected_user_receives_is_99_percent():
     assert loop.expected_user_receives(make_swap(to_amount=10_000)) == 9_900
 
 
-def test_fulfilled_both_legs_ok_confirms_and_checks_99_percent_dest():
+def test_fulfilled_confirms_and_fetches_only_the_dest_leg():
     loop, providers = loop_with(result=True)
     swap = make_swap(status='Fulfilled', to_amount=1000)
     assert loop.decide(swap, now=1500).decision == SwapDecision.CONFIRM
     # dest leg verified against 99% of to_amount, not the full amount
     dest_call = providers['sol'].calls[-1]
     assert dest_call.amount == 990 and dest_call.recipient == 'userSOL'
-    # source leg verified against the full from_amount to the miner
-    src_call = providers['btc'].calls[-1]
-    assert src_call.amount == 500 and src_call.recipient == 'minerBTC'
+    # P0: the SOURCE leg is NOT re-fetched for a Fulfilled swap — it was already verified + frozen at
+    # attestation. Fulfilled must make exactly ONE leg fetch (dest only).
+    assert providers['btc'].calls == [], 'Fulfilled re-fetched the source leg — should be dest-only'
+
+
+def test_fulfilled_source_provider_down_still_confirms():
+    # P0 behavior note: a source-provider OUTAGE no longer blocks confirming an already-attested payout,
+    # because the source isn't re-fetched. (Pre-P0 this SKIPped on the source `down` guard.)
+    loop, providers = loop_with(result=True)
+    providers['btc'].result = 'unreachable'  # source provider down — must be irrelevant now
+    assert loop.decide(make_swap(status='Fulfilled'), now=1500).decision == SwapDecision.CONFIRM
+    assert providers['btc'].calls == []  # source never touched
 
 
 def test_fulfilled_dest_pending_far_from_timeout_waits():
