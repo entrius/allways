@@ -273,8 +273,7 @@ def swap_now_command(
                 'spent (non-refundable); do NOT send funds. Re-run to bid on the next round.'
             )
         fail(
-            '  The draw did not resolve in the bid window (no seat drawn yet). '
-            'Do NOT send funds; re-run to try again.'
+            '  The draw did not resolve in the bid window (no seat drawn yet). Do NOT send funds; re-run to try again.'
         )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).

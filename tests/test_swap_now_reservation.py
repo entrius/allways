@@ -208,7 +208,8 @@ _V = bytes([7] * 32)
 
 def _pool(opened_at, closes_at, routers):
     return types.SimpleNamespace(
-        opened_at=opened_at, closes_at=closes_at,
+        opened_at=opened_at,
+        closes_at=closes_at,
         requests=[types.SimpleNamespace(router=r) for r in routers],
     )
 
