@@ -90,7 +90,10 @@ def test_poll_drawn_self_heals_when_the_crank_keeps_flaking_but_the_seat_is_draw
     The outcome-driven loop must return it rather than die on the nudge exception."""
     us = 'ME'
     drawn = types.SimpleNamespace(  # unfilled seat won by us: reserved_until==0, created_at==0, live
-        reserved_until=0, created_at=0, finalize_by=int(time.time()) + 120, router=us,
+        reserved_until=0,
+        created_at=0,
+        finalize_by=int(time.time()) + 120,
+        router=us,
     )
     client = MagicMock()
     client.resolve_pool.side_effect = TransientRpcError('boom')  # crank flakes on every pass

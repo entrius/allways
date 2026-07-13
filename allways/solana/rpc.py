@@ -31,10 +31,19 @@ _TRANSIENT_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
 # Side-effect-free methods (+ read-only simulate) — safe to auto-retry. sendTransaction and
 # requestAirdrop are deliberately excluded: a duplicate submit is the caller's decision (the pool crank
 # already re-sends on its next pass, and a double resolve_pool reverts benignly).
-_RETRYABLE_METHODS = frozenset({
-    'getAccountInfo', 'getProgramAccounts', 'getSlot', 'getBalance', 'getLatestBlockhash',
-    'getSignaturesForAddress', 'getTransaction', 'getSignatureStatuses', 'simulateTransaction',
-})
+_RETRYABLE_METHODS = frozenset(
+    {
+        'getAccountInfo',
+        'getProgramAccounts',
+        'getSlot',
+        'getBalance',
+        'getLatestBlockhash',
+        'getSignaturesForAddress',
+        'getTransaction',
+        'getSignatureStatuses',
+        'simulateTransaction',
+    }
+)
 _MAX_READ_RETRIES = 4
 _RETRY_BACKOFF_BASE = 0.25  # seconds; doubles each attempt → 0.25, 0.5, 1.0, 2.0
 

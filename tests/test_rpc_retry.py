@@ -8,6 +8,7 @@ Now: idempotent reads retry on transient faults inside `_call`; `confirm` treats
 as "unknown, keep polling" (never "failed"); state-changing sends are NOT auto-retried (a duplicate
 submit is the caller's call).
 """
+
 from unittest.mock import MagicMock
 
 import pytest
