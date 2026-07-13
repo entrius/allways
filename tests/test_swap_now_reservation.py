@@ -12,7 +12,13 @@ import types
 from unittest.mock import MagicMock, patch
 
 from allways.cli.swap_commands.helpers import live_unclaimed
-from allways.cli.swap_commands.swap import _SEND_MARGIN_SECS, _poll_reservation
+from allways.cli.swap_commands.swap import (
+    _SEND_MARGIN_SECS,
+    _poll_drawn,
+    _poll_reservation,
+    _self_crank_resolve,
+)
+from allways.solana.rpc import TransientRpcError
 
 EMPTY = bytes(32)
 
@@ -68,6 +74,33 @@ def test_send_margin_does_not_scale_with_confirmation_depth():
     btc = get_chain('btc')
     assert btc.min_confirmations * btc.seconds_per_block > _SEND_MARGIN_SECS
     assert _SEND_MARGIN_SECS < 480 - 80  # clears a fresh reservation post-draw, on any source chain
+
+
+def test_self_crank_swallows_a_transient_rpc_fault():
+    """A transient RPC fault while nudging the pool must not abort origination — the resolve_pool may
+    already have landed. It is swallowed so the poll loop re-cranks and re-reads the real outcome. This
+    is the exact fault (getSignatureStatuses -32603 mid-crank) that crashed the first mainnet BTC swap."""
+    client = MagicMock()
+    client.resolve_pool.side_effect = TransientRpcError('getSignatureStatuses: -32603 Internal error')
+    _self_crank_resolve(client, 'miner')  # must NOT raise
+
+
+def test_poll_drawn_self_heals_when_the_crank_keeps_flaking_but_the_seat_is_drawn():
+    """End-to-end: every crank nudge throws a transient RPC error, yet the pool still draws our seat.
+    The outcome-driven loop must return it rather than die on the nudge exception."""
+    us = 'ME'
+    drawn = types.SimpleNamespace(  # unfilled seat won by us: reserved_until==0, created_at==0, live
+        reserved_until=0,
+        created_at=0,
+        finalize_by=int(time.time()) + 120,
+        router=us,
+    )
+    client = MagicMock()
+    client.resolve_pool.side_effect = TransientRpcError('boom')  # crank flakes on every pass
+    client.get_reservation.side_effect = [None, drawn]  # not drawn yet, then drawn to us
+    with patch('allways.cli.swap_commands.swap.time.sleep'):
+        got = _poll_drawn(client, 'miner', us, timeout_secs=100)
+    assert got is drawn
 
 
 def _run_swap_now(reserved_until, from_chain='btc'):
