@@ -13,6 +13,8 @@ taker who won the draw, because ``Reservation.from_addr`` is pinned at reserve t
 relay the confirm, but only the winner's deposit verifies.
 """
 
+import time
+
 import click
 
 from allways.cli.dendrite_lite import (
@@ -33,6 +35,21 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.synapses import SwapConfirmSynapse
+
+# Bounded auto-retry of the deposit relay. The relay is idempotent (validators re-verify the same
+# on-chain deposit each time), so when nothing is accepted for a *non-deterministic* reason — the
+# deposit hasn't propagated to validators' source-chain nodes yet (`tx_not_found`), a 429, or a
+# timeout — we wait briefly and re-broadcast. A BTC deposit takes seconds to reach a validator's
+# bitcoind, so `post-tx` fired immediately after broadcast otherwise fails on the first pass.
+_RELAY_ATTEMPTS = 3
+_RELAY_WAIT_SECS = 30
+
+
+def _should_retry_relay(info) -> bool:
+    """Retry a zero-accept relay only when the aggregator says the failure is NOT deterministic —
+    i.e. a re-broadcast could plausibly succeed (propagation lag / rate-limit / timeout). A genuine
+    mismatch (wrong amount/recipient, expired reservation) is `deterministic=True` → fail fast."""
+    return info is not None and not info.accepted and not getattr(info, 'deterministic', False)
 
 
 def _find_reservations(client, user, miner_hint, require_user):
@@ -185,10 +202,19 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
         return
 
     wallet = get_ephemeral_wallet()  # transport-only throwaway hotkey; auth is the on-chain deposit
-    with loading(f'Relaying deposit to {len(validator_axons)} validator(s)...'):
-        responses = broadcast_synapse(wallet, validator_axons, synapse, timeout=60.0)
+    info = None
+    for attempt in range(_RELAY_ATTEMPTS):
+        with loading(f'Relaying deposit to {len(validator_axons)} validator(s)...'):
+            responses = broadcast_synapse(wallet, validator_axons, synapse, timeout=60.0)
+        info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': miner_hotkey})
+        if attempt == _RELAY_ATTEMPTS - 1 or not _should_retry_relay(info):
+            break
+        console.print(
+            f'  [dim]No validator has seen the deposit yet (propagation lag) — retrying in '
+            f'{_RELAY_WAIT_SECS}s [{attempt + 1}/{_RELAY_ATTEMPTS - 1}]…[/dim]'
+        )
+        time.sleep(_RELAY_WAIT_SECS)
 
-    info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': miner_hotkey})
     if info.accepted:
         clear_pending_swap()
         console.print(

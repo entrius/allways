@@ -202,13 +202,13 @@ class AllwaysSolanaClient:
         instructions: List[Instruction],
         signers: Optional[List[Keypair]] = None,
         skip_preflight: bool = False,
-        retries: int = 5,
+        retries: int = 8,
     ) -> str:
         if self.keypair is None:
             raise SolanaClientError('client has no keypair; cannot send transactions')
         signers = signers or [self.keypair]
         last_err: Optional[Exception] = None
-        for _ in range(retries):
+        for attempt in range(retries):
             blockhash = Hash.from_string(self.rpc.get_latest_blockhash())
             tx = Transaction.new_signed_with_payer(instructions, self.keypair.pubkey(), signers, blockhash)
             try:
@@ -219,11 +219,15 @@ class AllwaysSolanaClient:
                 msg = str(e).lower()
                 # Match the actual staleness signature only — NOT the substring 'blockhash', which also
                 # appears in the `replacementBlockhash` field of every program-error payload (that would
-                # retry a deterministic contract rejection 5× and bury it as a "blockhash retries" error).
+                # retry a deterministic contract rejection and bury it as a "blockhash retries" error).
+                # A BlockhashNotFound tx never entered the ledger, so re-signing with a FRESH blockhash
+                # can't double-submit — safe to retry hard. Exponential backoff (~0.5→4s, ~23s total)
+                # rides out a sustained degraded-RPC window that the old 5×0.5s (~2.5s) blew straight
+                # through, orphaning a paid-for seat mid-origination.
                 if 'blockhash not found' not in msg and 'block height exceeded' not in msg:
                     raise
                 last_err = e
-                time.sleep(0.5)
+                time.sleep(min(4.0, 0.5 * 2**attempt))
         raise SolanaClientError(f'send failed after {retries} blockhash retries: {last_err}')
 
     def _ix(self, name: str, arg_bytes: bytes, metas: List[AccountMeta]) -> Instruction:

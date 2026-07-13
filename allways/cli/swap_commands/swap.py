@@ -236,10 +236,18 @@ def swap_now_command(
         f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
     )
 
-    # Pool contention — surface it BEFORE the fee-charging bid so the taker isn't bidding blind into
-    # an already-open, contested round. The reservation fee is non-refundable even on a losing draw.
+    # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
+    # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
+    # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
+    existing = client.get_reservation(cand.miner)
+    resume_live = live_unclaimed(existing) and str(getattr(existing, 'user', '')) == str(user)
+    resume_drawn = not resume_live and _drawn_unfilled(existing) and str(getattr(existing, 'router', '')) == str(user)
+    resuming = resume_live or resume_drawn
+
+    # Pool contention — surface it BEFORE the fee-charging bid so the taker isn't bidding blind into an
+    # already-open, contested round (skipped when resuming, since no new bid is placed).
     contention = _pool_contention(client, cand.miner, cfg)
-    if contention.is_open:
+    if contention.is_open and not resuming:
         fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain(NUMERAIRE_CHAIN).decimals
         if contention.weighted_rivals > 0:
             console.print(
@@ -256,40 +264,50 @@ def swap_now_command(
             )
         console.print(f'  [dim]A losing bid still spends the {fee_sol:g} SOL reservation fee.[/dim]')
 
-    if not skip_confirm and not click.confirm('  Bid on this miner on-chain?', default=False):
+    if not resuming and not skip_confirm and not click.confirm('  Bid on this miner on-chain?', default=False):
         return
 
-    # Phase 1 — BID (pair only; no taker, no amounts).
-    sig = client.open_or_request(cand.miner, from_chain, to_chain)
-    console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
+    # Phases 1-3 — obtain a live reservation held by us: resume an existing seat if we have one,
+    # otherwise bid, self-crank the draw, and finalize against the PINNED rate.
+    if resume_live:
+        console.print('[green]  Resuming the reservation you already hold[/green] (skipping bid + finalize).')
+        resv = existing
+    else:
+        if resume_drawn:
+            console.print('[green]  Resuming the seat you already drew[/green] (skipping bid); finalizing…')
+            drawn = existing
+        else:
+            # Phase 1 — BID (pair only; no taker, no amounts).
+            sig = client.open_or_request(cand.miner, from_chain, to_chain)
+            console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
 
-    # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
-    drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
-    if drawn is None:
-        winner = _lost_seat_to(client, cand.miner, user)
-        if winner:
-            fail(
-                f'  You lost the draw — the seat went to [dim]{winner[:8]}…[/dim]. Your reservation fee is '
-                'spent (non-refundable); do NOT send funds. Re-run to bid on the next round.'
-            )
-        fail(
-            '  The draw did not resolve in the bid window (no seat drawn yet). Do NOT send funds; re-run to try again.'
+            # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
+            drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
+            if drawn is None:
+                winner = _lost_seat_to(client, cand.miner, user)
+                if winner:
+                    fail(
+                        f'  You lost the draw — the seat went to [dim]{winner[:8]}…[/dim]. Your reservation fee is '
+                        'spent (non-refundable); do NOT send funds. Re-run to bid on the next round.'
+                    )
+                fail(
+                    '  The draw did not resolve in the bid window (no seat drawn yet). Do NOT send funds; re-run to try again.'
+                )
+
+        # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
+        fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
+        client.finalize_reservation(
+            cand.miner,
+            user,
+            user_from_addr,
+            receive_address_opt,
+            fill.collateral_amount,
+            fill.from_amount,
+            fill.to_amount,
         )
-
-    # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
-    client.finalize_reservation(
-        cand.miner,
-        user,
-        user_from_addr,
-        receive_address_opt,
-        fill.collateral_amount,
-        fill.from_amount,
-        fill.to_amount,
-    )
-    resv = _poll_reservation(client, cand.miner, timeout_secs=30)
-    if resv is None or str(resv.user) != str(user):
-        fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
+        resv = _poll_reservation(client, cand.miner, timeout_secs=30)
+        if resv is None or str(resv.user) != str(user):
+            fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
     recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
