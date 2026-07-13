@@ -4,6 +4,7 @@ A BTC deposit fired at `post-tx` immediately after broadcast hasn't propagated t
 bitcoind yet, so the first relay is rejected `tx_not_found` (deterministic=False) — a re-broadcast a
 few seconds later succeeds. A genuine mismatch (wrong amount/recipient, expired reservation) is
 deterministic=True and must fail fast, not spin."""
+
 import types
 
 from allways.cli.swap_commands.post_tx import _should_retry_relay

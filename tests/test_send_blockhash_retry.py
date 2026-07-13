@@ -5,6 +5,7 @@ ledger, so re-signing with a FRESH blockhash can't double-submit — now with ex
 more attempts (was 5×0.5s ≈ 2.5s, which a prolonged degraded-RPC window blew straight through,
 orphaning a paid-for reservation seat). Any other send fault still raises immediately (a landed tx
 might exist → a blind resend is the caller's call, not ours)."""
+
 from unittest.mock import MagicMock
 
 import pytest

@@ -241,9 +241,7 @@ def swap_now_command(
     # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
     existing = client.get_reservation(cand.miner)
     resume_live = live_unclaimed(existing) and str(getattr(existing, 'user', '')) == str(user)
-    resume_drawn = (
-        not resume_live and _drawn_unfilled(existing) and str(getattr(existing, 'router', '')) == str(user)
-    )
+    resume_drawn = not resume_live and _drawn_unfilled(existing) and str(getattr(existing, 'router', '')) == str(user)
     resuming = resume_live or resume_drawn
 
     # Pool contention — surface it BEFORE the fee-charging bid so the taker isn't bidding blind into an
