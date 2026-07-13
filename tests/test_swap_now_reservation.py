@@ -194,3 +194,85 @@ def test_crank_reraises_a_real_error():
     client.resolve_pool.side_effect = RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
     with pytest.raises(RuntimeError):
         _self_crank_resolve(client, 'miner-pubkey')
+
+
+# ── pool-contention visibility (feat): surface a contested/already-open pool + the lost-draw reason ──
+# `swap now` used to bid blind and, on a loss, print one ambiguous "not seated" message. These cover
+# the read-only helpers that back the new pre-bid notice (odds + fee warning) and the specific
+# lost-the-draw-to-<router> reason. Both are best-effort: a bad read must never block or crash a swap.
+
+_A = bytes([1] * 32)
+_B = bytes([2] * 32)
+_V = bytes([7] * 32)
+
+
+def _pool(opened_at, closes_at, routers):
+    return types.SimpleNamespace(
+        opened_at=opened_at,
+        closes_at=closes_at,
+        requests=[types.SimpleNamespace(router=r) for r in routers],
+    )
+
+
+def test_pool_contention_reports_an_open_uniform_pool():
+    from allways.cli.swap_commands.swap import _pool_contention
+
+    now = int(time.time())
+    client = MagicMock()
+    client.get_pool.return_value = _pool(now - 10, now + 40, [_A, _B])  # 2 takers, still in window
+    c = _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]))
+    assert c.is_open and c.bidders == 2 and c.weighted_rivals == 0
+    assert 30 <= c.closes_in <= 40
+
+
+def test_pool_contention_flags_a_weighted_validator_rival():
+    from allways.cli.swap_commands.swap import _pool_contention
+
+    now = int(time.time())
+    client = MagicMock()
+    client.get_pool.return_value = _pool(now - 5, now + 30, [_V, _B])
+    cfg = types.SimpleNamespace(validators=[types.SimpleNamespace(key=_V, weight=100)])
+    c = _pool_contention(client, 'miner', cfg)
+    assert c.is_open and c.bidders == 2 and c.weighted_rivals == 1  # the validator dominates the draw
+
+
+def test_pool_contention_treats_a_closed_window_as_not_open():
+    from allways.cli.swap_commands.swap import _pool_contention
+
+    now = int(time.time())
+    client = MagicMock()
+    client.get_pool.return_value = _pool(now - 100, now - 40, [_A])  # window already passed
+    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[])).is_open is False
+
+
+def test_pool_contention_never_raises_on_a_bad_read():
+    from allways.cli.swap_commands.swap import _pool_contention
+
+    client = MagicMock()
+    client.get_pool.side_effect = RuntimeError('rpc down')  # must degrade to "not open", never crash a bid
+    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[])).is_open is False
+
+
+def test_lost_seat_to_names_the_rival_that_won_the_draw():
+    from allways.cli.swap_commands.swap import _lost_seat_to
+
+    now = int(time.time())
+    client = MagicMock()
+    # a freshly-drawn, not-yet-filled seat (reserved_until==0, created_at==0, finalize_by ahead) held
+    # by a DIFFERENT router than us -> we lost the draw to it.
+    client.get_reservation.return_value = types.SimpleNamespace(
+        reserved_until=0, created_at=0, finalize_by=now + 100, router='RIVAL'
+    )
+    assert _lost_seat_to(client, 'miner', 'ME') == 'RIVAL'
+
+
+def test_lost_seat_to_is_none_when_no_seat_is_drawn_yet():
+    from allways.cli.swap_commands.swap import _lost_seat_to
+
+    now = int(time.time())
+    client = MagicMock()
+    # drawn window already lapsed -> not a live drawn seat -> "draw didn't resolve" branch, not "lost"
+    client.get_reservation.return_value = types.SimpleNamespace(
+        reserved_until=0, created_at=0, finalize_by=now - 100, router='RIVAL'
+    )
+    assert _lost_seat_to(client, 'miner', 'ME') is None

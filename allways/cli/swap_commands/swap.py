@@ -9,7 +9,7 @@ unrouted taker never waits on validator liveness."""
 
 import json
 import time
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 import click
 
@@ -49,6 +49,33 @@ def _candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandi
         collateral = client.get_collateral_lamports(q.miner) or 0
         out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
     return out
+
+
+class PoolContention(NamedTuple):
+    """A read-only snapshot of a miner's live bid pool, so a taker can see — BEFORE it pays the
+    non-refundable reservation fee — whether it is bidding into an already-open, contested round and
+    roughly what its draw odds are."""
+
+    is_open: bool  # a pool round is open AND still in its bid window
+    bidders: int  # distinct bids already in the round (before you join)
+    closes_in: int  # seconds until the window closes
+    weighted_rivals: int  # existing bidders that are weighted validators (0 => the draw is uniform)
+
+
+def _pool_contention(client, miner, cfg) -> PoolContention:
+    """Best-effort read of the miner's pool. Visibility only — never raises, so a decode/RPC hiccup
+    can't block a bid; on any surprise it reports 'not open' and the taker proceeds as before."""
+    try:
+        pool = client.get_pool(miner)
+        now = int(time.time())
+        if int(getattr(pool, 'opened_at', 0)) == 0 or now > int(getattr(pool, 'closes_at', 0)):
+            return PoolContention(False, 0, 0, 0)
+        reqs = list(getattr(pool, 'requests', []))
+        weighted = {bytes(v.key) for v in getattr(cfg, 'validators', []) if int(getattr(v, 'weight', 0)) > 0}
+        weighted_rivals = sum(1 for r in reqs if bytes(r.router) in weighted)
+        return PoolContention(True, len(reqs), max(0, int(pool.closes_at) - now), weighted_rivals)
+    except Exception:  # noqa: BLE001 - visibility only; a bad read must not stop the swap
+        return PoolContention(False, 0, 0, 0)
 
 
 # Minimum reservation life required before we'll instruct a send. The reservation must outlive
@@ -107,6 +134,19 @@ def _poll_drawn(client, miner, user, timeout_secs: int):
         if _drawn_unfilled(resv):
             return resv if str(resv.router) == us else None  # seated: us, or someone else won
         time.sleep(3)
+    return None
+
+
+def _lost_seat_to(client, miner, user) -> Optional[str]:
+    """Best-effort: after `_poll_drawn` returns None, tell the two failure modes apart. Returns the
+    winning router (as a string) if a *different* taker holds the freshly-drawn seat — i.e. you lost
+    the draw — or None if no seat is drawn yet (the draw simply didn't resolve in the window)."""
+    try:
+        resv = client.get_reservation(miner)
+    except Exception:  # noqa: BLE001 - message quality only; fall back to the generic reason
+        return None
+    if _drawn_unfilled(resv) and str(resv.router) != str(user):
+        return str(resv.router)
     return None
 
 
@@ -195,6 +235,27 @@ def swap_now_command(
         f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
         f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
     )
+
+    # Pool contention — surface it BEFORE the fee-charging bid so the taker isn't bidding blind into
+    # an already-open, contested round. The reservation fee is non-refundable even on a losing draw.
+    contention = _pool_contention(client, cand.miner, cfg)
+    if contention.is_open:
+        fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain(NUMERAIRE_CHAIN).decimals
+        if contention.weighted_rivals > 0:
+            console.print(
+                f'  [yellow]This miner already has an open bid pool[/yellow]: {contention.bidders} bidder(s), '
+                f'closes in {contention.closes_in}s — and a weighted validator is bidding, so an unrouted '
+                f'taker is very unlikely to win this draw.'
+            )
+        else:
+            odds = 100.0 / (contention.bidders + 1)
+            console.print(
+                f'  [yellow]This miner already has an open bid pool[/yellow]: {contention.bidders} taker(s) '
+                f'bidding, closes in {contention.closes_in}s. Joining makes {contention.bidders + 1}; the draw '
+                f'is uniform, so ~[cyan]{odds:.0f}%[/cyan] odds to win the seat.'
+            )
+        console.print(f'  [dim]A losing bid still spends the {fee_sol:g} SOL reservation fee.[/dim]')
+
     if not skip_confirm and not click.confirm('  Bid on this miner on-chain?', default=False):
         return
 
@@ -205,9 +266,14 @@ def swap_now_command(
     # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
     drawn = _poll_drawn(client, cand.miner, user, timeout_secs=pool_window + 120)
     if drawn is None:
+        winner = _lost_seat_to(client, cand.miner, user)
+        if winner:
+            fail(
+                f'  You lost the draw — the seat went to [dim]{winner[:8]}…[/dim]. Your reservation fee is '
+                'spent (non-refundable); do NOT send funds. Re-run to bid on the next round.'
+            )
         fail(
-            '  You were not seated (another bidder won, or the draw did not resolve in time). '
-            'Do NOT send funds; re-run to try again.'
+            '  The draw did not resolve in the bid window (no seat drawn yet). Do NOT send funds; re-run to try again.'
         )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
