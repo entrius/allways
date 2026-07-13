@@ -26,6 +26,7 @@ from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
+from allways.utils.rate import quantize_rate_fixed
 from allways.validator.state_store import ValidatorStateStore
 
 # Swap-lifecycle events → MinerActivity edges. A reserved miner enters FULFILLING on
@@ -122,7 +123,10 @@ class SolanaEventIndex:
             self.state_store.insert_collateral_event(block_time, hotkey, total)
             return True
         if name == 'QuoteSet':
-            rate = int(rec.fields['rate']) / RATE_PRECISION
+            # Floor to RATE_SIG_FIGS on ingest, matching the contract's on-chain floor. Redundant for
+            # post-redeploy quotes (already floored at set_quote) but closes the migration window where a
+            # pre-redeploy full-precision quote could still snipe the crown.
+            rate = quantize_rate_fixed(int(rec.fields['rate'])) / RATE_PRECISION
             self.state_store.insert_rate_event(
                 hotkey, self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain'), rate, block_time
             )

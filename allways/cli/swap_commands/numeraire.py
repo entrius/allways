@@ -30,6 +30,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.pair import write_rate_posted_flag
 from allways.constants import LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.solana.client import SolanaClientError
+from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
 
 
 @dataclass
@@ -149,7 +150,8 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
                 )
             else:
                 note = f'[dim]free (was {was:g})[/dim]'
-        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{sp.rate:g}[/green]   {note}')
+        disp = quantize_rate_display(sp.rate)  # mirror the on-chain floor so preview == stored
+        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{disp:g}[/green]   {note}')
 
     if total_fee:
         console.print(
@@ -168,7 +170,14 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
     for sp in specs:
         try:
             with loading(f'Publishing {sp.from_chain.upper()} → {sp.to_chain.upper()}...'):
-                client.set_quote(sp.from_chain, sp.to_chain, sp.from_addr, sp.to_addr, int(sp.rate * RATE_PRECISION), 0)
+                client.set_quote(
+                    sp.from_chain,
+                    sp.to_chain,
+                    sp.from_addr,
+                    sp.to_addr,
+                    quantize_rate_fixed(int(sp.rate * RATE_PRECISION)),
+                    0,
+                )
             posted += 1
         except SolanaClientError as e:
             console.print(f'[red]Failed {sp.from_chain.upper()} → {sp.to_chain.upper()}: {e}[/red]')

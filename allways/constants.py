@@ -29,9 +29,10 @@ BTC_TO_SAT = 100_000_000
 # Fixed-point scale for the miner rate: stored u128 = display_rate * RATE_PRECISION.
 # Single source of truth, mirrors constants.rs (1e18).
 RATE_PRECISION = 10**18
-# Significant digits enforced on every committed rate. Normalized at the CLI
-# (post) and again at the validator (parse) so scoring buckets, consensus
-# hashes, and contract storage all agree on the same canonical string.
+# Significant figures every posted rate is floored to. Enforced on-chain in set_quote
+# (quantize_rate_sig_figs); the CLI mirrors it (quantize_rate_fixed) so previews match what is
+# stored, and the validator floors on ingest to close the pre-redeploy migration window. Below
+# this precision an undercut is imperceptible to takers, so the crown ignores it (equal buckets tie).
 RATE_SIG_FIGS = 5
 
 # ─── Transaction Fees ────────────────────────────────────

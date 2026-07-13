@@ -17,6 +17,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import RATE_PRECISION
 from allways.solana.client import SolanaClientError
+from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
 
 # Default per-direction liquidity (u128) posted with a quote; the taker discovery path is Phase 9.
 DEFAULT_QUOTE_LIQUIDITY = 0
@@ -157,6 +158,11 @@ def post_pair(
         if rates_from_args:
             rate, counter_rate = counter_rate, rate
 
+    # Floor to RATE_SIG_FIGS up front (mirrors the on-chain floor in set_quote) so the preview below
+    # and the posted value both show exactly what the chain will store.
+    rate = quantize_rate_display(rate)
+    counter_rate = quantize_rate_display(counter_rate)
+
     # The bt wallet is only needed for the running-miner refresh flag (keyed by hotkey); the quote
     # write is signed by the Solana keypair.
     _, wallet, _, _ = get_cli_context(need_client=False)
@@ -221,7 +227,7 @@ def post_pair(
                     to_chain,
                     from_addr,
                     to_addr,
-                    int(r * RATE_PRECISION),
+                    quantize_rate_fixed(int(r * RATE_PRECISION)),
                     DEFAULT_QUOTE_LIQUIDITY,
                 )
             posted += 1
