@@ -111,6 +111,20 @@ def test_contract_rejection_returns_reject_not_raise():
     assert not r.ok and 'active reservation' in r.reason.lower()
 
 
+def test_contract_rejection_code_only_form_returns_reject():
+    # Same race, but the reject tx LANDS failed instead of failing pre-flight: the confirm path
+    # surfaces only `{'InstructionError': [0, {'Custom': 6022}]}` — no Anchor name, no 'custom program
+    # error' text. Must still be a 422 domain reject, not a 500 crash (the F2-class code-only miss).
+    client = FakeClient()
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
+
+    client.open_or_request = _raise
+    r = _reserve(client)
+    assert not r.ok and '6022' in r.reason
+
+
 def test_transport_error_still_raises():
     # A genuine RPC/transport fault is NOT a domain rejection — it must propagate (seam → 500), not be
     # silently swallowed as a normal rejection.
