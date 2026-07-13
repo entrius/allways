@@ -654,6 +654,11 @@ fn test_fulfill_confirm_fee_and_invariant() {
     // realized VWAP = to/from = 1.5
     assert_eq!(st.total_to_amount * 1_000 / st.total_from_amount, 1_500, "realized VWAP 1.5");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
+    // The per-swap confirm round is closed (rent refunded to a validator), not parked on-chain forever.
+    assert!(
+        svm.get_account(&vote_pda(REQ_CONFIRM, swap_key("srctx1").as_ref())).is_none(),
+        "confirm vote round closed on quorum"
+    );
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
 }
 
@@ -689,6 +694,11 @@ fn test_timeout_slash_refund_and_invariant() {
     // a timed-out swap accrues NO direction stats (timeout_swap has no stats account)
     assert!(svm.get_account(&stats_pda(&miner.pubkey(), FROM_CHAIN, TO_CHAIN)).is_none(), "no stats on timeout");
     assert!(svm.get_account(&swap_pda(&swap_key("srctx1"))).is_none(), "swap closed");
+    // The per-swap timeout round is closed (rent refunded to a validator), not parked on-chain forever.
+    assert!(
+        svm.get_account(&vote_pda(REQ_TIMEOUT, swap_key("srctx1").as_ref())).is_none(),
+        "timeout vote round closed on quorum"
+    );
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after slash");
 }
 

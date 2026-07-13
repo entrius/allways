@@ -4,7 +4,14 @@ from decimal import Decimal
 
 from allways.chains import get_chain
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
-from allways.utils.rate import apply_fee_deduction, calculate_to_amount, is_executable_rate, normalize_rate
+from allways.utils.rate import (
+    apply_fee_deduction,
+    calculate_to_amount,
+    is_executable_rate,
+    normalize_rate,
+    quantize_rate_display,
+    quantize_rate_fixed,
+)
 
 # Chain decimals
 TAO_DEC = 9
@@ -388,3 +395,33 @@ class TestIsExecutableRate:
         """If only min_swap is set (max_swap=0), any rate above the floor
         symmetry still passes. Mirrors test_max_unset_only_lower_bound_enforced."""
         assert is_executable_rate(1e-8, 'sol', 'btc', self.MIN, 0) is True
+
+
+class TestQuantizeRate:
+    """quantize_rate_fixed floors to RATE_SIG_FIGS (=5) sig figs, mirroring the on-chain
+    quantize_rate_sig_figs (set_quote.rs). Keep these cases in lockstep with the Rust unit test."""
+
+    P = RATE_PRECISION
+
+    def test_zero_and_small_pass_through(self):
+        assert quantize_rate_fixed(0) == 0
+        assert quantize_rate_fixed(-5) == 0
+        assert quantize_rate_fixed(12_345) == 12_345  # <= 5 digits, untouched
+
+    def test_floors_never_rounds(self):
+        # 1.23459 → 1.2345 (floor, not 1.2346); 123456 → 123450.
+        assert quantize_rate_fixed(1_234_590_000_000_000_000) == 1_234_500_000_000_000_000
+        assert quantize_rate_fixed(123_456) == 123_450
+
+    def test_sub_perceptible_undercut_collapses_to_same_bucket(self):
+        # 5.00001 and 5.00002 both floor to 5.0 → they tie & split, no free crown steal.
+        assert quantize_rate_fixed(5_000_010_000_000_000_000) == 5 * self.P
+        assert quantize_rate_fixed(5_000_020_000_000_000_000) == 5 * self.P
+
+    def test_genuine_5sf_improvement_survives(self):
+        assert quantize_rate_fixed(4_999_900_000_000_000_000) != quantize_rate_fixed(5 * self.P)
+
+    def test_display_helper_round_trips(self):
+        assert quantize_rate_display(5.00001) == 5.0
+        assert quantize_rate_display(1.23459) == 1.2345
+        assert quantize_rate_display(0.0) == 0.0

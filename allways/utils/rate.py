@@ -16,6 +16,27 @@ def normalize_rate(rate: float) -> str:
     return f'{rate:.{RATE_SIG_FIGS}g}'
 
 
+def quantize_rate_fixed(rate_fixed: int) -> int:
+    """Floor a fixed-point rate (display × RATE_PRECISION) to RATE_SIG_FIGS significant figures.
+
+    Integer-exact mirror of the contract's ``quantize_rate_sig_figs`` (set_quote.rs): both floor the
+    same way, so the CLI previews and posts exactly what the chain will store and the validator's crown
+    ingest agrees byte-for-byte. Floor, not round — a rate can never gain a tick by rounding up.
+    """
+    if rate_fixed <= 0:
+        return 0
+    digits = len(str(rate_fixed))
+    if digits <= RATE_SIG_FIGS:
+        return rate_fixed
+    pow10 = 10 ** (digits - RATE_SIG_FIGS)
+    return rate_fixed // pow10 * pow10
+
+
+def quantize_rate_display(rate: float) -> float:
+    """Display-domain convenience: the RATE_SIG_FIGS-floored rate as a float, for CLI previews."""
+    return quantize_rate_fixed(int(rate * RATE_PRECISION)) / RATE_PRECISION
+
+
 def calculate_to_amount(
     from_amount: int,
     rate,

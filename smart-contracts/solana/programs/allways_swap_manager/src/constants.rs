@@ -98,6 +98,27 @@ pub const NUMERAIRE_CHAIN: &str = "sol";
 /// only stores/copies the value; routability/validity is judged off-chain (`is_executable_rate`).
 pub const RATE_PRECISION: u128 = 1_000_000_000_000_000_000; // 1e18
 
+/// Significant figures every posted rate is floored to on-chain (`quantize_rate_sig_figs`). The crown
+/// is ranked off-chain on the raw stored rate, so without a tick two miners can undercut in a
+/// sub-perceptible digit to capture the whole crown for free; flooring to display precision makes any
+/// crown-winning improvement one a taker can actually see. Mirrored off-chain as `RATE_SIG_FIGS`.
+pub const RATE_SIG_FIGS: u32 = 5;
+
+/// Floor `rate` (fixed-point, display × RATE_PRECISION) to RATE_SIG_FIGS significant figures — zeros
+/// every digit below the top RATE_SIG_FIGS. Pure integer math (no floats — non-deterministic in BPF);
+/// floor not round, so a rate can never gain a tick by rounding and the reconstruction can't overflow.
+pub fn quantize_rate_sig_figs(rate: u128) -> u128 {
+    if rate == 0 {
+        return 0;
+    }
+    let digits = rate.ilog10() + 1;
+    if digits <= RATE_SIG_FIGS {
+        return rate;
+    }
+    let pow = 10u128.pow(digits - RATE_SIG_FIGS);
+    rate / pow * pow
+}
+
 /// Basis-points denominator (10_000 bps = 1.00×). Shared by every ×-multiplier below.
 pub const BPS_DENOMINATOR: u64 = 10_000;
 
@@ -235,6 +256,24 @@ mod tests {
         assert_eq!(quote_update_fee(86_400), 0);
         // Clock skew (negative elapsed) → most-expensive tier, never free.
         assert_eq!(quote_update_fee(-100), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+    }
+
+    #[test]
+    fn quantize_rate_floors_to_sig_figs() {
+        let p = RATE_PRECISION;
+        // Zero and mantissas already within RATE_SIG_FIGS pass through untouched.
+        assert_eq!(quantize_rate_sig_figs(0), 0);
+        assert_eq!(quantize_rate_sig_figs(12_345), 12_345);
+        assert_eq!(quantize_rate_sig_figs(345 * p), 345 * p);
+        // Floor, never round: 1.23459 → 1.2345 (not 1.2346).
+        assert_eq!(quantize_rate_sig_figs(1_234_590_000_000_000_000), 1_234_500_000_000_000_000);
+        assert_eq!(quantize_rate_sig_figs(123_456), 123_450);
+        // Sub-perceptible undercuts within one 5-sf bucket collapse to the SAME value → tie & split,
+        // never a free crown steal. 5.00001 and 5.00002 both floor to 5.0.
+        assert_eq!(quantize_rate_sig_figs(5_000_010_000_000_000_000), 5 * p);
+        assert_eq!(quantize_rate_sig_figs(5_000_020_000_000_000_000), 5 * p);
+        // A genuine 5-sf improvement survives as a distinct (better) bucket.
+        assert_ne!(quantize_rate_sig_figs(5 * p), quantize_rate_sig_figs(4_999_900_000_000_000_000));
     }
 
     #[test]

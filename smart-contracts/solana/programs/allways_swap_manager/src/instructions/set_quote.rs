@@ -1,7 +1,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::{quote_update_fee, MAX_ADDR_LEN, MAX_CHAIN_LEN, QUOTE_SEED, TREASURY_SEED};
+use crate::constants::{
+    quote_update_fee, quantize_rate_sig_figs, MAX_ADDR_LEN, MAX_CHAIN_LEN, QUOTE_SEED, TREASURY_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
 use crate::state::{MinerQuote, Treasury};
@@ -46,8 +48,8 @@ pub fn handler(
 ) -> Result<()> {
     // Mechanical sanity only — chains/addrs are opaque bounded strings. The rate is an opaque
     // fixed-point integer (display × RATE_PRECISION); the contract stores whatever the miner posts
-    // and never computes with it — routability/validity is the off-chain layer's call
-    // (`is_executable_rate`), so there is deliberately no on-chain rate check.
+    // (floored to RATE_SIG_FIGS, below) and never computes with it — routability/validity is the
+    // off-chain layer's call (`is_executable_rate`), so there is no on-chain rate *validity* check.
     require!(
         !from_chain.is_empty()
             && !to_chain.is_empty()
@@ -64,6 +66,12 @@ pub fn handler(
         ErrorCode::StringTooLong
     );
     require!(from_chain != to_chain, ErrorCode::SameChain);
+
+    // Floor to RATE_SIG_FIGS significant figures before it is stored OR emitted, so the pinned swap
+    // rate, the off-chain crown ranking, and the indexer/UI all read the same canonical value. A
+    // sub-perceptible undercut collapses into the incumbent's bucket (tie & split) instead of stealing
+    // the crown for free; a real 5-sf improvement still wins.
+    let rate = quantize_rate_sig_figs(rate);
 
     let now = Clock::get()?.unix_timestamp;
     let miner_key = ctx.accounts.miner.key();

@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::{record_vote, reset_round, swap_request_hash};
+use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{
     COLLATERAL_SEED, CONFIG_SEED, FEE_DIVISOR, MINER_SEED, REQ_CONFIRM, STATS_SEED, SWAP_SEED,
     TREASURY_SEED, VOTE_SEED,
@@ -153,7 +153,11 @@ pub fn handler(
             .checked_add(to_amount)
             .ok_or(ErrorCode::Overflow)?;
 
-        reset_round(&mut ctx.accounts.vote_round);
+        // Close the per-swap round (unique swap_key seed → never reused) and refund its rent to the
+        // validator instead of parking it on-chain forever. Safe: the swap closes just below in this
+        // same terminal branch, and `swap` is resolved before `vote_round` in the accounts struct, so a
+        // straggler validator's late confirm reverts on the gone swap before it could re-create the round.
+        ctx.accounts.vote_round.close(ctx.accounts.validator.to_account_info())?;
         ctx.accounts.swap.close(ctx.accounts.validator.to_account_info())?;
 
         emit!(SwapCompleted {
