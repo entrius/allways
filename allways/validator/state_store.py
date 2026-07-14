@@ -333,6 +333,25 @@ class ValidatorStateStore:
             for r in rows
         ]
 
+    def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
+        """``{(from_chain, to_chain): {hotkey: (from_amount_sum, to_amount_sum)}}``
+        over ``(start_time, end_time]`` — the windowed realized-volume read the
+        reward weighting consumes. Summed in Python: the legs are stored as TEXT
+        (u128-safe) and SQL SUM would coerce them to float."""
+        rows = self._fetchall(
+            """
+            SELECT from_chain, to_chain, hotkey, from_amount, to_amount FROM clearing_rates
+            WHERE block_num > ? AND block_num <= ?
+            """,
+            (start_time, end_time),
+        )
+        volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]] = {}
+        for r in rows:
+            direction = volumes.setdefault((r['from_chain'], r['to_chain']), {})
+            from_sum, to_sum = direction.get(r['hotkey'], (0, 0))
+            direction[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
+        return volumes
+
     def prune_clearing_rates(self, cutoff_block: int) -> None:
         """Drop clearing-rate rows older than ``cutoff_block``. No anchor row is
         preserved — each row is an independent sample, not a state-reconstruction

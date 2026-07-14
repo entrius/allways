@@ -73,6 +73,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
 VOLUME_WEIGHT_ALPHA: float = 0.5
+# Volume floor: a direction whose in-window SOL-side notional clears less than this
+# (lamports — 1 SOL) is treated as having no volume for the round: the quality-volume
+# slice folds into crown and volume_factor stays neutral, the same fallback as a fully
+# idle direction. Keeps a couple of dust swaps from steering the weights.
+MIN_DIRECTION_VOLUME = 1_000_000_000
 # Reward-shape weights (B3.5): reward = eligible × [w_a·crown + w_b·quality_volume].
 # w_a weights the crown-time component (best-rate presence × capacity), w_b the
 # realized-volume share × rate-quality (executed throughput at fair rates). Phase C

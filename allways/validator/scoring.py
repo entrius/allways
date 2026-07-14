@@ -4,8 +4,12 @@ Reward per miner is ``eligible × [w_a·crown + w_b·quality_volume]`` (B3.5),
 where ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState``
 counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. The crown
 component is ``pool × crown_share × capacity × volume_factor``; the
-quality-volume component is the pool's realized-volume share (sourced from the
-on-chain ``MinerDirectionStats`` accounts) gated by the ``rate_quality`` curve.
+quality-volume component is the pool's realized-volume share, summed over the
+scored window from the ingested ``clearing_rates`` ledger (the ``SwapCompleted``
+history — volume is what cleared this round, not a lifetime account total) and
+gated by the ``rate_quality`` curve. A direction clearing less than
+``MIN_DIRECTION_VOLUME`` on its SOL side in the window is treated as zero-volume
+(w_a folds to 1.0, ``volume_factor`` neutral) so dust can't steer the weights.
 The curve compares a miner's realized rate against an on-chain reference (C-rev):
 a trimmed, volume-weighted, per-miner-capped average of completed-swap clearing
 rates per direction (``build_direction_references``), computed deterministically
@@ -33,7 +37,9 @@ from allways.constants import (
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
+    MIN_DIRECTION_VOLUME,
     MIN_SUCCESSFUL_SWAPS,
+    NUMERAIRE_CHAIN,
     RATE_QUALITY_FLOOR_ADV,
     RATE_QUALITY_MIN,
     RATE_QUALITY_TOLERANCE_BPS,
@@ -208,60 +214,13 @@ def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, 
     return eligibility
 
 
-def realized_vwap(total_to_amount: int, total_from_amount: int) -> float:
-    """Realized volume-weighted average rate for a direction:
-    ``total_to_amount / total_from_amount`` over all confirmed swaps. The legs
-    are accumulated as exact integers on-chain (``MinerDirectionStats``); the
-    only float is this final ratio. Zero from-volume ⇒ 0.0 (no executed swaps to
-    average — guards divide-by-zero). Phase-C feeds this into the
-    ``rate_quality`` curve."""
-    to_amt = int(total_to_amount)
-    from_amt = int(total_from_amount)
-    if from_amt <= 0:
-        return 0.0
-    return to_amt / from_amt
-
-
-@dataclass
-class DirectionVolume:
-    """A miner's realized per-direction track record, read off the on-chain
-    ``MinerDirectionStats`` ledger (asset-native units). ``from_amount`` is the
-    volume the ``volume_factor`` participation weighting compares within a
-    direction; ``vwap`` is the realized executed rate the Phase-C quality curve
-    will consume."""
-
-    from_amount: int = 0
-    to_amount: int = 0
-
-    @property
-    def vwap(self) -> float:
-        return realized_vwap(self.to_amount, self.from_amount)
-
-
-def build_direction_volumes(
-    solana_client, metagraph, attribution: Optional[Dict[str, str]] = None
-) -> Dict[str, Dict[Tuple[str, str], DirectionVolume]]:
-    """``{hotkey: {(from_chain, to_chain): DirectionVolume}}`` — realized
-    per-direction volume read off the on-chain ``MinerDirectionStats`` accounts
-    (B3.5), replacing the per-validator ``swap_outcomes`` ledger (the #1
-    cross-validator divergence source). pubkey→hotkey via the sr25519 binding
-    (B3.2 ``build_attribution``); unbound or off-metagraph miners are dropped
-    (no UID to credit). The PDA is one row per (miner, from, to), so amounts
-    accumulate defensively in case attribution ever folds two pubkeys onto one
-    hotkey. Pass ``attribution`` to reuse one per-round binding snapshot."""
-    if attribution is None:
-        attribution = build_attribution(solana_client)
-    metagraph_hotkeys = set(metagraph.hotkeys)
-    volumes: Dict[str, Dict[Tuple[str, str], DirectionVolume]] = {}
-    for _pubkey, ds in solana_client.get_all('MinerDirectionStats'):
-        hotkey = attribution.get(str(ds.miner))
-        if hotkey is None or hotkey not in metagraph_hotkeys:
-            continue
-        direction = ((ds.from_chain or '').lower(), (ds.to_chain or '').lower())
-        dv = volumes.setdefault(hotkey, {}).setdefault(direction, DirectionVolume())
-        dv.from_amount += int(ds.total_from_amount or 0)
-        dv.to_amount += int(ds.total_to_amount or 0)
-    return volumes
+def direction_sol_volume(from_chain: str, leg_sums: Dict[str, Tuple[int, int]]) -> int:
+    """Windowed SOL notional (lamports) of a direction's cleared legs: the
+    hub-side leg of each swap — ``from_amount`` when the hub is the source, else
+    ``to_amount``. Every direction is hub↔spoke by construction, so no price
+    feed is needed to compare a direction's flow against the volume floor."""
+    side = 0 if from_chain == NUMERAIRE_CHAIN else 1
+    return sum(legs[side] for legs in leg_sums.values())
 
 
 def _canonical_rate_and_weight(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> Tuple[float, int]:
@@ -451,16 +410,15 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     unweighted_rewards = np.zeros(n_uids, dtype=np.float32)
-    # One per-round sr25519 binding snapshot, shared by both reads (each re-verifies every binding).
-    attribution = build_attribution(self.solana_client)
     # Flat eligibility gate off the on-chain MinerState counters (B3.3),
     # attributed pubkey→hotkey via the sr25519 binding. Absent hotkey → not
     # eligible (no on-chain counters ⇒ no proven successful swaps).
-    eligibility = build_eligibility(self.solana_client, self.metagraph, attribution)
-    # Per-direction realized volume re-sourced from the on-chain
-    # MinerDirectionStats accounts (B3.5), replacing the per-validator
-    # swap_outcomes ledger. Built once, sliced per direction below.
-    direction_volumes = build_direction_volumes(self.solana_client, self.metagraph, attribution)
+    eligibility = build_eligibility(self.solana_client, self.metagraph)
+    # Per-direction realized volume summed over this round's window from the
+    # ingested clearing_rates ledger — volume is what cleared this hour, not a
+    # lifetime account total. Hotkeys were attributed at ingest (event_index),
+    # so no binding read is needed. Built once, sliced per direction below.
+    clearing_volumes = self.state_store.get_clearing_volumes(window_start, window_end)
     # On-chain rate-quality reference (C-rev): trimmed volume-weighted clearing
     # rate per direction + each miner's windowed realized VWAP, built once per
     # round from the ingested clearing_rates history. Deterministic — no feed, no
@@ -510,10 +468,19 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             max_swap_lamports=max_swap_amount,
         )
         total_crown_dir = sum(crown_time.values())
-        vols_dir: Dict[str, DirectionVolume] = {
-            hk: dirs[(from_chain, to_chain)] for hk, dirs in direction_volumes.items() if (from_chain, to_chain) in dirs
+        leg_sums = {
+            hk: legs
+            for hk, legs in clearing_volumes.get((from_chain, to_chain), {}).items()
+            if hk in rewardable_hotkeys
         }
-        volumes_dir = {hk: dv.from_amount for hk, dv in vols_dir.items()}
+        # Volume floor: a direction clearing less than MIN_DIRECTION_VOLUME on
+        # its SOL side this window is too thin to signal anything — treat it as
+        # zero-volume so the fallback below folds w_a to 1.0 and volume_factor
+        # stays neutral, and a couple of dust swaps can't steer the round.
+        if direction_sol_volume(from_chain, leg_sums) < MIN_DIRECTION_VOLUME:
+            leg_sums = {}
+        # Within a direction, vol_share stays in from-asset units.
+        volumes_dir = {hk: legs[0] for hk, legs in leg_sums.items()}
         total_volume_dir = sum(volumes_dir.values())
         for hk, v in volumes_dir.items():
             miner_volume_total[hk] = miner_volume_total.get(hk, 0) + int(v)
