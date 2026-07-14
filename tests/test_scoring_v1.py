@@ -23,7 +23,6 @@ from allways.validator.scoring import (
     build_eligibility,
     calculate_miner_rewards,
     crown_holders_at_instant,
-    direction_sol_volume,
     due_for_scoring,
     is_eligible,
     make_crown_predicates,
@@ -319,22 +318,6 @@ class TestGetClearingVolumes:
         store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 3, 1)
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (10**30 + 10, 2)
         store.close()
-
-
-class TestDirectionSolVolume:
-    """The volume floor compares a direction's SOL-side notional: the hub leg is
-    ``from_amount`` when SOL is the source, ``to_amount`` when SOL is the dest."""
-
-    def test_sol_source_uses_from_leg(self):
-        legs = {'hk_a': (2_000, 5), 'hk_b': (3_000, 7)}
-        assert direction_sol_volume('sol', legs) == 5_000
-
-    def test_sol_dest_uses_to_leg(self):
-        legs = {'hk_a': (5, 2_000), 'hk_b': (7, 3_000)}
-        assert direction_sol_volume('btc', legs) == 5_000
-
-    def test_empty_direction_is_zero(self):
-        assert direction_sol_volume('sol', {}) == 0
 
 
 class TestCrownHoldersHelper:
@@ -2146,49 +2129,18 @@ class TestVolumeWeighting:
         assert rewards[1] == 0.0
         v.state_store.close()
 
-    def test_below_floor_direction_falls_back_to_crown_only(self, tmp_path: Path):
-        """A direction clearing less than MIN_DIRECTION_VOLUME on its SOL side is
-        scored as zero-volume: w_a folds to 1.0 and fill_ratio stays neutral,
-        so a dust swap neither pays the w_b slice nor penalizes the crown holder."""
+    def test_dust_volume_counts_toward_shares(self, tmp_path: Path):
+        """Any cleared volume counts — there is no direction volume floor. A dust
+        swap served by a non-holder costs the idle crown holder alpha, exactly
+        like larger volume."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
-        # B clears dust in A's market (btc→sol: SOL is the to-leg): without the
-        # floor A's vol_share = 0 would cost it alpha; with it, neutral.
+        # B clears dust in A's market: A holds all crown, serves none of the
+        # volume → w_a·pool·fill_ratio(0.5).
         self.insert_volume(v, 'hk_b', from_amount=100, to_amount=999_999_999)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        v.state_store.close()
-
-    def test_floor_boundary_exactly_at_floor_counts(self, tmp_path: Path):
-        """Exactly MIN_DIRECTION_VOLUME on the SOL side is NOT floored — the
-        idle-crown-holder penalty applies as usual."""
-        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
-        v = make_validator(tmp_path, hotkeys)
-        self.seed_sol_btc_crown(v, 'hk_a')
-        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000, to_amount=1_000_000_000)
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        # Same shape as test_idle_crown_holder_loses_alpha: A holds all crown,
-        # serves none of the (at-floor) volume → w_a·pool·fill_ratio(0.5).
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
-        v.state_store.close()
-
-    def test_floor_uses_sol_leg_for_sol_source_direction(self, tmp_path: Path):
-        """For a SOL-source direction the floor reads the from-leg: a swap with a
-        big spoke-side to-leg but a dust SOL from-leg is still below the floor."""
-        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
-        v = make_validator(tmp_path, hotkeys)
-        conn = v.state_store.require_connection()
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'sol', 'btc', 200.0, 0),
-        )
-        conn.commit()
-        # sol→btc: SOL is the from-leg (dust); the btc to-leg being huge is irrelevant.
-        self.insert_volume(v, 'hk_b', from_amount=999_999_999, to_amount=10**12, from_chain='sol', to_chain='btc')
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        # Floored → zero-volume fallback → full crown, no alpha penalty.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_volume_outside_window_ignored(self, tmp_path: Path):
@@ -2205,8 +2157,8 @@ class TestVolumeWeighting:
         v.state_store.close()
 
     def test_zero_amount_clearing_row_tolerated(self, tmp_path: Path):
-        """A clearing row with zero legs is tolerated — it contributes no volume
-        (and keeps the direction under the floor), never a crash."""
+        """A clearing row with zero legs is tolerated — it contributes no volume,
+        never a crash."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
@@ -2282,8 +2234,7 @@ class TestCrevReference:
 
     @staticmethod
     def _legs(rate: float) -> tuple[int, int]:
-        # btc→sol legs clearing at `rate` for a 1-SOL swap (1e9 lamports —
-        # clears MIN_DIRECTION_VOLUME so the volume floor never interferes).
+        # btc→sol legs clearing at `rate` for a 1-SOL swap (1e9 lamports).
         # Equal SOL weight per swap, so the per-miner cap is only ever
         # triggered by repeating a hotkey, not by these distinct refs.
         return int(rate * 10 * 1e9), 1_000_000_000
