@@ -51,6 +51,7 @@ from allways.constants import (
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
     VOLUME_WEIGHT_ALPHA,
+    required_collateral,
 )
 from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator.binding import build_attribution
@@ -749,12 +750,14 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
 
 
 def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
-    """min(1, collateral / max_swap). Fail-safe to 1.0 when bounds unset."""
+    """min(1, collateral / required_collateral(max_swap)) — full credit means holding enough
+    to actually accept a max_swap fill at the contract's 1.10× gate. Fail-safe to 1.0 when
+    bounds unset."""
     if max_swap_amount_rao <= 0:
         return 1.0
     if collateral_rao <= 0:
         return 0.0
-    return min(1.0, collateral_rao / max_swap_amount_rao)
+    return min(1.0, collateral_rao / required_collateral(max_swap_amount_rao))
 
 
 def fill_ratio(
