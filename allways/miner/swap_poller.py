@@ -1,9 +1,9 @@
 """Polls the Solana program for swaps assigned to this miner.
 
 Solana keys swaps by `swap_key` (== keccak(from_tx_hash)) and exposes them through a single
-`getProgramAccounts` snapshot per status, so there is no incremental cursor and no per-id transient
-miss to defend against (the old ink! poller scanned `get_swap(id)` one id at a time): each poll is an
-atomic, authoritative view. Whether a swap has already been handled is tracked by ``SwapFulfiller``'s
+`getProgramAccounts` snapshot per poll, partitioned by status locally, so there is no incremental
+cursor and no per-id transient miss to defend against (the old ink! poller scanned `get_swap(id)`
+one id at a time): each poll is an atomic, authoritative view. Whether a swap has already been handled is tracked by ``SwapFulfiller``'s
 persistent send cache — this poller reports raw on-chain state only.
 """
 
@@ -39,9 +39,11 @@ class SwapPoller:
             self.last_poll_ok = False
             return [], []
 
-    def _mine(self, status: str) -> List[SolanaSwap]:
+    def _mine(self, rows, status: str) -> List[SolanaSwap]:
         out = []
-        for _pubkey, acct in self.client.get_swaps(status=status):
+        for _pubkey, acct in rows:
+            if type(acct.status).__name__ != status:
+                continue
             if _as_pubkey(acct.miner) != self.miner_pubkey:
                 continue
             swap = swap_from_solana(acct)
@@ -55,8 +57,11 @@ class SwapPoller:
         return out
 
     def poll_inner(self) -> Tuple[List[SolanaSwap], List[SolanaSwap]]:
-        active = self._mine('Active')
-        fulfilled = self._mine('Fulfilled')
+        # One snapshot fetch, partitioned locally — both statuses come from the same atomic view
+        # (and half the getProgramAccounts of fetching per status).
+        rows = self.client.get_swaps()
+        active = self._mine(rows, 'Active')
+        fulfilled = self._mine(rows, 'Fulfilled')
         # Forget keys no longer present so a reused-tx swap re-logs; bounded to the live set.
         live = {s.key_hex for s in active} | {s.key_hex for s in fulfilled}
         # A key that was known but is no longer Active/Fulfilled left the miner's live set — the swap
