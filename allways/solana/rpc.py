@@ -5,11 +5,26 @@ into the existing `asyncio.to_thread` pattern. Account data is returned base64-d
 """
 
 import base64
+import os
 import time
 from typing import Any, List, Optional, Tuple
 
 import base58
 import requests
+
+
+def resolve_rpc_url(explicit: Optional[str] = None) -> str:
+    """The SOL RPC endpoint every consumer (neurons, provider, CLI) resolves through.
+
+    ``explicit`` (or ``SOLANA_RPC_URL``) is the endpoint; ``SOLANA_RPC_API_KEY`` is composed on as
+    the ``api-key`` query param (the keyed-provider convention, e.g. Helius), so operators set a
+    plain URL and a key instead of splicing the key into the URL. A URL already carrying an
+    ``api-key`` is left alone. Defaults to localnet."""
+    url = explicit or os.environ.get('SOLANA_RPC_URL') or 'http://127.0.0.1:8899'
+    key = os.environ.get('SOLANA_RPC_API_KEY')
+    if key and 'api-key=' not in url:
+        url = f'{url}{"&" if "?" in url else "?"}api-key={key}'
+    return url
 
 
 class SolanaRpcError(Exception):

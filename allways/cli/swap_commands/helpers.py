@@ -17,7 +17,7 @@ from rich.text import Text
 from allways.classes import SwapStatus
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.solana.client import SolanaClientError
-from allways.solana.rpc import SolanaRpcError
+from allways.solana.rpc import SolanaRpcError, resolve_rpc_url
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -45,19 +45,17 @@ ENV_BUNDLES = {
 
 def resolve_solana_rpc(config: dict) -> str:
     """Solana RPC precedence: SOLANA_RPC_URL env / solana-rpc config (raw URL — paid/custom) win;
-    else the solana-network name resolves to a public endpoint; else localnet default."""
-    raw = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc')
-    if raw:
-        return raw
+    else the solana-network name resolves to a public endpoint; else localnet default.
+    ``SOLANA_RPC_API_KEY`` is composed onto whichever endpoint wins (``resolve_rpc_url``)."""
+    url = os.environ.get('SOLANA_RPC_URL') or config.get('solana-rpc')
     name = config.get('solana-network')
-    if name:
+    if not url and name:
         url = SOLANA_NETWORKS.get(name)
-        if url:
-            return url
-        console.print(
-            f'[yellow]Unknown solana-network {name!r} (expected {list(SOLANA_NETWORKS)}); using localnet.[/yellow]'
-        )
-    return 'http://127.0.0.1:8899'
+        if not url:
+            console.print(
+                f'[yellow]Unknown solana-network {name!r} (expected {list(SOLANA_NETWORKS)}); using localnet.[/yellow]'
+            )
+    return resolve_rpc_url(url)
 
 
 def resolve_solana_keypair_path(config: dict) -> str:

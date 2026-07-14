@@ -33,6 +33,7 @@ from allways.constants import (  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
+from allways.solana.rpc import resolve_rpc_url  # noqa: E402
 from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -73,7 +74,7 @@ class Validator(BaseValidatorNeuron):
 
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
-        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        solana_rpc_url = resolve_rpc_url()
         self.chain_providers = create_chain_providers(
             check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
         )
