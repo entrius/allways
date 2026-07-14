@@ -134,6 +134,7 @@ def required_collateral(collateral_amount: int) -> int:
     """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
     return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
 
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
