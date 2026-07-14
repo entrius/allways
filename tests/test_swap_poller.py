@@ -41,12 +41,8 @@ def _acct(miner_bytes: bytes, from_tx_hash: str, status_name: str = 'Active'):
 
 def _client(active=(), fulfilled=()):
     client = MagicMock()
-
-    def get_swaps(status=None):
-        rows = active if status == 'Active' else fulfilled if status == 'Fulfilled' else []
-        return [(f'pda{i}', a) for i, a in enumerate(rows)]
-
-    client.get_swaps.side_effect = get_swaps
+    rows = [*active, *fulfilled]
+    client.get_swaps.side_effect = lambda status=None: [(f'pda{i}', a) for i, a in enumerate(rows)]
     return client
 
 
@@ -69,6 +65,17 @@ def test_filters_to_this_miner_and_splits_active_fulfilled():
     assert [s.from_tx_hash for s in active] == ['aa']  # 'bb' belongs to another miner
     assert [s.from_tx_hash for s in fulfilled] == ['cc']
     assert active[0].status == 'Active' and fulfilled[0].status == 'Fulfilled'
+
+
+def test_poll_fetches_one_snapshot():
+    me = Keypair().pubkey()
+    client = _client(
+        active=[_acct(bytes(me), 'aa')],
+        fulfilled=[_acct(bytes(me), 'cc', 'Fulfilled')],
+    )
+    poller = SwapPoller(client, me)
+    poller.poll()
+    assert client.get_swaps.call_count == 1
 
 
 def test_empty_when_no_swaps_for_miner():
