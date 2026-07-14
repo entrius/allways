@@ -7,9 +7,7 @@ component is ``pool × crown_share × capacity × fill_ratio``; the
 execution component is the pool's realized-volume share, summed over the
 scored window from the ingested ``clearing_rates`` ledger (the ``SwapCompleted``
 history — volume is what cleared this round, not a lifetime account total) and
-gated by the ``rate_quality`` curve. A direction clearing less than
-``MIN_DIRECTION_VOLUME`` on its SOL side in the window is treated as zero-volume
-(w_a folds to 1.0, ``fill_ratio`` neutral) so dust can't steer the weights.
+gated by the ``rate_quality`` curve.
 The curve compares a miner's realized rate against an on-chain reference (C-rev):
 a trimmed, volume-weighted, per-miner-capped average of completed-swap clearing
 rates per direction (``build_direction_references``), computed deterministically
@@ -37,9 +35,7 @@ from allways.constants import (
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
-    MIN_DIRECTION_VOLUME,
     MIN_SUCCESSFUL_SWAPS,
-    NUMERAIRE_CHAIN,
     RATE_QUALITY_FLOOR_ADV,
     RATE_QUALITY_MIN,
     RATE_QUALITY_TOLERANCE_BPS,
@@ -214,31 +210,18 @@ def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, 
     return eligibility
 
 
-def direction_sol_volume(from_chain: str, leg_sums: Dict[str, Tuple[int, int]]) -> int:
-    """Windowed SOL notional (lamports) of a direction's cleared legs: the
-    hub-side leg of each swap — ``from_amount`` when the hub is the source, else
-    ``to_amount``. Every direction is hub↔spoke by construction, so no price
-    feed is needed to compare a direction's flow against the volume floor."""
-    side = 0 if from_chain == NUMERAIRE_CHAIN else 1
-    return sum(legs[side] for legs in leg_sums.values())
-
-
 def windowed_direction_volumes(
     clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
     from_chain: str,
     to_chain: str,
     rewardable_hotkeys: Set[str],
 ) -> Tuple[Dict[str, int], int]:
-    """One direction's scored volume: metagraph-filter the windowed leg sums,
-    apply the SOL-side floor (below ``MIN_DIRECTION_VOLUME`` ⇒ scored as
-    zero-volume, so dust can't steer the round), and return
-    ``({hotkey: from_leg}, total)`` — within a direction, vol_share stays in
-    from-asset units."""
+    """One direction's scored volume: metagraph-filter the windowed leg sums and
+    return ``({hotkey: from_leg}, total)`` — within a direction, vol_share stays
+    in from-asset units."""
     leg_sums = {
         hk: legs for hk, legs in clearing_volumes.get((from_chain, to_chain), {}).items() if hk in rewardable_hotkeys
     }
-    if direction_sol_volume(from_chain, leg_sums) < MIN_DIRECTION_VOLUME:
-        leg_sums = {}
     volumes_dir = {hk: legs[0] for hk, legs in leg_sums.items()}
     return volumes_dir, sum(volumes_dir.values())
 
