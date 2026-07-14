@@ -22,6 +22,11 @@ from allways.cli.swap_commands.helpers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_api_key(monkeypatch):
+    monkeypatch.delenv('SOLANA_RPC_API_KEY', raising=False)
+
+
 def test_solana_name_resolves_to_endpoint(monkeypatch):
     monkeypatch.delenv('SOLANA_RPC_URL', raising=False)
     assert resolve_solana_rpc({'solana-network': 'devnet'}) == SOLANA_NETWORKS['devnet']
@@ -47,6 +52,30 @@ def test_solana_unset_defaults_localnet(monkeypatch):
 def test_solana_unknown_name_falls_back_localnet(monkeypatch):
     monkeypatch.delenv('SOLANA_RPC_URL', raising=False)
     assert resolve_solana_rpc({'solana-network': 'nope'}) == 'http://127.0.0.1:8899'
+
+
+def test_api_key_composes_onto_resolved_endpoint(monkeypatch):
+    monkeypatch.setenv('SOLANA_RPC_URL', 'https://mainnet.helius-rpc.com')
+    monkeypatch.setenv('SOLANA_RPC_API_KEY', 'k1')
+    assert resolve_solana_rpc({}) == 'https://mainnet.helius-rpc.com?api-key=k1'
+
+
+def test_api_key_appends_with_ampersand_when_query_present(monkeypatch):
+    monkeypatch.setenv('SOLANA_RPC_URL', 'https://rpc.example/x?tier=pro')
+    monkeypatch.setenv('SOLANA_RPC_API_KEY', 'k1')
+    assert resolve_solana_rpc({}) == 'https://rpc.example/x?tier=pro&api-key=k1'
+
+
+def test_api_key_leaves_already_keyed_url_alone(monkeypatch):
+    monkeypatch.setenv('SOLANA_RPC_URL', 'https://rpc.example/?api-key=inline')
+    monkeypatch.setenv('SOLANA_RPC_API_KEY', 'k1')
+    assert resolve_solana_rpc({}) == 'https://rpc.example/?api-key=inline'
+
+
+def test_api_key_composes_onto_network_name(monkeypatch):
+    monkeypatch.delenv('SOLANA_RPC_URL', raising=False)
+    monkeypatch.setenv('SOLANA_RPC_API_KEY', 'k1')
+    assert resolve_solana_rpc({'solana-network': 'devnet'}) == SOLANA_NETWORKS['devnet'] + '?api-key=k1'
 
 
 def test_env_bundles_cover_all_three_chains():

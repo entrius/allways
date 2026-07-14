@@ -26,6 +26,7 @@ from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
+from allways.solana.rpc import resolve_rpc_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
@@ -43,7 +44,7 @@ class Miner(BaseMinerNeuron):
         self.unlock_coldkey()
 
         # Solana program client (signer = the miner's Solana keypair; separate from the bt wallet).
-        solana_rpc_url = os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        solana_rpc_url = resolve_rpc_url()
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         self.solana_pubkey = self.solana_client.keypair.pubkey()
         # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer

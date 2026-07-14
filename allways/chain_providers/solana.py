@@ -1,5 +1,4 @@
 import base64
-import os
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -11,7 +10,7 @@ from solders.signature import Signature
 
 from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
 from allways.chains import CHAIN_SOL, ChainDefinition
-from allways.solana.rpc import SolanaRpc
+from allways.solana.rpc import SolanaRpc, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
@@ -36,7 +35,7 @@ class SolanaProvider(ChainProvider):
     def __init__(
         self, solana_rpc_url: Optional[str] = None, solana_keypair: Optional[Keypair] = None, timeout: int = 30
     ):
-        self.rpc_url = solana_rpc_url or os.environ.get('SOLANA_RPC_URL', 'http://127.0.0.1:8899')
+        self.rpc_url = resolve_rpc_url(solana_rpc_url)
         self.rpc = SolanaRpc(self.rpc_url, timeout=timeout)
         self.keypair = solana_keypair
 
