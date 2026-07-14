@@ -130,7 +130,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
 
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._poll_drawn', return_value=drawn),
         patch('allways.cli.swap_commands.swap._poll_reservation', return_value=resv),
@@ -314,7 +314,7 @@ def _run_resume(existing, poll_resv):
     ]
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch(
             'allways.cli.swap_commands.swap._poll_drawn', return_value=None

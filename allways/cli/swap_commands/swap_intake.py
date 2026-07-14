@@ -1,8 +1,10 @@
-"""Pure taker swap-intake math — miner selection + on-chain amount derivation. No network, no click.
+"""Taker swap-intake — miner selection + on-chain amount derivation. No click, no owned RPC config.
 
 Mirrors the contract: ``collateral_amount`` is the SOL leg (the bounded, collateral-backed notional). Uses the
 shared ``calculate_to_amount`` so the CLI's pinned amounts agree with the miner + validator byte-for-byte.
 Launch pairs always have a SOL leg (sol↔btc / sol↔tao); a pair without one is rejected here.
+The one network-touching helper (``candidate_miners``) takes the Solana client as a parameter, so the
+CLI taker path and the validator reserve engine build the same candidate set from the same reads.
 """
 
 from dataclasses import dataclass
@@ -35,6 +37,19 @@ def to_smallest_units(amount: float, chain: str) -> int:
 def rate_display_from_fixed(rate_fixed: int) -> str:
     """On-chain u128 fixed-point rate → canonical display string (matches normalize_rate)."""
     return normalize_rate(rate_fixed / RATE_PRECISION)
+
+
+def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
+    """All miners with a posted quote for this exact direction, collateral attached.
+    Shared by the CLI taker path and the validator reserve engine so "who is
+    quotable" can never diverge between what a taker sees and what reserves."""
+    out: List[MinerCandidate] = []
+    for _pk, q in client.get_all('MinerQuote'):
+        if q.from_chain != from_chain or q.to_chain != to_chain:
+            continue
+        collateral = client.get_collateral_lamports(q.miner) or 0
+        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
+    return out
 
 
 def compute_intake_amounts(from_chain: str, to_chain: str, from_amount: int, rate_display: str) -> IntakeAmounts:
