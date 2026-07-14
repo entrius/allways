@@ -33,7 +33,7 @@ import bittensor as bt
 import pytest
 from solders.keypair import Keypair
 
-from allways.constants import DIRECTION_POOLS, RATE_PRECISION, RECYCLE_UID
+from allways.constants import DIRECTION_POOLS, RATE_PRECISION, RECYCLE_UID, required_collateral
 from allways.solana.client import AllwaysSolanaClient
 from allways.solana.events import SolanaEventIngest
 from allways.solana.rpc import SolanaRpc
@@ -125,7 +125,7 @@ def _activate_miner(admin, validators, rate_int):
     miner = Keypair()
     _airdrop(miner.pubkey(), 10)
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
-    collateral = MAX_SWAP_RAO  # == max_swap → capacity_factor 1.0
+    collateral = required_collateral(MAX_SWAP_RAO)  # 1.1 × max_swap → capacity_factor 1.0
     mclient.post_collateral(collateral)
     mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', rate_int, 1_000)
     hk = _hotkey()

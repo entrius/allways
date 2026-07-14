@@ -1625,24 +1625,31 @@ class TestHaltShortCircuit:
 
 
 class TestCapacityFactorHelper:
-    """Direct unit tests for the capacity_factor pure function."""
+    """Direct unit tests for the capacity_factor pure function. Full credit requires
+    backing a max_swap fill at the contract's 1.10× gate: denominator = 1.1 × max_swap."""
 
-    def test_at_max_swap_is_full(self):
+    def test_at_required_collateral_is_full(self):
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(500_000_000, 500_000_000) == 1.0
+        assert capacity_factor(550_000_000, 500_000_000) == 1.0
 
-    def test_half_max_swap_is_half(self):
+    def test_at_max_swap_is_under_full(self):
+        """Collateral == max_swap can't actually accept a max_swap fill (needs 1.1×)."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(250_000_000, 500_000_000) == 0.5
+        assert capacity_factor(500_000_000, 500_000_000) == 500_000_000 / 550_000_000
 
-    def test_quarter_max_swap_is_quarter(self):
+    def test_half_required_is_half(self):
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(125_000_000, 500_000_000) == 0.25
+        assert capacity_factor(275_000_000, 500_000_000) == 0.5
 
-    def test_above_max_swap_caps_at_one(self):
+    def test_quarter_required_is_quarter(self):
+        from allways.validator.scoring import capacity_factor
+
+        assert capacity_factor(137_500_000, 500_000_000) == 0.25
+
+    def test_above_required_caps_at_one(self):
         from allways.validator.scoring import capacity_factor
 
         assert capacity_factor(2_000_000_000, 500_000_000) == 1.0
@@ -1743,13 +1750,13 @@ class TestCapacityWeighting:
         conn.commit()
 
     def test_full_capacity_pays_baseline(self, tmp_path: Path):
-        """Miner with collateral = max_swap earns the full per-direction pool."""
+        """Miner with collateral = 1.1 x max_swap earns the full per-direction pool."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
             hotkeys,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 500_000_000},
+            collaterals={'hk_a': 550_000_000},
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
@@ -1758,13 +1765,13 @@ class TestCapacityWeighting:
         v.state_store.close()
 
     def test_quarter_capacity_pays_quarter(self, tmp_path: Path):
-        """Collateral at 1/4 of max swap → 1/4 reward, 3/4 recycles."""
+        """Collateral at 1/4 of required (1.1 x max_swap) → 1/4 reward, 3/4 recycles."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
             hotkeys,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 125_000_000},
+            collaterals={'hk_a': 137_500_000},
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
@@ -1812,7 +1819,7 @@ class TestCapacityWeighting:
             tmp_path,
             hotkeys,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 500_000_000, 'hk_b': 100_000_000},
+            collaterals={'hk_a': 550_000_000, 'hk_b': 110_000_000},
         )
         conn = v.state_store.require_connection()
         for hk in ('hk_a', 'hk_b'):
@@ -2366,7 +2373,7 @@ class TestCapacityVolumeInteraction:
             tmp_path,
             hotkeys,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 250_000_000},
+            collaterals={'hk_a': 275_000_000},
         )
         conn = v.state_store.require_connection()
         conn.execute(
@@ -2499,17 +2506,17 @@ class TestHistoricalCollateralReplay:
             hotkeys,
             block=10_000,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 100_000_000},  # held throughout the window
+            collaterals={'hk_a': 110_000_000},  # held throughout the window
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         # Top-up fires *after* window_end (= 10_000). Window is (9_700, 10_000].
         v.event_watcher.apply_event(
             10_500,
             'CollateralPosted',
-            {'miner': 'hk_a', 'amount': 400_000_000, 'total': 500_000_000},
+            {'miner': 'hk_a', 'amount': 440_000_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # capacity_factor = 100M / 500M = 0.2; pool 0.5 → reward 0.1.
+        # capacity_factor = 110M / (1.1 × 500M) = 0.2; pool 0.5 → reward 0.1.
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.2, atol=1e-6)
         v.state_store.close()
 
@@ -2524,7 +2531,7 @@ class TestHistoricalCollateralReplay:
             hotkeys,
             block=10_000,
             max_swap_amount=500_000_000,
-            collaterals={'hk_a': 125_000_000},  # window-start anchor
+            collaterals={'hk_a': 137_500_000},  # window-start anchor (0.25 × required)
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         # SCORING_WINDOW_BLOCKS = 300 → window is (9_700, 10_000]. Midpoint
@@ -2532,7 +2539,7 @@ class TestHistoricalCollateralReplay:
         v.event_watcher.apply_event(
             9_850,
             'CollateralPosted',
-            {'miner': 'hk_a', 'amount': 375_000_000, 'total': 500_000_000},
+            {'miner': 'hk_a', 'amount': 412_500_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.

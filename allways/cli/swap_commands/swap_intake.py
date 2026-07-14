@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain
-from allways.constants import COLLATERAL_REQUIREMENT_BPS, NUMERAIRE_CHAIN, RATE_PRECISION
+from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, required_collateral
 from allways.utils.rate import calculate_to_amount, is_executable_rate, normalize_rate
 
 
@@ -68,11 +68,6 @@ def compute_intake_amounts(from_chain: str, to_chain: str, from_amount: int, rat
     )
     collateral_amount = from_amount if from_chain == NUMERAIRE_CHAIN else to_amount
     return IntakeAmounts(collateral_amount=collateral_amount, from_amount=from_amount, to_amount=to_amount)
-
-
-def required_collateral(collateral_amount: int) -> int:
-    """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
-    return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
 
 
 def swap_viable(collateral_amount: int, collateral: int, min_swap: int, max_swap: int) -> Tuple[bool, str]:

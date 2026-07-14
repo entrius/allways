@@ -129,6 +129,11 @@ SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
 COLLATERAL_REQUIREMENT_BPS = 11_000
 
+
+def required_collateral(collateral_amount: int) -> int:
+    """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
+    return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 
