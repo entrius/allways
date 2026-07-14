@@ -31,6 +31,7 @@ from allways.validator.scoring import (
     score_and_reward_miners,
     scoring_window_bounds,
     snapshot_current_crown_holders,
+    snapshot_current_miner_scores,
 )
 from allways.validator.state_store import ValidatorStateStore
 
@@ -1670,64 +1671,64 @@ class TestCapacityFactorHelper:
         assert capacity_factor(100_000_000, -1) == 1.0
 
 
-class TestVolumeFactorHelper:
-    """Direct unit tests for the volume_factor pure function.
+class TestFillRatioHelper:
+    """Direct unit tests for the fill_ratio pure function.
 
-    Signature: volume_factor(vol_rao, total_volume_rao, crown_share, alpha).
+    Signature: fill_ratio(vol_rao, total_volume_rao, crown_share, alpha).
     """
 
     def test_idle_crown_loses_alpha(self):
         """vol=0 of total=1 → vol_share=0, participation=0 → factor = (1-α)."""
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.5) == 0.5
+        assert fill_ratio(0, 1_000, crown_share=1.0, alpha=0.5) == 0.5
 
     def test_matching_volume_keeps_full_reward(self):
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
         # 500/1000 = 0.5 vol_share, crown_share 0.5 → participation 1.0.
-        assert volume_factor(500, 1_000, crown_share=0.5, alpha=0.5) == 1.0
+        assert fill_ratio(500, 1_000, crown_share=0.5, alpha=0.5) == 1.0
 
     def test_over_serving_capped_at_one(self):
         """Anti-wash-trade: high volume / low crown stays at 1.0."""
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(900, 1_000, crown_share=0.1, alpha=0.5) == 1.0
+        assert fill_ratio(900, 1_000, crown_share=0.1, alpha=0.5) == 1.0
 
     def test_partial_mismatch_interpolates(self):
         """vol_share/crown_share = 0.5 → factor = 0.5 + 0.5*0.5 = 0.75."""
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(250, 1_000, crown_share=0.5, alpha=0.5) == 0.75
+        assert fill_ratio(250, 1_000, crown_share=0.5, alpha=0.5) == 0.75
 
     def test_zero_crown_share_is_moot(self):
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(500, 1_000, crown_share=0.0, alpha=0.5) == 1.0
+        assert fill_ratio(500, 1_000, crown_share=0.0, alpha=0.5) == 1.0
 
     def test_idle_network_short_circuits_to_one(self):
         """total_volume == 0 → factor = 1.0 (no penalty for a quiet window)."""
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(0, 0, crown_share=1.0, alpha=0.5) == 1.0
+        assert fill_ratio(0, 0, crown_share=1.0, alpha=0.5) == 1.0
 
     def test_alpha_zero_disables_volume_weighting(self):
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
         for vol in (0, 250, 500, 750, 1_000):
-            assert volume_factor(vol, 1_000, crown_share=1.0, alpha=0.0) == 1.0
+            assert fill_ratio(vol, 1_000, crown_share=1.0, alpha=0.0) == 1.0
 
     def test_alpha_one_is_pure_volume_share(self):
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=1.0) == 0.0
-        assert volume_factor(250, 1_000, crown_share=0.5, alpha=1.0) == 0.5
+        assert fill_ratio(0, 1_000, crown_share=1.0, alpha=1.0) == 0.0
+        assert fill_ratio(250, 1_000, crown_share=0.5, alpha=1.0) == 0.5
 
     def test_alpha_03_softer_penalty(self):
-        from allways.validator.scoring import volume_factor
+        from allways.validator.scoring import fill_ratio
 
-        assert volume_factor(0, 1_000, crown_share=1.0, alpha=0.3) == 0.7
-        np.testing.assert_allclose(volume_factor(500, 1_000, crown_share=1.0, alpha=0.3), 0.85, atol=1e-6)
+        assert fill_ratio(0, 1_000, crown_share=1.0, alpha=0.3) == 0.7
+        np.testing.assert_allclose(fill_ratio(500, 1_000, crown_share=1.0, alpha=0.3), 0.85, atol=1e-6)
 
 
 class TestCapacityWeighting:
@@ -1913,7 +1914,7 @@ class TestWeightingTraceRecorders:
         assert wt.volume_share == 0.25
         assert wt.crown_share == 0.5
         assert wt.participation == 0.5
-        assert wt.volume_factor == 0.75
+        assert wt.fill_ratio == 0.75
 
     def test_record_volume_idle_network_zeros_share(self):
         """total_volume == 0 → volume_share = 0, participation defaults to 1.0
@@ -1924,7 +1925,7 @@ class TestWeightingTraceRecorders:
         wt.record_volume(vol_rao=0, total_volume_rao=0, crown_share=1.0, factor=1.0)
         assert wt.volume_share == 0.0
         assert wt.participation == 0.0  # vol_share / crown_share = 0/1 = 0
-        assert wt.volume_factor == 1.0  # set by caller (idle-network short-circuit)
+        assert wt.fill_ratio == 1.0  # set by caller (idle-network short-circuit)
 
     def test_record_volume_caps_participation_at_one(self):
         """Over-serving: vol_share/crown_share > 1 → participation capped."""
@@ -1969,7 +1970,7 @@ class TestVolumeWeighting:
     ) -> None:
         """Seed one completed swap's realized legs on the ``clearing_rates``
         ledger — the windowed volume read the reward weighting consumes.
-        ``from_amount`` is the from-leg the ``volume_factor`` compares within a
+        ``from_amount`` is the from-leg the ``fill_ratio`` compares within a
         direction. A non-completed swap never lands a ``SwapCompleted`` event,
         so it writes nothing — timed-out swaps contribute no volume."""
         if not completed:
@@ -2001,7 +2002,7 @@ class TestVolumeWeighting:
         # B doesn't post a rate → never holds crown.
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → vol_factor = 0.5.
+        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → fill_ratio = 0.5.
         # Volume>0 in this direction → w_a=0.8/w_b=0.2; A's qv_share is 0, so
         # A = 0.8·(pool·0.5). B has crown_share = 0 → no crown reward to multiply.
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
@@ -2049,7 +2050,7 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_a', from_amount=100_000_000, from_chain='sol', to_chain='btc')
         self.insert_volume(v, 'hk_b', from_amount=900_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → vol_factor = 0.55.
+        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → fill_ratio = 0.55.
         # w_a=0.8/w_b=0.2: 0.8·(pool·0.55) + 0.2·(pool·0.1) = pool·0.46.
         np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.46, atol=1e-6)
         # B: crown_share = 0 → factor moot, no reward to multiply.
@@ -2081,7 +2082,7 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_b', from_amount=800_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
-        # A participation = 0.2/0.8 = 0.25 → vol_factor 0.625; B → vol_factor 1.0.
+        # A participation = 0.2/0.8 = 0.25 → fill_ratio 0.625; B → fill_ratio 1.0.
         # w_a=0.8/w_b=0.2 (volume>0): A = 0.8·(0.8·0.625) + 0.2·0.2 = 0.44·pool.
         #                              B = 0.8·(0.2·1.0)  + 0.2·0.8 = 0.32·pool.
         np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.44, atol=1e-6)
@@ -2147,7 +2148,7 @@ class TestVolumeWeighting:
 
     def test_below_floor_direction_falls_back_to_crown_only(self, tmp_path: Path):
         """A direction clearing less than MIN_DIRECTION_VOLUME on its SOL side is
-        scored as zero-volume: w_a folds to 1.0 and volume_factor stays neutral,
+        scored as zero-volume: w_a folds to 1.0 and fill_ratio stays neutral,
         so a dust swap neither pays the w_b slice nor penalizes the crown holder."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
@@ -2168,7 +2169,7 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000, to_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Same shape as test_idle_crown_holder_loses_alpha: A holds all crown,
-        # serves none of the (at-floor) volume → w_a·pool·vol_factor(0.5).
+        # serves none of the (at-floor) volume → w_a·pool·fill_ratio(0.5).
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
         v.state_store.close()
 
@@ -2216,7 +2217,7 @@ class TestVolumeWeighting:
 
 
 class TestRewardShapeWeights:
-    """Reward = eligible × [w_a·crown + w_b·quality_volume]. Phase C set the live
+    """Reward = eligible × [w_a·crown + w_b·execution]. Phase C set the live
     weights to w_a=0.8/w_b=0.2; a larger w_b shifts weight toward realized
     volume. A solo crown holder with full volume share earns the whole pool for
     any w_a+w_b=1 (both components equal the pool there)."""
@@ -2252,15 +2253,15 @@ class TestRewardShapeWeights:
         component, so a volume-serving crown holder earns strictly more than it
         does under the w_b=0 baseline."""
         # Pin w_a=1.0 across both runs and vary only w_b (0 → 0.5) so the delta
-        # isolates the added quality-volume term (weights need not sum to 1 here —
+        # isolates the added execution term (weights need not sum to 1 here —
         # this is a formula sanity check, not a distribution).
         monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_CROWN', 1.0)
-        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_QUALITY_VOLUME', 0.0)
+        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_EXECUTION', 0.0)
         v_base = self._solo_crown_with_volume(tmp_path / 'base')
         baseline, _ = calculate_miner_rewards(v_base, v_base.block)
         v_base.state_store.close()
 
-        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_QUALITY_VOLUME', 0.5)
+        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_EXECUTION', 0.5)
         v_vol = self._solo_crown_with_volume(tmp_path / 'vol')
         weighted, _ = calculate_miner_rewards(v_vol, v_vol.block)
         v_vol.state_store.close()
@@ -2271,7 +2272,7 @@ class TestRewardShapeWeights:
 
 
 class TestCrevReference:
-    """C-rev — the on-chain trimmed reference gates the quality-volume slice,
+    """C-rev — the on-chain trimmed reference gates the execution slice,
     replacing the external feed. The solo holder executes tao→btc at a realized
     500 TAO/BTC; seeding the network's clearing-rate history around 500 sets the
     reference (the 500 outlier is trimmed when other rates dominate), and the
@@ -2376,7 +2377,7 @@ class TestCapacityVolumeInteraction:
         # B serves the market's (floor-clearing) volume so A's vol_share = 0.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: w_a 0.8 × pool × crown 1.0 × eligible 1 × capacity 0.5 × volume_factor 0.5.
+        # A: w_a 0.8 × pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 0.5.
         # A serves no volume (B does), so A's w_b slice is 0 → only the crown term.
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 1.0 * 0.5 * 0.5, atol=1e-6)
         v.state_store.close()
@@ -2720,3 +2721,84 @@ class TestCrownPredicateParity:
         assert min_leg > 0  # rate is executable, so the gate is live
         assert can_fund('hk_poor', rate) is False
         assert can_fund('hk_rich', rate) is True
+
+
+class TestScoreSnapshots:
+    """miner_scores round rows + the current_miner_scores live tip (D8): the
+    persisted factors must be exactly what the reward math paid — same shared
+    ``build_direction_score_rows``, so a snapshot can never disagree with the
+    weights that went on chain."""
+
+    def _solo_with_storage(self, tmp_path: Path) -> SimpleNamespace:
+        v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
+        v.database_storage.is_enabled.return_value = True
+        return v
+
+    def test_round_flush_rows_match_reward_math(self, tmp_path: Path):
+        v = self._solo_with_storage(tmp_path)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
+        rows = kwargs['miner_score_rows']
+        assert len(rows) == 1
+        (round_ts, hotkey, from_c, to_c, eligible, crown_share, capacity, fill_ratio, vol_share, quality, reward) = (
+            rows[0]
+        )
+        assert round_ts == v.block  # round keyed by window_end
+        assert (hotkey, from_c, to_c) == ('hk_a', 'btc', 'sol')
+        assert eligible is True
+        np.testing.assert_allclose((crown_share, capacity, fill_ratio, vol_share, quality), (1.0,) * 5)
+        # The persisted factors reproduce the persisted reward, and the
+        # persisted reward is what the weights actually paid.
+        expected = 0.8 * POOL_BTC_SOL * crown_share * capacity * fill_ratio + 0.2 * POOL_BTC_SOL * vol_share * quality
+        np.testing.assert_allclose(reward, expected, atol=1e-9)
+        np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
+
+    def test_ineligible_holder_persists_factors_with_zero_reward(self, tmp_path: Path):
+        """The gate zeroes the reward but the factors are still recorded — the
+        dashboard can show WHY the eligible=false round paid nothing."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, all_eligible=False)
+        v.database_storage.is_enabled.return_value = True
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
+        )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        assert len(rows) == 1
+        row = rows[0]
+        assert row[4] is False  # eligible
+        np.testing.assert_allclose(row[5], 1.0)  # crown_share still recorded
+        assert row[10] == 0.0  # reward
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+    def test_live_tip_equals_round_rows_for_same_window(self, tmp_path: Path):
+        """The tip is the same math over the same window — identical rows,
+        with ts standing in for round_ts."""
+        v = self._solo_with_storage(tmp_path)
+        tip = snapshot_current_miner_scores(v, at_time=v.block)
+        calculate_miner_rewards(v, v.block)
+        round_rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        assert tip == round_rows
+        v.state_store.close()
+
+    def test_tip_empty_when_no_crown(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        assert snapshot_current_miner_scores(v, at_time=v.block) == []
+        v.state_store.close()
+
+    def test_halt_flush_carries_no_score_rows(self, tmp_path: Path):
+        """A halted round pays nobody: the halt flush goes through
+        flush_halt_window (which clears the live tip) and miner_scores gets no
+        rows for the round."""
+        v = self._solo_with_storage(tmp_path)
+        v.solana_config_cache.halted.return_value = True
+        v.update_scores = lambda rewards, miner_uids: None
+        score_and_reward_miners(v)
+        assert v.database_storage.flush_halt_window.called
+        assert not v.database_storage.flush_scoring_window.called
+        v.state_store.close()

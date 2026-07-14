@@ -4,16 +4,6 @@
 # produces: rate quotes and crown intervals timestamped in unix seconds
 # (blockTime axis), not block numbers.
 
-# rate_history: per-miner on-chain rate quotes, append-only by (hotkey,
-# direction, ts). Last-write-wins on the rate column if the same timestamp is
-# re-emitted.
-BULK_UPSERT_RATE_HISTORY = """
-INSERT INTO rate_history (hotkey, from_chain, to_chain, rate, ts)
-VALUES (%s, %s, %s, %s, %s)
-ON CONFLICT (hotkey, from_chain, to_chain, ts)
-DO UPDATE SET rate = EXCLUDED.rate
-"""
-
 # crown_holders window wipe: crown derivation operates on a moving time
 # window, so an old window's intervals are deleted before the recomputed ones
 # are upserted. Bounded by the caller (the scoring window, in unix seconds).
@@ -58,4 +48,34 @@ DO UPDATE SET credit = EXCLUDED.credit,
               rate   = EXCLUDED.rate,
               ts     = EXCLUDED.ts,
               updated_at = NOW()
+"""
+
+# miner_scores: per-round factor snapshots — what the validator actually paid,
+# one row per (round, hotkey, direction), flushed in the same transaction as
+# the crown ledger. Idempotent on retry of the same round.
+BULK_UPSERT_MINER_SCORES = """
+INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, eligible,
+                          crown_share, capacity, fill_ratio, vol_share, rate_quality, reward)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (round_ts, hotkey, from_chain, to_chain)
+DO UPDATE SET eligible     = EXCLUDED.eligible,
+              crown_share  = EXCLUDED.crown_share,
+              capacity     = EXCLUDED.capacity,
+              fill_ratio   = EXCLUDED.fill_ratio,
+              vol_share    = EXCLUDED.vol_share,
+              rate_quality = EXCLUDED.rate_quality,
+              reward       = EXCLUDED.reward
+"""
+
+# current_miner_scores: the live mid-round tip of miner_scores, wiped and
+# rewritten every forward step. The table only ever holds the in-progress round,
+# so the wipe is unconditional (no per-direction bookkeeping needed).
+DELETE_CURRENT_MINER_SCORES = """
+DELETE FROM current_miner_scores
+"""
+
+BULK_INSERT_CURRENT_MINER_SCORES = """
+INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, eligible,
+                                  crown_share, capacity, fill_ratio, vol_share, rate_quality, reward, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 """

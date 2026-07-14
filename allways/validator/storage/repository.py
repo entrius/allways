@@ -10,11 +10,13 @@ from contextlib import contextmanager
 from typing import Dict, List, Tuple
 
 from .queries import (
+    BULK_INSERT_CURRENT_MINER_SCORES,
     BULK_UPSERT_CROWN_HOLDERS,
     BULK_UPSERT_CURRENT_CROWN_HOLDERS,
-    BULK_UPSERT_RATE_HISTORY,
+    BULK_UPSERT_MINER_SCORES,
     DELETE_CROWN_IN_RANGE,
     DELETE_CURRENT_CROWN_BY_DIRECTION,
+    DELETE_CURRENT_MINER_SCORES,
     SET_SYNC_CURSOR,
 )
 
@@ -48,26 +50,6 @@ class BaseRepository:
 
 class Repository(BaseRepository):
     """Bulk write methods for the validator's dashboard-write path."""
-
-    def store_rate_history_bulk(
-        self,
-        rows: List[Tuple[str, str, str, float, int]],
-        commit: bool = True,
-    ) -> int:
-        """Upsert rate quotes. Rows: (hotkey, from_chain, to_chain, rate, ts)."""
-        if not rows:
-            return 0
-        try:
-            with self.get_cursor() as cursor:
-                cursor.executemany(BULK_UPSERT_RATE_HISTORY, rows)
-                if commit:
-                    self.db.commit()
-                return len(rows)
-        except Exception as e:
-            if commit:
-                self.db.rollback()
-            self.logger.error(f'Error in bulk rate_history storage: {e}')
-            return 0
 
     def delete_crown_in_range(
         self,
@@ -111,6 +93,52 @@ class Repository(BaseRepository):
         data the cursor describes so partial writes don't desync the
         dashboard's freshness signal."""
         return self.execute_command(SET_SYNC_CURSOR, (name, value), commit=commit)
+
+    def store_miner_scores_bulk(
+        self,
+        rows: List[Tuple],
+        commit: bool = True,
+    ) -> int:
+        """Upsert per-round score snapshots. Rows: (round_ts, hotkey, from_chain,
+        to_chain, eligible, crown_share, capacity, fill_ratio, vol_share,
+        rate_quality, reward)."""
+        if not rows:
+            return 0
+        try:
+            with self.get_cursor() as cursor:
+                cursor.executemany(BULK_UPSERT_MINER_SCORES, rows)
+                if commit:
+                    self.db.commit()
+                return len(rows)
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in bulk miner_scores storage: {e}')
+            return 0
+
+    def replace_current_miner_scores(
+        self,
+        rows: List[Tuple],
+        commit: bool = True,
+    ) -> int:
+        """Wipe + rewrite the live score tip. Rows: (ts, hotkey, from_chain,
+        to_chain, eligible, crown_share, capacity, fill_ratio, vol_share,
+        rate_quality, reward). The table only holds the in-progress round, so
+        the delete is unconditional; one transaction so readers never see a
+        partial tip. An empty row list clears it (halt, or no crown holder)."""
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute(DELETE_CURRENT_MINER_SCORES)
+                if rows:
+                    cursor.executemany(BULK_INSERT_CURRENT_MINER_SCORES, rows)
+                if commit:
+                    self.db.commit()
+            return len(rows)
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in current_miner_scores replace: {e}')
+            return 0
 
     def replace_current_crown(
         self,

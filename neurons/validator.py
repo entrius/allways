@@ -90,7 +90,7 @@ class Validator(BaseValidatorNeuron):
             db_path=state_db_path,
             current_block_fn=lambda: self.block,
         )
-        # Mirrors crown_holders / rate_history into Postgres for the miner
+        # Mirrors crown_holders / miner_scores into Postgres for the miner
         # dashboard. Disabled by default; opt in per host with
         # STORE_DB_RESULTS=true and DB_* env vars. When disabled the scoring
         # path's storage tee is a no-op — zero overhead for validators that
