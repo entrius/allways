@@ -65,11 +65,12 @@ def _rate(q) -> str:
 
 
 def _max_rate(entry) -> float:
-    """Highest numeric rate the miner posts (coarse cross-direction proxy for `--sort rate`)."""
+    """Highest DIRECTIONAL rate the miner posts (coarse cross-direction proxy for `--sort rate`),
+    matching the numbers the rate column renders."""
     rates = []
     for q in entry.quotes:
         try:
-            rates.append(float(rate_display_from_fixed(q.rate)))
+            rates.append(float(_rate(q)))
         except (TypeError, ValueError):
             continue
     return max(rates) if rates else 0.0

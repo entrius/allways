@@ -17,7 +17,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import RATE_PRECISION
 from allways.solana.client import SolanaClientError
-from allways.utils.rate import directional_rate, quantize_rate_display, quantize_rate_fixed
+from allways.utils.rate import canonical_rate, directional_rate, quantize_rate_display, quantize_rate_fixed
 
 # Default per-direction liquidity (u128) posted with a quote; the taker discovery path is Phase 9.
 DEFAULT_QUOTE_LIQUIDITY = 0
@@ -36,13 +36,6 @@ def prompt_chain(label: str, exclude: str | None = None) -> str:
             return value
         reason = 'already selected' if value == exclude else 'unsupported'
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
-
-
-def canonical_rate(directional: float, leg_from: str, canon_from: str) -> float:
-    """Directional 'to per 1 from' of a leg → canonical 'dest per 1 canonical source'."""
-    if leg_from == canon_from or directional == 0:
-        return directional
-    return 1 / directional
 
 
 def prompt_rates(canon_from: str, canon_to: str) -> tuple:
@@ -77,7 +70,7 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
                 console.print('[red]At least one direction must have a positive rate[/red]')
             else:
                 break
-    return fwd, canonical_rate(rev, canon_to, canon_from)
+    return fwd, canonical_rate(canon_to, canon_from, rev)
 
 
 @click.command('pair', cls=StyledCommand)
@@ -159,8 +152,8 @@ def post_pair(
         if rate == 0 and not counter_rate:
             fail('At least one direction must have a positive rate')
         # Positional rates are directional ('to per 1 from' of their own leg); the chain stores canonical.
-        rate = canonical_rate(rate, src_chain, canon_from)
-        counter_rate = rate if counter_rate is None else canonical_rate(counter_rate, dst_chain, canon_from)
+        rate = canonical_rate(src_chain, dst_chain, rate)
+        counter_rate = rate if counter_rate is None else canonical_rate(dst_chain, src_chain, counter_rate)
 
     # Normalize to canonical direction. Rates are already canonical values per leg, so the swap just
     # keeps each value attached to its own leg. Interactive prompts asked in canonical order — no swap.

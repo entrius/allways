@@ -318,8 +318,9 @@ class TestGetClearingVolumes:
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (300, 600)
         store.close()
 
-    def test_pre_m2_db_gains_swap_key_column(self, tmp_path: Path):
-        # A deployed DB created before the idempotency key must be migrated in place.
+    def test_pre_m2_db_migrates_and_purges_unkeyed_rows(self, tmp_path: Path):
+        # A pre-idempotency DB gains the column in place; its NULL-key rows are purged
+        # (NULLs never collide with ON CONFLICT, so a replay would double-count them).
         import sqlite3
 
         db = tmp_path / 'state.db'
@@ -336,8 +337,9 @@ class TestGetClearingVolumes:
             )
         store = ValidatorStateStore(db_path=db)
         store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk_new')
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk_new')  # replay → no-op
         vols = store.get_clearing_volumes(9_500, 10_000)
-        assert vols[('btc', 'sol')] == {'hk_old': (1, 1), 'hk_a': (300, 600)}
+        assert vols[('btc', 'sol')] == {'hk_a': (300, 600)}
         store.close()
 
     def test_u128_scale_legs_sum_exactly(self, tmp_path: Path):

@@ -514,10 +514,13 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
             if cols and 'outcome' not in cols:
                 conn.execute('DROP TABLE swap_outcomes')
-            # Pre-M2 deployments lack the clearing_rates idempotency key.
+            # Pre-M2 deployments lack the clearing_rates idempotency key. Purge unkeyed rows:
+            # NULL keys never collide with ON CONFLICT(swap_key), so a post-upgrade replay would
+            # double-count them — a one-time <=2h volume gap buys a safe dedup invariant.
             cols = [row[1] for row in conn.execute('PRAGMA table_info(clearing_rates)')]
             if cols and 'swap_key' not in cols:
                 conn.execute('ALTER TABLE clearing_rates ADD COLUMN swap_key TEXT')
+                conn.execute('DELETE FROM clearing_rates')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
