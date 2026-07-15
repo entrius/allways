@@ -2,18 +2,23 @@
 
 Users don't have TAO wallets. This module provides:
 - Ephemeral sr25519 keypair generation/storage for transport-layer auth
-- Validator discovery from metagraph
+- Validator discovery from metagraph (all, or one by hotkey with a disk cache)
 - Dendrite broadcast helper
 """
 
+import json
+import time
 from pathlib import Path
-from typing import List
+from typing import Callable, List, Optional
 
 import bittensor as bt
 
 EPHEMERAL_WALLET_DIR = Path.home() / '.allways' / 'ephemeral_wallet'
 EPHEMERAL_WALLET_NAME = 'allways_ephemeral'
 EPHEMERAL_HOTKEY_NAME = 'default'
+
+AXON_CACHE_FILE = Path.home() / '.allways' / 'axon_cache.json'
+AXON_CACHE_TTL_SECS = 3600
 
 
 def get_ephemeral_wallet() -> bt.Wallet:
@@ -56,6 +61,78 @@ def discover_validators(
         axons.append(axon)
 
     return axons
+
+
+def find_validator_axon(
+    subtensor_factory: Callable[[], bt.Subtensor],
+    netuid: int,
+    hotkey: str,
+    fresh: bool = False,
+) -> Optional[bt.AxonInfo]:
+    """The axon of one specific validator hotkey, with a disk cache so the routed
+    happy path skips the multi-second metagraph sync entirely.
+
+    ``subtensor_factory`` defers the chain connection to the cache-miss path.
+    ``fresh=True`` bypasses the cache (used after a dendrite failure to a cached
+    axon — validators move IPs). Returns None if the hotkey isn't a serving
+    validator on the subnet."""
+    if not fresh:
+        cached = _read_axon_cache(netuid, hotkey)
+        if cached is not None:
+            return cached
+    metagraph = subtensor_factory().metagraph(netuid=netuid)
+    for uid in range(metagraph.n):
+        if metagraph.hotkeys[uid] != hotkey:
+            continue
+        axon = metagraph.axons[uid]
+        if metagraph.validator_permit[uid] and axon.is_serving:
+            _write_axon_cache(netuid, hotkey, axon)
+            return axon
+        return None
+    return None
+
+
+def invalidate_axon_cache() -> None:
+    AXON_CACHE_FILE.unlink(missing_ok=True)
+
+
+def _read_axon_cache(netuid: int, hotkey: str) -> Optional[bt.AxonInfo]:
+    try:
+        entry = json.loads(AXON_CACHE_FILE.read_text())
+        fresh_enough = time.time() - float(entry['cached_at']) < AXON_CACHE_TTL_SECS
+        if entry['netuid'] == netuid and entry['hotkey'] == hotkey and fresh_enough:
+            return bt.AxonInfo(
+                version=entry.get('version', 0),
+                ip=entry['ip'],
+                port=entry['port'],
+                ip_type=entry.get('ip_type', 4),
+                hotkey=hotkey,
+                coldkey=entry.get('coldkey', ''),
+            )
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # unreadable/stale cache is a miss, never an error
+    return None
+
+
+def _write_axon_cache(netuid: int, hotkey: str, axon: bt.AxonInfo) -> None:
+    try:
+        AXON_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        AXON_CACHE_FILE.write_text(
+            json.dumps(
+                {
+                    'netuid': netuid,
+                    'hotkey': hotkey,
+                    'ip': axon.ip,
+                    'port': axon.port,
+                    'ip_type': getattr(axon, 'ip_type', 4),
+                    'version': getattr(axon, 'version', 0),
+                    'coldkey': getattr(axon, 'coldkey', ''),
+                    'cached_at': time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass  # best-effort cache
 
 
 def broadcast_synapse(

@@ -81,7 +81,7 @@ def test_api_key_composes_onto_network_name(monkeypatch):
 def test_env_bundles_cover_all_three_chains():
     for name in ('testnet', 'mainnet'):
         b = ENV_BUNDLES[name]
-        assert set(b) == {'network', 'solana-network', 'btc-network', 'netuid'}
+        assert set(b) == {'network', 'solana-network', 'btc-network', 'netuid', 'router'}
         assert b['solana-network'] in SOLANA_NETWORKS
         assert b['btc-network'] in BTC_NETWORKS
 

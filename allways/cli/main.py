@@ -158,6 +158,7 @@ VALID_CONFIG_KEYS = (
     'solana-network',
     'solana-keypair',
     'btc-network',
+    'router',
     'env',
 )
 
@@ -172,7 +173,7 @@ def config_set(key: str, value: str):
     """Set a configuration value.
 
     [dim]Valid keys:
-        env                 One-liner bundle: sets network + solana-network + btc-network + netuid
+        env                 One-liner bundle: sets network + solana-network + btc-network + netuid + router
         wallet              Bittensor wallet name
         hotkey              Bittensor hotkey name
         network             Bittensor network name (test/finney/local) or ws:// endpoint
@@ -181,6 +182,7 @@ def config_set(key: str, value: str):
         solana-rpc          Custom Solana RPC URL (escape hatch; SOLANA_RPC_URL env wins)
         solana-keypair      Path to the Solana keypair that signs miner/admin ops (SOLANA_KEYPAIR_PATH env wins)
         btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
+        router              Validator hotkey (ss58) to route reservations through; "" = self-represent
         program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:
