@@ -110,8 +110,8 @@ def test_bind_hotkey_signs_and_binds():
     c.get_binding.return_value = None
     c.bind_hotkey.return_value = 'SIG' * 10
     with (
-        patch('allways.cli.swap_commands.miner_commands.get_cli_context', return_value=({}, wallet, None, None)),
-        patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)),
+        patch('allways.cli.swap_commands.bind.get_cli_context', return_value=({}, wallet, None, None)),
+        patch('allways.cli.swap_commands.bind.get_solana_cli_context', return_value=({}, c)),
     ):
         res = CliRunner().invoke(miner_group, ['bind-hotkey', '--yes'])
     assert res.exit_code == 0, res.output
@@ -126,8 +126,8 @@ def test_bind_hotkey_skips_when_already_bound():
     c = _client()
     c.get_binding.return_value = object()  # already bound
     with (
-        patch('allways.cli.swap_commands.miner_commands.get_cli_context', return_value=({}, wallet, None, None)),
-        patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)),
+        patch('allways.cli.swap_commands.bind.get_cli_context', return_value=({}, wallet, None, None)),
+        patch('allways.cli.swap_commands.bind.get_solana_cli_context', return_value=({}, c)),
     ):
         res = CliRunner().invoke(miner_group, ['bind-hotkey', '--yes'])
     assert res.exit_code == 0

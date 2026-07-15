@@ -18,6 +18,7 @@ from allways.validator.scoring import (
     snapshot_current_crown_holders,
     snapshot_current_miner_scores,
 )
+from allways.validator.weights_vote import maybe_vote_weights
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -57,6 +58,9 @@ async def forward(self: Validator) -> None:
 
     # Fold new program events into the crown index before scoring reads it.
     ingest_solana_events(self)
+
+    # Block-aligned stake-weight vote: keeps Config.validators draw weights stake-true.
+    maybe_vote_weights(self, now)
 
     if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
         score_and_reward_miners(self)

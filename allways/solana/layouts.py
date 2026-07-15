@@ -374,6 +374,8 @@ IX_DISCRIMINATORS = {
     'finalize_reservation': bytes([237, 55, 120, 249, 88, 130, 214, 133]),
     'close_unfilled_reservation': bytes([162, 160, 156, 98, 241, 195, 23, 88]),  # no args (empty body)
     'set_finalize_window': bytes([84, 242, 160, 48, 107, 111, 170, 241]),  # IX_I64_ARGS
+    # Stake-weight consensus vote — full vector index-aligned to Config.validators.
+    'vote_set_weights': bytes([4, 215, 218, 143, 103, 219, 125, 6]),
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -419,6 +421,7 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'from_amount' / U128,
     'to_amount' / U128,
 )
+IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64))  # vote_set_weights
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout

@@ -55,6 +55,7 @@ def test_ix_discriminators_match_anchor_global_formula():
         'timeout_swap',
         'close_stale_claim',
         'vote_activate',
+        'vote_set_weights',
         'mark_fulfilled',
         'extend_timeout',
         'extend_reservation',
@@ -100,6 +101,20 @@ def test_vote_initiate_ix(client):
         (pdas.reservation_pda(miner, PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_INITIATE, miner, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
+        (SYSTEM_PROGRAM, False, False),
+    ]
+
+
+def test_vote_set_weights_ix(client):
+    client.vote_set_weights([3, 0, 7])
+    ix = _ix(client)
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['vote_set_weights']
+    # Borsh Vec<u64>: u32 LE length prefix + elements.
+    assert ix.data[8:] == layouts.IX_SET_WEIGHTS_ARGS.build({'weights': [3, 0, 7]})
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (pdas.config_pda(PID), False, True),
+        (pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, None, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
 

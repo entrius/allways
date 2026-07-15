@@ -522,6 +522,18 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('vote_activate', b'', metas)])
 
+    def vote_set_weights(self, weights: List[int]) -> str:
+        """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies."""
+        validator = self.keypair.pubkey()
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, None, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_SET_WEIGHTS_ARGS.build({'weights': weights})
+        return self._send([self._ix('vote_set_weights', args, metas)])
+
     def mark_fulfilled(self, swap_key: bytes, to_tx_hash: str, to_tx_block: int) -> str:
         """Miner-only: mark an Active swap Fulfilled with the dest-leg tx. Prod miner wiring lands in B4;
         kept here so the test harness can drive a swap to Fulfilled. Signer = this client's keypair."""

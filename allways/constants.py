@@ -77,6 +77,19 @@ VOLUME_WEIGHT_ALPHA: float = 0.5
 MIN_SUCCESSFUL_SWAPS: int = 2
 MAX_FAILED_SWAPS: int = 2
 
+# ─── Validator stake weights (reservation-lottery draw) ──
+# Each validator derives the same vector — floor(alpha_stake / bucket) per whitelisted
+# validator, index-aligned to Config.validators — and votes it on-chain (vote_set_weights).
+# Posting is block-aligned: every validator fires just after the same block boundary, so all
+# read the metagraph at ~the same stake snapshot and the quorum's hash-bound vectors converge.
+SECONDS_PER_BLOCK = 12
+WEIGHTS_STAKE_BUCKET_ALPHA = 50_000  # alpha per draw-weight unit; floor rounding
+WEIGHTS_VOTE_INTERVAL_BLOCKS = 3_600  # ~12h — posting boundary cadence
+CONTRACT_VOTE_ROUND_TTL_SECS = 1800  # mirror of the contract's VOTE_ROUND_TTL_SECS — keep in sync
+# In-epoch retry throttle = one attempt per round lifetime, so a divergent round has expired
+# (and is reopenable with our snapshot) by the time we retry.
+WEIGHTS_VOTE_RETRY_SECS = CONTRACT_VOTE_ROUND_TTL_SECS
+
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are
 # tiny and only queried while an offering still polls a finished swap — 7 days is generous.

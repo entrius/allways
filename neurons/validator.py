@@ -45,6 +45,7 @@ from allways.validator.axon_handlers import (  # noqa: E402
     priority_swap_confirm,
     priority_swap_reserve,
 )
+from allways.validator.binding import warn_if_unbound  # noqa: E402
 from allways.validator.bounds_cache import SolanaConfigCache  # noqa: E402
 from allways.validator.event_index import SolanaEventIndex  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
@@ -112,6 +113,7 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning('VALIDATOR_MODE=vote — Solana contract votes ON, set_weights OFF.')
         solana_read_only = mode == 'watch'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        warn_if_unbound(self.solana_client)
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only
         )
@@ -136,6 +138,12 @@ class Validator(BaseValidatorNeuron):
         # window back so a fresh process scores one trailing window.
         self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
         self.last_scored_time = max(0, int(time.time()) - SCORING_WINDOW_SECS)
+
+        # Stake-weight vote state (weights_vote.py): last satisfied epoch, in-epoch retry
+        # throttle anchor, and the one-shot not-whitelisted warning.
+        self.weights_epoch_done = None
+        self.last_weights_attempt = 0
+        self.weights_whitelist_warned = False
 
         # Separate subtensor + chain providers for the axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two handler
