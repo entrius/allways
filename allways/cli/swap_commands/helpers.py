@@ -36,10 +36,24 @@ SOLANA_NETWORKS = {
 }
 # Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
 BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
-# One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid.
+# One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid
+# + the recommended router (the Ventura Labs validator per network) so reservations are
+# validator-routed out of the box. `alw config set router ""` or --no-router opts out.
 ENV_BUNDLES = {
-    'testnet': {'network': 'test', 'solana-network': 'devnet', 'btc-network': 'testnet4', 'netuid': '19'},
-    'mainnet': {'network': 'finney', 'solana-network': 'mainnet', 'btc-network': 'mainnet', 'netuid': '7'},
+    'testnet': {
+        'network': 'test',
+        'solana-network': 'devnet',
+        'btc-network': 'testnet4',
+        'netuid': '19',
+        'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
+    },
+    'mainnet': {
+        'network': 'finney',
+        'solana-network': 'mainnet',
+        'btc-network': 'mainnet',
+        'netuid': '7',
+        'router': '5DtUJ9ytbeCMjovFieNwaxxqRP3DzT6iQPnZTyKmi3n6iXey',
+    },
 }
 
 
