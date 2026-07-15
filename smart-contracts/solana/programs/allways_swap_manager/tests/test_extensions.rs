@@ -107,7 +107,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
             max_collateral: 0,
             fulfillment_timeout_secs: TIMEOUT_SECS,
             consensus_threshold_percent: 66,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: TTL,
         }
@@ -290,7 +290,7 @@ fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
             to_tx_block: 200,
         }
         .data(),
-        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, swap: swap_pda(&key) }
+        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, miner_state: miner_pda(miner), swap: swap_pda(&key) }
             .to_account_metas(None),
     )
 }

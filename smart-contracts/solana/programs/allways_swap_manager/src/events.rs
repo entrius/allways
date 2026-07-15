@@ -104,6 +104,16 @@ pub struct SwapTimeoutExtended {
     pub timeout_at: i64,
 }
 
+/// `mark_fulfilled` slid `timeout_at` forward to cover the destination chain's confirmation window
+/// (so a miner who paid just before the deadline can't be slashed while the tx confirms). Post-value
+/// like every deadline event. Separate from `SwapTimeoutExtended` — no validator is involved.
+#[event]
+pub struct FulfillmentGraceApplied {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub timeout_at: i64,
+}
+
 // --- Phase 6: treasury ---
 
 #[event]
@@ -153,7 +163,8 @@ pub struct HotkeyBound {
 /// Miner active-state transitions. Emitted so validators can replay the per-instant `active` history for
 /// the crown capacity integral from deterministic logs alone (the `MinerState.active` flag carries no
 /// history). `MinerActivated` fires on `vote_activate` quorum; `MinerDeactivated` on `vote_deactivate`
-/// quorum or self-`deactivate`.
+/// quorum, self-`deactivate`, or `apply_penalty`'s auto-deactivation (fee/slash dropping collateral
+/// below the minimum — previously silent, which desynced event-driven scorers from chain state).
 #[event]
 pub struct MinerActivated {
     pub miner: Pubkey,

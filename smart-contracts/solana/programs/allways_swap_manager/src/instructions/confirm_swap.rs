@@ -112,7 +112,9 @@ pub fn handler(
         let from_chain = ctx.accounts.swap.from_chain.clone();
         let to_chain = ctx.accounts.swap.to_chain.clone();
         let rate = ctx.accounts.swap.rate;
-        let fee = collateral_amount / FEE_DIVISOR;
+        // Floor at 1 lamport so a sub-100-lamport swap can't complete fee-free (integer division
+        // would truncate 1% of dust to 0); apply_penalty still clamps to available collateral.
+        let fee = (collateral_amount / FEE_DIVISOR).max(1);
         let min_collateral = ctx.accounts.config.min_collateral;
 
         let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;

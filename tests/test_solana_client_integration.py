@@ -94,7 +94,7 @@ def test_b0_round_trip(client):
         max_collateral=0,
         fulfillment_timeout_secs=12_600,
         consensus_threshold_percent=66,
-        min_swap_amount=0,
+        min_swap_amount=1000,  # hard dust floor — 0-unbounded was removed (L4a)
         max_swap_amount=0,
         reservation_ttl_secs=1_800,
     )

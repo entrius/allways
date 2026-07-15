@@ -76,9 +76,12 @@ pub const REQ_TIMEOUT: u8 = 7;
 /// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
 
-/// Slots the draw's seed slot is pinned ahead of the arming crank. Small: the pool has already
-/// closed, so this only has to be far enough ahead that the slot is unproduced when pinned.
-pub const SEED_SLOT_DELAY_SLOTS: u64 = 4;
+/// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
+/// each) ahead, so the seed slot never lands in the window of the leader who included the arming tx.
+/// Residual: the seed slot's own leader can still bias its block hash (schedule is public), but that
+/// only buys a reservation hold — funds still need a real deposit + vote quorum. Must stay far below
+/// the ~512-slot SlotHashes window or every draw would re-arm forever.
+pub const SEED_SLOT_DELAY_SLOTS: u64 = 12;
 
 /// Bounded max lengths for stored strings.
 pub const MAX_ADDR_LEN: usize = 80;
@@ -193,6 +196,15 @@ pub const FEE_DIVISOR: u64 = 100;
 /// pool-open (which now busies the miner for the window + reservation TTL, #485) isn't cheap to grief.
 pub const RESERVATION_FEE_LAMPORTS: u64 = 20_000_000;
 
+/// Floor for `set_reservation_fee` — the fee is the only anti-grief brake on pool-opens (each one
+/// busies a miner for window + finalize + TTL), so the admin key must not be able to zero it.
+pub const RESERVATION_FEE_LAMPORTS_MIN: u64 = 1_000_000; // 0.001 SOL
+
+const _: () = assert!(
+    RESERVATION_FEE_LAMPORTS >= RESERVATION_FEE_LAMPORTS_MIN,
+    "seed reservation fee must satisfy its own floor"
+);
+
 /// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs` — how long
 /// a pool gathers contending requests before the stake-weighted draw. Must stay well below the
 /// reservation TTL. Runtime-adjustable via `set_pool_window` (dev seeds 5s for fast swaps).
@@ -239,6 +251,32 @@ const _: () = assert!(
     "MAX_TOTAL_EXTENSION_SECS must be within [30 min, 140 min]"
 );
 
+// Confirmation grace granted by `mark_fulfilled`: a miner who broadcast the dest tx near the deadline
+// must not be slashable while that tx confirms, so fulfillment slides `timeout_at` to at least
+// now + the dest chain's expected confirmation window (never shortened, capped by `max_extend_at`).
+// Sized to each chain's finality gate: BTC 2 confs (~20 min) + one slow block; SOL 32 slots (~13 s);
+// TAO 6 blocks (~72 s).
+pub const FULFILL_GRACE_BTC_SECS: i64 = 1_800;
+pub const FULFILL_GRACE_SOL_SECS: i64 = 120;
+pub const FULFILL_GRACE_TAO_SECS: i64 = 180;
+/// Unknown dest chain: one conservative default rather than 0 (0 would silently reopen the
+/// paid-and-slashed window the moment a new chain is added off-chain before this table learns it).
+pub const FULFILL_GRACE_DEFAULT_SECS: i64 = 600;
+
+/// Confirmation grace (seconds) for a destination chain, by chain id. Case-insensitive so a
+/// differently-cased chain string degrades to the right window, not silently to the default.
+pub fn fulfillment_grace_secs(to_chain: &str) -> i64 {
+    if to_chain.eq_ignore_ascii_case("btc") {
+        FULFILL_GRACE_BTC_SECS
+    } else if to_chain.eq_ignore_ascii_case("sol") {
+        FULFILL_GRACE_SOL_SECS
+    } else if to_chain.eq_ignore_ascii_case("tao") {
+        FULFILL_GRACE_TAO_SECS
+    } else {
+        FULFILL_GRACE_DEFAULT_SECS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +312,25 @@ mod tests {
         assert_eq!(quantize_rate_sig_figs(5_000_020_000_000_000_000), 5 * p);
         // A genuine 5-sf improvement survives as a distinct (better) bucket.
         assert_ne!(quantize_rate_sig_figs(5 * p), quantize_rate_sig_figs(4_999_900_000_000_000_000));
+    }
+
+    #[test]
+    fn fulfillment_grace_covers_every_chain() {
+        assert_eq!(fulfillment_grace_secs("btc"), FULFILL_GRACE_BTC_SECS);
+        assert_eq!(fulfillment_grace_secs("BTC"), FULFILL_GRACE_BTC_SECS);
+        assert_eq!(fulfillment_grace_secs("sol"), FULFILL_GRACE_SOL_SECS);
+        assert_eq!(fulfillment_grace_secs("tao"), FULFILL_GRACE_TAO_SECS);
+        // An unknown chain must get a real grace, never 0 (that would reopen paid-and-slashed).
+        assert_eq!(fulfillment_grace_secs("eth"), FULFILL_GRACE_DEFAULT_SECS);
+        assert!(FULFILL_GRACE_DEFAULT_SECS > 0);
+    }
+
+    #[test]
+    fn seed_slot_delay_clears_a_leader_window_but_not_slothashes() {
+        // Must clear at least one full 4-slot leader window past the arming tx's window...
+        assert!(SEED_SLOT_DELAY_SLOTS > 8);
+        // ...and stay far inside the ~512-slot SlotHashes ring or draws would re-arm forever.
+        assert!(SEED_SLOT_DELAY_SLOTS < 128);
     }
 
     #[test]

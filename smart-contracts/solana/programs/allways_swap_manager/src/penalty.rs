@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::error::ErrorCode;
+use crate::events::MinerDeactivated;
 use crate::state::MinerState;
 
 /// Deduct up to `amount` from the miner's collateral (clamped to available) and auto-deactivate the
@@ -25,6 +26,10 @@ pub fn apply_penalty(
     if miner_state.collateral < min_collateral && miner_state.active {
         miner_state.active = false;
         miner_state.deactivation_at = now;
+        // Without this emit the scorer — which rebuilds the active set purely from
+        // MinerActivated/MinerDeactivated events — keeps paying crown to a miner the chain
+        // already considers inactive, until some later vote event happens to fire.
+        emit!(MinerDeactivated { miner: miner_state.miner, at: now });
     }
     Ok(actual)
 }

@@ -93,8 +93,9 @@ fn resv_pda(m: &Pubkey) -> Pubkey {
 fn pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
-fn weights_round_pda() -> Pubkey {
-    Pubkey::find_program_address(&[b"vote", &[REQ_SET_WEIGHTS]], &pid()).0
+/// Weights rounds are keyed by the snapshot hash (`round_key`) so competing proposals coexist.
+fn weights_round_pda(round_key: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"vote", &[REQ_SET_WEIGHTS], round_key], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -178,7 +179,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
             max_collateral: 0,
             fulfillment_timeout_secs: TIMEOUT_SECS,
             consensus_threshold_percent: THRESHOLD,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: TTL_SECS,
         }
@@ -354,7 +355,7 @@ fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
             to_tx_block: 200,
         }
         .data(),
-        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, swap: swap_pda(&key) }
+        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, miner_state: miner_pda(miner), swap: swap_pda(&key) }
             .to_account_metas(None),
     )
 }
@@ -400,14 +401,19 @@ fn withdraw_treasury_ix(admin: &Pubkey, recipient: &Pubkey, amount: u64) -> Inst
         .to_account_metas(None),
     )
 }
-fn vote_weights_ix(validator: &Pubkey, weights: Vec<u64>) -> Instruction {
+fn vote_weights_ix(validator: &Pubkey, val_keys: &[Pubkey], weights: Vec<u64>) -> Instruction {
+    let infos: Vec<allways_swap_manager::state::ValidatorInfo> = val_keys
+        .iter()
+        .map(|k| allways_swap_manager::state::ValidatorInfo { key: *k, weight: 0 })
+        .collect();
+    let round_key = allways_swap_manager::consensus::weights_hash(&infos, &weights);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteSetWeights { weights }.data(),
+        &allways_swap_manager::instruction::VoteSetWeights { weights, round_key }.data(),
         allways_swap_manager::accounts::VoteSetWeights {
             validator: *validator,
             config: config_pda(),
-            vote_round: weights_round_pda(),
+            vote_round: weights_round_pda(&round_key),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -575,9 +581,10 @@ fn onchain_vote_set_weights_quorum() {
     let mut weights: Vec<u64> = cfg.validators.iter().map(|v| v.weight).collect();
     weights[0] = 42;
 
-    send(&rpc, vote_weights_ix(&vals[0].pubkey(), weights.clone()), &vals[0].pubkey(), &vals[0])
+    let keys: Vec<Pubkey> = cfg.validators.iter().map(|v| v.key).collect();
+    send(&rpc, vote_weights_ix(&vals[0].pubkey(), &keys, weights.clone()), &vals[0].pubkey(), &vals[0])
         .expect("weights v0");
-    send(&rpc, vote_weights_ix(&vals[1].pubkey(), weights.clone()), &vals[1].pubkey(), &vals[1])
+    send(&rpc, vote_weights_ix(&vals[1].pubkey(), &keys, weights.clone()), &vals[1].pubkey(), &vals[1])
         .expect("weights v1");
 
     let after = read_config(&rpc);
@@ -909,6 +916,8 @@ fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instructio
         &allways_swap_manager::instruction::BindHotkey { hotkey, hotkey_sig }.data(),
         allways_swap_manager::accounts::BindHotkey {
             miner: *miner,
+            config: config_pda(),
+            miner_state: miner_pda(miner),
             binding: bind_pda(miner),
             hotkey_binding: hkbind_pda(&hotkey),
             system_program: SYSTEM_PROGRAM,
@@ -999,6 +1008,11 @@ fn onchain_bind_hotkey() {
     let hotkey = [9u8; 32];
     let sig = [3u8; 64];
 
+    // Binding is gated to registered miners: an unregistered pubkey is rejected, then registration
+    // (collateral >= min_collateral) unlocks it.
+    let unregistered = send(&rpc, bind_ix(&miner.pubkey(), hotkey, sig), &miner.pubkey(), &miner);
+    assert!(unregistered.is_err(), "bind before post_collateral must be rejected");
+    send(&rpc, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post collateral");
     send(&rpc, bind_ix(&miner.pubkey(), hotkey, sig), &miner.pubkey(), &miner).expect("bind_hotkey");
 
     let a = rpc.get_account(&bind_pda(&miner.pubkey())).expect("binding account");

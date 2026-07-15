@@ -59,7 +59,7 @@ fn init_ix(admin: &Pubkey, min_collateral: u64, threshold: u8) -> Instruction {
             max_collateral: 0,
             fulfillment_timeout_secs: 100,
             consensus_threshold_percent: threshold,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: 1_800,
         }
@@ -175,6 +175,83 @@ fn fund_miner(svm: &mut LiteSVM, collateral: u64) -> Keypair {
         send(svm, post_ix(&miner.pubkey(), 1), &miner.pubkey(), &miner).expect("post");
     }
     miner
+}
+
+fn remove_validator_ix(admin: &Pubkey, v: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::RemoveValidator { validator: v }.data(),
+        allways_swap_manager::accounts::AdminConfig {
+            admin: *admin,
+            config: config_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+fn set_threshold_ix(admin: &Pubkey, percent: u8) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetConsensusThreshold { percent }.data(),
+        allways_swap_manager::accounts::AdminConfig {
+            admin: *admin,
+            config: config_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Like `setup` but also returns the admin (for set mutations mid-test).
+fn setup_with_admin(threshold: u8, n: usize) -> (LiteSVM, Keypair, Vec<Keypair>) {
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, init_ix(&admin.pubkey(), 0, threshold), &admin.pubkey(), &admin).expect("initialize");
+    let mut validators = Vec::new();
+    for _ in 0..n {
+        let v = Keypair::new();
+        svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+        send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add validator");
+        validators.push(v);
+    }
+    (svm, admin, validators)
+}
+
+#[test]
+fn test_threshold_floored_at_majority() {
+    // Sub-majority thresholds let a single validator (or minority clique) pass votes alone.
+    let (mut svm, admin, _vals) = setup_with_admin(66, 1);
+    assert!(send(&mut svm, set_threshold_ix(&admin.pubkey(), 50), &admin.pubkey(), &admin).is_err(), "50 rejected");
+    assert!(send(&mut svm, set_threshold_ix(&admin.pubkey(), 1), &admin.pubkey(), &admin).is_err(), "1 rejected");
+    send(&mut svm, set_threshold_ix(&admin.pubkey(), 51), &admin.pubkey(), &admin).expect("51 is the floor");
+
+    // initialize enforces the same rule (shared validator).
+    let mut svm2 = LiteSVM::new();
+    svm2.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    let admin2 = Keypair::new();
+    svm2.airdrop(&admin2.pubkey(), 100_000_000_000).unwrap();
+    let r = send(&mut svm2, init_ix(&admin2.pubkey(), 0, 50), &admin2.pubkey(), &admin2);
+    assert!(r.is_err(), "initialize below the majority floor must be rejected");
+}
+
+#[test]
+fn test_removed_validator_vote_no_longer_counts() {
+    // 3 validators at 66% → quorum needs 2. v0 votes, then is REMOVED: its recorded vote must not
+    // keep counting (after removal the live set is 2, threshold needs 2 of 2).
+    let (mut svm, admin, vals) = setup_with_admin(66, 3);
+    let miner = fund_miner(&mut svm, 0);
+
+    send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("v0");
+    send(&mut svm, remove_validator_ix(&admin.pubkey(), vals[0].pubkey()), &admin.pubkey(), &admin).expect("remove v0");
+
+    send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("v1");
+    assert!(
+        !miner_active(&svm, &miner.pubkey()),
+        "removed validator's stale vote must not combine with one live vote into quorum"
+    );
+
+    send(&mut svm, vote_activate_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]).expect("v2");
+    assert!(miner_active(&svm, &miner.pubkey()), "two LIVE votes reach quorum");
 }
 
 #[test]

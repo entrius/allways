@@ -106,10 +106,15 @@ pub mod allways_swap_manager {
         admin::set_max_total_extension(ctx, secs)
     }
     // --- Consensus-governed validator weights ---
-    /// A validator submits the full weight vector (index-aligned to `Config.validators`); on quorum
-    /// the weights are saved. Validators read stake off-chain and converge on one snapshot.
-    pub fn vote_set_weights(ctx: Context<VoteSetWeights>, weights: Vec<u64>) -> Result<()> {
-        vote_set_weights::handler(ctx, weights)
+    /// A validator submits the full weight vector (index-aligned to `Config.validators`) plus
+    /// `round_key` = the snapshot hash, which keys the vote-round PDA (competing proposals coexist);
+    /// on quorum the weights are saved. Validators read stake off-chain and converge on one snapshot.
+    pub fn vote_set_weights(
+        ctx: Context<VoteSetWeights>,
+        weights: Vec<u64>,
+        round_key: [u8; 32],
+    ) -> Result<()> {
+        vote_set_weights::handler(ctx, weights, round_key)
     }
 
     // --- Miner activation consensus ---

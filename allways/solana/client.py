@@ -340,9 +340,13 @@ class AllwaysSolanaClient:
 
     # ---------- representative writes (miner-side, no consensus) ----------
     def bind_hotkey(self, hotkey: bytes, hotkey_sig: bytes) -> str:
+        """Registered miners only: the program requires an existing MinerState with collateral >=
+        min_collateral (H3 squat gate), so `post_collateral` must have run before binding."""
         miner = self.keypair.pubkey()
         metas = [
             AccountMeta(miner, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, False),
             AccountMeta(pdas.binding_pda(miner, self.program_id), False, True),
             AccountMeta(pdas.hotkey_binding_pda(hotkey, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
@@ -527,6 +531,7 @@ class AllwaysSolanaClient:
         )
         metas = [
             AccountMeta(miner, True, False),
+            AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
         ]
         return self._send([self._ix('mark_fulfilled', args, metas)])

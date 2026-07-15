@@ -76,7 +76,14 @@ pub fn record_vote<'info>(
     require!(round.voters.len() < MAX_VALIDATORS, ErrorCode::ValidatorSetFull);
     round.voters.push(validator);
 
-    let votes = round.voters.len() as u64;
+    // Tally only voters still in the CURRENT validator set: a validator removed mid-round must not
+    // keep counting toward quorum (its recorded vote would otherwise outlive its membership), and the
+    // threshold denominator is the live set, so numerator and denominator stay consistent.
+    let votes = round
+        .voters
+        .iter()
+        .filter(|voter| config.validators.iter().any(|v| &v.key == *voter))
+        .count() as u64;
     let total = config.validators.len() as u64;
     let threshold = config.consensus_threshold_percent as u64;
     Ok(votes.saturating_mul(100) >= threshold.saturating_mul(total))
