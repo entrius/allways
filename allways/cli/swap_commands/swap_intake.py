@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain
 from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, required_collateral
-from allways.utils.rate import calculate_to_amount, is_executable_rate, normalize_rate
+from allways.utils.rate import calculate_to_amount, is_executable_rate, normalize_rate, quantize_rate_fixed
 
 
 @dataclass
@@ -35,8 +35,11 @@ def to_smallest_units(amount: float, chain: str) -> int:
 
 
 def rate_display_from_fixed(rate_fixed: int) -> str:
-    """On-chain u128 fixed-point rate → canonical display string (matches normalize_rate)."""
-    return normalize_rate(rate_fixed / RATE_PRECISION)
+    """On-chain u128 fixed-point rate → canonical display string, floored to RATE_SIG_FIGS first.
+
+    Mirrors the contract's set_quote floor and the crown ingest, so display/reserve/scoring agree
+    even for quotes grandfathered from before the on-chain floor (rounding could disagree there)."""
+    return normalize_rate(quantize_rate_fixed(rate_fixed) / RATE_PRECISION)
 
 
 def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:

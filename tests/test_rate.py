@@ -7,6 +7,7 @@ from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
 from allways.utils.rate import (
     apply_fee_deduction,
     calculate_to_amount,
+    directional_rate,
     is_executable_rate,
     normalize_rate,
     quantize_rate_display,
@@ -279,6 +280,25 @@ class TestNormalizeRate:
         """Pre-existing :g behavior — sub-1e-4 values switch to scientific.
         Documented so a future change to fixed-point doesn't silently break."""
         assert normalize_rate(1e-6) == '1e-06'
+
+
+class TestDirectionalRate:
+    """Canonical stored rate → directional 'to per 1 from' display."""
+
+    def test_forward_is_identity(self):
+        assert directional_rate('sol', 'btc', '0.0021') == '0.0021'
+
+    def test_reverse_is_reciprocal(self):
+        assert directional_rate('btc', 'sol', '0.0021') == f'{1 / 0.0021:.8g}'
+
+    def test_legacy_non_hub_pair_reverse(self):
+        # canonical_pair(btc, tao) = (btc, tao): tao→btc is the reverse leg
+        assert directional_rate('tao', 'btc', '345') == f'{1 / 345:.8g}'
+        assert directional_rate('btc', 'tao', '345') == '345'
+
+    def test_zero_and_non_numeric_pass_through(self):
+        assert directional_rate('btc', 'sol', '0') == '0'
+        assert directional_rate('btc', 'sol', 'n/a') == 'n/a'
 
 
 class TestIsExecutableRate:

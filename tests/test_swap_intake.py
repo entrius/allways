@@ -9,6 +9,7 @@ import pytest
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     compute_intake_amounts,
+    rate_display_from_fixed,
     required_collateral,
     select_best_miner,
     swap_viable,
@@ -16,6 +17,15 @@ from allways.cli.swap_commands.swap_intake import (
 )
 
 SOL = 1_000_000_000  # 1 SOL in lamports (9 dec)
+
+
+def test_rate_display_from_fixed_floors_to_sig_figs():
+    """Grandfathered pre-floor quotes must display FLOORED (matching set_quote + crown ingest),
+    never rounded — rounding could show a rate one tick above what scoring/reserve use."""
+    clean = 21 * 10**14  # 0.0021 × RATE_PRECISION, exact
+    assert rate_display_from_fixed(clean) == '0.0021'
+    dirty = 34512999 * 10**13  # 345.12999: would ROUND to 345.13; must floor to 345.12
+    assert rate_display_from_fixed(dirty) == '345.12'
 
 
 def test_to_smallest_units():
