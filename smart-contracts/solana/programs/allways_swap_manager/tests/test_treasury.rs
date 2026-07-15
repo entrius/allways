@@ -107,7 +107,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
         pid(),
         &allways_swap_manager::instruction::Initialize {
             min_collateral: 1_000_000_000, max_collateral: 0, fulfillment_timeout_secs: 3_600,
-            consensus_threshold_percent: 66, min_swap_amount: 0, max_swap_amount: 0, reservation_ttl_secs: 1_800,
+            consensus_threshold_percent: 66, min_swap_amount: 1000, max_swap_amount: 0, reservation_ttl_secs: 1_800,
         }.data(),
         allways_swap_manager::accounts::Initialize { admin: admin.pubkey(), config: cfg(), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
     ), &admin.pubkey(), &admin).expect("init");
@@ -184,7 +184,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
 
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::MarkFulfilled { swap_key: key, to_tx_hash: "d".to_string(), to_tx_block: 1 }.data(),
-        allways_swap_manager::accounts::MarkFulfilled { miner: miner.pubkey(), swap: swap_pda(&key) }.to_account_metas(None),
+        allways_swap_manager::accounts::MarkFulfilled { miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), swap: swap_pda(&key) }.to_account_metas(None),
     ), &miner.pubkey(), &miner).expect("fulfill");
 
     let confirm = |svm: &mut LiteSVM, v: &Keypair| {

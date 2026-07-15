@@ -58,6 +58,13 @@ pub fn handler(
         ErrorCode::StringTooLong
     );
 
+    // Self-dealing guard: a miner may not be its own taker. Two tiny self-swaps would otherwise buy
+    // permanent eligibility (successful_swaps >= 2) and pad fill volume at zero real cost. A sybil
+    // (second wallet, same operator) is out of on-chain reach — the scorer's volume exclusion owns
+    // that half. Also reject the default pubkey: a timeout would "refund" the slash to the burn address.
+    require!(user != ctx.accounts.miner.key(), ErrorCode::SelfSwapNotAllowed);
+    require!(user != Pubkey::default(), ErrorCode::InvalidUser);
+
     let now = Clock::get()?.unix_timestamp;
     let cfg = &ctx.accounts.config;
 

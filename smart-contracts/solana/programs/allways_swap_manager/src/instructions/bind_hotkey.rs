@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{BIND_SEED, HOTKEY_BIND_SEED};
+use crate::constants::{BIND_SEED, CONFIG_SEED, HOTKEY_BIND_SEED, MINER_SEED};
 use crate::error::ErrorCode;
 use crate::events::HotkeyBound;
-use crate::state::{Binding, HotkeyBinding};
+use crate::state::{Binding, Config, HotkeyBinding, MinerState};
 
 /// A miner links its Solana pubkey to its Bittensor hotkey by storing the hotkey + an sr25519 signature
 /// (by the hotkey, over the miner pubkey). The contract only STORES these — sr25519 verification is too
@@ -11,11 +11,30 @@ use crate::state::{Binding, HotkeyBinding};
 /// The set-once `hotkey_binding` marker enforces hotkey→≤1 pubkey on-chain: the first pubkey to claim a
 /// hotkey owns it forever, so a struck pubkey can't rotate + re-bind the same hotkey to dodge strikes.
 /// The same miner may re-bind in place (refresh sig / change hotkey). Not halt-gated — identity, no value.
+///
+/// Gated to registered miners (MinerState exists + collateral >= min_collateral): the set-once marker
+/// is claimable exactly once per hotkey, so a free, unauthenticated `bind_hotkey` would let anyone
+/// enumerate metagraph hotkeys and squat them all, locking real miners out of their identity. The
+/// gate prices each claimed hotkey at a full collateral stake held by an attributable on-chain miner.
+/// Residual: a funded miner can still claim a hotkey that isn't theirs — the validator's off-chain
+/// sr25519 verify rejects the binding for scoring, so the squat earns nothing but still blocks; that
+/// deeper fix (validator-attested claims) was weighed and deferred.
 #[derive(Accounts)]
 #[instruction(hotkey: [u8; 32])]
 pub struct BindHotkey<'info> {
     #[account(mut)]
     pub miner: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+
+    /// Must already exist (created by `post_collateral`) — binding is for registered miners only.
+    #[account(
+        seeds = [MINER_SEED, miner.key().as_ref()],
+        bump = miner_state.bump,
+        constraint = miner_state.miner == miner.key(),
+    )]
+    pub miner_state: Account<'info, MinerState>,
 
     #[account(
         init_if_needed,
@@ -41,6 +60,13 @@ pub struct BindHotkey<'info> {
 }
 
 pub fn handler(ctx: Context<BindHotkey>, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Result<()> {
+    // Registered-miner gate: claiming a hotkey requires a live collateral stake, so squatting the
+    // metagraph costs min_collateral per identity instead of rent.
+    require!(
+        ctx.accounts.miner_state.collateral >= ctx.accounts.config.min_collateral,
+        ErrorCode::InsufficientCollateral
+    );
+
     let now = Clock::get()?.unix_timestamp;
     let miner = ctx.accounts.miner.key();
     let binding_bump = ctx.bumps.binding;

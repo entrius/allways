@@ -5,13 +5,14 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{
     FINALIZE_WINDOW_SECS_MAX, FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX,
-    MAX_TOTAL_EXTENSION_SECS_MIN,
+    MAX_TOTAL_EXTENSION_SECS_MIN, RESERVATION_FEE_LAMPORTS_MIN,
 };
 use crate::error::ErrorCode;
 
-/// Quorum threshold as a percent of the validator set.
+/// Quorum threshold as a percent of the validator set. Floored at a majority: anything below 51 lets
+/// a single validator (or a sub-majority clique) pass votes alone once the set has >1 member.
 pub fn consensus_threshold(percent: u8) -> Result<()> {
-    require!((1..=100).contains(&percent), ErrorCode::InvalidThreshold);
+    require!((51..=100).contains(&percent), ErrorCode::InvalidThreshold);
     Ok(())
 }
 
@@ -49,15 +50,24 @@ pub fn weights_update_min_interval(secs: i64) -> Result<()> {
     Ok(())
 }
 
-/// Min swap size: 0 = unbounded, else a sane dust floor.
+/// Min swap size: always at least a dust floor. No 0-means-unbounded escape — a zero minimum lets
+/// dust-sized swaps whose 1% fee truncates to nothing through, and it's an anti-grief brake the
+/// admin key must not be able to release.
 pub fn min_swap_amount(amount: u64) -> Result<()> {
-    require!(amount == 0 || amount >= 1000, ErrorCode::InvalidAmount);
+    require!(amount >= 1000, ErrorCode::InvalidAmount);
     Ok(())
 }
 
-/// Swap-size bounds must not be contradictory (0 on either side = unbounded).
+/// Reservation fee: floored, never zero — it's the only cost on opening a pool, which busies a miner
+/// for the whole window + finalize + TTL.
+pub fn reservation_fee(lamports: u64) -> Result<()> {
+    require!(lamports >= RESERVATION_FEE_LAMPORTS_MIN, ErrorCode::InvalidAmount);
+    Ok(())
+}
+
+/// Swap-size bounds must not be contradictory (max 0 = unbounded above; min has a hard floor).
 pub fn swap_bounds(min: u64, max: u64) -> Result<()> {
-    require!(min == 0 || max == 0 || min <= max, ErrorCode::InvalidBounds);
+    require!(max == 0 || min <= max, ErrorCode::InvalidBounds);
     Ok(())
 }
 

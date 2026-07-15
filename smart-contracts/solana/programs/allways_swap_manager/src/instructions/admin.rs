@@ -97,6 +97,7 @@ pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
 }
 
 pub fn set_reservation_fee(ctx: Context<AdminConfig>, lamports: u64) -> Result<()> {
+    crate::validate::reservation_fee(lamports)?;
     ctx.accounts.config.reservation_fee_lamports = lamports;
     msg!("reservation_fee_lamports = {}", lamports);
     Ok(())

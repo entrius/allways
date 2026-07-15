@@ -5,7 +5,9 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::constants::{
+        FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
+    },
     allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
     solana_hash::Hash,
@@ -116,7 +118,7 @@ fn init_ix(admin: &Pubkey) -> Instruction {
             max_collateral: 0,
             fulfillment_timeout_secs: TIMEOUT_SECS,
             consensus_threshold_percent: 66,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: TTL,
         }
@@ -344,7 +346,7 @@ fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
             to_tx_block: 200,
         }
         .data(),
-        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, swap: swap_pda(&key) }
+        allways_swap_manager::accounts::MarkFulfilled { miner: *miner, miner_state: miner_pda(miner), swap: swap_pda(&key) }
             .to_account_metas(None),
     )
 }
@@ -614,6 +616,68 @@ fn test_stale_claim_reap() {
     assert!(svm.get_account(&swap_pda(&key)).is_none(), "stale claim closed");
     let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
     assert_eq!(r.claimed_swap_key, [0u8; 32], "claim slot freed");
+}
+
+fn read_swap(svm: &LiteSVM, key: &[u8; 32]) -> Swap {
+    let a = svm.get_account(&swap_pda(key)).unwrap();
+    Swap::try_deserialize(&mut a.data.as_slice()).unwrap()
+}
+
+#[test]
+fn test_early_fulfill_leaves_timeout_untouched() {
+    // Grace is a floor on remaining runway, not an add-on: fulfilling with plenty of deadline left
+    // must not move timeout_at (a fake early fulfillment buys nothing).
+    let (mut svm, vals, miner, _rent) = setup();
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let key = swap_key("srctx1");
+
+    set_clock(&mut svm, BASE_TS + 10);
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+    assert_eq!(read_swap(&svm, &key).timeout_at, BASE_TS + TIMEOUT_SECS, "timeout unchanged");
+}
+
+#[test]
+fn test_fulfill_near_deadline_grants_confirmation_grace() {
+    // L1: a miner who broadcast the dest tx just before the deadline must not stay slashable while
+    // it confirms — mark_fulfilled slides timeout_at to now + the dest chain's conf window.
+    let (mut svm, vals, miner, _rent) = setup();
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let key = swap_key("srctx1");
+
+    let fulfill_ts = BASE_TS + TIMEOUT_SECS - 30; // 30s of runway left
+    set_clock(&mut svm, fulfill_ts);
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+
+    let s = read_swap(&svm, &key);
+    let expected = fulfill_ts + FULFILL_GRACE_SOL_SECS; // dest leg is SOL
+    assert_eq!(s.timeout_at, expected, "timeout slid to now + dest conf window");
+    assert_eq!(s.status, SwapStatus::Fulfilled);
+    assert_eq!(
+        miner_state(&svm, &miner.pubkey()).busy_until,
+        expected,
+        "busy lock follows the extended deadline"
+    );
+
+    // The grace only defers: past it, the timeout path still slashes normally.
+    set_clock(&mut svm, expected + 1);
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
+    send(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
+    assert!(svm.get_account(&swap_pda(&key)).is_none(), "swap closed by timeout after the grace");
+}
+
+#[test]
+fn test_fulfill_grace_capped_by_frozen_ceiling() {
+    // The grace obeys the same frozen max_extend_at ceiling as validator extensions — a late
+    // fulfillment can never push the deadline past it.
+    let (mut svm, vals, miner, _rent) = setup();
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let key = swap_key("srctx1");
+
+    let ceiling = BASE_TS + TIMEOUT_SECS + MAX_TOTAL_EXTENSION_SECS; // frozen at initiate
+    let fulfill_ts = ceiling - 50; // now + grace would land past the ceiling
+    set_clock(&mut svm, fulfill_ts);
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+    assert_eq!(read_swap(&svm, &key).timeout_at, ceiling, "grace clamped to max_extend_at");
 }
 
 #[test]

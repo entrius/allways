@@ -115,7 +115,9 @@ fn init_ix(admin: &Pubkey, min_swap: u64, max_swap: u64, ttl: i64) -> Instructio
             max_collateral: 0,
             fulfillment_timeout_secs: 100,
             consensus_threshold_percent: 66,
-            min_swap_amount: min_swap,
+            // min_swap_amount has a hard 1000-lamport floor (no 0-unbounded escape); callers passing
+            // 0 mean "no meaningful bound", which the dust floor satisfies for every SOL-scale fill.
+            min_swap_amount: min_swap.max(1000),
             max_swap_amount: max_swap,
             reservation_ttl_secs: ttl,
         }
@@ -647,6 +649,48 @@ fn test_swap_amount_bounds_cannot_be_contradictory() {
     assert!(send(&mut svm, set_max_swap_ix(&admin.pubkey(), 500_000_000), &admin.pubkey(), &admin).is_err(), "max < min rejected");
     assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 6_000_000_000), &admin.pubkey(), &admin).is_err(), "min > max rejected");
     send(&mut svm, set_max_swap_ix(&admin.pubkey(), 8_000_000_000), &admin.pubkey(), &admin).expect("widening max is allowed");
+}
+
+fn set_reservation_fee_ix(admin: &Pubkey, lamports: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::SetReservationFee { lamports }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }.to_account_metas(None),
+    )
+}
+
+#[test]
+fn test_admin_cannot_zero_anti_grief_brakes() {
+    // min_swap_amount and reservation_fee are the brakes on dust swaps / free pool-open griefing;
+    // the admin key must not be able to release either (L4a).
+    let (mut svm, admin, _vals, _miner) = setup(1_000_000_000, 5_000_000_000);
+    assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 0), &admin.pubkey(), &admin).is_err(), "min_swap 0 rejected");
+    assert!(send(&mut svm, set_min_swap_ix(&admin.pubkey(), 999), &admin.pubkey(), &admin).is_err(), "below dust floor rejected");
+    send(&mut svm, set_min_swap_ix(&admin.pubkey(), 1000), &admin.pubkey(), &admin).expect("dust floor is the minimum");
+
+    assert!(send(&mut svm, set_reservation_fee_ix(&admin.pubkey(), 0), &admin.pubkey(), &admin).is_err(), "fee 0 rejected");
+    assert!(send(&mut svm, set_reservation_fee_ix(&admin.pubkey(), 999_999), &admin.pubkey(), &admin).is_err(), "below fee floor rejected");
+    send(&mut svm, set_reservation_fee_ix(&admin.pubkey(), 1_000_000), &admin.pubkey(), &admin).expect("fee floor is the minimum");
+}
+
+#[test]
+fn test_finalize_rejects_self_swap_and_default_user() {
+    // M1: a miner naming ITSELF as taker would buy eligibility (successful_swaps) with wash swaps;
+    // the default pubkey as taker would burn a timeout refund. Both rejected at the fill.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
+
+    let self_fill = finalize_btc_sol(&mut svm, &vals[0], &miner.pubkey(), &miner.pubkey(), "u", "uSOL", 2_000_000_000, 1);
+    assert!(self_fill.is_err(), "user == miner must be rejected");
+
+    let burn_fill = finalize_btc_sol(&mut svm, &vals[0], &miner.pubkey(), &Pubkey::default(), "u", "uSOL", 2_000_000_000, 1);
+    assert!(burn_fill.is_err(), "default-pubkey taker must be rejected");
+
+    let user = Keypair::new().pubkey();
+    finalize_btc_sol(&mut svm, &vals[0], &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 1)
+        .expect("distinct taker fills normally");
 }
 // NOTE: the old `test_update_reflected_in_reservation` was removed — under two-phase a bid carries no
 // amounts, so there is no bid content to "reflect". The winner names amounts at finalize instead

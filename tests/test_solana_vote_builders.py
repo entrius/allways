@@ -185,6 +185,7 @@ def test_mark_fulfilled_ix(client):
     )
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, False),
+        (pdas.miner_state_pda(client.keypair.pubkey(), PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
     ]
 

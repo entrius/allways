@@ -61,7 +61,7 @@ fn setup() -> (LiteSVM, Pubkey) {
             max_collateral: 0,
             fulfillment_timeout_secs: 100,
             consensus_threshold_percent: 66,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: 1_800,
         }

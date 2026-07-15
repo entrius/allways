@@ -34,7 +34,7 @@ fn test_initialize_creates_config() {
             max_collateral: 500_000_000,
             fulfillment_timeout_secs: 12_600,
             consensus_threshold_percent: 66,
-            min_swap_amount: 0,
+            min_swap_amount: 1000,
             max_swap_amount: 0,
             reservation_ttl_secs: 1_800,
         }

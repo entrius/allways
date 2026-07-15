@@ -27,7 +27,7 @@ pub enum ErrorCode {
     ValidatorSetFull,
     #[msg("Validator not found in the set")]
     ValidatorNotFound,
-    #[msg("Consensus threshold must be 1..=100")]
+    #[msg("Consensus threshold must be 51..=100 (majority floor)")]
     InvalidThreshold,
     #[msg("Validator has already voted in this round")]
     AlreadyVoted,
@@ -129,4 +129,12 @@ pub enum ErrorCode {
     // --- Treasury hardening ---
     #[msg("Treasury withdrawals may only be sent to the admin")]
     TreasuryRecipientNotAdmin,
+
+    // --- Security hardening batch (self-dealing / identity / weights round) ---
+    #[msg("Taker and miner must be different accounts")]
+    SelfSwapNotAllowed,
+    #[msg("Taker pubkey must not be the default address")]
+    InvalidUser,
+    #[msg("round_key does not match the keccak hash of the submitted weights snapshot")]
+    WeightsRoundKeyMismatch,
 }

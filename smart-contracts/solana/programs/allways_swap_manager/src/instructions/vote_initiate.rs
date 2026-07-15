@@ -73,6 +73,9 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         require!(resv.claimed_swap_key == swap_key, ErrorCode::NotPending);
         // Never obligate a removed miner (defense-in-depth; resolve_pool also refuses an inactive miner).
         require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
+        // Self-dealing backstop (finalize_reservation is the primary guard; this also covers
+        // reservations filled before that guard deployed).
+        require!(ctx.accounts.swap.user != ctx.accounts.swap.miner, ErrorCode::SelfSwapNotAllowed);
         // Obligation gate: miner must hold the over-collateralization requirement before being bound.
         require!(
             ctx.accounts.miner_state.collateral
