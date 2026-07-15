@@ -19,21 +19,19 @@ import bittensor as bt
 from solders.pubkey import Pubkey
 
 from allways.constants import (
-    CONTRACT_VOTE_ROUND_TTL_SECS,
     SECONDS_PER_BLOCK,
     WEIGHTS_STAKE_BUCKET_ALPHA,
     WEIGHTS_VOTE_INTERVAL_BLOCKS,
     WEIGHTS_VOTE_RETRY_SECS,
 )
-from allways.solana import pdas
-from allways.solana.client import weights_round_key
 from allways.validator.binding import build_attribution
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
 
-# Expected contract rejections in the normal multi-validator dance: we already voted this round,
-# the on-chain cadence floor, or we're not whitelisted yet. Retried/settled at the next throttled attempt.
+# Expected contract rejections in the normal multi-validator dance: we already voted this round
+# (quorum pending), the on-chain cadence floor, or we were de-whitelisted mid-attempt.
+# Retried/settled at the next throttled attempt.
 _BENIGN_WEIGHTS_MARKERS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
 
 
@@ -74,9 +72,8 @@ def _step(self: Validator, now: int) -> None:
 
     me = str(self.solana_client.keypair.pubkey())
     if me not in (str(Pubkey.from_bytes(bytes(v.key))) for v in config.validators):
-        if not self.weights_whitelist_warned:
-            bt.logging.warning(f'weights vote: {me} not in the contract validator whitelist — skipping until added')
-            self.weights_whitelist_warned = True
+        # Epoch memo rate-limits this to once per ~12h — visible, not spam.
+        bt.logging.warning(f'weights vote: {me} not in the contract validator whitelist — skipping until added')
         self.weights_epoch_done = epoch
         return
 
@@ -90,24 +87,11 @@ def _step(self: Validator, now: int) -> None:
         self.weights_epoch_done = epoch
         return
 
-    validator_keys = [bytes(v.key) for v in config.validators]
-    if _voted_in_open_round(self, now, vector, validator_keys):
-        return
     try:
-        sig = self.solana_client.vote_set_weights(vector, validator_keys)
+        sig = self.solana_client.vote_set_weights(vector, [bytes(v.key) for v in config.validators])
     except Exception as e:
         if any(m in str(e) for m in _BENIGN_WEIGHTS_MARKERS):
             bt.logging.debug(f'weights vote: no-op ({e})')
             return
         raise
     bt.logging.success(f'weights vote: {vector} submitted (sig {sig[:16]}…)')
-
-
-def _voted_in_open_round(self: Validator, now: int, vector: List[int], validator_keys: List[bytes]) -> bool:
-    """True iff our vote is already in the live round for THIS snapshot (rounds are keyed by the
-    vector's hash). A stale round doesn't count — the contract reopens it on the next vote."""
-    vr = self.solana_client.get_vote_round(pdas.REQ_SET_WEIGHTS, weights_round_key(validator_keys, vector))
-    if vr is None or not vr.voters or now - int(vr.created_at) > CONTRACT_VOTE_ROUND_TTL_SECS:
-        return False
-    me = bytes(self.solana_client.keypair.pubkey())
-    return any(bytes(v) == me for v in vr.voters)

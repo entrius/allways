@@ -139,11 +139,9 @@ class Validator(BaseValidatorNeuron):
         self.last_scored_block = max(0, self.block - SCORING_WINDOW_BLOCKS)
         self.last_scored_time = max(0, int(time.time()) - SCORING_WINDOW_SECS)
 
-        # Stake-weight vote state (weights_vote.py): last satisfied epoch, in-epoch retry
-        # throttle anchor, and the one-shot not-whitelisted warning.
+        # Stake-weight vote state (weights_vote.py): last satisfied epoch + in-epoch retry throttle.
         self.weights_epoch_done = None
         self.last_weights_attempt = 0
-        self.weights_whitelist_warned = False
 
         # Separate subtensor + chain providers for the axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two handler

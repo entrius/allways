@@ -85,10 +85,9 @@ MAX_FAILED_SWAPS: int = 2
 SECONDS_PER_BLOCK = 12
 WEIGHTS_STAKE_BUCKET_ALPHA = 50_000  # alpha per draw-weight unit; floor rounding
 WEIGHTS_VOTE_INTERVAL_BLOCKS = 3_600  # ~12h — posting boundary cadence
-CONTRACT_VOTE_ROUND_TTL_SECS = 1800  # mirror of the contract's VOTE_ROUND_TTL_SECS — keep in sync
-# In-epoch retry throttle = one attempt per round lifetime, so a divergent round has expired
-# (and is reopenable with our snapshot) by the time we retry.
-WEIGHTS_VOTE_RETRY_SECS = CONTRACT_VOTE_ROUND_TTL_SECS
+# In-epoch retry throttle: one attempt per contract vote-round lifetime (VOTE_ROUND_TTL_SECS),
+# so an unlanded round has expired (and is reopenable with our snapshot) by the time we retry.
+WEIGHTS_VOTE_RETRY_SECS = 1_800
 
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are

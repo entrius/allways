@@ -3,7 +3,7 @@
 No chain: a fake client captures vote_set_weights calls; build_attribution is patched to a
 canned pubkey→hotkey map. Covers vector derivation edges (buckets, floor, unbound,
 off-metagraph), every gate in the step (epoch memo, retry throttle, landed-this-epoch,
-whitelist, unchanged vector, watch mode, open-round dedup), and error swallowing.
+whitelist, unchanged vector, watch mode), and error swallowing.
 """
 
 from types import SimpleNamespace
@@ -12,7 +12,6 @@ import pytest
 from solders.keypair import Keypair
 
 from allways.constants import WEIGHTS_VOTE_INTERVAL_BLOCKS, WEIGHTS_VOTE_RETRY_SECS
-from allways.solana.client import weights_round_key
 from allways.validator import weights_vote
 from allways.validator.weights_vote import derive_weight_vector, maybe_vote_weights
 
@@ -30,10 +29,9 @@ def _metagraph(hotkeys, alphas):
 
 
 class FakeClient:
-    def __init__(self, config, vote_round=None, vote_error=None):
+    def __init__(self, config, vote_error=None):
         self.keypair = Keypair()
         self.config = config
-        self.vote_round = vote_round
         self.vote_error = vote_error
         self.voted = []
         self.config_reads = 0
@@ -41,10 +39,6 @@ class FakeClient:
     def get_config(self):
         self.config_reads += 1
         return self.config
-
-    def get_vote_round(self, req_type, target=None):
-        self.round_target = target
-        return self.vote_round
 
     def vote_set_weights(self, weights, validator_keys):
         if self.vote_error is not None:
@@ -61,7 +55,6 @@ def _validator(client, metagraph=None, read_only=False, block=BLOCK):
         metagraph=metagraph or _metagraph([], []),
         weights_epoch_done=None,
         last_weights_attempt=0,
-        weights_whitelist_warned=False,
     )
 
 
@@ -137,13 +130,12 @@ def test_stale_update_before_boundary_is_due(patch_attribution):
     assert client.voted == [[3]]
 
 
-def test_not_whitelisted_warns_once_and_skips(patch_attribution):
+def test_not_whitelisted_skips_epoch(patch_attribution):
     client = FakeClient(config=SimpleNamespace(validators=[_vali(Keypair().pubkey())], last_weights_update=0))
     patch_attribution({})
     vali = _validator(client)
     maybe_vote_weights(vali, NOW)
     assert client.voted == []
-    assert vali.weights_whitelist_warned
     assert vali.weights_epoch_done == BLOCK // WEIGHTS_VOTE_INTERVAL_BLOCKS
 
 
@@ -160,23 +152,6 @@ def test_watch_mode_never_votes(patch_attribution):
     maybe_vote_weights(vali, NOW)
     assert client.voted == []
     assert vali.weights_epoch_done == BLOCK // WEIGHTS_VOTE_INTERVAL_BLOCKS
-
-
-def test_open_round_vote_dedup(patch_attribution):
-    client, vali = _whitelisted_setup(patch_attribution)
-    client.vote_round = SimpleNamespace(voters=[bytes(client.keypair.pubkey())], created_at=NOW - 10)
-    maybe_vote_weights(vali, NOW)
-    assert client.voted == []
-    # The round lookup is keyed by THIS snapshot's hash (per-snapshot rounds).
-    me = bytes(client.keypair.pubkey())
-    assert client.round_target == weights_round_key([me], [3])
-
-
-def test_stale_round_votes_again(patch_attribution):
-    client, vali = _whitelisted_setup(patch_attribution)
-    client.vote_round = SimpleNamespace(voters=[bytes(client.keypair.pubkey())], created_at=NOW - 2_000)
-    maybe_vote_weights(vali, NOW)
-    assert client.voted == [[3]]
 
 
 # ---------- error handling ----------
