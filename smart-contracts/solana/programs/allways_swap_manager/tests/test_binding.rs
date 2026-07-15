@@ -2,9 +2,9 @@
 //   cargo test -p allways_swap_manager --test test_binding
 //
 // bind_hotkey is miner-signed and per-miner (one Binding PDA). It only STORES the hotkey + sr25519
-// sig (the validator verifies off-chain) and overwrites in place on re-bind. Since the H3 squat
-// gate it is registered-miners-only: the caller needs a MinerState with collateral >= min_collateral,
-// so `initialize` + `post_collateral` run in setup.
+// sig (the validator verifies off-chain) and overwrites in place on re-bind. The H3 squat gate
+// admits registered miners (MinerState with collateral >= min_collateral) and whitelisted
+// validators (no MinerState — they pass None and bind so peers can attribute their stake).
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize,
@@ -50,18 +50,34 @@ fn send(svm: &mut LiteSVM, ix: Instruction, payer: &Pubkey, signer: &Keypair) ->
     svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
 }
 fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instruction {
+    bind_ix_opt(miner, Some(miner_pda(miner)), hotkey, hotkey_sig)
+}
+fn bind_ix_opt(
+    miner: &Pubkey,
+    miner_state: Option<Pubkey>,
+    hotkey: [u8; 32],
+    hotkey_sig: [u8; 64],
+) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::BindHotkey { hotkey, hotkey_sig }.data(),
         allways_swap_manager::accounts::BindHotkey {
             miner: *miner,
             config: config_pda(),
-            miner_state: miner_pda(miner),
+            miner_state,
             binding: bind_pda(miner),
             hotkey_binding: hkbind_pda(&hotkey),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
+    )
+}
+fn add_validator_ix(admin: &Pubkey, validator: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::AddValidator { validator, weight: 1 }.data(),
+        allways_swap_manager::accounts::AdminConfig { admin: *admin, config: config_pda() }
+            .to_account_metas(None),
     )
 }
 fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
@@ -84,6 +100,10 @@ fn read_binding(svm: &LiteSVM, miner: &Pubkey) -> Binding {
 }
 
 fn setup() -> LiteSVM {
+    setup_with_admin().0
+}
+
+fn setup_with_admin() -> (LiteSVM, Keypair) {
     let mut svm = LiteSVM::new();
     svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
 
@@ -110,7 +130,7 @@ fn setup() -> LiteSVM {
         .to_account_metas(None),
     );
     send(&mut svm, ix, &admin.pubkey(), &admin).expect("initialize");
-    svm
+    (svm, admin)
 }
 
 /// A funded keypair with collateral posted — a "registered" miner allowed through the bind gate.
@@ -154,6 +174,35 @@ fn test_bind_requires_registration() {
     send(&mut svm, post_ix(&squatter.pubkey(), MIN_COLLATERAL / 2), &squatter.pubkey(), &squatter).expect("post rest");
     send(&mut svm, bind_ix(&squatter.pubkey(), [8u8; 32], [1u8; 64]), &squatter.pubkey(), &squatter)
         .expect("bind unlocks at min_collateral");
+}
+
+#[test]
+fn test_bind_whitelisted_validator_without_miner_state() {
+    // Weights-attribution path: a whitelisted validator has no MinerState — the admin-vetted
+    // whitelist slot prices the claim instead of collateral. miner_state passed as None.
+    let (mut svm, admin) = setup_with_admin();
+    let vali = Keypair::new();
+    svm.airdrop(&vali.pubkey(), 10_000_000_000).unwrap();
+    send(&mut svm, add_validator_ix(&admin.pubkey(), vali.pubkey()), &admin.pubkey(), &admin).expect("whitelist");
+
+    send(&mut svm, bind_ix_opt(&vali.pubkey(), None, [6u8; 32], [5u8; 64]), &vali.pubkey(), &vali)
+        .expect("whitelisted validator binds without MinerState");
+    assert_eq!(read_binding(&svm, &vali.pubkey()).hotkey, [6u8; 32]);
+}
+
+#[test]
+fn test_bind_none_miner_state_still_gated() {
+    // Passing None must not bypass the squat gate for a plain (unwhitelisted, unregistered) keypair.
+    let mut svm = setup();
+    let squatter = Keypair::new();
+    svm.airdrop(&squatter.pubkey(), 10_000_000_000).unwrap();
+    let res = send(
+        &mut svm,
+        bind_ix_opt(&squatter.pubkey(), None, [8u8; 32], [1u8; 64]),
+        &squatter.pubkey(),
+        &squatter,
+    );
+    assert!(res.is_err(), "None miner_state without a whitelist slot must be rejected");
 }
 
 #[test]

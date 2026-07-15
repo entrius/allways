@@ -917,7 +917,7 @@ fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instructio
         allways_swap_manager::accounts::BindHotkey {
             miner: *miner,
             config: config_pda(),
-            miner_state: miner_pda(miner),
+            miner_state: Some(miner_pda(miner)),
             binding: bind_pda(miner),
             hotkey_binding: hkbind_pda(&hotkey),
             system_program: SYSTEM_PROGRAM,
