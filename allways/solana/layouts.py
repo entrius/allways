@@ -421,7 +421,7 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'from_amount' / U128,
     'to_amount' / U128,
 )
-IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64))  # vote_set_weights
+IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout

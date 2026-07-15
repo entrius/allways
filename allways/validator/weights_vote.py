@@ -6,9 +6,9 @@ weight per whitelisted validator, index-aligned to ``Config.validators`` — and
 attributing each validator pubkey to its metagraph hotkey through the same sr25519 bindings miners
 use (``alw bind-hotkey``); no valid binding or no metagraph presence → 0 (an all-zero vector is
 safe: the draw falls back to uniform). The block-aligned cadence has every validator read the
-metagraph at ~the same stake snapshot, so the hash-bound vectors converge; a divergent round
-self-heals — the contract rejects mismatched votes and the round expires (vote-round TTL) before
-the next throttled retry.
+metagraph at ~the same stake snapshot, so the hash-bound vectors converge; vote rounds are keyed
+per snapshot (round PDA = the vector's hash), so a divergent proposal coexists instead of blocking —
+whichever snapshot reaches quorum first wins, and stragglers retry on the throttle.
 """
 
 from __future__ import annotations
@@ -26,15 +26,15 @@ from allways.constants import (
     WEIGHTS_VOTE_RETRY_SECS,
 )
 from allways.solana import pdas
+from allways.solana.client import weights_round_key
 from allways.validator.binding import build_attribution
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
 
-# Expected contract rejections in the normal multi-validator dance: we already voted, a peer's
-# open round holds a different snapshot (bucket flap), the on-chain cadence floor, or we're not
-# whitelisted yet. All retried/settled at the next throttled attempt.
-_BENIGN_WEIGHTS_MARKERS = ('AlreadyVoted', 'VoteHashMismatch', 'WeightsUpdateTooSoon', 'NotValidator')
+# Expected contract rejections in the normal multi-validator dance: we already voted this round,
+# the on-chain cadence floor, or we're not whitelisted yet. Retried/settled at the next throttled attempt.
+_BENIGN_WEIGHTS_MARKERS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
 
 
 def derive_weight_vector(validators, attribution: Dict[str, str], metagraph) -> List[int]:
@@ -90,10 +90,11 @@ def _step(self: Validator, now: int) -> None:
         self.weights_epoch_done = epoch
         return
 
-    if _voted_in_open_round(self, now):
+    validator_keys = [bytes(v.key) for v in config.validators]
+    if _voted_in_open_round(self, now, vector, validator_keys):
         return
     try:
-        sig = self.solana_client.vote_set_weights(vector)
+        sig = self.solana_client.vote_set_weights(vector, validator_keys)
     except Exception as e:
         if any(m in str(e) for m in _BENIGN_WEIGHTS_MARKERS):
             bt.logging.debug(f'weights vote: no-op ({e})')
@@ -102,10 +103,10 @@ def _step(self: Validator, now: int) -> None:
     bt.logging.success(f'weights vote: {vector} submitted (sig {sig[:16]}…)')
 
 
-def _voted_in_open_round(self: Validator, now: int) -> bool:
-    """True iff our vote is already in a live round. A stale round doesn't count — the contract
-    reopens it on the next vote, dropping its voters."""
-    vr = self.solana_client.get_vote_round(pdas.REQ_SET_WEIGHTS)
+def _voted_in_open_round(self: Validator, now: int, vector: List[int], validator_keys: List[bytes]) -> bool:
+    """True iff our vote is already in the live round for THIS snapshot (rounds are keyed by the
+    vector's hash). A stale round doesn't count — the contract reopens it on the next vote."""
+    vr = self.solana_client.get_vote_round(pdas.REQ_SET_WEIGHTS, weights_round_key(validator_keys, vector))
     if vr is None or not vr.voters or now - int(vr.created_at) > CONTRACT_VOTE_ROUND_TTL_SECS:
         return False
     me = bytes(self.solana_client.keypair.pubkey())

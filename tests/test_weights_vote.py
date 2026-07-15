@@ -12,6 +12,7 @@ import pytest
 from solders.keypair import Keypair
 
 from allways.constants import WEIGHTS_VOTE_INTERVAL_BLOCKS, WEIGHTS_VOTE_RETRY_SECS
+from allways.solana.client import weights_round_key
 from allways.validator import weights_vote
 from allways.validator.weights_vote import derive_weight_vector, maybe_vote_weights
 
@@ -42,9 +43,10 @@ class FakeClient:
         return self.config
 
     def get_vote_round(self, req_type, target=None):
+        self.round_target = target
         return self.vote_round
 
-    def vote_set_weights(self, weights):
+    def vote_set_weights(self, weights, validator_keys):
         if self.vote_error is not None:
             raise self.vote_error
         self.voted.append(weights)
@@ -165,6 +167,9 @@ def test_open_round_vote_dedup(patch_attribution):
     client.vote_round = SimpleNamespace(voters=[bytes(client.keypair.pubkey())], created_at=NOW - 10)
     maybe_vote_weights(vali, NOW)
     assert client.voted == []
+    # The round lookup is keyed by THIS snapshot's hash (per-snapshot rounds).
+    me = bytes(client.keypair.pubkey())
+    assert client.round_target == weights_round_key([me], [3])
 
 
 def test_stale_round_votes_again(patch_attribution):
@@ -178,7 +183,7 @@ def test_stale_round_votes_again(patch_attribution):
 
 
 def test_benign_contract_error_swallowed(patch_attribution):
-    client, vali = _whitelisted_setup(patch_attribution, vote_error=Exception('custom program error: VoteHashMismatch'))
+    client, vali = _whitelisted_setup(patch_attribution, vote_error=Exception('custom program error: AlreadyVoted'))
     maybe_vote_weights(vali, NOW)  # must not raise
     assert vali.weights_epoch_done is None  # retried next throttled attempt
 

@@ -31,6 +31,19 @@ def swap_key_from_tx_hash(from_tx_hash: str) -> bytes:
     return keccak.new(data=from_tx_hash.encode(), digest_bits=256).digest()
 
 
+def weights_round_key(validator_keys: List[bytes], weights: List[int]) -> bytes:
+    """Mirror of the contract's consensus::weights_hash — keccak256 over
+    REQ_SET_WEIGHTS || each validator key (config order) || each weight LE. Binds a weights vote to
+    its exact snapshot and doubles as the per-snapshot vote-round PDA key."""
+    h = keccak.new(digest_bits=256)
+    h.update(bytes([pdas.REQ_SET_WEIGHTS]))
+    for k in validator_keys:
+        h.update(bytes(k))
+    for w in weights:
+        h.update(int(w).to_bytes(8, 'little'))
+    return h.digest()
+
+
 @dataclass
 class SolanaSwap:
     """Miner-facing view of an on-chain `Swap`, keyed by its `swap_key` (== keccak(from_tx_hash)).
@@ -522,16 +535,18 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('vote_activate', b'', metas)])
 
-    def vote_set_weights(self, weights: List[int]) -> str:
-        """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies."""
+    def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
+        """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.
+        The round PDA is keyed by the snapshot hash, so competing proposals coexist instead of blocking."""
+        round_key = weights_round_key(validator_keys, weights)
         validator = self.keypair.pubkey()
         metas = [
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, True),
-            AccountMeta(pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, None, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, round_key, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        args = layouts.IX_SET_WEIGHTS_ARGS.build({'weights': weights})
+        args = layouts.IX_SET_WEIGHTS_ARGS.build({'weights': weights, 'round_key': round_key})
         return self._send([self._ix('vote_set_weights', args, metas)])
 
     def mark_fulfilled(self, swap_key: bytes, to_tx_hash: str, to_tx_block: int) -> str:
