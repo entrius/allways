@@ -17,7 +17,7 @@ NOW = 1_000_000
 MINER = str(SolKeypair().pubkey())
 USER_A = str(SolKeypair().pubkey())
 USER_B = str(SolKeypair().pubkey())
-RATE_FIXED = int(0.0021 * RATE_PRECISION)  # sol->btc: 0.0021 BTC per 1 SOL
+RATE_FIXED = 21 * RATE_PRECISION // 10_000  # sol->btc: 0.0021 BTC per 1 SOL, exact fixed-point
 
 
 class SweepClient:
