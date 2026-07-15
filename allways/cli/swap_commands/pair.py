@@ -22,6 +22,11 @@ from allways.utils.rate import canonical_rate, directional_rate, quantize_rate_d
 # Default per-direction liquidity (u128) posted with a quote; the taker discovery path is Phase 9.
 DEFAULT_QUOTE_LIQUIDITY = 0
 
+# Both legs share the canonical denomination, so their ratio is the effective round-trip spread.
+# Real spreads are a few percent; an accidentally inverted COUNTER_RATE (each rate is directional
+# for its OWN leg) lands ~1/rate² off — orders of magnitude past this and instantly arbitrageable.
+MAX_LEG_SPREAD_RATIO = 4
+
 
 def prompt_chain(label: str, exclude: str | None = None) -> str:
     """Prompt the user to pick a chain from SUPPORTED_CHAINS."""
@@ -168,6 +173,19 @@ def post_pair(
     # and the posted value both show exactly what the chain will store.
     rate = quantize_rate_display(rate)
     counter_rate = quantize_rate_display(counter_rate)
+
+    if rate > 0 and counter_rate > 0:
+        spread = max(rate, counter_rate) / min(rate, counter_rate)
+        if spread > MAX_LEG_SPREAD_RATIO:
+            console.print(
+                f'[red]Your two rates disagree by {spread:,.0f}× — that is not a spread, one of them is '
+                f'almost certainly inverted.[/red]\n'
+                f'[dim]Each rate is directional for its own leg: RATE = {canon_to.upper()} per 1 '
+                f'{canon_from.upper()}, COUNTER_RATE = {canon_from.upper()} per 1 {canon_to.upper()}. '
+                f'Posting this would be instantly arbitrageable against your collateral. '
+                f'To intentionally post extreme legs, post each direction separately (0 = not offered).[/dim]'
+            )
+            fail('Refusing to post inconsistent rates.')
 
     # The bt wallet is only needed for the running-miner refresh flag (keyed by hotkey); the quote
     # write is signed by the Solana keypair.
