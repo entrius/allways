@@ -17,7 +17,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import RATE_PRECISION
 from allways.solana.client import SolanaClientError
-from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
+from allways.utils.rate import directional_rate, quantize_rate_display, quantize_rate_fixed
 
 # Default per-direction liquidity (u128) posted with a quote; the taker discovery path is Phase 9.
 DEFAULT_QUOTE_LIQUIDITY = 0
@@ -38,12 +38,22 @@ def prompt_chain(label: str, exclude: str | None = None) -> str:
         console.print(f'[red]Invalid: {reason}. Choose from: {choices}[/red]')
 
 
+def canonical_rate(directional: float, leg_from: str, canon_from: str) -> float:
+    """Directional 'to per 1 from' of a leg → canonical 'dest per 1 canonical source'."""
+    if leg_from == canon_from or directional == 0:
+        return directional
+    return 1 / directional
+
+
 def prompt_rates(canon_from: str, canon_to: str) -> tuple:
-    """Prompt for direction-specific rates. 0 = don't offer that direction; at least one must be positive."""
+    """Prompt directional 'what the user receives per 1 they send' rates for each leg.
+
+    Returns canonical values for the (canon_from→canon_to, canon_to→canon_from) legs.
+    0 = don't offer that direction; at least one must be positive."""
     src_up, dst_up = canon_from.upper(), canon_to.upper()
-    console.print(f"\n[dim]Rates in {dst_up} per 1 {src_up} (0 = don't offer)[/dim]")
-    fwd_label = f'  {src_up} to {dst_up} (user sends {src_up}, miner returns {dst_up})'
-    rev_label = f'  {dst_up} to {src_up} (user sends {dst_up}, miner returns {src_up})'
+    console.print("\n[dim]Each rate is what the user receives per 1 they send (0 = don't offer)[/dim]")
+    fwd_label = f'  {src_up} to {dst_up}, in {dst_up} per 1 {src_up}'
+    rev_label = f'  {dst_up} to {src_up}, in {src_up} per 1 {dst_up}'
     while True:
         fwd = click.prompt(fwd_label, type=FINITE_FLOAT)
         if fwd < 0:
@@ -51,7 +61,10 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
         else:
             break
     if fwd > 0:
-        rev = click.prompt(rev_label, type=FINITE_FLOAT, default=fwd)
+        same = f'  {dst_up} to {src_up} at the same effective price (~{1 / fwd:.8g} {src_up} per 1 {dst_up})?'
+        if click.confirm(same, default=True):
+            return fwd, fwd
+        rev = click.prompt(rev_label, type=FINITE_FLOAT)
         if rev < 0:
             console.print('[red]Rate cannot be negative, using 0 (not offered)[/red]')
             rev = 0.0
@@ -64,7 +77,7 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
                 console.print('[red]At least one direction must have a positive rate[/red]')
             else:
                 break
-    return fwd, rev
+    return fwd, canonical_rate(rev, canon_to, canon_from)
 
 
 @click.command('pair', cls=StyledCommand)
@@ -91,17 +104,17 @@ def post_pair(
     [dim]All arguments are optional — if omitted, you'll be prompted interactively.[/dim]
 
     [dim]Arguments:
-        SRC_CHAIN       Source chain ID (e.g. btc, tao)
+        SRC_CHAIN       Source chain ID (e.g. sol, btc)
         SRC_ADDR        Your receiving address on source chain
-        DST_CHAIN       Destination chain ID (e.g. tao, btc)
+        DST_CHAIN       Destination chain ID (e.g. btc, sol)
         DST_ADDR        Your sending address on destination chain
-        RATE            source→dest rate (e.g. TAO per 1 BTC for btc-tao pair)
-        COUNTER_RATE    dest→source rate (optional, defaults to RATE)[/dim]
+        RATE            src→dst rate, in DST per 1 SRC — what the user receives per 1 they send
+        COUNTER_RATE    dst→src rate, in SRC per 1 DST (optional, defaults to the same effective price)[/dim]
 
     [dim]Examples:
-        $ alw miner post                                            (interactive wizard)
-        $ alw miner post btc bc1q...abc tao 5Cxyz...def 340 350     (direction-specific rates)
-        $ alw miner post btc bc1q...abc tao 5Cxyz...def 345         (same rate both ways)[/dim]
+        $ alw miner post                                                (interactive wizard)
+        $ alw miner post sol So1...abc btc bc1q...def 0.0021 470        (direction-specific rates)
+        $ alw miner post sol So1...abc btc bc1q...def 0.0021            (same effective price both ways)[/dim]
     """
     # --- Determine chains ---
     if src_chain is None:
@@ -141,16 +154,16 @@ def post_pair(
     elif rate < 0:
         fail('Rate cannot be negative')
     else:
-        if counter_rate is None:
-            counter_rate = rate
-        elif counter_rate < 0:
+        if counter_rate is not None and counter_rate < 0:
             fail('Rate cannot be negative')
-        if rate == 0 and counter_rate == 0:
+        if rate == 0 and not counter_rate:
             fail('At least one direction must have a positive rate')
+        # Positional rates are directional ('to per 1 from' of their own leg); the chain stores canonical.
+        rate = canonical_rate(rate, src_chain, canon_from)
+        counter_rate = rate if counter_rate is None else canonical_rate(counter_rate, dst_chain, canon_from)
 
-    # Normalize to canonical direction.
-    # Positional args: RATE = user's source→dest, so swap rates to match canonical order.
-    # Interactive prompts: already asked in canonical order, no rate swap needed.
+    # Normalize to canonical direction. Rates are already canonical values per leg, so the swap just
+    # keeps each value attached to its own leg. Interactive prompts asked in canonical order — no swap.
     if src_chain != canon_from:
         console.print(f'[dim]Normalizing pair direction to canonical form ({canon_from} -> {canon_to}).[/dim]')
         src_chain, dst_chain = dst_chain, src_chain
@@ -174,17 +187,17 @@ def post_pair(
     console.print('\n[bold]Publishing trading pair quotes[/bold]\n')
     console.print(f'  [cyan]{src_name}[/cyan]:  {src_addr}')
     console.print(f'  [cyan]{dst_name}[/cyan]:  {dst_addr}')
-    if rate == counter_rate and rate > 0:
-        console.print(f'  Rate:       [green]1 {src_up} = {rate:g} {dst_up} (both directions)[/green]')
+    if rate > 0:
+        fwd_disp = directional_rate(src_chain, dst_chain, f'{rate:g}')
+        console.print(f'  {src_up} → {dst_up}: [green]1 {src_up} = {fwd_disp} {dst_up}[/green]')
     else:
-        if rate > 0:
-            console.print(f'  {src_up} → {dst_up}: [green]1 {src_up} = {rate:g} {dst_up}[/green]')
-        else:
-            console.print(f'  {src_up} → {dst_up}: [yellow]not offered[/yellow]')
-        if counter_rate > 0:
-            console.print(f'  {dst_up} → {src_up}: [green]1 {src_up} = {counter_rate:g} {dst_up}[/green]')
-        else:
-            console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
+        console.print(f'  {src_up} → {dst_up}: [yellow]not offered[/yellow]')
+    if counter_rate > 0:
+        rev_disp = directional_rate(dst_chain, src_chain, f'{counter_rate:g}')
+        same = ' [dim](same effective price)[/dim]' if counter_rate == rate else ''
+        console.print(f'  {dst_up} → {src_up}: [green]1 {dst_up} = {rev_disp} {src_up}[/green]{same}')
+    else:
+        console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
     # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
