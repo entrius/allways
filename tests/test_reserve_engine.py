@@ -4,7 +4,9 @@ Mocks the solana_client; no chain. Asserts eligibility gating, SOL-numeraire amo
 a joiner quotes against the PINNED pool rate (not the live quote) so it stays rate-consistent for D1.
 """
 
+import tempfile
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
@@ -12,6 +14,7 @@ from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import RATE_PRECISION
 from allways.validator.reserve_engine import reserve_on_behalf
+from allways.validator.state_store import ValidatorStateStore
 
 HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
 HOTKEY = HK.ss58_address
@@ -66,32 +69,39 @@ class FakeClient:
 
 
 def _validator(client):
-    return SimpleNamespace(solana_client=client, axon_lock=threading.RLock())
+    store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
+    return SimpleNamespace(solana_client=client, axon_lock=threading.RLock(), state_store=store)
 
 
 def _reserve(client, from_amount=1_000_000_000):
     # sol->btc: user sends 1 SOL, receives btc
-    return reserve_on_behalf(
-        _validator(client), HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', from_amount
-    )
+    validator = _validator(client)
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', from_amount)
+    return result, validator.state_store
 
 
-def test_open_happy_path():
-    # Two-phase: reserve_on_behalf places a BID after a viability pre-check. The taker + amounts
-    # are named later at finalize (next wave), so the on-chain bid carries only the pair.
+def test_open_happy_path_persists_routed_request():
+    # Two-phase: reserve_on_behalf places a BID after a viability pre-check, then queues the
+    # user's details for finalize_won_seats (the winner names the fill at finalize).
     client = FakeClient()
-    r = _reserve(client)
+    r, store = _reserve(client)
     assert r.ok and r.pool_closes_at == FUTURE
     assert client.calls == [('open_or_request', 'sol', 'btc')]
+    queued = store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
+    assert len(queued) == 1
+    assert queued[0]['user_pubkey'] == USER_PK
+    assert queued[0]['from_amount'] == 1_000_000_000
+    store.close()
 
 
 def test_inactive_miner_rejects():
-    r = _reserve(FakeClient(active=False))
+    r, store = _reserve(FakeClient(active=False))
     assert not r.ok and 'not active' in r.reason
+    assert store.distinct_routed_pools() == []  # nothing queued on rejection
 
 
 def test_busy_miner_open_rejects():
-    r = _reserve(FakeClient(has_active_swap=True))
+    r, _ = _reserve(FakeClient(has_active_swap=True))
     assert not r.ok and 'busy' in r.reason
 
 
@@ -107,8 +117,9 @@ def test_contract_rejection_returns_reject_not_raise():
         )
 
     client.open_or_request = _raise
-    r = _reserve(client)
+    r, store = _reserve(client)
     assert not r.ok and 'active reservation' in r.reason.lower()
+    assert store.distinct_routed_pools() == []  # a failed entry queues nothing
 
 
 def test_contract_rejection_code_only_form_returns_reject():
@@ -121,7 +132,7 @@ def test_contract_rejection_code_only_form_returns_reject():
         raise RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
 
     client.open_or_request = _raise
-    r = _reserve(client)
+    r, _ = _reserve(client)
     assert not r.ok and '6022' in r.reason
 
 
@@ -144,13 +155,14 @@ def test_transport_error_still_raises():
 def test_no_quote_rejects():
     client = FakeClient()
     client.quote = None
-    r = _reserve(client)
+    r, _ = _reserve(client)
     assert not r.ok and 'no quote' in r.reason.lower()
 
 
 def test_low_collateral_rejects():
-    r = _reserve(FakeClient(collateral=1))
+    r, store = _reserve(FakeClient(collateral=1))
     assert not r.ok and 'collateral' in r.reason.lower()
+    assert store.distinct_routed_pools() == []
 
 
 def test_join_uses_pinned_pool_rate_not_live_quote():
@@ -160,7 +172,7 @@ def test_join_uses_pinned_pool_rate_not_live_quote():
     # contract at finalize (Rust suite) — the bid itself carries no amounts.
     pinned = SimpleNamespace(opened_at=1, closes_at=FUTURE, from_chain='sol', to_chain='btc', rate=_rate_fixed(0.0021))
     client = FakeClient(quote_rate=0.0099, pool=pinned)  # live quote drifted away from the pinned 0.0021
-    r = _reserve(client)
+    r, _ = _reserve(client)
     assert r.ok
     assert client.calls == [('open_or_request', 'sol', 'btc')]
 

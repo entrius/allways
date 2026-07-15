@@ -11,6 +11,7 @@ import bittensor as bt
 from allways import dev_signal
 from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
+from allways.validator.reserve_engine import finalize_won_seats
 from allways.validator.scoring import (
     due_for_scoring,
     score_and_reward_miners,
@@ -44,6 +45,11 @@ async def forward(self: Validator) -> None:
     resolved = await asyncio.to_thread(self.solana_swap_loop.resolve_pools_once, now)
     if resolved:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
+    # Routed-reservation sweep right after the crank: won seats are freshest here, spending
+    # the least of the finalize window on queued on-behalf users.
+    finalized = await asyncio.to_thread(finalize_won_seats, self, now)
+    if finalized:
+        bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'

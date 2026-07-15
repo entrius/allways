@@ -6,7 +6,9 @@ events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 ``clearing_rates`` (per-swap realized legs from ``SwapCompleted``, backing the
 windowed volume read), ``swap_outcomes`` (terminal completed/timed_out
 truth per swap_key, backing the seam's stage disambiguation after the swap PDA
-closes), and ``solana_event_meta`` (the event-ingest cursor).
+closes), ``routed_requests`` (queued on-behalf reservation details awaiting
+finalize — the one table NOT rebuildable from chain), and
+``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
 brief exclusive lock that concurrent openers would otherwise hit as "database is
@@ -357,6 +359,78 @@ class ValidatorStateStore:
             return
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
 
+    # ─── routed_requests (on-behalf reservation queue) ──────────────────
+    # The ONLY table not rebuildable from chain events: a routed user's details
+    # exist nowhere else until the won seat is finalized on-chain.
+
+    def upsert_routed_request(
+        self,
+        miner: str,
+        from_chain: str,
+        to_chain: str,
+        user_pubkey: str,
+        user_from_addr: str,
+        user_to_addr: str,
+        from_amount: int,
+        created_at: int,
+    ) -> None:
+        """Persist one routed reservation request. A retry from the same user for the
+        same (miner, direction) refreshes addresses/amount but keeps its original
+        ``created_at`` — a retry never loses its FIFO position."""
+        self._execute(
+            """
+            INSERT INTO routed_requests
+                (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, from_amount, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(miner, from_chain, to_chain, user_pubkey) DO UPDATE SET
+                user_from_addr = excluded.user_from_addr,
+                user_to_addr = excluded.user_to_addr,
+                from_amount = excluded.from_amount
+            """,
+            (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, str(int(from_amount)), created_at),
+        )
+
+    def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> List[dict]:
+        """A miner-direction's queued requests, oldest first (the FIFO order
+        ``draw_pool_winner`` selects from)."""
+        rows = self._fetchall(
+            """
+            SELECT user_pubkey, user_from_addr, user_to_addr, from_amount, created_at FROM routed_requests
+            WHERE miner = ? AND from_chain = ? AND to_chain = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (miner, from_chain, to_chain),
+        )
+        return [
+            {
+                'user_pubkey': r['user_pubkey'],
+                'user_from_addr': r['user_from_addr'],
+                'user_to_addr': r['user_to_addr'],
+                'from_amount': int(r['from_amount']),
+                'created_at': r['created_at'],
+            }
+            for r in rows
+        ]
+
+    def distinct_routed_pools(self) -> List[Tuple[str, str, str]]:
+        """The (miner, from_chain, to_chain) keys with pending requests — the
+        finalize sweep's iteration set."""
+        rows = self._fetchall('SELECT DISTINCT miner, from_chain, to_chain FROM routed_requests')
+        return [(r['miner'], r['from_chain'], r['to_chain']) for r in rows]
+
+    def delete_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> None:
+        """Drop a miner-direction's whole queue — called on any terminal outcome
+        (finalized, lost, expired). Non-selected users re-request via their client."""
+        self._execute(
+            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ?',
+            (miner, from_chain, to_chain),
+        )
+
+    def prune_routed_requests(self, cutoff_time: int) -> None:
+        """Staleness backstop: drop rows older than ``cutoff_time`` so a dead
+        miner (pool never drawn, reservation never seen) can't pin a queue."""
+        self._execute('DELETE FROM routed_requests WHERE created_at < ?', (cutoff_time,))
+
     def get_solana_event_cursor(self) -> Optional[str]:
         """Last ingested Solana tx signature (the SolanaEventIngest cursor).
         ``None`` on a fresh DB so the first poll starts from the prune horizon."""
@@ -589,6 +663,24 @@ class ValidatorStateStore:
                     outcome     TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
                 );
+
+                -- Routed reservation requests awaiting their draw (on-behalf flow).
+                -- The ONLY table not rebuildable from chain events: the user's
+                -- details live here alone until finalize_reservation publishes
+                -- them. from_amount is TEXT (u128-safe), created_at is the FIFO key.
+                CREATE TABLE IF NOT EXISTS routed_requests (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    miner          TEXT NOT NULL,
+                    from_chain     TEXT NOT NULL,
+                    to_chain       TEXT NOT NULL,
+                    user_pubkey    TEXT NOT NULL,
+                    user_from_addr TEXT NOT NULL,
+                    user_to_addr   TEXT NOT NULL,
+                    from_amount    TEXT NOT NULL,
+                    created_at     INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_routed_requests_key
+                    ON routed_requests(miner, from_chain, to_chain, user_pubkey);
 
                 CREATE TABLE IF NOT EXISTS solana_event_meta (
                     key     TEXT PRIMARY KEY,

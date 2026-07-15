@@ -144,9 +144,6 @@ def reserve_on_behalf(
 
     # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
     # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
-    # NOTE: the validator-side finalize/reap sweep is a follow-up wave — until it lands, a
-    # validator-routed reservation draws but expires unfilled (reaped by close_unfilled_reservation).
-    _ = (user_pk, user_from_addr, user_to_addr)  # consumed at finalize (next wave)
     try:
         sig = client.open_or_request(miner_pk, from_chain, to_chain)
     except Exception as e:
@@ -154,9 +151,91 @@ def reserve_on_behalf(
         if reason is None:
             raise
         return ReserveResult(False, reason)
+    # The entry landed — queue the user's details for `finalize_won_seats`. Persisted (not held in
+    # memory) so a validator restart inside the pool/finalize window still honors the routing promise.
+    validator.state_store.upsert_routed_request(
+        str(miner_pk), from_chain, to_chain, str(user_pk), user_from_addr, user_to_addr, from_amount, now
+    )
     pool = client.get_pool(miner_pk)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
     return ReserveResult(True, '', closes_at, sig)
+
+
+# Staleness backstop for queued routed requests: pool window + finalize window + generous slack.
+# A queue whose reservation never materializes (miner never drawn, RPC blind spot) dies here.
+ROUTED_REQUEST_TTL_SECS = 900
+
+
+def draw_pool_winner(requests: list) -> dict:
+    """Select which queued user gets a won seat. FIFO for now — a deliberate stub:
+    selection policy (user stake weighting, priority fees, batching) evolves HERE
+    without touching the sweep or the persistence around it."""
+    return requests[0]
+
+
+def finalize_won_seats(validator, now: int) -> list:
+    """The routed-reservation sweep: for every miner-direction with queued requests, check the
+    reservation and act once its outcome is known. Won a drawn seat → finalize it on-chain for
+    ``draw_pool_winner``'s pick (amounts recomputed from the PINNED rate, mirroring the CLI's
+    native Phase 3) and drop the queue — non-selected users' clients see another user pinned and
+    re-request. Lost / filled by another router / finalize window lapsed → drop the queue. A
+    transient RPC fault keeps the queue for the next step's retry (inside the finalize window).
+    Returns the miners finalized this pass."""
+    store = validator.state_store
+    client = validator.solana_client
+    read_only = validator.solana_swap_loop.read_only
+    me = str(client.keypair.pubkey())
+    finalized: list = []
+    for miner, from_chain, to_chain in store.distinct_routed_pools():
+        try:
+            resv = client.get_reservation(Pubkey.from_string(miner))
+        except Exception as e:
+            bt.logging.warning(f'routed sweep {miner[:8]}: reservation read failed, retrying next step: {e}')
+            continue
+        drawn_unfilled = resv is not None and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0
+        won = (
+            drawn_unfilled
+            and now <= int(resv.finalize_by)
+            and str(resv.router) == me
+            and resv.from_chain == from_chain
+            and resv.to_chain == to_chain
+        )
+        if not won:
+            # No seat we can fill: not drawn yet (pool still open/uncranked) → wait; anything
+            # terminal (lost, filled, lapsed) → drop. The TTL backstop clears the never-drawn.
+            if drawn_unfilled and now <= int(resv.finalize_by):
+                store.delete_routed_requests(miner, from_chain, to_chain)  # another router's seat
+            elif resv is not None and (int(resv.reserved_until) != 0 or int(resv.finalize_by) != 0):
+                store.delete_routed_requests(miner, from_chain, to_chain)  # filled or lapsed
+            continue
+        req = draw_pool_winner(store.pending_routed_requests(miner, from_chain, to_chain))
+        if read_only:
+            bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
+            continue
+        try:
+            fill = compute_intake_amounts(from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate))
+            client.finalize_reservation(
+                Pubkey.from_string(miner),
+                Pubkey.from_string(req['user_pubkey']),
+                req['user_from_addr'],
+                req['user_to_addr'],
+                fill.collateral_amount,
+                fill.from_amount,
+                fill.to_amount,
+            )
+        except Exception as e:
+            reason = _contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
+            if reason is None:
+                bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
+                continue
+            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
+            store.delete_routed_requests(miner, from_chain, to_chain)
+            continue
+        bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
+        store.delete_routed_requests(miner, from_chain, to_chain)
+        finalized.append(miner)
+    store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
+    return finalized
 
 
 @dataclass
