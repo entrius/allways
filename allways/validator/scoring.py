@@ -1,20 +1,12 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``eligible × [w_a·crown + w_b·execution]`` (B3.5),
+Reward per miner is ``eligible × pool × crown_share × capacity × fill_ratio``,
 where ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState``
-counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. The crown
-component is ``pool × crown_share × capacity × fill_ratio``; the
-execution component is the pool's realized-volume share, summed over the
-scored window from the ingested ``clearing_rates`` ledger (the ``SwapCompleted``
-history — volume is what cleared this round, not a lifetime account total) and
-gated by the ``rate_quality`` curve.
-The curve compares a miner's realized rate against an on-chain reference (C-rev):
-a trimmed, volume-weighted, per-miner-capped average of completed-swap clearing
-rates per direction (``build_direction_references``), computed deterministically
-from ingested events — no external feed. ``w_a=0.8 / w_b=0.2``; a direction with
-too-thin in-window history makes ``rate_quality`` neutral (1.0), so ``w_b`` still
-pays realized volume by raw share rather than zeroing anyone. Any shortfall
-recycles to ``RECYCLE_UID``. Entry is ``score_and_reward_miners``.
+counters (B3.3) — it replaces the old ``sr³ × credibility ramp``. ``fill_ratio``
+scales crown credit by served volume, summed over the scored window from the
+ingested ``clearing_rates`` ledger (the ``SwapCompleted`` history — volume is
+what cleared this round, not a lifetime account total). Any shortfall recycles
+to ``RECYCLE_UID``. Entry is ``score_and_reward_miners``.
 """
 
 from __future__ import annotations
@@ -29,24 +21,15 @@ import bittensor as bt
 import numpy as np
 
 from allways import dev_signal
-from allways.chains import canonical_pair, get_chain
+from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import (
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
-    RATE_QUALITY_FLOOR_ADV,
-    RATE_QUALITY_MIN,
-    RATE_QUALITY_TOLERANCE_BPS,
-    RATE_REFERENCE_MIN_SWAPS,
-    RATE_REFERENCE_MINER_CAP_FRAC,
-    RATE_REFERENCE_TRIM_FRAC,
-    RATE_REFERENCE_WINDOW_SECS,
     RECYCLE_UID,
     REWARD_MINER_STATES,
-    REWARD_WEIGHT_CROWN,
-    REWARD_WEIGHT_EXECUTION,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
@@ -177,10 +160,9 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_active_events(cutoff)
     self.state_store.prune_activity_events(cutoff)
     self.state_store.prune_collateral_events(cutoff)
-    # clearing_rates feeds the rate-quality reference over a wider (24h) window,
-    # so it has its own, later horizon — pruning it at the 1h crown cutoff would
-    # starve the reference.
-    self.state_store.prune_clearing_rates(current_time - RATE_REFERENCE_WINDOW_SECS)
+    # clearing_rates keeps backfill headroom beyond the crown cutoff so a
+    # stalled validator can still score the volumes of a caught-up window.
+    self.state_store.prune_clearing_rates(current_time - MAX_SCORING_BACKFILL_SECS)
     self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
@@ -243,7 +225,6 @@ class ScoreRow:
     capacity: float
     fill_ratio: float
     vol_share: float
-    rate_quality: float
     reward: float
 
 
@@ -256,30 +237,18 @@ def build_direction_score_rows(
     volumes_dir: Dict[str, int],
     total_volume_dir: int,
     eligibility: Dict[str, bool],
-    reference: Optional[DirectionReference],
-) -> Tuple[List[ScoreRow], float]:
+) -> List[ScoreRow]:
     """Per-holder factors + reward for one direction — the single place the
     reward multiplication lives, shared by the round scorer
     (``calculate_miner_rewards``) and the live tip
     (``snapshot_current_miner_scores``) so the two can never disagree.
-
-    Returns ``(rows, w_a)`` — one row per crown holder (only crown holders
-    earn either slice), plus the direction's effective crown weight for the
-    caller's unweighted-baseline trace.
-
-    W_B falls back to crown for a direction with no realized volume: the
-    execution slice has nothing to distribute, so handing it to crown
-    keeps a quiet direction at full pool rather than recycling 20% (Phase C).
-    """
+    One row per crown holder — only crown holders earn. ``vol_share`` is
+    persisted as an informational factor (it explains ``fill_ratio``) but is
+    not itself a reward term."""
     total_crown_dir = sum(crown_time.values())
-    if total_volume_dir > 0:
-        w_a, w_b = REWARD_WEIGHT_CROWN, REWARD_WEIGHT_EXECUTION
-    else:
-        w_a, w_b = 1.0, 0.0
     rows: List[ScoreRow] = []
     if total_crown_dir <= 0:
-        return rows, w_a
-    reference_rate = reference.reference if reference is not None else None
+        return rows
     for hotkey, secs in crown_time.items():
         # Capacity is integrated over time during the replay, so the effective
         # multiplier is the time-weighted average over the miner's crown
@@ -292,16 +261,6 @@ def build_direction_score_rows(
         vol_dir = volumes_dir.get(hotkey, 0)
         vol_share_dir = (vol_dir / total_volume_dir) if total_volume_dir > 0 else 0.0
         fill = fill_ratio(vol_dir, total_volume_dir, crown_share_dir)
-        # Reward = eligible × [w_a·crown + w_b·execution] (Phase C). crown
-        # is the B3.3 reward (pool·share·cap·fill_ratio); execution is the
-        # pool's volume share × rate-quality (vs the on-chain reference). w_a/w_b
-        # are the direction's effective weights (0.8/0.2, or 1.0/0.0 if idle).
-        crown_component = pool * crown_share_dir * cap * fill
-        # Quality compares the miner's OWN windowed realized rate against the
-        # direction reference — same windowed clearing-rate basis (C-rev).
-        realized_rate = reference.miner_rates.get(hotkey, 0.0) if reference is not None else 0.0
-        quality = rate_quality(from_chain, to_chain, realized_rate, reference_rate)
-        execution_component = pool * vol_share_dir * quality
         rows.append(
             ScoreRow(
                 hotkey=hotkey,
@@ -312,177 +271,15 @@ def build_direction_score_rows(
                 capacity=cap,
                 fill_ratio=fill,
                 vol_share=vol_share_dir,
-                rate_quality=quality,
-                reward=(1.0 if eligible else 0.0) * (w_a * crown_component + w_b * execution_component),
+                reward=(1.0 if eligible else 0.0) * pool * crown_share_dir * cap * fill,
             )
         )
-    return rows, w_a
-
-
-def _canonical_rate_and_weight(from_chain: str, to_chain: str, from_amount: int, to_amount: int) -> Tuple[float, int]:
-    """Canonical 'dest per source' rate (TAO per BTC for the btc/tao pair) plus
-    the swap's volume weight = the **canonical-source** native leg. Weighting a
-    set of per-swap canonical rates by this leg makes the weighted mean equal the
-    aggregate VWAP in *either* direction (the source leg is btc's native amount
-    for both btc→tao and tao→btc). Non-positive legs ⇒ ``(0.0, 0)``."""
-    canon_source, canon_dest = canonical_pair(from_chain, to_chain)
-    native = {from_chain: int(from_amount), to_chain: int(to_amount)}
-    src_native = native.get(canon_source, 0)
-    dst_native = native.get(canon_dest, 0)
-    if src_native <= 0 or dst_native <= 0:
-        return 0.0, 0
-    src_disp = src_native / (10 ** get_chain(canon_source).decimals)
-    dst_disp = dst_native / (10 ** get_chain(canon_dest).decimals)
-    return dst_disp / src_disp, src_native
-
-
-def trimmed_reference(
-    samples: List[Tuple[str, float, float]],
-    trim_frac: float = RATE_REFERENCE_TRIM_FRAC,
-    cap_frac: float = RATE_REFERENCE_MINER_CAP_FRAC,
-    min_swaps: int = RATE_REFERENCE_MIN_SWAPS,
-) -> Optional[float]:
-    """Deterministic per-direction reference from completed-swap clearing rates
-    (C-rev). ``samples`` is ``[(hotkey, rate, weight)]``.
-
-    Pipeline: (1) fewer than ``min_swaps`` positive-weight samples ⇒ ``None``;
-    (2) **per-miner cap** — scale any miner whose summed weight exceeds
-    ``cap_frac × total`` down to the cap (preserves its rate spread, limits its
-    pull, so a wash farmer's self-swaps can't dominate); (3) **weighted trim** —
-    sort by ``(rate, hotkey)`` and drop ``trim_frac`` of the (capped) weight from
-    each tail, with partial inclusion at the boundary samples; (4) weighted mean
-    of the survivors. Pure float ops in a fixed sorted order ⇒ identical across
-    validators given identical samples."""
-    pos = [(hk, float(r), float(w)) for hk, r, w in samples if r > 0 and w > 0]
-    if len(pos) < min_swaps:
-        return None
-    total_weight = sum(w for _, _, w in pos)
-    if total_weight <= 0:
-        return None
-
-    # Per-miner cap: hold each miner's total influence to cap_frac of the pool.
-    cap = cap_frac * total_weight
-    miner_weight: Dict[str, float] = {}
-    for hk, _, w in pos:
-        miner_weight[hk] = miner_weight.get(hk, 0.0) + w
-    scale = {hk: (cap / mw if mw > cap else 1.0) for hk, mw in miner_weight.items()}
-    capped = sorted(((hk, r, w * scale[hk]) for hk, r, w in pos), key=lambda s: (s[1], s[0]))
-    total_capped = sum(w for _, _, w in capped)
-    if total_capped <= 0:
-        return None
-
-    # Weighted trim: keep the central (1 - 2·trim_frac) of the weight by rate.
-    lo_cut = trim_frac * total_capped
-    hi_cut = (1.0 - trim_frac) * total_capped
-    cum = 0.0
-    num = 0.0
-    den = 0.0
-    for _hk, r, w in capped:
-        seg_start, seg_end = cum, cum + w
-        cum = seg_end
-        included = min(seg_end, hi_cut) - max(seg_start, lo_cut)
-        if included <= 0:
-            continue
-        num += r * included
-        den += included
-    if den <= 0:
-        return None
-    return num / den
-
-
-@dataclass
-class DirectionReference:
-    """Per-direction rate-quality reference (C-rev). ``reference`` is the trimmed
-    volume-weighted clearing rate (None when in-window history is too thin);
-    ``miner_rates`` is each miner's own windowed realized VWAP — the numerator the
-    quality curve compares against the reference, on the same windowed basis."""
-
-    reference: Optional[float] = None
-    miner_rates: Dict[str, float] = field(default_factory=dict)
-
-
-def build_direction_references(state_store, current_time: int) -> Dict[Tuple[str, str], DirectionReference]:
-    """``{(from,to): DirectionReference}`` for every scored direction, computed
-    purely from the on-chain ``clearing_rates`` history over
-    ``[current_time − RATE_REFERENCE_WINDOW_SECS, current_time]``. One query per
-    direction; the trimmed reference and each miner's windowed VWAP are both
-    derived from the same rows, so numerator and reference share a basis."""
-    window_start = current_time - RATE_REFERENCE_WINDOW_SECS
-    references: Dict[Tuple[str, str], DirectionReference] = {}
-    for from_chain, to_chain in DIRECTION_POOLS:
-        rows = state_store.get_clearing_rates_in_range(from_chain, to_chain, window_start, current_time)
-        samples: List[Tuple[str, float, float]] = []
-        miner_num: Dict[str, float] = {}
-        miner_den: Dict[str, float] = {}
-        for row in rows:
-            rate, weight = _canonical_rate_and_weight(from_chain, to_chain, row['from_amount'], row['to_amount'])
-            if rate <= 0 or weight <= 0:
-                continue
-            hk = row['hotkey']
-            samples.append((hk, rate, float(weight)))
-            miner_num[hk] = miner_num.get(hk, 0.0) + rate * weight
-            miner_den[hk] = miner_den.get(hk, 0.0) + weight
-        miner_rates = {hk: miner_num[hk] / miner_den[hk] for hk in miner_num if miner_den[hk] > 0}
-        references[(from_chain, to_chain)] = DirectionReference(
-            reference=trimmed_reference(samples), miner_rates=miner_rates
-        )
-    return references
-
-
-def rate_advantage(from_chain: str, to_chain: str, realized_rate: float, reference_rate: float) -> float:
-    """Taker-oriented relative advantage of a realized rate vs the reference,
-    signed so positive = better-than-reference for the swapper. Direction-aware:
-    in the canonical direction (btc→tao) a higher TAO/BTC is better; in the
-    reverse (tao→btc) a lower TAO/BTC is better — the same orientation the crown
-    uses (``lower_rate_wins``)."""
-    if reference_rate <= 0:
-        return 0.0
-    canon_source, _ = canonical_pair(from_chain, to_chain)
-    higher_is_better = from_chain == canon_source
-    if higher_is_better:
-        return (realized_rate - reference_rate) / reference_rate
-    return (reference_rate - realized_rate) / reference_rate
-
-
-def quality_curve(advantage: float) -> float:
-    """One-sided clamp: 1.0 at/above market (within the tolerance deadband),
-    ramping linearly down to ``RATE_QUALITY_MIN`` at ``RATE_QUALITY_FLOOR_ADV``.
-    Above-market is capped at 1.0 — the crown already rewards best-rate presence,
-    so paying it again here would double-reward rate and invite wash-trade
-    farming at fake-good quotes."""
-    tol = RATE_QUALITY_TOLERANCE_BPS / 10_000.0
-    if advantage >= -tol:
-        return 1.0
-    if advantage <= RATE_QUALITY_FLOOR_ADV:
-        return RATE_QUALITY_MIN
-    # Linear interpolation from 1.0 (at -tol) to RATE_QUALITY_MIN (at FLOOR_ADV).
-    frac = (advantage + tol) / (RATE_QUALITY_FLOOR_ADV + tol)
-    return 1.0 + frac * (RATE_QUALITY_MIN - 1.0)
-
-
-def rate_quality(
-    from_chain: str,
-    to_chain: str,
-    realized_rate: float,
-    reference_rate: Optional[float] = None,
-) -> float:
-    """Quality multiplier for a miner's realized volume in a direction: how good
-    its realized rate was versus the on-chain reference (C-rev). Both numbers are
-    realized clearing rates over the same window (``build_direction_references``),
-    so they share a basis. A ``reference_rate`` of None/≤0 (in-window history too
-    thin) ⇒ 1.0 neutral — a missing reference never zeroes everyone or hands out
-    free reward, w_b then pays realized volume by raw share. No realized rate for
-    this miner in-window ⇒ 1.0 (nothing to judge)."""
-    if reference_rate is None or reference_rate <= 0:
-        return 1.0
-    if realized_rate <= 0:
-        return 1.0
-    return quality_curve(rate_advantage(from_chain, to_chain, realized_rate, reference_rate))
+    return rows
 
 
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (eligible × [w_a·crown + w_b·execution]), recycle the rest.
+    (eligible × pool × crown_share × capacity × fill_ratio), recycle the rest.
     ``current_time`` is the unix-seconds window_end (the crown axis).
 
     Volume weighting is *per direction*: a miner earning crown on btc→tao is
@@ -515,11 +312,6 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # lifetime account total. Hotkeys were attributed at ingest (event_index),
     # so no binding read is needed. Built once, sliced per direction below.
     clearing_volumes = self.state_store.get_clearing_volumes(window_start, window_end)
-    # On-chain rate-quality reference (C-rev): trimmed volume-weighted clearing
-    # rate per direction + each miner's windowed realized VWAP, built once per
-    # round from the ingested clearing_rates history. Deterministic — no feed, no
-    # network. A direction with too-thin history yields reference None ⇒ neutral.
-    references = build_direction_references(self.state_store, current_time)
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -585,7 +377,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         if total_crown_dir == 0:
             continue  # empty bucket — pool recycles via the remainder below
 
-        rows, w_a = build_direction_score_rows(
+        rows = build_direction_score_rows(
             from_chain,
             to_chain,
             pool,
@@ -594,7 +386,6 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             volumes_dir=volumes_dir,
             total_volume_dir=total_volume_dir,
             eligibility=eligibility,
-            reference=references.get((from_chain, to_chain)),
         )
         for row in rows:
             uid = hotkey_to_uid.get(row.hotkey)
@@ -605,8 +396,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             wt.record_capacity(factor=row.capacity)
             wt.record_eligibility(eligible=row.eligible)
             # Trace baseline is the pre-volume crown reward (dashboard attributes
-            # the volume penalty off the gap to the final weighted reward).
-            unweighted_rewards[uid] += eligible * w_a * pool * row.crown_share * row.capacity
+            # the volume penalty off the gap to the final reward).
+            unweighted_rewards[uid] += eligible * pool * row.crown_share * row.capacity
             rewards[uid] += row.reward
             score_rows.append(row)
             if row.fill_ratio < 1.0:
@@ -684,7 +475,6 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
             r.capacity,
             r.fill_ratio,
             r.vol_share,
-            r.rate_quality,
             r.reward,
         )
         for r in score_rows
@@ -707,7 +497,6 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     eligibility = build_eligibility(self.solana_client, self.metagraph)
     clearing_volumes = self.state_store.get_clearing_volumes(window_start, window_end)
-    references = build_direction_references(self.state_store, window_end)
     try:
         min_swap_amount = int(self.solana_config_cache.min_swap_amount())
         max_swap_amount = int(self.solana_config_cache.max_swap_amount())
@@ -734,7 +523,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
         volumes_dir, total_volume_dir = windowed_direction_volumes(
             clearing_volumes, from_chain, to_chain, rewardable_hotkeys
         )
-        dir_rows, _ = build_direction_score_rows(
+        dir_rows = build_direction_score_rows(
             from_chain,
             to_chain,
             pool,
@@ -743,7 +532,6 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             volumes_dir=volumes_dir,
             total_volume_dir=total_volume_dir,
             eligibility=eligibility,
-            reference=references.get((from_chain, to_chain)),
         )
         rows.extend(dir_rows)
     return miner_score_tuples(rows, ts)
