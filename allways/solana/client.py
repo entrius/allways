@@ -31,6 +31,19 @@ def swap_key_from_tx_hash(from_tx_hash: str) -> bytes:
     return keccak.new(data=from_tx_hash.encode(), digest_bits=256).digest()
 
 
+def weights_round_key(validator_keys: List[bytes], weights: List[int]) -> bytes:
+    """Mirror of the contract's consensus::weights_hash — keccak256 over
+    REQ_SET_WEIGHTS || each validator key (config order) || each weight LE. Binds a weights vote to
+    its exact snapshot and doubles as the per-snapshot vote-round PDA key."""
+    h = keccak.new(digest_bits=256)
+    h.update(bytes([pdas.REQ_SET_WEIGHTS]))
+    for k in validator_keys:
+        h.update(bytes(k))
+    for w in weights:
+        h.update(int(w).to_bytes(8, 'little'))
+    return h.digest()
+
+
 @dataclass
 class SolanaSwap:
     """Miner-facing view of an on-chain `Swap`, keyed by its `swap_key` (== keccak(from_tx_hash)).
@@ -340,13 +353,18 @@ class AllwaysSolanaClient:
 
     # ---------- representative writes (miner-side, no consensus) ----------
     def bind_hotkey(self, hotkey: bytes, hotkey_sig: bytes) -> str:
-        """Registered miners only: the program requires an existing MinerState with collateral >=
-        min_collateral (H3 squat gate), so `post_collateral` must have run before binding."""
+        """Identity-gated (H3 squat gate): registered miners (MinerState with collateral >=
+        min_collateral, so `post_collateral` must have run) and whitelisted validators may bind.
+        miner_state is optional on-chain — the program id is passed in its place (anchor's None)
+        when the signer has no MinerState."""
         miner = self.keypair.pubkey()
+        miner_state = pdas.miner_state_pda(miner, self.program_id)
+        if self.get_miner_state(miner) is None:
+            miner_state = self.program_id
         metas = [
             AccountMeta(miner, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
-            AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, False),
+            AccountMeta(miner_state, False, False),
             AccountMeta(pdas.binding_pda(miner, self.program_id), False, True),
             AccountMeta(pdas.hotkey_binding_pda(hotkey, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
@@ -521,6 +539,20 @@ class AllwaysSolanaClient:
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('vote_activate', b'', metas)])
+
+    def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
+        """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.
+        The round PDA is keyed by the snapshot hash, so competing proposals coexist instead of blocking."""
+        round_key = weights_round_key(validator_keys, weights)
+        validator = self.keypair.pubkey()
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, round_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_SET_WEIGHTS_ARGS.build({'weights': weights, 'round_key': round_key})
+        return self._send([self._ix('vote_set_weights', args, metas)])
 
     def mark_fulfilled(self, swap_key: bytes, to_tx_hash: str, to_tx_block: int) -> str:
         """Miner-only: mark an Active swap Fulfilled with the dest-leg tx. Prod miner wiring lands in B4;

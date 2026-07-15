@@ -12,11 +12,13 @@ use crate::state::{Binding, Config, HotkeyBinding, MinerState};
 /// hotkey owns it forever, so a struck pubkey can't rotate + re-bind the same hotkey to dodge strikes.
 /// The same miner may re-bind in place (refresh sig / change hotkey). Not halt-gated — identity, no value.
 ///
-/// Gated to registered miners (MinerState exists + collateral >= min_collateral): the set-once marker
-/// is claimable exactly once per hotkey, so a free, unauthenticated `bind_hotkey` would let anyone
-/// enumerate metagraph hotkeys and squat them all, locking real miners out of their identity. The
-/// gate prices each claimed hotkey at a full collateral stake held by an attributable on-chain miner.
-/// Residual: a funded miner can still claim a hotkey that isn't theirs — the validator's off-chain
+/// Gated to registered miners (MinerState exists + collateral >= min_collateral) and whitelisted
+/// validators (Config.validators — they bind so peers can attribute their stake for the weights
+/// vote): the set-once marker is claimable exactly once per hotkey, so a free, unauthenticated
+/// `bind_hotkey` would let anyone enumerate metagraph hotkeys and squat them all, locking real
+/// miners out of their identity. Both paths price a claimed hotkey at something scarce and
+/// attributable — a full collateral stake, or a hand-approved validator slot.
+/// Residual: a gated caller can still claim a hotkey that isn't theirs — the validator's off-chain
 /// sr25519 verify rejects the binding for scoring, so the squat earns nothing but still blocks; that
 /// deeper fix (validator-attested claims) was weighed and deferred.
 #[derive(Accounts)]
@@ -28,13 +30,14 @@ pub struct BindHotkey<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
 
-    /// Must already exist (created by `post_collateral`) — binding is for registered miners only.
+    /// Present on the miner path (created by `post_collateral`); whitelisted validators have none
+    /// and pass the program id in its place (anchor's optional-account None).
     #[account(
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
     )]
-    pub miner_state: Account<'info, MinerState>,
+    pub miner_state: Option<Account<'info, MinerState>>,
 
     #[account(
         init_if_needed,
@@ -60,12 +63,16 @@ pub struct BindHotkey<'info> {
 }
 
 pub fn handler(ctx: Context<BindHotkey>, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Result<()> {
-    // Registered-miner gate: claiming a hotkey requires a live collateral stake, so squatting the
-    // metagraph costs min_collateral per identity instead of rent.
-    require!(
-        ctx.accounts.miner_state.collateral >= ctx.accounts.config.min_collateral,
-        ErrorCode::InsufficientCollateral
-    );
+    // Identity gate: claiming a hotkey requires a live collateral stake (registered miner) or a
+    // whitelisted-validator slot, so squatting the metagraph stays priced instead of rent-cheap.
+    let signer = ctx.accounts.miner.key();
+    let is_validator = ctx.accounts.config.validators.iter().any(|v| v.key == signer);
+    let miner_ok = ctx
+        .accounts
+        .miner_state
+        .as_ref()
+        .is_some_and(|ms| ms.collateral >= ctx.accounts.config.min_collateral);
+    require!(is_validator || miner_ok, ErrorCode::InsufficientCollateral);
 
     let now = Clock::get()?.unix_timestamp;
     let miner = ctx.accounts.miner.key();

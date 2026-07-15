@@ -2,7 +2,7 @@
 
 Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
   quote / stats : [seed, miner, from_chain, to_chain]
-  vote          : [b"vote", [req_type], target]  (global weights round: [b"vote", [REQ_SET_WEIGHTS]])
+  vote          : [b"vote", [req_type], target]  (weights round: target = the 32-byte snapshot hash)
   swap          : [b"swap", swap_key]   (swap_key = keccak(from_tx_hash), 32 bytes)
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
 """
@@ -80,7 +80,7 @@ def stats_pda(miner, from_chain: str, to_chain: str, program_id: Optional[Pubkey
 
 
 def vote_round_pda(req_type: int, target=None, program_id: Optional[Pubkey] = None) -> Pubkey:
-    """Per-target vote round, or the global weights round when target is None (REQ_SET_WEIGHTS)."""
+    """Per-target vote round. REQ_SET_WEIGHTS rounds are keyed per snapshot: target = weights_round_key."""
     seeds = [b'vote', bytes([req_type])]
     if target is not None:
         seeds.append(_pk_bytes(target))

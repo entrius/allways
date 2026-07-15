@@ -36,6 +36,20 @@ def hotkey_ss58(hotkey_bytes: bytes) -> Optional[str]:
         return None
 
 
+def warn_if_unbound(solana_client) -> None:
+    """Startup nudge: peers can only derive this validator's stake weight if its pubkey carries a
+    hotkey binding. Best-effort — a read failure never blocks startup."""
+    try:
+        unbound = solana_client.get_binding(solana_client.keypair.pubkey()) is None
+    except Exception as e:
+        bt.logging.debug(f'binding self-check skipped: {e}')
+        return
+    if unbound:
+        bt.logging.warning(
+            'solana pubkey has no hotkey binding — run `alw bind-hotkey` so peers can post your stake weight'
+        )
+
+
 def build_attribution(solana_client) -> Dict[str, str]:
     """Map miner Solana pubkey (str) → bound hotkey ss58 for every valid binding.
 

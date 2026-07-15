@@ -9,10 +9,11 @@ helpers (tests/test_swap.rs initiate_ix/confirm_ix/timeout_ix, test_consensus.rs
 import hashlib
 
 import pytest
+from Crypto.Hash import keccak as keccak_lib
 from solders.keypair import Keypair
 
 from allways.solana import layouts, pdas
-from allways.solana.client import SYSTEM_PROGRAM, AllwaysSolanaClient, swap_key_from_tx_hash
+from allways.solana.client import SYSTEM_PROGRAM, AllwaysSolanaClient, swap_key_from_tx_hash, weights_round_key
 from allways.solana.program import resolve_program_id
 
 PID = resolve_program_id()
@@ -55,6 +56,7 @@ def test_ix_discriminators_match_anchor_global_formula():
         'timeout_swap',
         'close_stale_claim',
         'vote_activate',
+        'vote_set_weights',
         'mark_fulfilled',
         'extend_timeout',
         'extend_reservation',
@@ -100,6 +102,31 @@ def test_vote_initiate_ix(client):
         (pdas.reservation_pda(miner, PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_INITIATE, miner, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
+        (SYSTEM_PROGRAM, False, False),
+    ]
+
+
+def test_vote_set_weights_ix(client):
+    weights = [3, 0, 7]
+    keys = [bytes(Keypair().pubkey()) for _ in range(3)]
+    client.vote_set_weights(weights, keys)
+    ix = _ix(client)
+    # round_key mirrors consensus::weights_hash: keccak(REQ_SET_WEIGHTS || keys || weights LE).
+    kec = keccak_lib.new(digest_bits=256)
+    kec.update(bytes([pdas.REQ_SET_WEIGHTS]))
+    for k in keys:
+        kec.update(k)
+    for w in weights:
+        kec.update(w.to_bytes(8, 'little'))
+    round_key = kec.digest()
+    assert weights_round_key(keys, weights) == round_key
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['vote_set_weights']
+    # Borsh: Vec<u64> (u32 LE length prefix + elements) then the raw 32-byte round_key.
+    assert ix.data[8:] == layouts.IX_SET_WEIGHTS_ARGS.build({'weights': weights, 'round_key': round_key})
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (pdas.config_pda(PID), False, True),
+        (pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS, round_key, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
 
