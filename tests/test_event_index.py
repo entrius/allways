@@ -305,6 +305,24 @@ class TestIngestClearingRate:
         assert store.get_clearing_volumes(0, 100) == {}
         store.close()
 
+    def test_reingested_swap_counts_volume_once(self, tmp_path: Path):
+        """M2: a cursor-reset replay of the same SwapCompleted must not double volume."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        completed = rec(
+            'SwapCompleted',
+            miner='pk_a',
+            block_time=10,
+            from_chain='btc',
+            to_chain='tao',
+            from_amount=100,
+            to_amount=200,
+        )
+        idx.ingest([completed], ATTR)
+        idx.ingest([completed], ATTR)
+        assert store.get_clearing_volumes(0, 100)[('btc', 'tao')]['hk_a'] == (100, 200)
+        store.close()
+
     def test_prune_drops_old_samples(self, tmp_path: Path):
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
@@ -314,6 +332,7 @@ class TestIngestClearingRate:
                     'SwapCompleted',
                     miner='pk_a',
                     block_time=100,
+                    swap_key=bytes([1] * 32),
                     from_chain='btc',
                     to_chain='tao',
                     from_amount=1,
@@ -323,6 +342,7 @@ class TestIngestClearingRate:
                     'SwapCompleted',
                     miner='pk_a',
                     block_time=900,
+                    swap_key=bytes([2] * 32),
                     from_chain='btc',
                     to_chain='tao',
                     from_amount=3,

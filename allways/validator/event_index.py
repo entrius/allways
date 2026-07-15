@@ -107,6 +107,7 @@ class SolanaEventIndex:
                     self._chain(rec, 'to_chain'),
                     int(rec.fields['from_amount']),
                     int(rec.fields['to_amount']),
+                    bytes(rec.fields['swap_key']).hex(),
                 )
             return True
         if name == 'StaleClaimClosed':

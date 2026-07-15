@@ -295,15 +295,18 @@ class ValidatorStateStore:
         to_chain: str,
         from_amount: int,
         to_amount: int,
+        swap_key: str,
     ) -> None:
-        """Persist one completed swap's realized legs. ``block_num`` is the unix
-        ``blockTime``; the legs are stored as decimal strings (u128-safe)."""
+        """Persist one completed swap's realized legs, keyed by ``swap_key`` hex so a
+        cursor-reset / RPC-prune re-ingest can't double-count volume. ``block_num`` is
+        the unix ``blockTime``; the legs are stored as decimal strings (u128-safe)."""
         self._execute(
             """
-            INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(swap_key) DO NOTHING
             """,
-            (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount))),
+            (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount)), swap_key),
         )
 
     def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
@@ -511,6 +514,10 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
             if cols and 'outcome' not in cols:
                 conn.execute('DROP TABLE swap_outcomes')
+            # Pre-M2 deployments lack the clearing_rates idempotency key.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(clearing_rates)')]
+            if cols and 'swap_key' not in cols:
+                conn.execute('ALTER TABLE clearing_rates ADD COLUMN swap_key TEXT')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -575,10 +582,15 @@ class ValidatorStateStore:
                     from_chain  TEXT NOT NULL,
                     to_chain    TEXT NOT NULL,
                     from_amount TEXT NOT NULL,
-                    to_amount   TEXT NOT NULL
+                    to_amount   TEXT NOT NULL,
+                    swap_key    TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);
+                -- Idempotency key: NULL only on pre-migration rows (SQLite UNIQUE
+                -- admits multiple NULLs); every new insert carries the swap_key.
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_clearing_rates_swap_key
+                    ON clearing_rates(swap_key);
 
                 -- Terminal outcome per swap (SwapCompleted | SwapTimedOut), keyed by
                 -- swap_key hex. Terminal swap PDAs are closed on-chain, so this is the
