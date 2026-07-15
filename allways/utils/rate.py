@@ -37,6 +37,19 @@ def quantize_rate_display(rate: float) -> float:
     return quantize_rate_fixed(int(rate * RATE_PRECISION)) / RATE_PRECISION
 
 
+def directional_rate(from_chain: str, to_chain: str, rate_display: str) -> str:
+    """Directional 'to per 1 from' rate for display. Stored quotes are canonical 'dest per 1 canonical
+    source', which reads backwards for a reverse direction (BTC→SOL stored 0.0021 really means ~476
+    SOL per BTC). Return the reciprocal there so `amount × shown-rate ≈ you receive` always reconciles."""
+    try:
+        r = float(rate_display)
+    except (TypeError, ValueError):
+        return rate_display
+    if r > 0 and from_chain != canonical_pair(from_chain, to_chain)[0]:
+        r = 1.0 / r
+    return f'{r:.8g}'
+
+
 def calculate_to_amount(
     from_amount: int,
     rate,

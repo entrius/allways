@@ -32,7 +32,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
 from allways.solana.rpc import TransientRpcError
-from allways.utils.rate import apply_fee_deduction
+from allways.utils.rate import apply_fee_deduction, directional_rate
 
 
 @click.group('swap', cls=StyledGroup, show_disclaimer=True)
@@ -220,9 +220,10 @@ def swap_now_command(
     # `alw swap quote`. The gross `to_amount` is what gets pinned on-chain, not what you receive.
     recv = apply_fee_deduction(amts.to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
 
+    rate_disp = directional_rate(from_chain, to_chain, cand.rate_display)
     console.print(
         f'\n  Swap [cyan]{amount_opt} {from_chain.upper()}[/cyan] -> ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan]'
-        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {cand.rate_display} per SOL)\n'
+        f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {rate_disp} {to_chain.upper()}/{from_chain.upper()})\n'
     )
 
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
