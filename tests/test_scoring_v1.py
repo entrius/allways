@@ -333,7 +333,7 @@ class TestGetClearingVolumes:
             )
             conn.execute(
                 'INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount)'
-                " VALUES (9_600, 'hk_old', 'btc', 'sol', '1', '1')"
+                " VALUES (9600, 'hk_old', 'btc', 'sol', '1', '1')"
             )
         store = ValidatorStateStore(db_path=db)
         store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk_new')
