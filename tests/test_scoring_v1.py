@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -285,9 +286,9 @@ class TestGetClearingVolumes:
 
     def test_sums_per_direction_and_hotkey(self, tmp_path: Path):
         store = self._store(tmp_path)
-        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600)
-        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 100, 200)
-        store.insert_clearing_rate(9_850, 'hk_b', 'sol', 'btc', 100, 50)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk1')
+        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 100, 200, 'sk2')
+        store.insert_clearing_rate(9_850, 'hk_b', 'sol', 'btc', 100, 50, 'sk3')
         vols = store.get_clearing_volumes(9_700, 10_000)
         assert vols[('btc', 'sol')]['hk_a'] == (400, 800)
         assert vols[('sol', 'btc')]['hk_b'] == (100, 50)
@@ -295,26 +296,58 @@ class TestGetClearingVolumes:
 
     def test_window_boundaries_start_exclusive_end_inclusive(self, tmp_path: Path):
         store = self._store(tmp_path)
-        store.insert_clearing_rate(9_700, 'hk_a', 'btc', 'sol', 1, 1)  # at start — excluded
-        store.insert_clearing_rate(9_701, 'hk_a', 'btc', 'sol', 10, 10)  # just inside
-        store.insert_clearing_rate(10_000, 'hk_a', 'btc', 'sol', 100, 100)  # at end — included
-        store.insert_clearing_rate(10_001, 'hk_a', 'btc', 'sol', 1_000, 1_000)  # past end — excluded
+        store.insert_clearing_rate(9_700, 'hk_a', 'btc', 'sol', 1, 1, 'sk4')  # at start — excluded
+        store.insert_clearing_rate(9_701, 'hk_a', 'btc', 'sol', 10, 10, 'sk5')  # just inside
+        store.insert_clearing_rate(10_000, 'hk_a', 'btc', 'sol', 100, 100, 'sk6')  # at end — included
+        store.insert_clearing_rate(10_001, 'hk_a', 'btc', 'sol', 1_000, 1_000, 'sk7')  # past end — excluded
         vols = store.get_clearing_volumes(9_700, 10_000)
         assert vols[('btc', 'sol')]['hk_a'] == (110, 110)
         store.close()
 
     def test_empty_window(self, tmp_path: Path):
         store = self._store(tmp_path)
-        store.insert_clearing_rate(9_000, 'hk_a', 'btc', 'sol', 5, 5)
+        store.insert_clearing_rate(9_000, 'hk_a', 'btc', 'sol', 5, 5, 'sk8')
         assert store.get_clearing_volumes(9_700, 10_000) == {}
+        store.close()
+
+    def test_reingest_same_swap_key_counts_once(self, tmp_path: Path):
+        # M2: cursor-reset / RPC-prune re-ingest of the same SwapCompleted must not double volume.
+        store = self._store(tmp_path)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'dup')
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'dup')
+        assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (300, 600)
+        store.close()
+
+    def test_pre_m2_db_migrates_and_purges_unkeyed_rows(self, tmp_path: Path):
+        # A pre-idempotency DB gains the column in place; its NULL-key rows are purged
+        # (NULLs never collide with ON CONFLICT, so a replay would double-count them).
+        import sqlite3
+
+        db = tmp_path / 'state.db'
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                """CREATE TABLE clearing_rates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, block_num INTEGER NOT NULL,
+                    hotkey TEXT NOT NULL, from_chain TEXT NOT NULL, to_chain TEXT NOT NULL,
+                    from_amount TEXT NOT NULL, to_amount TEXT NOT NULL)"""
+            )
+            conn.execute(
+                'INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount)'
+                " VALUES (9600, 'hk_old', 'btc', 'sol', '1', '1')"
+            )
+        store = ValidatorStateStore(db_path=db)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk_new')
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'sk_new')  # replay → no-op
+        vols = store.get_clearing_volumes(9_500, 10_000)
+        assert vols[('btc', 'sol')] == {'hk_a': (300, 600)}
         store.close()
 
     def test_u128_scale_legs_sum_exactly(self, tmp_path: Path):
         # Legs are TEXT in SQLite; summing in Python keeps u128-scale integers
         # exact where SQL SUM would round through float.
         store = self._store(tmp_path)
-        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 10**30 + 7, 1)
-        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 3, 1)
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 10**30 + 7, 1, 'sk9')
+        store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 3, 1, 'sk10')
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (10**30 + 10, 2)
         store.close()
 
@@ -1971,6 +2004,7 @@ class TestVolumeWeighting:
             to_chain,
             from_amount,
             from_amount if to_amount is None else to_amount,
+            uuid4().hex,
         )
 
     def test_idle_network_no_penalty(self, tmp_path: Path):
@@ -2190,7 +2224,7 @@ class TestCapacityVolumeInteraction:
         )
         conn.commit()
         # B serves the market's (floor-clearing) volume so A's vol_share = 0.
-        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000)
+        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 0.5 (B serves the volume).
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.5 * 0.5, atol=1e-6)
@@ -2213,7 +2247,7 @@ class TestCapacityVolumeInteraction:
                 (hk, from_c, to_c, rate, 0),
             )
         conn.commit()
-        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'btc', 1_500_000_000, 1_500_000_000)
+        v.state_store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'btc', 1_500_000_000, 1_500_000_000, 'sk13')
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
@@ -2553,7 +2587,7 @@ class TestScoreSnapshots:
             ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
-        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 5_000_000_000_000, 1_000_000_000)
+        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 5_000_000_000_000, 1_000_000_000, 'sk14')
         v.database_storage.is_enabled.return_value = True
         return v
 

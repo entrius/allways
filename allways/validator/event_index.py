@@ -96,7 +96,9 @@ class SolanaEventIndex:
                 dev_signal.emit('swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=outcome)
             # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the windowed volume read, in
-            # addition to closing the fulfillment above.
+            # addition to closing the fulfillment above. Its `rate` field is
+            # deliberately ignored: the attest gate already refused any swap whose
+            # legs disagree with the pinned rate, and the legs are the realized truth.
             if name == 'SwapCompleted':
                 self.state_store.insert_clearing_rate(
                     block_time,
@@ -105,6 +107,7 @@ class SolanaEventIndex:
                     self._chain(rec, 'to_chain'),
                     int(rec.fields['from_amount']),
                     int(rec.fields['to_amount']),
+                    bytes(rec.fields['swap_key']).hex(),
                 )
             return True
         if name == 'StaleClaimClosed':

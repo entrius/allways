@@ -14,7 +14,6 @@ from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
     console,
-    effective_rate,
     fail,
     from_lamports,
     get_solana_cli_context,
@@ -32,7 +31,7 @@ from allways.cli.swap_commands.swap_intake import (
     to_smallest_units,
 )
 from allways.constants import FEE_DIVISOR
-from allways.utils.rate import apply_fee_deduction, is_executable_rate
+from allways.utils.rate import apply_fee_deduction, directional_rate, is_executable_rate
 
 
 def _prompt_or_fail(value, prompt_text, opt, cast=str):
@@ -123,7 +122,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
                 'offers': [
                     {
                         'miner': str(c.miner),
-                        'rate': effective_rate(from_chain, to_chain, c.rate_display),
+                        'rate': directional_rate(from_chain, to_chain, c.rate_display),
                         'rate_unit': f'{to_chain.upper()} per {from_chain.upper()}',
                         'receive': recv / 10**to_dec,
                         'collateral_sol': from_lamports(c.collateral),
@@ -158,7 +157,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         is_best = str(c.miner) == best_miner
         table.add_row(
             Text(str(c.miner)[:12] + '…', style='bold cyan' if is_best else 'cyan'),
-            effective_rate(from_chain, to_chain, c.rate_display),
+            directional_rate(from_chain, to_chain, c.rate_display),
             f'{recv / 10**to_dec:.8g}',
             f'{from_lamports(c.collateral):.2f} SOL',
             '★ best' if is_best else '',

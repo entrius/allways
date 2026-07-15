@@ -161,7 +161,7 @@ pub struct Reservation {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    /// Canonical rate (see `MinerQuote::rate`); fixed-point = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
     /// Reservation creation time, unix seconds. The **source-freshness lower bound**: the user's
     /// deposit must be mined after this (a replayed prior-swap deposit predates it → rejected by the
@@ -213,7 +213,7 @@ pub struct Swap {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    /// Canonical rate (see `MinerQuote::rate`); fixed-point = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
     /// Collateral-backed swap size, collateral-currency smallest unit (SOL lamports) — fee/slash basis.
     pub collateral_amount: u64,
@@ -261,8 +261,9 @@ pub struct MinerQuote {
     /// Where the miner sends the destination asset (on `to_chain`).
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    /// Offered rate, dest per 1 source, for THIS direction. Fixed-point = display_rate ×
-    /// RATE_PRECISION (1e18) — exact, no string parse; see constants::RATE_PRECISION.
+    /// Offered rate, canonical 'dest per 1 canonical source' (hub pinned as source) in BOTH direction
+    /// PDAs — never per-direction; direction is applied off-chain via `is_reverse`. Fixed-point =
+    /// display_rate × RATE_PRECISION (1e18) — exact, no string parse; see constants::RATE_PRECISION.
     pub rate: u128,
     /// Advertised depth in the asset's own units (u128 to cover wei-scale).
     pub liquidity: u128,
@@ -361,7 +362,7 @@ pub struct Pool {
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_to_addr: String,
-    /// Fixed-point rate = display_rate × RATE_PRECISION (1e18); see constants::RATE_PRECISION.
+    /// Canonical rate (see `MinerQuote::rate`); fixed-point = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
     /// Unix seconds the pool opened (0 = available/empty slot).
     pub opened_at: i64,

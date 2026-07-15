@@ -229,21 +229,6 @@ def print_json(data) -> None:
     click.echo(json.dumps(data, indent=2, default=str))
 
 
-def effective_rate(from_chain: str, to_chain: str, rate_display: str) -> str:
-    """Directional 'to per 1 from' rate for display. Stored quotes are canonical 'dest per 1 hub', which
-    reads backwards for a spoke→hub direction (BTC→SOL stored 0.0021 really means ~476 SOL per BTC).
-    Return the reciprocal for spoke→hub so `amount × shown-rate ≈ you receive` always reconciles."""
-    from allways.constants import NUMERAIRE_CHAIN
-
-    try:
-        r = float(rate_display)
-    except (TypeError, ValueError):
-        return rate_display
-    if to_chain == NUMERAIRE_CHAIN and r > 0:
-        r = 1.0 / r
-    return f'{r:.8g}'
-
-
 def safe_read(fn: Callable, what: str = 'read from Solana'):
     """Run a client read, converting any RPC/decode/transport failure into a clean non-zero `fail`.
 

@@ -23,7 +23,6 @@ from allways.cli.swap_commands.helpers import (
     STATUS_STYLES,
     ZERO_SWAP_KEY,
     console,
-    effective_rate,
     fail,
     from_lamports,
     get_solana_cli_context,
@@ -36,6 +35,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.solana.client import swap_from_solana
+from allways.utils.rate import directional_rate
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
 MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
@@ -60,16 +60,17 @@ def _quote_dir(q) -> str:
 
 
 def _rate(q) -> str:
-    """Effective directional rate ('to per 1 from') for display — see helpers.effective_rate."""
-    return effective_rate(q.from_chain, q.to_chain, rate_display_from_fixed(q.rate))
+    """Directional 'to per 1 from' rate for display — see utils.rate.directional_rate."""
+    return directional_rate(q.from_chain, q.to_chain, rate_display_from_fixed(q.rate))
 
 
 def _max_rate(entry) -> float:
-    """Highest numeric rate the miner posts (coarse cross-direction proxy for `--sort rate`)."""
+    """Highest DIRECTIONAL rate the miner posts (coarse cross-direction proxy for `--sort rate`),
+    matching the numbers the rate column renders."""
     rates = []
     for q in entry.quotes:
         try:
-            rates.append(float(rate_display_from_fixed(q.rate)))
+            rates.append(float(_rate(q)))
         except (TypeError, ValueError):
             continue
     return max(rates) if rates else 0.0

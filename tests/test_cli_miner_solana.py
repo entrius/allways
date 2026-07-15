@@ -143,12 +143,44 @@ def test_post_pair_calls_set_quote_with_scaled_rate():
         patch('allways.cli.swap_commands.pair.get_solana_cli_context', return_value=({}, c)),
         patch('allways.cli.swap_commands.pair.write_rate_posted_flag'),
     ):
-        # btc bc1qsrc tao 5dst 345 (same rate both directions)
+        # btc bc1qsrc tao 5dst 345 (same effective price both directions)
         res = CliRunner().invoke(post_pair, ['btc', 'bc1qsrc', 'tao', '5dst', '345', '--yes'])
     assert res.exit_code == 0, res.output
-    # Two directions posted (rate + counter both 345), rate scaled by RATE_PRECISION.
+    # Two directions posted (rate + counter both canonical 345), rate scaled by RATE_PRECISION.
     assert c.set_quote.call_count == 2
     first = c.set_quote.call_args_list[0].args
     assert first[4] == int(345 * RATE_PRECISION)
     # forward direction keeps src addr on from-leg, dst addr on to-leg
     assert (first[0], first[1], first[2], first[3]) == ('btc', 'tao', 'bc1qsrc', '5dst')
+
+
+def test_post_pair_directional_counter_rate_posts_canonical():
+    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address='5Fhotkey'))
+    c = _client()
+    with (
+        patch('allways.cli.swap_commands.pair.get_cli_context', return_value=({}, wallet, None, None)),
+        patch('allways.cli.swap_commands.pair.get_solana_cli_context', return_value=({}, c)),
+        patch('allways.cli.swap_commands.pair.write_rate_posted_flag'),
+    ):
+        # COUNTER_RATE is directional (BTC per 1 TAO); the chain stores canonical (TAO per 1 BTC).
+        res = CliRunner().invoke(post_pair, ['btc', 'bc1qsrc', 'tao', '5dst', '345', '0.003', '--yes'])
+    assert res.exit_code == 0, res.output
+    counter = c.set_quote.call_args_list[1].args
+    assert (counter[0], counter[1]) == ('tao', 'btc')
+    assert counter[4] == 33333 * 10**16  # 1/0.003 = 333.33…, floored to 5 sig figs
+
+
+def test_post_pair_rejects_inverted_counter_rate():
+    """Old-style canonical COUNTER_RATE (pre-directional automation) must hard-fail, not post
+    an instantly arbitrageable reverse quote — even with --yes."""
+    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address='5Fhotkey'))
+    c = _client()
+    with (
+        patch('allways.cli.swap_commands.pair.get_cli_context', return_value=({}, wallet, None, None)),
+        patch('allways.cli.swap_commands.pair.get_solana_cli_context', return_value=({}, c)),
+        patch('allways.cli.swap_commands.pair.write_rate_posted_flag'),
+    ):
+        res = CliRunner().invoke(post_pair, ['btc', 'bc1qsrc', 'tao', '5dst', '345', '345', '--yes'])
+    assert res.exit_code != 0
+    assert 'inverted' in res.output
+    c.set_quote.assert_not_called()
