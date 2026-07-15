@@ -30,7 +30,7 @@ class WeightingTrace:
     """Per-hotkey capacity + volume + eligibility factors for the scoring log.
 
     ``capacity_factor`` is the time-weighted average of
-    ``min(1, collateral / max_swap)`` over the miner's crown intervals — the
+    ``min(1, collateral / (1.1 × max_swap))`` over the miner's crown intervals — the
     per-block series lives in the event watcher, so a post-window collateral
     top-up cannot retroactively scale it (#409). ``eligible`` is the flat 0/1
     crown gate read off the on-chain MinerState counters (B3.3)."""

@@ -277,9 +277,8 @@ class TestBuildEligibility:
 
 class TestGetClearingVolumes:
     """``get_clearing_volumes`` sums the windowed clearing-rate legs per
-    (direction, hotkey) — the realized-volume read the reward weighting
-    consumes. Window semantics are ``(start, end]``, matching
-    ``get_clearing_rates_in_range``."""
+    (direction, hotkey) — the realized-volume read ``fill_ratio`` consumes.
+    Window semantics are ``(start, end]``."""
 
     def _store(self, tmp_path: Path) -> ValidatorStateStore:
         return ValidatorStateStore(db_path=tmp_path / 'state.db')
@@ -1993,9 +1992,8 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A's vol_share = 0, crown_share = 1.0 → participation = 0 → fill_ratio = 0.5.
-        # Volume>0 in this direction → w_a=0.8/w_b=0.2; A's qv_share is 0, so
-        # A = 0.8·(pool·0.5). B has crown_share = 0 → no crown reward to multiply.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
+        # A = pool·0.5. B has crown_share = 0 → no crown reward to multiply.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
@@ -2041,8 +2039,7 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_b', from_amount=900_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → fill_ratio = 0.55.
-        # w_a=0.8/w_b=0.2: 0.8·(pool·0.55) + 0.2·(pool·0.1) = pool·0.46.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.46, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.55, atol=1e-6)
         # B: crown_share = 0 → factor moot, no reward to multiply.
         assert rewards[1] == 0.0
         v.state_store.close()
@@ -2073,10 +2070,9 @@ class TestVolumeWeighting:
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
         # A participation = 0.2/0.8 = 0.25 → fill_ratio 0.625; B → fill_ratio 1.0.
-        # w_a=0.8/w_b=0.2 (volume>0): A = 0.8·(0.8·0.625) + 0.2·0.2 = 0.44·pool.
-        #                              B = 0.8·(0.2·1.0)  + 0.2·0.8 = 0.32·pool.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.44, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_SOL_BTC * 0.32, atol=1e-6)
+        # A = 0.8·0.625 = 0.5·pool. B = 0.2·1.0 = 0.2·pool.
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_SOL_BTC * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_timed_out_swaps_dont_count_as_volume(self, tmp_path: Path):
@@ -2144,10 +2140,10 @@ class TestVolumeWeighting:
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
         # B clears dust in A's market: A holds all crown, serves none of the
-        # volume → w_a·pool·fill_ratio(0.5).
+        # volume → pool·fill_ratio(0.5).
         self.insert_volume(v, 'hk_b', from_amount=100, to_amount=999_999_999)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_volume_outside_window_ignored(self, tmp_path: Path):
@@ -2175,145 +2171,6 @@ class TestVolumeWeighting:
         v.state_store.close()
 
 
-class TestRewardShapeWeights:
-    """Reward = eligible × [w_a·crown + w_b·execution]. Phase C set the live
-    weights to w_a=0.8/w_b=0.2; a larger w_b shifts weight toward realized
-    volume. A solo crown holder with full volume share earns the whole pool for
-    any w_a+w_b=1 (both components equal the pool there)."""
-
-    def _solo_crown_with_volume(self, tmp_path: Path) -> SimpleNamespace:
-        # hk_a holds 100% tao→btc crown and serves 100% of the volume.
-        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys)
-        conn = v.state_store.require_connection()
-        conn.execute(
-            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_a', 'btc', 'sol', 0.00020, 0),
-        )
-        conn.commit()
-        # One in-window completed swap: all the direction's volume, clearing at
-        # TestCrevReference.REALIZED (500) with a floor-clearing SOL leg. Doubles
-        # as the holder's own realized rate for the C-rev tests below.
-        f, t = TestCrevReference._legs(TestCrevReference.REALIZED)
-        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', f, t)
-        return v
-
-    def test_solo_holder_earns_full_pool_under_live_weights(self, tmp_path: Path):
-        """Live weights (w_a=0.8, w_b=0.2): a solo crown holder serving all the
-        volume has crown_share = vol_share = 1 and neutral quality, so both
-        components equal the pool — it earns the whole pool, same as crown-only."""
-        v = self._solo_crown_with_volume(tmp_path)
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        v.state_store.close()
-
-    def test_wb_positive_shifts_weight_toward_volume(self, tmp_path: Path, monkeypatch):
-        """A positive w_b adds the realized-volume component on top of the crown
-        component, so a volume-serving crown holder earns strictly more than it
-        does under the w_b=0 baseline."""
-        # Pin w_a=1.0 across both runs and vary only w_b (0 → 0.5) so the delta
-        # isolates the added execution term (weights need not sum to 1 here —
-        # this is a formula sanity check, not a distribution).
-        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_CROWN', 1.0)
-        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_EXECUTION', 0.0)
-        v_base = self._solo_crown_with_volume(tmp_path / 'base')
-        baseline, _ = calculate_miner_rewards(v_base, v_base.block)
-        v_base.state_store.close()
-
-        monkeypatch.setattr(scoring_mod, 'REWARD_WEIGHT_EXECUTION', 0.5)
-        v_vol = self._solo_crown_with_volume(tmp_path / 'vol')
-        weighted, _ = calculate_miner_rewards(v_vol, v_vol.block)
-        v_vol.state_store.close()
-
-        # Crown share 1.0, vol_share 1.0 → qv component = pool. Adds 0.5·pool.
-        assert weighted[0] > baseline[0]
-        np.testing.assert_allclose(weighted[0], baseline[0] + 0.5 * POOL_BTC_SOL, atol=1e-6)
-
-
-class TestCrevReference:
-    """C-rev — the on-chain trimmed reference gates the execution slice,
-    replacing the external feed. The solo holder executes tao→btc at a realized
-    500 TAO/BTC; seeding the network's clearing-rate history around 500 sets the
-    reference (the 500 outlier is trimmed when other rates dominate), and the
-    holder's own clearing row sets its realized rate."""
-
-    REALIZED = 500.0  # canonical rate the holder's own swap executed at
-
-    @staticmethod
-    def _legs(rate: float) -> tuple[int, int]:
-        # btc→sol legs clearing at `rate` for a 1-SOL swap (1e9 lamports).
-        # Equal SOL weight per swap, so the per-miner cap is only ever
-        # triggered by repeating a hotkey, not by these distinct refs.
-        return int(rate * 10 * 1e9), 1_000_000_000
-
-    def _solo(self, tmp_path: Path, reference_rate, n_ref: int = 20):
-        # The holder's OWN windowed realized clearing rate (500) is the volume
-        # row _solo_crown_with_volume seeded in-window.
-        v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
-        # A cluster of other-miner swaps at the target rate, before the scoring
-        # window (block 0) so they set the reference without adding scored
-        # volume. With ≥9 of them the holder's lone 500 lands in the trimmed
-        # tail, so the reference == target.
-        if reference_rate is not None:
-            rf, rt = self._legs(reference_rate)
-            for i in range(n_ref):
-                v.state_store.insert_clearing_rate(0, f'ref{i}', 'btc', 'sol', rf, rt)
-        return v
-
-    def test_below_reference_volume_penalized(self, tmp_path: Path):
-        """Realized rate worse than the reference shaves the w_b slice via
-        rate_quality, so the solo holder earns strictly less than the full pool."""
-        reference = 480.0  # tao→btc: clearing at 500 vs reference 480 is worse for takers
-        v = self._solo(tmp_path, reference)
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        q = scoring_mod.quality_curve(scoring_mod.rate_advantage('btc', 'sol', self.REALIZED, reference))
-        assert 0.0 < q < 1.0  # in the ramp, not floored
-        expected = POOL_BTC_SOL * (0.8 + 0.2 * q)
-        np.testing.assert_allclose(rewards[0], expected, atol=1e-6)
-        assert rewards[0] < POOL_BTC_SOL
-        v.state_store.close()
-
-    def test_above_reference_capped_full_pool(self, tmp_path: Path):
-        """Realized rate better than the reference is capped at quality 1.0 (the
-        crown already rewards good rates), so the holder earns the full pool."""
-        v = self._solo(tmp_path, 550.0)  # clearing at 500 vs reference 550 is better
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        v.state_store.close()
-
-    def test_thin_history_pays_volume_at_par(self, tmp_path: Path):
-        """Too few in-window clearing rates (only the holder's own swap) → reference
-        undefined → rate_quality neutral 1.0 → the w_b slice still pays the holder's
-        volume share, so a solo holder earns the full pool. Same safe degradation
-        the old stale-feed path had."""
-        v = self._solo(tmp_path, None)  # no reference cluster → 1 sample < min_swaps
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        v.state_store.close()
-
-    def test_quality_penalty_recycles_remainder(self, tmp_path: Path):
-        """Whatever the quality curve shaves off the w_b slice recycles — the
-        distributed weights plus recycle always sum to 1.0."""
-        v = self._solo(tmp_path, 480.0)
-        rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
-        # Below-pool reward → strictly positive recycle on top of the idle btc→tao pool.
-        assert rewards[RECYCLE_UID] > POOL_SOL_BTC
-        v.state_store.close()
-
-    def test_reference_is_deterministic_across_runs(self, tmp_path: Path):
-        """The whole point of dropping the external feed: identical ingested
-        clearing-rate history ⇒ identical reference ⇒ identical rewards, with no
-        wall-clock-of-fetch or network in the path."""
-        a = self._solo(tmp_path / 'a', 480.0)
-        b = self._solo(tmp_path / 'b', 480.0)
-        ra, _ = calculate_miner_rewards(a, a.block)
-        rb, _ = calculate_miner_rewards(b, b.block)
-        np.testing.assert_array_equal(ra, rb)  # exact equality — determinism
-        a.state_store.close()
-        b.state_store.close()
-
-
 class TestCapacityVolumeInteraction:
     """Capacity + volume are independent multipliers — verify they compose."""
 
@@ -2335,9 +2192,8 @@ class TestCapacityVolumeInteraction:
         # B serves the market's (floor-clearing) volume so A's vol_share = 0.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: w_a 0.8 × pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 0.5.
-        # A serves no volume (B does), so A's w_b slice is 0 → only the crown term.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.8 * 1.0 * 0.5 * 0.5, atol=1e-6)
+        # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 0.5 (B serves the volume).
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.5 * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2688,7 +2544,16 @@ class TestScoreSnapshots:
     weights that went on chain."""
 
     def _solo_with_storage(self, tmp_path: Path) -> SimpleNamespace:
-        v = TestRewardShapeWeights()._solo_crown_with_volume(tmp_path)
+        # hk_a holds 100% btc→sol crown and serves 100% of the direction's volume.
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
+        )
+        conn.commit()
+        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 5_000_000_000_000, 1_000_000_000)
         v.database_storage.is_enabled.return_value = True
         return v
 
@@ -2698,16 +2563,14 @@ class TestScoreSnapshots:
         kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
         rows = kwargs['miner_score_rows']
         assert len(rows) == 1
-        (round_ts, hotkey, from_c, to_c, eligible, crown_share, capacity, fill_ratio, vol_share, quality, reward) = (
-            rows[0]
-        )
+        (round_ts, hotkey, from_c, to_c, eligible, crown_share, capacity, fill_ratio, vol_share, reward) = rows[0]
         assert round_ts == v.block  # round keyed by window_end
         assert (hotkey, from_c, to_c) == ('hk_a', 'btc', 'sol')
         assert eligible is True
-        np.testing.assert_allclose((crown_share, capacity, fill_ratio, vol_share, quality), (1.0,) * 5)
+        np.testing.assert_allclose((crown_share, capacity, fill_ratio, vol_share), (1.0,) * 4)
         # The persisted factors reproduce the persisted reward, and the
         # persisted reward is what the weights actually paid.
-        expected = 0.8 * POOL_BTC_SOL * crown_share * capacity * fill_ratio + 0.2 * POOL_BTC_SOL * vol_share * quality
+        expected = POOL_BTC_SOL * crown_share * capacity * fill_ratio
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
@@ -2729,7 +2592,7 @@ class TestScoreSnapshots:
         row = rows[0]
         assert row[4] is False  # eligible
         np.testing.assert_allclose(row[5], 1.0)  # crown_share still recorded
-        assert row[10] == 0.0  # reward
+        assert row[9] == 0.0  # reward
         assert rewards[0] == 0.0
         v.state_store.close()
 

@@ -55,16 +55,15 @@ DO UPDATE SET credit = EXCLUDED.credit,
 # the crown ledger. Idempotent on retry of the same round.
 BULK_UPSERT_MINER_SCORES = """
 INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, eligible,
-                          crown_share, capacity, fill_ratio, vol_share, rate_quality, reward)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                          crown_share, capacity, fill_ratio, vol_share, reward)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (round_ts, hotkey, from_chain, to_chain)
-DO UPDATE SET eligible     = EXCLUDED.eligible,
-              crown_share  = EXCLUDED.crown_share,
-              capacity     = EXCLUDED.capacity,
-              fill_ratio   = EXCLUDED.fill_ratio,
-              vol_share    = EXCLUDED.vol_share,
-              rate_quality = EXCLUDED.rate_quality,
-              reward       = EXCLUDED.reward
+DO UPDATE SET eligible    = EXCLUDED.eligible,
+              crown_share = EXCLUDED.crown_share,
+              capacity    = EXCLUDED.capacity,
+              fill_ratio  = EXCLUDED.fill_ratio,
+              vol_share   = EXCLUDED.vol_share,
+              reward      = EXCLUDED.reward
 """
 
 # current_miner_scores: the live mid-round tip of miner_scores, wiped and
@@ -76,6 +75,6 @@ DELETE FROM current_miner_scores
 
 BULK_INSERT_CURRENT_MINER_SCORES = """
 INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, eligible,
-                                  crown_share, capacity, fill_ratio, vol_share, rate_quality, reward, updated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                  crown_share, capacity, fill_ratio, vol_share, reward, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 """

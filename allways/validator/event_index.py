@@ -6,8 +6,8 @@ collateral, quoted rate) through a small read interface. B1/B2 fed that interfac
 this index persists them into the ``state_store`` event tables, attributing each on-chain Solana pubkey to
 its bound Bittensor hotkey at write time (B3.2). The crown math is unchanged — it consumes the same
 ``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed. ``SwapCompleted`` additionally
-persists its realized legs into ``clearing_rates`` (C-rev), the per-swap history the rate-quality reference
-is built from. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
+persists its realized legs into ``clearing_rates``, the per-swap history the windowed volume read
+(``fill_ratio``'s input) sums over. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
 ``swap_outcomes``, the seam's post-close completed-vs-slashed truth (terminal swap PDAs are closed on-chain).
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
@@ -95,7 +95,7 @@ class SolanaEventIndex:
                 self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
                 dev_signal.emit('swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=outcome)
             # SwapCompleted is the only swap event carrying realized legs — persist
-            # them as a clearing-rate sample for the C-rev quality reference, in
+            # them as a clearing-rate sample for the windowed volume read, in
             # addition to closing the fulfillment above.
             if name == 'SwapCompleted':
                 self.state_store.insert_clearing_rate(

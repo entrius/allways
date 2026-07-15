@@ -3,8 +3,8 @@
 Tables: ``rate_events`` + ``active_events`` + ``activity_events`` +
 ``collateral_events`` (the crown-time event series, sourced from Solana program
 events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
-``clearing_rates`` (per-swap realized history from ``SwapCompleted``, backing the
-C-rev rate-quality reference), ``swap_outcomes`` (terminal completed/timed_out
+``clearing_rates`` (per-swap realized legs from ``SwapCompleted``, backing the
+windowed volume read), ``swap_outcomes`` (terminal completed/timed_out
 truth per swap_key, backing the seam's stage disambiguation after the swap PDA
 closes), and ``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
@@ -285,7 +285,7 @@ class ValidatorStateStore:
         )
         return {r['hotkey']: int(r['collateral_rao']) for r in rows}
 
-    # ─── clearing_rates (per-swap realized history, C-rev) ──────────────
+    # ─── clearing_rates (per-swap realized legs) ────────────────────────
 
     def insert_clearing_rate(
         self,
@@ -305,33 +305,6 @@ class ValidatorStateStore:
             """,
             (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount))),
         )
-
-    def get_clearing_rates_in_range(
-        self,
-        from_chain: str,
-        to_chain: str,
-        start_time: int,
-        end_time: int,
-    ) -> List[dict]:
-        """Completed-swap clearing rates in ``(start_time, end_time]`` for a
-        direction, oldest first. Legs are re-cast to int from their TEXT storage."""
-        rows = self._fetchall(
-            """
-            SELECT hotkey, from_amount, to_amount, block_num FROM clearing_rates
-            WHERE from_chain = ? AND to_chain = ? AND block_num > ? AND block_num <= ?
-            ORDER BY block_num ASC, id ASC
-            """,
-            (from_chain, to_chain, start_time, end_time),
-        )
-        return [
-            {
-                'hotkey': r['hotkey'],
-                'from_amount': int(r['from_amount']),
-                'to_amount': int(r['to_amount']),
-                'block': r['block_num'],
-            }
-            for r in rows
-        ]
 
     def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
         """``{(from_chain, to_chain): {hotkey: (from_amount_sum, to_amount_sum)}}``
@@ -591,11 +564,10 @@ class ValidatorStateStore:
                 CREATE INDEX IF NOT EXISTS idx_collateral_events_hotkey
                     ON collateral_events(hotkey);
 
-                -- Per-swap realized clearing rates from SwapCompleted (C-rev).
-                -- One row per completed swap; the trimmed/volume-weighted/
-                -- per-miner-capped reference for the rate-quality reward is
-                -- computed off these. from_amount/to_amount are TEXT because the
-                -- on-chain legs are u128 and overflow SQLite's signed-64 INTEGER.
+                -- Per-swap realized legs from SwapCompleted. One row per completed
+                -- swap; the windowed volume read (fill_ratio's input) sums these.
+                -- from_amount/to_amount are TEXT because the on-chain legs are
+                -- u128 and overflow SQLite's signed-64 INTEGER.
                 CREATE TABLE IF NOT EXISTS clearing_rates (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     block_num   INTEGER NOT NULL,

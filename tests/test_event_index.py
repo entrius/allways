@@ -232,8 +232,7 @@ class TestIngestClearingRate:
         )
         # Both effects fire: FULFILL_END returns AVAILABLE AND a clearing-rate sample lands.
         assert idx.get_activity_state_at(400) == {}
-        rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)
-        assert rows == [{'hotkey': 'hk_a', 'from_amount': 100_000, 'to_amount': 500_000_000, 'block': 400}]
+        assert store.get_clearing_volumes(0, 1000)[('btc', 'tao')]['hk_a'] == (100_000, 500_000_000)
         store.close()
 
     def test_u128_legs_survive_text_storage(self, tmp_path: Path):
@@ -254,8 +253,7 @@ class TestIngestClearingRate:
             ],
             ATTR,
         )
-        rows = store.get_clearing_rates_in_range('btc', 'tao', 0, 100)
-        assert rows[0]['from_amount'] == big and rows[0]['to_amount'] == big - 1
+        assert store.get_clearing_volumes(0, 100)[('btc', 'tao')]['hk_a'] == (big, big - 1)
         store.close()
 
     def test_chain_strings_lowercased(self, tmp_path: Path):
@@ -275,7 +273,7 @@ class TestIngestClearingRate:
             ],
             ATTR,
         )
-        assert store.get_clearing_rates_in_range('btc', 'tao', 0, 100)  # found under lowercased direction
+        assert ('btc', 'tao') in store.get_clearing_volumes(0, 100)  # found under lowercased direction
         store.close()
 
     def test_unbound_and_unstamped_skip_clearing_rate(self, tmp_path: Path):
@@ -304,7 +302,7 @@ class TestIngestClearingRate:
             ],
             ATTR,
         )
-        assert store.get_clearing_rates_in_range('btc', 'tao', 0, 100) == []
+        assert store.get_clearing_volumes(0, 100) == {}
         store.close()
 
     def test_prune_drops_old_samples(self, tmp_path: Path):
@@ -334,8 +332,8 @@ class TestIngestClearingRate:
             ATTR,
         )
         store.prune_clearing_rates(500)
-        blocks = [r['block'] for r in store.get_clearing_rates_in_range('btc', 'tao', 0, 1000)]
-        assert blocks == [900]  # no anchor preservation — old sample is gone
+        # No anchor preservation — the old sample is gone, only the 900 legs remain.
+        assert store.get_clearing_volumes(0, 1000)[('btc', 'tao')]['hk_a'] == (3, 4)
         store.close()
 
 
