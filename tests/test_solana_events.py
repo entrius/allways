@@ -6,6 +6,8 @@ by a fake client.
 """
 
 import hashlib
+import re
+from pathlib import Path
 
 from solders.keypair import Keypair
 
@@ -81,9 +83,34 @@ def test_decode_miner_activated_and_collateral():
     assert name == 'CollateralPosted' and f.total == 9
 
 
+def test_decode_fulfillment_grace_applied_roundtrip():
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'FulfillmentGraceApplied',
+        {'swap_key': bytes(range(32)), 'miner': bytes(miner), 'timeout_at': 1_700_000_222},
+    )
+    name, f = decode_event(raw)
+    assert name == 'FulfillmentGraceApplied'
+    assert f.miner == miner
+    assert bytes(f.swap_key) == bytes(range(32))  # stays raw bytes
+    assert f.timeout_at == 1_700_000_222
+
+
 def test_decode_unknown_discriminator_returns_none():
     assert decode_event(b'\x00' * 8 + b'junk') is None
     assert decode_event(b'\x01\x02') is None  # too short
+
+
+def test_every_contract_event_is_registered():
+    # Every #[event] struct in the program source must decode, or the indexer/validator
+    # silently drop it (decode_event returns None for unknown discriminators).
+    events_rs = (
+        Path(__file__).resolve().parents[1] / 'smart-contracts/solana/programs/allways_swap_manager/src/events.rs'
+    )
+    declared = set(re.findall(r'#\[event\]\s*pub struct (\w+)', events_rs.read_text()))
+    assert declared, 'no #[event] structs parsed from events.rs — pattern drifted?'
+    missing = declared - set(events.EVENT_DISCRIMINATORS)
+    assert not missing, f'contract events missing from the Python decoder registry: {sorted(missing)}'
 
 
 # ---- ingest cursor ----

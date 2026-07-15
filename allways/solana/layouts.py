@@ -203,6 +203,7 @@ ACCOUNT_PUBKEY_FIELDS = {
 EVENT_DISCRIMINATORS = {
     'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
+    'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
@@ -230,6 +231,7 @@ EVENT_DISCRIMINATORS = {
 EVENT_LAYOUTS = {
     'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
+    'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
@@ -307,6 +309,7 @@ EVENT_LAYOUTS = {
 EVENT_PUBKEY_FIELDS = {
     'CollateralPosted': ['miner'],
     'CollateralWithdrawn': ['miner'],
+    'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
     'MinerActivated': ['miner'],
