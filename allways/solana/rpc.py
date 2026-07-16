@@ -39,6 +39,15 @@ class TransientRpcError(SolanaRpcError):
     handlers keep working."""
 
 
+class SolanaRpcUnreachable(TransientRpcError):
+    """The endpoint could not be reached at all (connection refused / DNS failure) — carries the
+    resolved URL so callers can tell the user which RPC they were actually pointed at."""
+
+    def __init__(self, message: str, url: str):
+        super().__init__(message)
+        self.url = url
+
+
 # JSON-RPC error codes that mean "try again", not "your request was malformed / the tx failed".
 _TRANSIENT_RPC_CODES = frozenset({-32603, -32005, -32004, -32014, -32016})
 # HTTP statuses that are the provider hiccuping, not a client-side error.
@@ -88,8 +97,12 @@ class SolanaRpc:
                         raise TransientRpcError(f'{method}: {err}')
                     raise SolanaRpcError(f'{method}: {err}')
                 return body['result']
-            except (requests.Timeout, requests.ConnectionError) as e:
-                transient: TransientRpcError = TransientRpcError(f'{method}: {type(e).__name__}: {e}')
+            except requests.ConnectionError:
+                transient: TransientRpcError = SolanaRpcUnreachable(
+                    f'{method}: could not connect to {self.url}', url=self.url
+                )
+            except requests.Timeout as e:
+                transient = TransientRpcError(f'{method}: {type(e).__name__}: {e}')
             except TransientRpcError as e:
                 transient = e
             # Retry side-effect-free reads with exponential backoff; surface everything else at once.

@@ -17,7 +17,7 @@ from rich.text import Text
 from allways.classes import SwapStatus
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.solana.client import SolanaClientError
-from allways.solana.rpc import SolanaRpcError, resolve_rpc_url
+from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -251,6 +251,13 @@ def safe_read(fn: Callable, what: str = 'read from Solana'):
     never a stacktrace."""
     try:
         return fn()
+    except SolanaRpcUnreachable as e:
+        hint = (
+            ''
+            if CONFIG_FILE.exists()
+            else ' No config file found — run `alw config set env testnet` (or `mainnet`) first.'
+        )
+        fail(f'Could not reach the Solana RPC at {e.url} to {what}.{hint}')
     except (SolanaClientError, SolanaRpcError) as e:
         fail(f'Failed to {what}: {e}')
     except requests.RequestException:
