@@ -1,7 +1,7 @@
 """alw swap resume-reservation - Recover an interrupted pre-initiate reservation flow.
 
 Deferred: resuming a reservation submits + verifies the source deposit against the source chain (a
-chain-provider check the CLI taker path does not do yet). Exits non-zero; use the browser flow."""
+chain-provider check the CLI taker path does not do yet). Exits non-zero."""
 
 import click
 
@@ -13,7 +13,7 @@ def resume_reservation_command():
     """Resume an interrupted pre-initiate reservation (not yet available from the CLI).
 
     Advancing a reservation submits + verifies the source deposit against the source chain, which the
-    CLI taker path does not do yet. Use the browser swap flow to resume; inspect a reservation's state
-    with `alw view reservation --miner <pubkey>`.
+    CLI taker path does not do yet. If you already sent the deposit, `alw swap post-tx` relays it;
+    inspect a reservation's state with `alw view reservation --miner <pubkey>`.
     """
     not_implemented('Swap resume-reservation (CLI fund relay)')

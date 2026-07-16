@@ -1,7 +1,8 @@
-"""alw status - Quick dashboard: network, Solana RPC/program health, your balance, and miner/taker state.
+"""alw status - Quick dashboard: network, Solana RPC/program health, your balances, and miner/taker state.
 
 Reads the live Solana program. If your keypair is a registered miner it summarizes miner state; otherwise it
-shows the taker view (any live reservation for --miner / the saved swap) and points at the browser swap UI."""
+shows the taker view (any live reservation for --miner / the saved swap). Identities shown are the Solana
+keypair (always — fees + on-chain identity) plus the configured bittensor wallet's coldkey + TAO balance."""
 
 import time
 
@@ -9,7 +10,6 @@ import click
 
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
-    BROWSER_SWAP_URL,
     ZERO_SWAP_KEY,
     console,
     fail,
@@ -21,6 +21,26 @@ from allways.cli.swap_commands.helpers import (
     safe_read,
     set_json_output,
 )
+
+
+def _tao_identity(config):
+    """(coldkey ss58, TAO balance | None) for the configured bittensor wallet, or None when no
+    wallet is configured or its files are missing. Reads only the public coldkey file — no
+    password; an unreachable subtensor degrades to an unknown balance, never an error."""
+    name = config.get('wallet')
+    if not name:
+        return None
+    import bittensor as bt
+
+    try:
+        ss58 = bt.Wallet(name=name).coldkeypub.ss58_address
+    except Exception:
+        return None
+    try:
+        balance = float(bt.Subtensor(network=config.get('network', 'finney')).get_balance(ss58))
+    except Exception:
+        balance = None
+    return ss58, balance
 
 
 def _load_caller(config):
@@ -52,6 +72,7 @@ def status_command(miner_pk, as_json):
     halted = bool(cfg and cfg.halted)
 
     caller = _load_caller(config)
+    tao = _tao_identity(config)
     balance = None
     miner_state = None
     if caller is not None:
@@ -83,6 +104,10 @@ def status_command(miner_pk, as_json):
             'balance_sol': from_lamports(balance) if balance is not None else None,
             'is_miner': is_miner,
         }
+        if tao is not None:
+            out['wallet'] = config['wallet']
+            out['coldkey'] = tao[0]
+            out['tao_balance'] = tao[1]
         if is_miner:
             out['miner'] = {
                 'collateral_sol': from_lamports(miner_state.collateral),
@@ -117,6 +142,11 @@ def status_command(miner_pk, as_json):
         console.print(
             '  Keypair:      [dim]none loaded (`alw config set solana-keypair <path>` or SOLANA_KEYPAIR_PATH)[/dim]'
         )
+    if tao is not None:
+        ss58, tao_balance = tao
+        tao_s = f'{tao_balance:.4f} τ' if tao_balance is not None else '[dim]unknown[/dim]'
+        console.print(f'  Wallet:       {config["wallet"]} ({ss58})')
+        console.print(f'  TAO balance:  {tao_s}')
 
     if is_miner:
         console.print('\n[bold]Miner[/bold]\n')
@@ -138,7 +168,7 @@ def status_command(miner_pk, as_json):
         console.print(f'  [dim]No active reservation on {resv_miner}.[/dim]')
     else:
         console.print('  [dim]No pending swap. Preview with `alw swap quote`, originate with `alw swap now`.[/dim]')
-    console.print(f'\n[dim]Or swap in the browser: {BROWSER_SWAP_URL}[/dim]\n')
+    console.print()
 
 
 def _saved_miner():

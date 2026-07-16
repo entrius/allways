@@ -120,11 +120,6 @@ def quote_update_fee_lamports(elapsed_secs: int) -> int:
 
 console = Console()
 
-# The taker fund-relay path (post-tx / claim / resume) verifies deposits against a chain provider before it
-# can advance a swap; that verification isn't wired into the CLI yet. Until it is, those commands point at the
-# working browser flow. Keep this URL in one place so every pointer agrees.
-BROWSER_SWAP_URL = 'http://localhost:9090'
-
 
 class CliError(Exception):
     """Local CLI/Solana error type — replaces the deleted ink! contract error."""
@@ -177,15 +172,14 @@ def fail(message: str, code: int = 1) -> None:
 
 
 def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
-    """Honest exit for the fund-moving relays (post-tx / claim / resume) that need chain-provider verification.
+    """Honest exit for deferred CLI paths that need chain-provider deposit verification.
 
-    Points at the working browser flow and exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so
-    scripts can tell a deferred path apart from bad args. The read views are all live on Solana now."""
+    Exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so scripts can tell a deferred path
+    apart from bad args."""
     console.print(
         f'[yellow]{what} is not available from the CLI yet.[/yellow]\n'
-        f'[dim]This step verifies your deposit against the source chain, which the CLI taker path does not do '
-        f'yet. Use the browser swap flow at {BROWSER_SWAP_URL} to complete a swap end-to-end; '
-        f'`alw swap now` originates a reservation on-chain.[/dim]'
+        f'[dim]Inspect the reservation with `alw view reservation --miner <pubkey>`; if you already sent the '
+        f'deposit, relay it with `alw swap post-tx`.[/dim]'
     )
     raise SystemExit(code)
 
