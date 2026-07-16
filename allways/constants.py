@@ -68,14 +68,18 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
     for spoke in LAUNCH_SPOKES
     for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
 }
-# Idle-crown penalty: 0 = none, 1 = pure volume share, 0.5 = half-credit floor.
-VOLUME_WEIGHT_ALPHA: float = 0.5
+# Idle-crown penalty: 0 = none, 1 = pure volume share; a zero-fill holder floors at 1-α (0.25).
+VOLUME_WEIGHT_ALPHA: float = 0.75
 # Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
 # replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
 # it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
 # failures — a binary 0/1 multiplier, no ramp.
 MIN_SUCCESSFUL_SWAPS: int = 2
 MAX_FAILED_SWAPS: int = 2
+# Live-state reconcile (scoring-round backstop for lost events): a miner's event-derived
+# active/collateral state is only corrected against the live chain read after its event
+# stream has been quiet this long, so a stale RPC read never fights an in-flight event.
+RECONCILE_QUIET_SECS = 600
 
 # ─── Validator stake weights (reservation-lottery draw) ──
 # Each validator derives the same vector — floor(alpha_stake / bucket) per whitelisted

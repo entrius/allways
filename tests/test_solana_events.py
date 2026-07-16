@@ -172,3 +172,48 @@ def test_ingest_skips_failed_tx_and_empty_is_noop():
     empty = FakeClient([], {})
     recs, cur = SolanaEventIngest(empty).poll(until_sig='good')
     assert recs == [] and cur == 'good'
+
+
+def test_poll_holds_cursor_at_unstamped_tip():
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
+    # Newest-first: stamped tip, unstamped middle (fresh), stamped oldest.
+    pages = [
+        {'signature': 'sigC', 'slot': 21, 'blockTime': 1_700_000_021, 'err': None},
+        {'signature': 'sigB', 'slot': 20, 'blockTime': None, 'err': None},
+        {'signature': 'sigA', 'slot': 10, 'blockTime': 1_700_000_010, 'err': None},
+    ]
+    client = FakeClient(pages, {s: [ev] for s in ('sigA', 'sigB', 'sigC')})
+    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
+    # The cursor holds before sigB so its events are re-read once stamped; sigC
+    # (newer than the hold point) is deliberately not consumed either.
+    assert [r.signature for r in records] == ['sigA']
+    assert cursor == 'sigA'
+
+
+def test_poll_reingests_previously_unstamped_once_stamped():
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
+    pages = [
+        {'signature': 'sigC', 'slot': 21, 'blockTime': 1_700_000_021, 'err': None},
+        {'signature': 'sigB', 'slot': 20, 'blockTime': 1_700_000_020, 'err': None},
+    ]
+    client = FakeClient(pages, {'sigB': [ev], 'sigC': [ev]})
+    records, cursor = SolanaEventIngest(client).poll(until_sig='sigA')
+    assert [r.signature for r in records] == ['sigB', 'sigC']
+    assert cursor == 'sigC'
+
+
+def test_poll_abandons_ancient_unstamped_entry():
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
+    # sigOld is unstamped and > UNSTAMPED_GIVE_UP_SLOTS behind the tip: this RPC
+    # will never stamp it — the cursor moves past (its events are written off).
+    pages = [
+        {'signature': 'sigTip', 'slot': 500, 'blockTime': 1_700_000_500, 'err': None},
+        {'signature': 'sigOld', 'slot': 100, 'blockTime': None, 'err': None},
+    ]
+    client = FakeClient(pages, {'sigTip': [ev], 'sigOld': [ev]})
+    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
+    assert [r.signature for r in records] == ['sigTip']
+    assert cursor == 'sigTip'

@@ -175,22 +175,28 @@ def is_eligible(miner_state) -> bool:
     )
 
 
-def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
-    """``{hotkey: eligible_bool}`` for on-metagraph miners, from the on-chain
-    ``MinerState`` counters. Each pubkey-keyed ``MinerState`` is attributed to a
-    Bittensor hotkey via the sr25519 binding (B3.2 ``build_attribution``);
+def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+    """``{hotkey: MinerState}`` for bound, on-metagraph miners — one chain read shared by
+    the eligibility gate and the live-state reconcile. Each pubkey-keyed ``MinerState`` is
+    attributed to a Bittensor hotkey via the sr25519 binding (B3.2 ``build_attribution``);
     unbound or off-metagraph miners are dropped (they have no UID to credit).
     Pass ``attribution`` to reuse one per-round binding snapshot."""
     if attribution is None:
         attribution = build_attribution(solana_client)
     metagraph_hotkeys = set(metagraph.hotkeys)
-    eligibility: Dict[str, bool] = {}
+    states: Dict[str, object] = {}
     for _pubkey, ms in solana_client.get_all('MinerState'):
         hotkey = attribution.get(str(ms.miner))
         if hotkey is None or hotkey not in metagraph_hotkeys:
             continue
-        eligibility[hotkey] = is_eligible(ms)
-    return eligibility
+        states[hotkey] = ms
+    return states
+
+
+def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
+    """``{hotkey: eligible_bool}`` for on-metagraph miners — ``is_eligible`` over the
+    on-chain ``MinerState`` counters (see ``live_miner_states``)."""
+    return {hk: is_eligible(ms) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()}
 
 
 def windowed_direction_volumes(
@@ -303,10 +309,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
 
     rewards = np.zeros(n_uids, dtype=np.float32)
     unweighted_rewards = np.zeros(n_uids, dtype=np.float32)
-    # Flat eligibility gate off the on-chain MinerState counters (B3.3),
-    # attributed pubkey→hotkey via the sr25519 binding. Absent hotkey → not
-    # eligible (no on-chain counters ⇒ no proven successful swaps).
-    eligibility = build_eligibility(self.solana_client, self.metagraph)
+    # One live MinerState snapshot serves two jobs: the flat eligibility gate off the
+    # on-chain counters (B3.3, pubkey→hotkey via the sr25519 binding; absent hotkey → not
+    # eligible), and the reconcile backstop that corrects event-derived active/collateral
+    # state the ingest lost — before the replay below reads those tables.
+    live_states = live_miner_states(self.solana_client, self.metagraph)
+    self.event_index.reconcile_live_state(live_states, now=current_time)
+    eligibility = {hk: is_eligible(ms) for hk, ms in live_states.items()}
     # Per-direction realized volume summed over this round's window from the
     # ingested clearing_rates ledger — volume is what cleared this hour, not a
     # lifetime account total. Hotkeys were attributed at ingest (event_index),
@@ -707,14 +716,13 @@ def merge_replay_events(
 
 
 def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
-    """Boundary-squat gate: a miner whose own rate forces a SOL leg larger than
-    their collateral earns no crown (collateral and the bounded leg are both SOL).
-    Fail open on unknown collateral (absent != zero) so a missing baseline doesn't
-    silently drop them."""
-    if hotkey not in collaterals:
-        return True
+    """Boundary-squat gate: a miner who cannot fund their own rate's smallest SOL leg
+    at the contract's 1.10× reserve requirement (mirroring routing's ``swap_viable``)
+    is unreservable at any size and earns no crown. Unknown collateral counts as zero
+    (fail closed) — the live-state reconcile seeds a baseline for every bound active
+    miner, so absent means the chain doesn't know this miner either."""
     min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports)
-    return min_leg == 0 or collaterals[hotkey] >= min_leg
+    return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
 
 def make_crown_predicates(from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
@@ -823,9 +831,10 @@ def replay_crown_time_window(
         split = duration / len(holders)
         for hk in holders:
             crown_time[hk] = crown_time.get(hk, 0.0) + split
-            # Unknown collateral (no event recorded) → capacity 1.0, matching
-            # can_fund's fail-open. Only a known value scales capacity down.
-            cap = capacity_factor(collaterals[hk], max_swap_lamports) if hk in collaterals else 1.0
+            # Unknown collateral counts as zero, matching can_fund's fail-closed
+            # (the reconcile seeds a baseline for every bound active miner);
+            # capacity_factor keeps its bounds-unset fail-safe of 1.0.
+            cap = capacity_factor(collaterals.get(hk, 0), max_swap_lamports)
             cap_weighted_time[hk] = cap_weighted_time.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:

@@ -16,6 +16,8 @@ from allways.constants import (
     MIN_SUCCESSFUL_SWAPS,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
+    VOLUME_WEIGHT_ALPHA,
+    required_collateral,
 )
 from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator import scoring as scoring_mod
@@ -23,8 +25,10 @@ from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
     build_eligibility,
     calculate_miner_rewards,
+    crown_can_fund,
     crown_holders_at_instant,
     due_for_scoring,
+    fill_ratio,
     is_eligible,
     make_crown_predicates,
     replay_crown_time_window,
@@ -55,13 +59,29 @@ class FakeSolanaClient:
     state keys by the same opaque strings the crown tables use. End-to-end
     sr25519 attribution is covered in ``tests/test_eligibility.py``."""
 
-    def __init__(self, miner_counters: dict[str, tuple[int, int]]):
+    def __init__(
+        self,
+        miner_counters: dict[str, tuple[int, int]],
+        collaterals: dict[str, int] | None = None,
+        inactive: set[str] | None = None,
+    ):
         self._counters = miner_counters
+        self._collaterals = collaterals or {}
+        self._inactive = inactive or set()
 
     def get_all(self, name: str):
         if name == 'MinerState':
             return [
-                (f'pda_{hk}', SimpleNamespace(miner=hk, successful_swaps=s, failed_swaps=f))
+                (
+                    f'pda_{hk}',
+                    SimpleNamespace(
+                        miner=hk,
+                        successful_swaps=s,
+                        failed_swaps=f,
+                        active=hk not in self._inactive,
+                        collateral=self._collaterals.get(hk, 0),
+                    ),
+                )
                 for hk, (s, f) in self._counters.items()
             ]
         return []
@@ -209,7 +229,9 @@ def make_validator(
         event_index=SolanaEventIndex(store),
         solana_config_cache=solana_config_cache,
         database_storage=database_storage,
-        solana_client=FakeSolanaClient(miner_counters),
+        # Live collateral mirrors the seeded event tables so the scoring-round
+        # reconcile is a no-op unless a test diverges them deliberately.
+        solana_client=FakeSolanaClient(miner_counters, collaterals=collaterals),
     )
 
 
@@ -590,8 +612,8 @@ class TestReplayCrownTime:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_squat'})
         seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
-        # Top-up mid-window — collateral becomes enough to fund the 0.5 TAO leg.
-        watcher.apply_event(600, 'CollateralPosted', {'miner': 'hk_squat', 'amount': 350_000_000, 'total': 500_000_000})
+        # Top-up mid-window — collateral clears the 1.10× requirement on the 0.5 TAO leg.
+        watcher.apply_event(600, 'CollateralPosted', {'miner': 'hk_squat', 'amount': 400_000_000, 'total': 550_000_000})
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -1861,18 +1883,17 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
-    def test_unknown_collateral_fails_open(self, tmp_path: Path):
-        """A miner with NO collateral event in the watcher's series (unknown,
-        not zero) must fail OPEN: capacity 1.0 and can_fund passes, so it earns
-        the full pool. The contract auto-deactivates anyone below
-        min_collateral, so an active miner always holds enough — treating a
-        missing baseline as zero would silently drop honest miners from crown
-        (the collateral-baseline bug). Absent != zero."""
+    def test_unknown_collateral_fails_closed(self, tmp_path: Path):
+        """A miner with no collateral baseline anywhere (event tables empty and
+        the live chain reads zero) earns nothing while capacity weighting is
+        active. The scoring-round reconcile seeds a real baseline for every
+        live funded miner, so a persistent absence means unfunded — failing
+        open here was the L4b hole (full capacity for an unknown miner)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)  # no collaterals dict → absent
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        assert rewards[0] == 0.0
         v.state_store.close()
 
     def test_scoring_does_not_call_contract_for_collateral(self, tmp_path: Path):
@@ -2025,9 +2046,9 @@ class TestVolumeWeighting:
         # B doesn't post a rate → never holds crown.
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → fill_ratio = 0.5.
-        # A = pool·0.5. B has crown_share = 0 → no crown reward to multiply.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
+        # A's vol_share = 0, crown_share = 1.0 → participation = 0 → fill_ratio = 1-α (0.25).
+        # A = pool·(1-α). B has crown_share = 0 → no crown reward to multiply.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (1 - VOLUME_WEIGHT_ALPHA), atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
@@ -2072,8 +2093,10 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_a', from_amount=100_000_000, from_chain='sol', to_chain='btc')
         self.insert_volume(v, 'hk_b', from_amount=900_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → fill_ratio = 0.55.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.55, atol=1e-6)
+        # A: crown_share = 1.0, vol_share = 0.1, participation = 0.1 → fill_ratio = (1-α) + α·0.1.
+        np.testing.assert_allclose(
+            rewards[0], POOL_SOL_BTC * ((1 - VOLUME_WEIGHT_ALPHA) + VOLUME_WEIGHT_ALPHA * 0.1), atol=1e-6
+        )
         # B: crown_share = 0 → factor moot, no reward to multiply.
         assert rewards[1] == 0.0
         v.state_store.close()
@@ -2103,9 +2126,9 @@ class TestVolumeWeighting:
         self.insert_volume(v, 'hk_b', from_amount=800_000_000, from_chain='sol', to_chain='btc')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Crown: A=240/300=0.8, B=60/300=0.2. Volume: A=0.2, B=0.8.
-        # A participation = 0.2/0.8 = 0.25 → fill_ratio 0.625; B → fill_ratio 1.0.
-        # A = 0.8·0.625 = 0.5·pool. B = 0.2·1.0 = 0.2·pool.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.5, atol=1e-6)
+        # A participation = 0.2/0.8 = 0.25 → fill_ratio = (1-α) + α·0.25; B → fill_ratio 1.0.
+        fill_a = (1 - VOLUME_WEIGHT_ALPHA) + VOLUME_WEIGHT_ALPHA * 0.25
+        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC * 0.8 * fill_a, atol=1e-6)
         np.testing.assert_allclose(rewards[1], POOL_SOL_BTC * 0.2, atol=1e-6)
         v.state_store.close()
 
@@ -2174,10 +2197,10 @@ class TestVolumeWeighting:
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
         # B clears dust in A's market: A holds all crown, serves none of the
-        # volume → pool·fill_ratio(0.5).
+        # volume → pool·(1-α).
         self.insert_volume(v, 'hk_b', from_amount=100, to_amount=999_999_999)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (1 - VOLUME_WEIGHT_ALPHA), atol=1e-6)
         v.state_store.close()
 
     def test_volume_outside_window_ignored(self, tmp_path: Path):
@@ -2209,7 +2232,7 @@ class TestCapacityVolumeInteraction:
     """Capacity + volume are independent multipliers — verify they compose."""
 
     def test_both_factors_compose_multiplicatively(self, tmp_path: Path):
-        """Single miner, capacity 0.5, idle on volume → reward = pool * 0.5 * 0.5."""
+        """Single miner, capacity 0.5, idle on volume → reward = pool * 0.5 * (1-α)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -2226,8 +2249,8 @@ class TestCapacityVolumeInteraction:
         # B serves the market's (floor-clearing) volume so A's vol_share = 0.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 0.5 (B serves the volume).
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.5 * 0.5, atol=1e-6)
+        # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 1-α (B serves the volume).
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.5 * (1 - VOLUME_WEIGHT_ALPHA), atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2530,10 +2553,8 @@ class TestCrownPredicateParity:
             return is_executable_rate(rate, from_chain, to_chain, min_rao, max_rao)
 
         def fund_ref(hotkey, rate):
-            if hotkey not in collaterals:
-                return True
             min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_rao, max_rao)
-            return min_leg == 0 or collaterals[hotkey] >= min_leg
+            return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
         return exec_ref, fund_ref
 
@@ -2554,10 +2575,11 @@ class TestCrownPredicateParity:
                             f'bounds=({min_rao},{max_rao}) hk={hk} rate={rate}'
                         )
 
-    def test_fail_open_on_absent_collateral(self):
-        # absent != zero — a miner with no recorded baseline must not be dropped.
+    def test_fail_closed_on_absent_collateral(self):
+        # Absent counts as zero — the scoring-round reconcile seeds a baseline for
+        # every live funded miner, so a missing one means the chain agrees: unfunded.
         _, can_fund = make_crown_predicates('sol', 'btc', 100_000_000, 500_000_000, {})
-        assert can_fund('hk_unknown', 345.0) is True
+        assert can_fund('hk_unknown', 345.0) is False
 
     def test_drops_holder_whose_collateral_cannot_fund_min_leg(self):
         # 1-rao collateral can't cover any real in-band leg → boundary-squat drop;
@@ -2657,3 +2679,63 @@ class TestScoreSnapshots:
         assert v.database_storage.flush_halt_window.called
         assert not v.database_storage.flush_scoring_window.called
         v.state_store.close()
+
+
+class TestFillRatio:
+    """fill_ratio = (1-α) + α·min(1, vol_share/crown_share), α = VOLUME_WEIGHT_ALPHA (0.75):
+    a zero-fill holder in an active direction floors at 0.25; an idle direction
+    (0 total volume) pays full — 0/0 is full earnings by design."""
+
+    def test_zero_fill_in_active_direction_floors_at_quarter(self):
+        assert fill_ratio(0, 1_000, 0.5) == pytest.approx(1.0 - VOLUME_WEIGHT_ALPHA) == pytest.approx(0.25)
+
+    def test_idle_direction_pays_full(self):
+        assert fill_ratio(0, 0, 1.0) == 1.0
+
+    def test_matching_share_pays_full(self):
+        assert fill_ratio(500, 1_000, 0.5) == 1.0
+
+    def test_over_serve_capped_at_full(self):
+        assert fill_ratio(1_000, 1_000, 0.5) == 1.0
+
+    def test_partial_fill_lands_between_floor_and_full(self):
+        # vol_share 0.25 vs crown_share 0.5 → participation 0.5 → 0.25 + 0.75·0.5
+        assert fill_ratio(250, 1_000, 0.5) == pytest.approx(0.25 + 0.75 * 0.5)
+
+
+class TestCrownCanFund:
+    """The crown funding gate mirrors routing's swap_viable / the contract's
+    1.10× reserve requirement — a miner below required_collateral(min_leg) is
+    unreservable at any size and must earn no crown."""
+
+    BOUNDS = dict(from_chain='sol', to_chain='btc', min_swap_lamports=100_000_000, max_swap_lamports=500_000_000)
+    RATE = 326.0
+
+    def min_leg(self) -> int:
+        return min_executable_sol_leg(self.RATE, **self.BOUNDS)
+
+    def test_collateral_at_raw_leg_is_rejected(self):
+        # Regression: the pre-1.1× gate passed exactly-min_leg collateral, paying
+        # crown to a miner the contract would refuse to reserve at any size.
+        leg = self.min_leg()
+        assert leg > 0
+        assert not crown_can_fund('hk', self.RATE, collaterals={'hk': leg}, **self.BOUNDS)
+
+    def test_collateral_at_required_collateral_passes(self):
+        assert crown_can_fund('hk', self.RATE, collaterals={'hk': required_collateral(self.min_leg())}, **self.BOUNDS)
+
+    def test_unknown_collateral_fails_closed(self):
+        assert not crown_can_fund('hk', self.RATE, collaterals={}, **self.BOUNDS)
+
+    def test_unexecutable_rate_is_unconstrained(self):
+        # min_leg 0 = "no in-band fundable swap" — executability is policed by
+        # is_executable_rate, not this gate (the #392 sentinel rate, btc→sol).
+        assert crown_can_fund(
+            'hk',
+            1e10,
+            from_chain='btc',
+            to_chain='sol',
+            min_swap_lamports=100_000_000,
+            max_swap_lamports=500_000_000,
+            collaterals={},
+        )

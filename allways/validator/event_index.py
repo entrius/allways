@@ -24,7 +24,7 @@ import bittensor as bt
 
 from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
-from allways.constants import RATE_PRECISION
+from allways.constants import RATE_PRECISION, RECONCILE_QUIET_SECS
 from allways.solana.events import EventRecord
 from allways.utils.rate import quantize_rate_fixed
 from allways.validator.state_store import ValidatorStateStore
@@ -63,8 +63,9 @@ class SolanaEventIndex:
     def ingest(self, records: List[EventRecord], attribution: Dict[str, str]) -> int:
         """Persist ``records`` (oldest-first) into the event tables, mapping each event's miner Solana
         pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). Events from an unbound
-        pubkey, or carrying no ``blockTime`` yet (an unstamped tip tx), are skipped — the cursor stays
-        behind them so a later pass re-ingests once they stamp. Returns the count written."""
+        pubkey are dropped (no UID to credit); ``reconcile_live_state`` later heals any state they carried.
+        Records with no ``blockTime`` are skipped defensively — poll() already holds the cursor before
+        unstamped txs, so none should reach here. Returns the count written."""
         written = 0
         for rec in records:
             block_time = rec.block_time
@@ -164,6 +165,30 @@ class SolanaEventIndex:
             bt.logging.warning(f'SolanaEventIndex: reservation_ttl read failed: {e}')
             return None
         return ttl if ttl > 0 else None
+
+    def reconcile_live_state(self, live_states: Dict[str, object], now: int) -> None:
+        """Scoring-round backstop for lost events (unbound-at-ingest drops, abandoned unstamped
+        txs, RPC gaps): diff each bound miner's live chain state against the event-derived view
+        and write corrective events stamped ``now``. Corrections apply from now on — crown
+        already credited over a divergent stretch stands, bounding the error at one round.
+        A miner is corrected only while its event stream has been quiet for
+        ``RECONCILE_QUIET_SECS``, so a stale live read never fights an in-flight real event."""
+        derived_active = self.state_store.get_active_state_at(now)
+        derived_collateral = self.state_store.get_collaterals_at(now)
+        quiet_start = now - RECONCILE_QUIET_SECS
+        recent_active = {e['hotkey'] for e in self.state_store.get_active_events_in_range(quiet_start, now)}
+        recent_collateral = {e['hotkey'] for e in self.state_store.get_collateral_events_in_range(quiet_start, now)}
+        for hotkey, ms in live_states.items():
+            live_active = bool(ms.active)
+            if hotkey not in recent_active and live_active != (hotkey in derived_active):
+                self.state_store.insert_active_event(now, hotkey, live_active)
+                bt.logging.warning(f'reconcile {hotkey[:8]}: event-derived active ≠ chain, corrected to {live_active}')
+            live_collateral = int(ms.collateral)
+            if hotkey not in recent_collateral and derived_collateral.get(hotkey) != live_collateral:
+                self.state_store.insert_collateral_event(now, hotkey, live_collateral)
+                bt.logging.warning(
+                    f'reconcile {hotkey[:8]}: event-derived collateral ≠ chain, corrected to {live_collateral}'
+                )
 
     @staticmethod
     def _miner_str(rec: EventRecord) -> Optional[str]:
