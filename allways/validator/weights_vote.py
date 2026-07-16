@@ -37,13 +37,16 @@ _BENIGN_WEIGHTS_MARKERS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator
 
 def derive_weight_vector(validators, attribution: Dict[str, str], metagraph) -> List[int]:
     """Draw weight per whitelisted validator, index-aligned to ``Config.validators``:
-    floor(alpha_stake / bucket); no binding or not on the metagraph → 0."""
+    max(1, floor(alpha_stake / bucket)); no binding or not on the metagraph → 0.
+
+    The floor of 1 keeps a bound, sub-bucket validator ahead of native (weight-0) bidders —
+    all-zero weights make resolve_pool's draw uniform and break routed win odds."""
     uid_of = {hk: uid for uid, hk in enumerate(metagraph.hotkeys)}
     weights = []
     for v in validators:
         uid = uid_of.get(attribution.get(str(Pubkey.from_bytes(bytes(v.key)))))
         alpha = float(metagraph.alpha_stake[uid]) if uid is not None else 0.0
-        weights.append(int(alpha // WEIGHTS_STAKE_BUCKET_ALPHA))
+        weights.append(max(1, int(alpha // WEIGHTS_STAKE_BUCKET_ALPHA)) if uid is not None else 0)
     return weights
 
 

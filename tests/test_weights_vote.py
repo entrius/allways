@@ -74,7 +74,9 @@ def test_derive_buckets_floor_and_alignment():
     validators = [_vali(k) for k in keys]
     attribution = {str(keys[0]): 'hkA', str(keys[1]): 'hkB', str(keys[2]): 'hkC'}  # keys[3] unbound
     mg = _metagraph(['hkA', 'hkB', 'hkC'], [178_000.0, 49_999.0, 50_000.0])
-    assert derive_weight_vector(validators, attribution, mg) == [3, 0, 1, 0]
+    # Sub-bucket but bound (hkB) floors to 1, not 0 — an all-zero vector makes the contract's
+    # draw uniform and native bidders beat routed takers (QA finding P1). Unbound stays 0.
+    assert derive_weight_vector(validators, attribution, mg) == [3, 1, 1, 0]
 
 
 def test_derive_hotkey_off_metagraph_is_zero():
