@@ -88,7 +88,14 @@ def log_scoring_trace(
         )
         lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
 
-    for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
+    def _in_story(u: int) -> bool:
+        # A miner belongs in the round's story if it was PAID or if it HELD crown time —
+        # an ineligible crown holder earning 0 is exactly the case the log must explain
+        # (otherwise "why did uid N get nothing?" needs a database query to answer).
+        hk = hotkeys[u]
+        return float(rewards[u]) > 0 or any(t.crown_time.get(hk, 0.0) > 0 for t in direction_traces.values())
+
+    for uid in sorted((u for u in range(len(rewards)) if _in_story(u)), key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
         crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
         if uid == recycle_uid and crown_secs == 0:
