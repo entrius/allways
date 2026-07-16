@@ -393,7 +393,17 @@ def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
 
     s = _load()
     if s is None:
-        fail(f'No swap found for swap_key {swap_key_hex}.')
+        # Not an error: Swap accounts close at resolution, so a missing account usually MEANS
+        # "finished". Say so in both modes instead of failing a normal terminal probe.
+        note = (
+            'No swap account on-chain for this swap_key — swaps close when resolved '
+            '(Completed or TimedOut), so this swap either finished or never existed.'
+        )
+        if as_json:
+            print_json({'found': False, 'note': note})
+        else:
+            console.print(f'[yellow]{note}[/yellow]')
+        return
 
     if as_json:
         print_json(_swap_json(s))
