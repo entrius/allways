@@ -51,6 +51,28 @@ def test_view_config_renders_every_field(monkeypatch):
     assert 'alw config' in result.output  # cross-link to the local CLI settings
 
 
+def test_votes_needed_mirrors_contract_headcount_math():
+    """consensus.rs: votes*100 >= threshold*total. Note 67% of 3 needs ALL 3 (2/3 = 66.7% < 67%)."""
+    one = types.SimpleNamespace(key=b'', weight=1)
+    assert view._votes_needed(_config(consensus_threshold_percent=67, validators=[one])) == 1
+    assert view._votes_needed(_config(consensus_threshold_percent=67, validators=[one] * 3)) == 3
+    assert view._votes_needed(_config(consensus_threshold_percent=66, validators=[one] * 3)) == 2
+    assert view._votes_needed(_config(consensus_threshold_percent=51, validators=[one] * 4)) == 3
+
+
+def test_view_config_shows_effective_votes(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(
+        consensus_threshold_percent=67, validators=[types.SimpleNamespace(key=b'', weight=1)]
+    )
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(view.view_group, ['config'])
+
+    assert result.exit_code == 0, result.output
+    assert '67% (1 of 1 validator votes)' in ' '.join(result.output.split())
+
+
 def test_view_config_reports_uninitialized(monkeypatch):
     client = MagicMock()
     client.get_config.return_value = None

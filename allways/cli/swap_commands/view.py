@@ -421,6 +421,17 @@ def _sol_or(amount: int, zero_label: str) -> str:
     return f'{from_lamports(amount):.4f} SOL' + (f' ({zero_label})' if amount == 0 else '')
 
 
+def _votes_needed(cfg) -> int:
+    """Votes required for consensus — mirrors the program's headcount check
+    (consensus.rs: votes*100 >= threshold*total), i.e. ceil(threshold*total/100)."""
+    total = len(cfg.validators)
+    return -(-cfg.consensus_threshold_percent * total // 100)
+
+
+def _threshold_line(cfg) -> str:
+    return f'{cfg.consensus_threshold_percent}% ({_votes_needed(cfg)} of {len(cfg.validators)} validator votes)'
+
+
 @view_group.command('config')
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of text.')
 def view_config(as_json):
@@ -440,6 +451,7 @@ def view_config(as_json):
                 'version': cfg.version,
                 'halted': bool(cfg.halted),
                 'consensus_threshold_percent': cfg.consensus_threshold_percent,
+                'votes_needed': _votes_needed(cfg),
                 'reservation_fee_sol': from_lamports(cfg.reservation_fee_lamports),
                 'min_collateral_sol': from_lamports(cfg.min_collateral),
                 'max_collateral_sol': from_lamports(cfg.max_collateral),
@@ -458,7 +470,7 @@ def view_config(as_json):
     console.print(f'  Admin:                {cfg.admin}')
     console.print(f'  Version:              {cfg.version}')
     console.print(f'  Halted:               {"yes" if cfg.halted else "no"}')
-    console.print(f'  Consensus threshold:  {cfg.consensus_threshold_percent}%')
+    console.print(f'  Consensus threshold:  {_threshold_line(cfg)}')
     console.print(f'  Reservation fee:      {from_lamports(cfg.reservation_fee_lamports):.6f} SOL')
     console.print(f'  Min collateral:       {from_lamports(cfg.min_collateral):.4f} SOL')
     console.print(f'  Max collateral:       {_sol_or(cfg.max_collateral, "unlimited")}')
@@ -487,10 +499,16 @@ def view_validators(as_json):
         return
     validators = [{'pubkey': str(Pubkey.from_bytes(bytes(v.key))), 'weight': v.weight} for v in cfg.validators]
     if as_json:
-        print_json({'consensus_threshold_percent': cfg.consensus_threshold_percent, 'validators': validators})
+        print_json(
+            {
+                'consensus_threshold_percent': cfg.consensus_threshold_percent,
+                'votes_needed': _votes_needed(cfg),
+                'validators': validators,
+            }
+        )
         return
     console.print('\n[bold]Validators[/bold]\n')
-    console.print(f'  Consensus threshold: {cfg.consensus_threshold_percent}%\n')
+    console.print(f'  Consensus threshold: {_threshold_line(cfg)}\n')
     if not validators:
         console.print('  [yellow]No validators registered.[/yellow]\n')
         return
