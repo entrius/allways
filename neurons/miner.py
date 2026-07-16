@@ -21,7 +21,7 @@ import bittensor as bt  # noqa: E402
 from bittensor import Keypair as BtKeypair  # noqa: E402
 
 from allways.chain_providers import create_chain_providers  # noqa: E402
-from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS  # noqa: E402
+from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS, NUMERAIRE_CHAIN  # noqa: E402
 from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
 from allways.solana import keys  # noqa: E402
@@ -49,8 +49,22 @@ class Miner(BaseMinerNeuron):
         self.solana_pubkey = self.solana_client.keypair.pubkey()
         # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer
         # user↔miner transfer; separate from the program client that never custodies swap assets).
+        # Only chains this miner actually quotes (plus the hub) must pass the startup check —
+        # a tao<->sol miner starts without BTC credentials; a btc-quoting miner still fails hard.
+        try:
+            quoted = {
+                chain
+                for _pda, q in self.solana_client.get_all('MinerQuote')
+                if bytes(q.miner) == bytes(self.solana_pubkey)
+                for chain in (q.from_chain, q.to_chain)
+            }
+            required_chains = quoted | {NUMERAIRE_CHAIN}
+        except Exception as e:
+            bt.logging.warning(f'Could not read own quotes at startup ({e}); requiring all chain providers.')
+            required_chains = None
         self.chain_providers = create_chain_providers(
             check=True,
+            required_chains=required_chains,
             subtensor=self.subtensor,
             wallet=self.wallet,
             solana_rpc_url=solana_rpc_url,

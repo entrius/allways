@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Type
+from typing import Dict, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
@@ -24,7 +24,12 @@ PROVIDER_REGISTRY: Tuple[Tuple[str, Type[ChainProvider], Tuple[str, ...]], ...] 
 )
 
 
-def create_chain_providers(check: bool = False, require_send: bool = True, **kwargs) -> Dict[str, ChainProvider]:
+def create_chain_providers(
+    check: bool = False,
+    require_send: bool = True,
+    required_chains: Optional[Set[str]] = None,
+    **kwargs,
+) -> Dict[str, ChainProvider]:
     """Initialize all available chain providers.
 
     Args:
@@ -33,6 +38,10 @@ def create_chain_providers(check: bool = False, require_send: bool = True, **kwa
         require_send: If False, skip validation of send credentials (e.g.
                       BTC_PRIVATE_KEY) during check. Validators only need
                       read/verify access so they pass require_send=False.
+        required_chains: Chains whose provider MUST pass the check — others
+                         degrade to a warning and are left out (a tao<->sol
+                         miner must not need BTC credentials). None = all
+                         chains required (validators verify every chain).
 
     Keyword arguments are forwarded to providers that need them.
     e.g. create_chain_providers(subtensor=subtensor)
@@ -40,6 +49,7 @@ def create_chain_providers(check: bool = False, require_send: bool = True, **kwa
     providers: Dict[str, ChainProvider] = {}
 
     for chain_id, cls, kwarg_names in PROVIDER_REGISTRY:
+        required = required_chains is None or chain_id in required_chains
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
             provider = cls(**provider_kwargs)
@@ -47,9 +57,12 @@ def create_chain_providers(check: bool = False, require_send: bool = True, **kwa
                 provider.check_connection(require_send=require_send)
             providers[chain_id] = provider
         except Exception as e:
-            if check:
+            if check and required:
                 raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
-            bt.logging.warning(f'{cls.__name__} not available: {e}')
+            bt.logging.warning(
+                f'{cls.__name__} disabled: {e}'
+                + (f' — {chain_id}-pair swaps cannot be fulfilled until this is fixed' if check else '')
+            )
 
     if check and providers:
         bt.logging.info('Chain providers ready:')
