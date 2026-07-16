@@ -20,6 +20,10 @@ _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
 
 PROGRAM_DATA_PREFIX = 'Program data: '
 
+# Slot age at which poll() stops holding the cursor for an unstamped tx (~2 min): past this the
+# RPC is never going to backfill its blockTime, and holding would wedge ingest forever.
+UNSTAMPED_GIVE_UP_SLOTS = 300
+
 
 def decode_event(raw: bytes) -> Optional[Tuple[str, Any]]:
     """Decode one `Program data:` payload → (event_name, parsed). None for unknown/foreign discriminators
@@ -88,10 +92,19 @@ class SolanaEventIngest:
 
     def poll(self, until_sig: Optional[str]) -> Tuple[List[EventRecord], Optional[str]]:
         """Fetch + decode all events newer than until_sig. Returns (records oldest-first, new_cursor_sig).
-        The cursor is the newest signature seen this pass (unchanged if nothing new)."""
+        The cursor advances only through stamped entries and holds at the first not-yet-stamped
+        (blockTime-less) tip tx, so its events are re-read once stamped instead of skipped forever.
+        An unstamped tx older than UNSTAMPED_GIVE_UP_SLOTS is abandoned (this RPC won't stamp it;
+        holding would wedge the cursor) — the live-state reconcile backstops the loss."""
         entries = self._fetch_new_signatures(until_sig)
+        newest_slot = entries[-1]['slot'] if entries else 0
         records: List[EventRecord] = []
+        new_cursor = until_sig
         for entry in entries:
-            records.extend(self._decode_signature(entry))
-        new_cursor = entries[-1]['signature'] if entries else until_sig
+            unstamped = entry.get('blockTime') is None and entry.get('err') is None
+            if unstamped and newest_slot - entry['slot'] < UNSTAMPED_GIVE_UP_SLOTS:
+                break
+            if not unstamped:
+                records.extend(self._decode_signature(entry))
+            new_cursor = entry['signature']
         return records, new_cursor

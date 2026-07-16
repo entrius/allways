@@ -535,3 +535,66 @@ class TestIngestEndToEndCrown:
         # A: (100,400] + (800,1100] = 600. B: (400,800] = 400.
         assert crown == {'hk_a': 600.0, 'hk_b': 400.0}
         store.close()
+
+
+class TestReconcileLiveState:
+    """Scoring-round backstop: divergence between live MinerState and the
+    event-derived view is corrected with events stamped ``now`` — but only for
+    miners whose event stream has been quiet for RECONCILE_QUIET_SECS."""
+
+    NOW = 100_000
+
+    @staticmethod
+    def _ms(active: bool = True, collateral: int = 0):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(active=active, collateral=collateral)
+
+    def test_corrects_missed_deactivation(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_active_event(100, 'hk_a', True)  # activation seen, deactivation lost
+        idx.reconcile_live_state({'hk_a': self._ms(active=False)}, now=self.NOW)
+        assert idx.get_active_miners_at(self.NOW) == set()
+        store.close()
+
+    def test_corrects_pre_binding_activation_drop(self, tmp_path: Path):
+        # Chain says active with collateral, but the events landed before the
+        # miner bound its hotkey and were dropped — reconcile makes them earnable.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=550)}, now=self.NOW)
+        assert idx.get_active_miners_at(self.NOW) == {'hk_a'}
+        assert idx.get_miner_collaterals_at(self.NOW) == {'hk_a': 550}
+        store.close()
+
+    def test_seeds_missing_collateral_baseline(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_active_event(100, 'hk_a', True)  # active agrees; collateral unknown
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=42)}, now=self.NOW)
+        assert idx.get_miner_collaterals_at(self.NOW) == {'hk_a': 42}
+        assert idx.get_active_miners_at(self.NOW) == {'hk_a'}  # no spurious active row
+        store.close()
+
+    def test_quiet_guard_defers_to_recent_event(self, tmp_path: Path):
+        # A real active event landed seconds ago; a stale live read disagreeing
+        # with it must NOT be written over the fresher event truth.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_active_event(self.NOW - 60, 'hk_a', True)
+        store.insert_collateral_event(self.NOW - 60, 'hk_a', 999)
+        idx.reconcile_live_state({'hk_a': self._ms(active=False, collateral=1)}, now=self.NOW)
+        assert idx.get_active_miners_at(self.NOW) == {'hk_a'}
+        assert idx.get_miner_collaterals_at(self.NOW) == {'hk_a': 999}
+        store.close()
+
+    def test_noop_when_consistent(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_active_event(100, 'hk_a', True)
+        store.insert_collateral_event(100, 'hk_a', 550)
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=550)}, now=self.NOW)
+        assert len(store.load_all_active_events()) == 1
+        assert len(store.load_all_collateral_events()) == 1
+        store.close()
