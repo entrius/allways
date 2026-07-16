@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - test
 
 jobs:
   build-and-push:
@@ -18,10 +19,11 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
+      # main → :latest (mainnet), test → :test (testnet); both also pinned by sha.
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
           push: true
-          tags: entrius/allways:latest,entrius/allways:${{ github.sha }}
+          tags: entrius/allways:${{ github.ref_name == 'main' && 'latest' || 'test' }},entrius/allways:${{ github.sha }}
