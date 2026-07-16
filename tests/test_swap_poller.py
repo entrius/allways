@@ -109,3 +109,50 @@ def test_known_set_tracks_live_swaps_only():
     client.get_swaps.side_effect = lambda status=None: []
     poller.poll()
     assert poller.known == set()
+
+
+def _miner_state(ok: int, failed: int):
+    return types.SimpleNamespace(successful_swaps=ok, failed_swaps=failed)
+
+
+def test_terminal_outcome_named_completed(caplog):
+    me = Keypair().pubkey()
+    client = _client(active=[_acct(bytes(me), 'aa')])
+    client.get_miner_state.return_value = _miner_state(3, 1)
+    poller = SwapPoller(client, me)
+    poller.poll()  # discovers + seeds counter baseline
+
+    client.get_swaps.side_effect = lambda status=None: []
+    client.get_miner_state.return_value = _miner_state(4, 1)  # +1 success
+    poller.poll()
+
+    assert poller.known == set()
+    assert poller._counters == (4, 1)
+
+
+def test_terminal_outcome_named_slashed(caplog):
+    me = Keypair().pubkey()
+    client = _client(active=[_acct(bytes(me), 'aa')])
+    client.get_miner_state.return_value = _miner_state(3, 1)
+    poller = SwapPoller(client, me)
+    poller.poll()
+
+    client.get_swaps.side_effect = lambda status=None: []
+    client.get_miner_state.return_value = _miner_state(3, 2)  # +1 failure
+    poller.poll()
+
+    assert poller._counters == (3, 2)
+
+
+def test_terminal_outcome_read_failure_degrades(caplog):
+    me = Keypair().pubkey()
+    client = _client(active=[_acct(bytes(me), 'aa')])
+    client.get_miner_state.return_value = _miner_state(0, 0)
+    poller = SwapPoller(client, me)
+    poller.poll()
+
+    client.get_swaps.side_effect = lambda status=None: []
+    client.get_miner_state.side_effect = RuntimeError('rpc down')
+    poller.poll()  # must not raise; falls back to ambiguous log
+
+    assert poller.known == set()
