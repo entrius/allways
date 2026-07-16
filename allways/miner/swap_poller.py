@@ -26,6 +26,7 @@ class SwapPoller:
         self.miner_pubkey = _as_pubkey(miner_pubkey)
         self.known: Set[str] = set()  # swap_key hexes already logged as discovered (cosmetic)
         self.last_poll_ok: bool = True
+        self._counters = None  # (successful_swaps, failed_swaps) baseline for naming terminal outcomes
 
     def poll(self) -> Tuple[List[SolanaSwap], List[SolanaSwap]]:
         """Snapshot poll. Returns (active, fulfilled) for this miner. On RPC failure returns ([], [])
@@ -64,10 +65,42 @@ class SwapPoller:
         fulfilled = self._mine(rows, 'Fulfilled')
         # Forget keys no longer present so a reused-tx swap re-logs; bounded to the live set.
         live = {s.key_hex for s in active} | {s.key_hex for s in fulfilled}
-        # A key that was known but is no longer Active/Fulfilled left the miner's live set — the swap
-        # reached a terminal state (Completed = paid, or TimedOut = slashed). Log it so the miner's own log
-        # tells the full story end to end (the miner can't see WHICH terminal without querying outcomes).
-        for gone in self.known - live:
-            bt.logging.info(f'Swap {gone[:16]}: left active set — resolved (Completed or TimedOut)')
+        gone = self.known - live
+        if gone or self._counters is None:
+            self._log_terminal(gone)
         self.known &= live
         return active, fulfilled
+
+    def _read_counters(self):
+        ms = self.client.get_miner_state(self.miner_pubkey)
+        return (int(ms.successful_swaps), int(ms.failed_swaps))
+
+    def _log_terminal(self, gone: Set[str]) -> None:
+        """Name each closed swap's terminal outcome — paid vs slashed — from the on-chain lifetime
+        counters, so the miner's own log tells the whole story (the Swap account is already gone).
+        Counters only move on closures, so the delta since the last baseline attributes exactly."""
+        prev = self._counters
+        try:
+            self._counters = self._read_counters()
+        except Exception as e:
+            for g in gone:
+                bt.logging.warning(f'Swap {g[:16]}: resolved (Completed or TimedOut — outcome read failed: {e})')
+            return
+        if not gone:
+            return  # first poll: baseline seeded
+        if prev is None:
+            for g in gone:
+                bt.logging.info(f'Swap {g[:16]}: left active set — resolved (Completed or TimedOut)')
+            return
+        ok, failed = self._counters[0] - prev[0], self._counters[1] - prev[1]
+        if len(gone) == 1 and ok + failed == 1:
+            g = next(iter(gone))
+            if ok:
+                bt.logging.success(f'Swap {g[:16]}: COMPLETED — paid out (successful_swaps={self._counters[0]})')
+            else:
+                bt.logging.error(f'Swap {g[:16]}: TIMED OUT — collateral slashed (failed_swaps={self._counters[1]})')
+            return
+        bt.logging.info(
+            f'{len(gone)} swap(s) resolved: +{ok} completed, +{failed} timed out '
+            f'(lifetime {self._counters[0]} ok / {self._counters[1]} failed)'
+        )
