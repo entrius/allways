@@ -187,12 +187,22 @@ def finalize_won_seats(validator, now: int) -> list:
     me = str(client.keypair.pubkey())
     finalized: list = []
     for miner, from_chain, to_chain in store.distinct_routed_pools():
+        queue = store.pending_routed_requests(miner, from_chain, to_chain)
+        if not queue:
+            continue
+        entered_at = queue[0]['created_at']
         try:
             resv = client.get_reservation(Pubkey.from_string(miner))
         except Exception as e:
             bt.logging.warning(f'routed sweep {miner[:8]}: reservation read failed, retrying next step: {e}')
             continue
-        drawn_unfilled = resv is not None and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0
+        # The Reservation PDA is reused across rounds: state older than our oldest queued request
+        # is residue from a PREVIOUS round — our pool simply hasn't been drawn yet, so wait (the
+        # TTL backstop clears a queue whose draw never comes). Treating residue as terminal
+        # deleted every queue on the first sweep step and permanently dead-ended routed mode for
+        # any miner-direction carrying an old lapsed seat.
+        fresh = resv is not None and max(int(resv.reserved_until), int(resv.finalize_by)) >= entered_at
+        drawn_unfilled = fresh and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0
         won = (
             drawn_unfilled
             and now <= int(resv.finalize_by)
@@ -201,14 +211,16 @@ def finalize_won_seats(validator, now: int) -> list:
             and resv.to_chain == to_chain
         )
         if not won:
-            # No seat we can fill: not drawn yet (pool still open/uncranked) → wait; anything
-            # terminal (lost, filled, lapsed) → drop. The TTL backstop clears the never-drawn.
+            # No seat we can fill: not drawn yet (open pool / residue) → wait; a fresh terminal
+            # outcome (lost to another router, filled, lapsed) → drop.
             if drawn_unfilled and now <= int(resv.finalize_by):
-                store.delete_routed_requests(miner, from_chain, to_chain)  # another router's seat
-            elif resv is not None and (int(resv.reserved_until) != 0 or int(resv.finalize_by) != 0):
-                store.delete_routed_requests(miner, from_chain, to_chain)  # filled or lapsed
+                bt.logging.info(f'routed sweep {miner[:8]}: seat won by another router, dropping queue')
+                store.delete_routed_requests(miner, from_chain, to_chain)
+            elif fresh:
+                bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
+                store.delete_routed_requests(miner, from_chain, to_chain)
             continue
-        req = draw_pool_winner(store.pending_routed_requests(miner, from_chain, to_chain))
+        req = draw_pool_winner(queue)
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
