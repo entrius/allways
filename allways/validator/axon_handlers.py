@@ -161,7 +161,7 @@ async def handle_swap_reserve(
     miner = synapse.miner_hotkey
     label = miner_label(validator, miner)
     direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
-    ctx = f'[{label}] SwapReserve {direction}'
+    ctx = f'[miner {label}] SwapReserve {direction}'
     try:
         result = reserve_on_behalf(
             validator,
