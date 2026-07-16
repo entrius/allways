@@ -108,3 +108,18 @@ def test_view_validators_handles_empty_set(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert 'No validators registered' in result.output
+
+
+def test_view_swap_closed_is_informative_not_error(monkeypatch):
+    client = MagicMock()
+    client.get_swap.return_value = None
+    _patch_client(monkeypatch, client)
+    key = 'ab' * 32
+
+    text = CliRunner().invoke(view.view_group, ['swap', key])
+    assert text.exit_code == 0, text.output
+    assert 'finished or never existed' in text.output
+
+    js = CliRunner().invoke(view.view_group, ['swap', key, '--json'])
+    assert js.exit_code == 0, js.output
+    assert '"found": false' in js.output
