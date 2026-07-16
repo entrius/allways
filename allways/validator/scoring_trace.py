@@ -130,6 +130,7 @@ def log_scoring_trace(
             collaterals,
             min_swap_lamports,
             max_swap_lamports,
+            covered=crown_holders,
         )
     )
 
@@ -154,8 +155,10 @@ def non_earner_lines(
     collaterals: Optional[Dict[str, int]] = None,
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
+    covered: Optional[Set[str]] = None,
 ) -> List[str]:
     collaterals = collaterals or {}
+    covered = covered or set()
     ever_active = set(self.event_index.get_active_miners_at(window_start))
     for e in self.event_index.get_active_events_in_range(window_start, window_end):
         if e['active']:
@@ -168,7 +171,9 @@ def non_earner_lines(
 
     out: List[str] = []
     for uid, hk in enumerate(self.metagraph.hotkeys):
-        if uid == recycle_uid or rewards[uid] > 0:
+        # `covered` = zero-reward crown holders — already narrated with full factors in the
+        # story loop (their crown_s is nonzero, so this section's crown_s=0 line would be wrong).
+        if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
             continue
         latest_rates = rates_by_hotkey.get(hk, {})
         if not latest_rates and hk not in ever_active:
