@@ -137,6 +137,9 @@ def add_validator_args(cls, parser):
 
 def config(cls):
     """Returns the configuration object specific to this miner or validator after adding relevant arguments."""
+    # bittensor >= 10.5 skips CLI/parser parsing unless this env opts in (BT_NO_PARSE_CLI_ARGS
+    # defaults to true) — without it every custom arg (--netuid, --neuron.*) comes back None.
+    os.environ.setdefault('BT_NO_PARSE_CLI_ARGS', 'false')
     parser = argparse.ArgumentParser()
     bt.Wallet.add_args(parser)
     bt.Subtensor.add_args(parser)
