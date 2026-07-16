@@ -1,6 +1,6 @@
 services:
   validator:
-    image: entrius/allways:${IMAGE_TAG:-latest}
+    image: entrius/allways:latest
     container_name: aw-vali
     restart: unless-stopped
     mem_limit: "3g"
