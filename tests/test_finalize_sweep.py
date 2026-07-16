@@ -116,6 +116,43 @@ def test_already_filled_reservation_drops_queue(tmp_path):
     v.state_store.close()
 
 
+def test_stale_lapsed_residue_from_previous_round_waits(tmp_path):
+    # The PDA still carries a LAPSED seat drawn before our request existed — that's residue from
+    # an earlier round, not our outcome. Deleting here dead-ended routed mode forever on this
+    # miner-direction (each attempt's lapsed seat killed the next attempt's queue).
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client, finalize_by=NOW - 500)
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    assert finalize_won_seats(v, NOW) == []
+    assert not client.finalized
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]  # kept — our draw is pending
+    v.state_store.close()
+
+
+def test_stale_expired_reservation_residue_waits(tmp_path):
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client, reserved_until=NOW - 500, finalize_by=0)
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    assert finalize_won_seats(v, NOW) == []
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]
+    v.state_store.close()
+
+
+def test_residue_then_fresh_draw_finalizes(tmp_path):
+    # Recovery path: sweep waits through residue, then our round's draw lands → finalize.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client, finalize_by=NOW - 500)
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    assert finalize_won_seats(v, NOW) == []
+    client._reservation = _drawn_seat(client, finalize_by=NOW + 100)
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert len(client.finalized) == 1
+    v.state_store.close()
+
+
 def test_undrawn_pool_keeps_queue_for_next_step(tmp_path):
     # No reservation yet (pool still open / crank pending) → wait, don't drop.
     client = SweepClient(None)
