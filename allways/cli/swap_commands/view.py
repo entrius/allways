@@ -454,7 +454,7 @@ def view_config(as_json):
             }
         )
         return
-    console.print('\n[bold]Program Config[/bold]\n')
+    console.print('\n[bold]On-chain Program Config[/bold] [dim](read-only — set by the program admin)[/dim]\n')
     console.print(f'  Admin:                {cfg.admin}')
     console.print(f'  Version:              {cfg.version}')
     console.print(f'  Halted:               {"yes" if cfg.halted else "no"}')
@@ -470,6 +470,7 @@ def view_config(as_json):
     console.print(f'  Weights interval:     {secs_str(cfg.weights_update_min_interval_secs)}')
     console.print(f'  Max total extension:  {secs_str(cfg.max_total_extension_secs)}')
     console.print(f'  Validators:           {len(cfg.validators)}\n')
+    console.print('[dim]Local CLI settings: `alw config`[/dim]\n')
 
 
 @view_group.command('validators')

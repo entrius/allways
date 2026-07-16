@@ -47,6 +47,8 @@ def test_view_config_renders_every_field(monkeypatch):
         assert label in result.output
     assert '51%' in result.output
     assert '0.001000 SOL' in result.output  # reservation fee in SOL
+    assert 'On-chain Program Config' in result.output
+    assert 'alw config' in result.output  # cross-link to the local CLI settings
 
 
 def test_view_config_reports_uninitialized(monkeypatch):

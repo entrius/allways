@@ -38,6 +38,7 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
+import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
@@ -62,6 +63,7 @@ from allways.cli.swap_commands.helpers import (  # noqa: E402
     fail,
     get_effective_config,
 )
+from allways.constants import NETUID_FINNEY  # noqa: E402
 
 # Feed a configured btc-network into the BTC provider (which reads BTC_NETWORK from env; a real env wins).
 apply_btc_network_env(get_effective_config())
@@ -93,39 +95,86 @@ def config_group(ctx):
 
 
 def show_config():
-    """Show current CLI configuration"""
-    console.print('\n[bold]Allways CLI Configuration[/bold]\n')
+    """Show the local CLI configuration: every settable key with its effective value and source."""
+    console.print('\n[bold]Local CLI Configuration[/bold]\n')
 
     if not CONFIG_FILE.exists():
-        console.print('[yellow]No config file found at ~/.allways/config.json[/yellow]')
-        console.print('[dim]Run `alw config set <key> <value>` to create config[/dim]')
-        return
+        console.print(
+            '[yellow]No config file yet — run `alw config set env testnet` (or `mainnet`) to create one.[/yellow]'
+        )
+    else:
+        try:
+            json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            console.print('[red]Warning: could not parse the config file — showing defaults.[/red]')
+    config = get_effective_config()
 
+    table = Table(show_header=True)
+    table.add_column('Setting', style='cyan')
+    table.add_column('Effective value', style='green')
+    table.add_column('Source', style='dim')
+    for key, value, source in _effective_settings(config):
+        table.add_row(key, value, source)
+    console.print(table)
+
+    # Show which key will actually sign (env > solana-keypair config > ~/.solana/id.json),
+    # so a wrong signer is visible here instead of as a cryptic on-chain failure.
+    signer = _resolved_signer_line(config)
+    if signer:
+        console.print(f'\n[dim]Solana signer:[/dim] {signer}')
+    console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]')
+    console.print('[dim]On-chain program parameters: `alw view config`[/dim]\n')
+
+
+def _effective_settings(config: dict) -> list:
+    """One (key, effective value, source) row per settable key, mirroring each key's real
+    resolution order (env escape hatch > config > default) — `alw config` shows what a command
+    would actually use, not just what the file contains."""
+    from allways.cli.swap_commands.helpers import resolve_solana_keypair_path, resolve_solana_rpc
+    from allways.solana.program import CONFIG_KEYS as PROGRAM_CONFIG_KEYS
+    from allways.solana.program import ENV_VAR as PROGRAM_ID_ENV
+    from allways.solana.program import resolve_program_id
+
+    def row(key, default=None):
+        if key in config:
+            return key, str(config[key]), 'config'
+        return (key, str(default), 'default') if default is not None else (key, '(not set)', '—')
+
+    def source(env_var: str, config_hit: bool, derived: str = '') -> str:
+        if os.environ.get(env_var):
+            return 'env'
+        if config_hit:
+            return 'config'
+        return derived or 'default'
+
+    rpc_url = re.sub(r'(api-key=)[^&]+', r'\1***', resolve_solana_rpc(config))
+    rpc_src = source(
+        'SOLANA_RPC_URL', bool(config.get('solana-rpc')), 'solana-network' if config.get('solana-network') else ''
+    )
+    keypair_src = source('SOLANA_KEYPAIR_PATH', bool(config.get('solana-keypair')))
+    program_src = source(PROGRAM_ID_ENV, any(config.get(k) for k in PROGRAM_CONFIG_KEYS))
     try:
-        config = json.loads(CONFIG_FILE.read_text())
+        program_id = str(resolve_program_id(config))
+    except ValueError as e:
+        program_id = f'invalid: {e}'
 
-        table = Table(show_header=True)
-        table.add_column('Setting', style='cyan')
-        table.add_column('Value', style='green')
-
-        for key, value in config.items():
-            if key in HIDDEN_CONFIG_KEYS:
-                continue  # legacy substrate key, dead on Solana — hidden but tolerated in the file
-            table.add_row(key, str(value))
-
-        console.print(table)
-
-        # Show which key will actually sign (env > solana-keypair config > ~/.solana/id.json),
-        # so a wrong signer is visible here instead of as a cryptic on-chain failure.
-        signer = _resolved_signer_line(config)
-        if signer:
-            console.print(f'\n[dim]Solana signer:[/dim] {signer}')
-        console.print(f'\n[dim]Config file: {CONFIG_FILE}[/dim]\n')
-
-    except json.JSONDecodeError:
-        console.print('[red]Error: Invalid JSON in config file[/red]')
-    except Exception as e:
-        console.print(f'[red]Error reading config: {e}[/red]')
+    btc_env = os.environ.get('BTC_NETWORK')
+    return [
+        row('network', default='finney'),
+        row('netuid', default=NETUID_FINNEY),
+        row('wallet'),
+        row('hotkey'),
+        row('solana-network'),
+        ('solana-rpc', rpc_url, rpc_src),
+        ('solana-keypair', resolve_solana_keypair_path(config), keypair_src),
+        (
+            'btc-network',
+            config.get('btc-network') or btc_env or 'mainnet',
+            'config' if config.get('btc-network') else 'env' if btc_env else 'default',
+        ),
+        row('router'),
+        ('program-id', program_id, program_src),
+    ]
 
 
 def _resolved_signer_line(config: dict) -> str | None:
@@ -161,9 +210,6 @@ VALID_CONFIG_KEYS = (
     'router',
     'env',
 )
-
-# Legacy keys still tolerated in an existing config file but never shown or settable (dead on Solana).
-HIDDEN_CONFIG_KEYS = ('contract-address', 'contract')
 
 
 @config_group.command('set')
