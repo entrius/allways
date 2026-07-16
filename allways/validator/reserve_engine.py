@@ -5,7 +5,6 @@ One source of truth for reserve / confirm / rate / status, shared by the axon sy
 invariants before it signs — the caller (offering or CLI) is never trusted.
 """
 
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,33 +21,10 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
 )
-from allways.solana.client import swap_key_from_tx_hash
+from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.validator.binding import hotkey_ss58, verify_binding
 
 EMPTY_SWAP_KEY = b'\x00' * 32
-
-
-def _contract_reject_reason(err: Exception) -> Optional[str]:
-    """A deliberate on-chain program rejection is a normal domain rejection — e.g. the miner got
-    reserved between our pre-check and this tx (a race the contract, as final arbiter, closes). Return a
-    clean human reason so the seam answers 422, not a 500. Returns None for a genuine transport/RPC
-    fault, which must still surface as an error.
-
-    A program rejection surfaces two ways: a PRE-FLIGHT simulation reject carries the Anchor name /
-    'custom program error' text; a tx that is submitted and LANDS failed surfaces through the confirm
-    path as `{'InstructionError': [0, {'Custom': N}]}` — a numeric code with neither phrase. Both are
-    contract domain rejections (a transport fault has no Custom program code), so 422 for both."""
-    s = str(err)
-    sl = s.lower()
-    if not ('custom program error' in sl or 'anchorerror' in sl or 'instructionerror' in sl or "'custom':" in sl):
-        return None
-    m = re.search(r'Error Message: ([^.\"\']+)', s)
-    if m:
-        return m.group(1).strip()
-    code = re.search(r"'Custom':\s*(\d+)", s)  # landed-tx form has no human message — surface the code
-    if code:
-        return f'miner is not available for reservation right now (contract error {code.group(1)})'
-    return 'miner is not available for reservation right now'
 
 
 def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
@@ -147,7 +123,7 @@ def reserve_on_behalf(
     try:
         sig = client.open_or_request(miner_pk, from_chain, to_chain)
     except Exception as e:
-        reason = _contract_reject_reason(e)
+        reason = contract_reject_reason(e)
         if reason is None:
             raise
         return ReserveResult(False, reason)
@@ -236,7 +212,7 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.to_amount,
             )
         except Exception as e:
-            reason = _contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
+            reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
             if reason is None:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue

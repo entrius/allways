@@ -7,6 +7,7 @@ builders land in B1/B2 as the loop needs them.
 """
 
 import base64
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -122,6 +123,28 @@ def _as_pubkey(p) -> Pubkey:
 
 class SolanaClientError(Exception):
     pass
+
+
+def contract_reject_reason(err: Exception) -> Optional[str]:
+    """A deliberate on-chain program rejection is a normal domain rejection — e.g. the miner got
+    reserved between a pre-check and this tx (a race the contract, as final arbiter, closes).
+    Returns a clean human reason, or None for a genuine transport/RPC fault which must still
+    surface as an error.
+
+    A program rejection surfaces two ways: a PRE-FLIGHT simulation reject carries the Anchor name /
+    'custom program error' text; a tx that is submitted and LANDS failed surfaces through the confirm
+    path as `{'InstructionError': [0, {'Custom': N}]}` — a numeric code with neither phrase."""
+    s = str(err)
+    sl = s.lower()
+    if not ('custom program error' in sl or 'anchorerror' in sl or 'instructionerror' in sl or "'custom':" in sl):
+        return None
+    m = re.search(r'Error Message: ([^.\"\']+)', s)
+    if m:
+        return m.group(1).strip()
+    code = re.search(r"'Custom':\s*(\d+)", s)  # landed-tx form has no human message — surface the code
+    if code:
+        return f'miner is not available for reservation right now (contract error {code.group(1)})'
+    return 'miner is not available for reservation right now'
 
 
 class AllwaysSolanaClient:
