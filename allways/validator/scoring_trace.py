@@ -88,13 +88,11 @@ def log_scoring_trace(
         )
         lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
 
-    # The round's story covers every miner that was PAID or HELD crown time — an ineligible
-    # crown holder earning 0 must appear (eligible=False, reward=0.000), or "why did uid N
-    # get nothing?" needs a database query to answer.
+    # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
     crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
-    story_uids = [u for u in range(len(rewards)) if rewards[u] > 0 or hotkeys[u] in crown_holders]
+    shown = [u for u in range(len(rewards)) if rewards[u] > 0 or hotkeys[u] in crown_holders]
 
-    for uid in sorted(story_uids, key=lambda u: -float(rewards[u])):
+    for uid in sorted(shown, key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
         crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
         if uid == recycle_uid and crown_secs == 0:
@@ -171,8 +169,7 @@ def non_earner_lines(
 
     out: List[str] = []
     for uid, hk in enumerate(self.metagraph.hotkeys):
-        # `covered` = zero-reward crown holders — already narrated with full factors in the
-        # story loop (their crown_s is nonzero, so this section's crown_s=0 line would be wrong).
+        # crown holders already got a full factor line above
         if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
             continue
         latest_rates = rates_by_hotkey.get(hk, {})
