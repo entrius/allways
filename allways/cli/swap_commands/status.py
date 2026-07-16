@@ -16,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
     from_lamports,
     get_effective_config,
     get_solana_cli_context,
+    hotkey_bytes_to_ss58,
     print_json,
     resolve_solana_keypair_path,
     safe_read,
@@ -41,6 +42,19 @@ def _tao_identity(config):
     except Exception:
         balance = None
     return ss58, balance
+
+
+def _configured_hotkey_ss58(config):
+    """ss58 of the configured hotkey, or None when unset/unreadable — used only to annotate
+    whether the on-chain binding matches the local config, never to fail status."""
+    if not config.get('wallet') or not config.get('hotkey'):
+        return None
+    import bittensor as bt
+
+    try:
+        return bt.Wallet(name=config['wallet'], hotkey=config['hotkey']).hotkey.ss58_address
+    except Exception:
+        return None
 
 
 def _load_caller(config):
@@ -75,9 +89,12 @@ def status_command(miner_pk, as_json):
     tao = _tao_identity(config)
     balance = None
     miner_state = None
+    binding = None
     if caller is not None:
         balance = safe_read(lambda: client.rpc.get_account_lamports(caller), what='read balance')
         miner_state = safe_read(lambda: client.get_miner_state(caller), what='read miner state')
+        binding = safe_read(lambda: client.get_binding(caller), what='read hotkey binding')
+    bound_ss58 = hotkey_bytes_to_ss58(bytes(binding.hotkey)) if binding is not None else None
 
     is_miner = miner_state is not None
     now = int(time.time())
@@ -102,6 +119,7 @@ def status_command(miner_pk, as_json):
             'halted': halted,
             'caller': str(caller) if caller else None,
             'balance_sol': from_lamports(balance) if balance is not None else None,
+            'bound_hotkey': bound_ss58,
             'is_miner': is_miner,
         }
         if tao is not None:
@@ -138,6 +156,18 @@ def status_command(miner_pk, as_json):
         bal = f'{from_lamports(balance):.4f} SOL' if balance is not None else '[dim]unknown[/dim]'
         console.print(f'  Keypair:      {caller}')
         console.print(f'  Balance:      {bal}')
+        if bound_ss58:
+            local = _configured_hotkey_ss58(config)
+            note = ''
+            if local:
+                note = (
+                    '  [green](matches your configured hotkey)[/green]'
+                    if local == bound_ss58
+                    else '  [red](configured hotkey differs!)[/red]'
+                )
+            console.print(f'  Bound hotkey: {bound_ss58}{note}')
+        else:
+            console.print('  Bound hotkey: [dim]none — miners/validators bind with `alw bind-hotkey`[/dim]')
     else:
         console.print(
             '  Keypair:      [dim]none loaded (`alw config set solana-keypair <path>` or SOLANA_KEYPAIR_PATH)[/dim]'
