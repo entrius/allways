@@ -221,8 +221,8 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
             '[dim]Track it with `alw view swap`.[/dim]'
         )
     else:
-        console.print(
-            '\n[yellow]No validator accepted the confirm yet.[/yellow]\n'
-            '[dim]Re-run `alw swap post-tx` with the same hash in a moment. If it keeps failing, '
-            'check the reservation is still active with `alw view reservation`.[/dim]'
+        # exit 1: a scripted relay must see "not accepted" as failure and re-run (idempotent).
+        fail(
+            'No validator accepted the confirm yet. Re-run `alw swap post-tx` with the same hash '
+            'in a moment. If it keeps failing, check the reservation is still active with `alw view reservation`.'
         )
