@@ -34,6 +34,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
 )
 from allways.cli.validator_rejections import render_and_aggregate
+from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import SwapConfirmSynapse
 
 # Bounded auto-retry of the deposit relay. The relay is idempotent (validators re-verify the same
@@ -217,10 +218,12 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
 
     if info.accepted:
         clear_pending_swap()
+        swap_key = swap_key_from_tx_hash(tx_hash).hex()
         console.print(
             f'\n[green]Deposit confirmed by {info.accepted} validator(s).[/green] '
             'The miner will fulfil the destination leg once the claim is attested.\n'
-            '[dim]Track it with `alw view swap`.[/dim]'
+            f'  Swap key: {swap_key}\n'
+            f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]'
         )
     else:
         console.print(
