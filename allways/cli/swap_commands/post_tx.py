@@ -26,6 +26,7 @@ from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
+    fail,
     get_cli_context,
     get_solana_cli_context,
     hotkey_bytes_to_ss58,
@@ -127,8 +128,7 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
     else:
         tx_hash = tx_hash.strip()
     if not tx_hash:
-        console.print('[red]A source transaction hash is required.[/red]')
-        return
+        fail('A source transaction hash is required.')
 
     _config, client = get_solana_cli_context(need_keypair=True)
     user = client.keypair.pubkey()
@@ -145,27 +145,25 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
             matches = _find_reservations(client, user, None, require_user=True)
 
     if not matches:
-        console.print(
-            '[yellow]No live, unclaimed reservation found for your address.[/yellow]\n'
-            '[dim]Reserve one with `alw swap now` first, and confirm before it expires. '
-            'Check status with `alw view reservation`.[/dim]'
+        # fail (exit 1), not a friendly return — a scripted relay must see this as failure.
+        fail(
+            'No live, unclaimed reservation found for your address. Reserve one with '
+            '`alw swap now` first, and confirm before it expires. Check status with `alw view reservation`.'
         )
-        return
     if len(matches) > 1:
         console.print('[yellow]You hold multiple live reservations — pick one with --miner <pubkey>:[/yellow]')
         for mpk, _hotkey, resv in matches:
             console.print(
                 f'  [cyan]{mpk}[/cyan]  {resv.from_chain}->{resv.to_chain}  send to [dim]{resv.miner_from_addr}[/dim]'
             )
-        return
+        fail('Ambiguous reservation — nothing was relayed.')
 
     miner_pk, miner_hotkey, resv = matches[0]
     if not miner_hotkey:
-        console.print(
-            f'[red]Miner {miner_pk} has no verifiable hotkey binding — validators cannot resolve the '
-            'reservation. The miner must `alw miner bind-hotkey` before this swap can be confirmed.[/red]'
+        fail(
+            f'Miner {miner_pk} has no verifiable hotkey binding — validators cannot resolve the '
+            'reservation. The miner must `alw miner bind-hotkey` before this swap can be confirmed.'
         )
-        return
 
     # Resolve the source-tx slot as a verification hint (validators can scan without it, but a slot
     # makes it O(1)). Best-effort: fall back to 0 (server-side lookup) or the --block override.
@@ -226,8 +224,8 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
             f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]'
         )
     else:
-        console.print(
-            '\n[yellow]No validator accepted the confirm yet.[/yellow]\n'
-            '[dim]Re-run `alw swap post-tx` with the same hash in a moment. If it keeps failing, '
-            'check the reservation is still active with `alw view reservation`.[/dim]'
+        # exit 1: a scripted relay must see "not accepted" as failure and re-run (idempotent).
+        fail(
+            'No validator accepted the confirm yet. Re-run `alw swap post-tx` with the same hash '
+            'in a moment. If it keeps failing, check the reservation is still active with `alw view reservation`.'
         )

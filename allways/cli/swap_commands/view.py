@@ -384,6 +384,9 @@ def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
         key = bytes.fromhex(swap_key_hex)
     except ValueError:
         fail(f'Invalid swap_key {swap_key_hex!r}: expected hex (the 32-byte swap_key, not an integer id).')
+    if len(key) != 32:
+        # A truncated paste must not read as "swap finished" — it never existed under that key.
+        fail(f'Invalid swap_key: expected 32 bytes (64 hex chars), got {len(key)}.')
 
     _, client = get_solana_cli_context(need_keypair=False)
 

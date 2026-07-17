@@ -123,3 +123,14 @@ def test_view_swap_closed_is_informative_not_error(monkeypatch):
     js = CliRunner().invoke(view.view_group, ['swap', key, '--json'])
     assert js.exit_code == 0, js.output
     assert '"found": false' in js.output
+
+
+def test_view_swap_rejects_wrong_length_key(monkeypatch):
+    client = MagicMock()
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(view.view_group, ['swap', '1234'])
+
+    assert result.exit_code == 1, result.output
+    assert '32 bytes' in result.output
+    client.get_swap.assert_not_called()
