@@ -179,6 +179,10 @@ async def handle_swap_reserve(
         synapse.accepted = True
         synapse.pool_closes_at = result.pool_closes_at
         bt.logging.info(f'{ctx}: entered pool on-behalf (closes_at={result.pool_closes_at}, tx={result.sig[:16]}…)')
+    except ValueError as e:
+        # Malformed caller input (bad ss58/pubkey) is a client error, not a validator fault —
+        # reject at INFO like every other rejection, don't spam ERROR on garbage synapses.
+        reject_synapse(synapse, str(e), ctx)
     except Exception as e:
         bt.logging.error(f'{ctx} failed: {e}')
         reject_synapse(synapse, str(e))

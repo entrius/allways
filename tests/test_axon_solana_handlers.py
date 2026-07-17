@@ -224,3 +224,30 @@ def test_confirm_success_relays_claim():
     assert client.calls == [
         ('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 800_000),
     ]
+
+
+# ---- handle_swap_reserve: malformed caller input ----
+def test_reserve_bad_hotkey_rejects_at_info_not_error(monkeypatch):
+    from allways.synapses import SwapReserveSynapse
+
+    def _raise(*_a, **_k):
+        raise ValueError('Invalid SS58 address: Base 58 requirement is violated')
+
+    monkeypatch.setattr(axon_handlers, 'reserve_on_behalf', _raise)
+    errors = []
+    monkeypatch.setattr(axon_handlers.bt.logging, 'error', lambda msg, *a, **k: errors.append(msg))
+
+    syn = SwapReserveSynapse(
+        miner_hotkey='not-an-ss58',
+        from_chain='tao',
+        to_chain='sol',
+        user_pubkey='u',
+        user_from_addr='x',
+        user_to_addr='y',
+        from_amount=1,
+    )
+    out = run(axon_handlers.handle_swap_reserve(make_validator(FakeSolanaClient()), syn))
+
+    assert out.accepted is False
+    assert 'Invalid SS58' in out.rejection_reason
+    assert errors == []  # a garbage caller must not land on the validator's ERROR log
