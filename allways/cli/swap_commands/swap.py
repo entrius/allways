@@ -621,36 +621,48 @@ def _miner_hotkey(client, miner_pk) -> str:
     return hotkey_bytes_to_ss58(b.hotkey) if b else ''
 
 
+# Plain-English gloss for each on-chain swap status, shown beside it while watching.
+_STATUS_NOTE = {
+    'PendingAttestation': 'validators verifying your deposit',
+    'Active': 'deposit confirmed — miner is sending your funds',
+    'Fulfilled': 'miner delivered — validators confirming both legs',
+}
+
+
 def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 900) -> None:
     """Watch a just-relayed swap to a terminal state, printing transitions. A closed account is the
     SUCCESS signal (swaps close on settle) — so once we've seen it live, its disappearance reads as
     COMPLETED, never the bare 'never existed' scare."""
     key = bytes.fromhex(swap_key_hex)
-    console.print('[dim]  Watching your swap — this settles on its own; Ctrl-C is safe to walk away.[/dim]')
+    resume = f'[dim]  Resume anytime with `alw view swap {swap_key_hex} --watch`.[/dim]'
+    console.print(f'[dim]  Watching your swap — this settles on its own; Ctrl-C is safe to walk away.[/dim]\n{resume}')
     last, seen_live, seen_fulfilled = None, False, False
     deadline = time.time() + timeout_secs
-    while time.time() < deadline:
-        try:
-            acct = client.get_swap(key)
-        except Exception:
-            acct = None
-        if acct is not None:
-            seen_live = True
-            status = type(acct.status).__name__
-            if status != last:
-                console.print(f'    {status}')
-                last = status
-            if status == 'Fulfilled':
-                seen_fulfilled = True
-        elif seen_live:
-            console.print(f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.')
-            return
-        time.sleep(4)
+    try:
+        while time.time() < deadline:
+            try:
+                acct = client.get_swap(key)
+            except Exception:
+                acct = None
+            if acct is not None:
+                seen_live = True
+                status = type(acct.status).__name__
+                if status != last:
+                    console.print(f'    {status:<19}[dim]{_STATUS_NOTE.get(status, "")}[/dim]')
+                    last = status
+                if status == 'Fulfilled':
+                    seen_fulfilled = True
+            elif seen_live:
+                console.print(
+                    f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
+                )
+                return
+            time.sleep(4)
+    except KeyboardInterrupt:
+        console.print(f'\n[dim]  Stopped watching (the swap keeps settling on its own).[/dim]\n{resume}')
+        return
     tail = 'delivered' if seen_fulfilled else 'check `alw status` for your balance'
-    console.print(
-        f'[yellow]  Still settling after {timeout_secs}s[/yellow] — {tail}. '
-        f'Track: `alw view swap {swap_key_hex} --watch`.'
-    )
+    console.print(f'[yellow]  Still settling after {timeout_secs}s[/yellow] — {tail}.\n{resume}')
 
 
 def _reserve_self_represented(
