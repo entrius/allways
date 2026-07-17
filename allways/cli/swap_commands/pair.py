@@ -97,7 +97,7 @@ def post_pair(
     yes: bool,
     dry_run: bool,
 ):
-    """Post a trading pair to chain via commitment.
+    """Post a trading pair as an on-chain quote on the Solana program.
 
     [dim]All arguments are optional — if omitted, you'll be prompted interactively.[/dim]
 

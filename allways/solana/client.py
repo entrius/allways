@@ -205,8 +205,12 @@ class AllwaysSolanaClient:
         return self._get('MinerDirectionStats', pdas.stats_pda(miner, from_chain, to_chain, self.program_id))
 
     def get_collateral_lamports(self, miner) -> Optional[int]:
-        """Collateral balance = vault lamports (the SOL the miner posted; rent is included)."""
-        return self.rpc.get_account_lamports(pdas.collateral_vault_pda(miner, self.program_id))
+        """Slashable/gating collateral = the tracked ``MinerState.collateral`` — the exact field the
+        contract checks in finalize_reservation / vote_initiate. NOT the vault's raw lamports, which
+        include the account's rent-exempt reserve (~0.00089 SOL) and would over-credit capacity and
+        viability everywhere this is read. None if the miner never posted collateral."""
+        ms = self.get_miner_state(miner)
+        return int(ms.collateral) if ms is not None else None
 
     def get_vote_round(self, req_type: int, target=None):
         return self._get('VoteRound', pdas.vote_round_pda(req_type, target, self.program_id))
