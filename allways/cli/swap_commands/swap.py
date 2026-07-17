@@ -42,6 +42,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
+from allways.solana.client import contract_reject_reason
 from allways.solana.rpc import TransientRpcError
 from allways.synapses import SwapReserveSynapse
 from allways.utils.rate import apply_fee_deduction, directional_rate
@@ -475,8 +476,15 @@ def _reserve_self_represented(
     if drawn is not None:
         console.print('[green]  Resuming the seat you already drew[/green] (skipping bid); finalizing…')
     else:
-        # Phase 1 — BID (pair only; no taker, no amounts).
-        sig = client.open_or_request(miner, from_chain, to_chain)
+        # Phase 1 — BID (pair only; no taker, no amounts). A contract rejection (miner busy,
+        # already reserved, …) is a normal outcome — fail with its message, never a traceback.
+        try:
+            sig = client.open_or_request(miner, from_chain, to_chain)
+        except Exception as e:
+            reason = contract_reject_reason(e)
+            if reason is None:
+                raise
+            fail(f'  Reservation rejected: {reason}. No funds moved; re-run shortly.')
         console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
 
         # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
@@ -495,15 +503,21 @@ def _reserve_self_represented(
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
     fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
-    client.finalize_reservation(
-        miner,
-        user,
-        user_from_addr,
-        user_to_addr,
-        fill.collateral_amount,
-        fill.from_amount,
-        fill.to_amount,
-    )
+    try:
+        client.finalize_reservation(
+            miner,
+            user,
+            user_from_addr,
+            user_to_addr,
+            fill.collateral_amount,
+            fill.from_amount,
+            fill.to_amount,
+        )
+    except Exception as e:
+        reason = contract_reject_reason(e)
+        if reason is None:
+            raise
+        fail(f'  Finalize rejected: {reason}. Do NOT send funds; re-run shortly.')
     resv = _poll_reservation(client, miner, timeout_secs=30)
     if resv is None or str(resv.user) != str(user):
         fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')

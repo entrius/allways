@@ -294,3 +294,23 @@ def test_axon_cache_rejects_wrong_key_and_non_validator(tmp_path):
         metagraph.validator_permit = [True]
         metagraph.axons[0].is_serving = False  # validator but axon down
         assert dl.find_validator_axon(lambda: subtensor, 7, ROUTER) is None
+
+
+def test_native_bid_contract_rejection_fails_clean(monkeypatch):
+    """A program rejection on the native bid (miner busy mid-race) must fail() with the contract's
+    message, never a raw traceback (QA finding C5)."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    from allways.cli.swap_commands import swap as swap_mod
+
+    client = MagicMock()
+    client.open_or_request.side_effect = RuntimeError(
+        "sendTransaction: {'code': -32002, 'message': 'Transaction simulation failed: custom program error: "
+        "0x1774', 'data': {'logs': ['Program log: AnchorError thrown. Error Code: MinerHasActiveSwap. "
+        "Error Number: 6004. Error Message: Miner has an in-flight swap; cannot proceed.']}}"
+    )
+    with pytest.raises(SystemExit):
+        swap_mod._reserve_self_represented(client, 'miner', 'user', 'src', 'dst', 'tao', 'sol', 100, 30)
+    client.open_or_request.assert_called_once()
