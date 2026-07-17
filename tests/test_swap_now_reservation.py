@@ -364,3 +364,17 @@ def test_swap_now_does_not_resume_a_foreign_seat():
     # with no _poll_drawn patched, the bid path runs its self-crank; we only assert it did NOT short-circuit
     # into a resume (no "Resuming" banner) — it treated the foreign seat as not-ours.
     assert 'Resuming' not in result.output
+
+
+def test_unfillable_reason_names_the_bound():
+    from allways.cli.swap_commands.swap import _bounds_hint, _unfillable_reason
+    from allways.cli.swap_commands.swap_intake import MinerCandidate
+
+    MIN, MAX = 100_000_000, 1_000_000_000  # 0.1 .. 1 SOL
+    # rate_display is CANONICAL (TAO per 1 SOL). At 1.2, 0.1 TAO -> 0.083 SOL leg, below the 0.1 SOL min.
+    cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * 10**9)]
+    reason = _unfillable_reason(cands, 'tao', 'sol', 100_000_000, MIN, MAX)
+    assert 'below min swap' in reason
+    assert '0.1–1 SOL' in reason
+    assert _bounds_hint(MIN, MAX) == 'the SOL leg must be 0.1–1 SOL'
+    assert _bounds_hint(0, 0) == 'the SOL leg must be 0–∞ SOL'

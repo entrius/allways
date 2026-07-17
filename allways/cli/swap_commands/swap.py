@@ -39,6 +39,7 @@ from allways.cli.swap_commands.swap_intake import (
     compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
+    swap_viable,
     to_smallest_units,
 )
 from allways.cli.validator_rejections import render_and_aggregate
@@ -135,6 +136,42 @@ def _prompt_missing(value, prompt_text: str, opt: str, cast=str):
     if sys.stdin.isatty():
         return click.prompt(prompt_text, type=cast)
     fail(f'{opt} is required (no TTY to prompt).')
+
+
+def _bounds_hint(min_swap: int, max_swap: int) -> str:
+    lo = f'{min_swap / 1e9:g}' if min_swap else '0'
+    hi = f'{max_swap / 1e9:g}' if max_swap else '∞'
+    return f'the SOL leg must be {lo}–{hi} SOL'
+
+
+def _no_active_miner_reason(client, from_chain: str, to_chain: str) -> str:
+    """No ACTIVE candidate — say whether inactive miners quote this direction (so the user knows
+    it's a liveness gap, not an empty market) vs nobody quoting it at all."""
+    inactive = 0
+    for _pk, q in client.get_all('MinerQuote'):
+        if q.from_chain == from_chain and q.to_chain == to_chain:
+            ms = client.get_miner_state(q.miner)
+            if ms is not None and not ms.active:
+                inactive += 1
+    if inactive:
+        return f'{inactive} miner(s) quote {from_chain}->{to_chain} but are offline — none active right now.'
+    return f'No miner is quoting {from_chain}->{to_chain} right now.'
+
+
+def _unfillable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap) -> str:
+    """Active miners exist but none can fill — surface the specific swap_viable reason (below/above
+    the swap bounds, or too little collateral) so the user knows to change the amount, not guess."""
+    for c in candidates:
+        try:
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
+        except ValueError:
+            continue
+        ok, reason = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
+        if not ok:
+            return (
+                f'No active miner can fund this swap: {reason}. Adjust --amount so {_bounds_hint(min_swap, max_swap)}.'
+            )
+    return f'No active miner can fund this swap for that amount. Adjust --amount so {_bounds_hint(min_swap, max_swap)}.'
 
 
 def _drawn_unfilled(resv) -> bool:
@@ -348,10 +385,10 @@ def swap_now_command(
     from_amount = to_smallest_units(amount_opt, from_chain)
     candidates = candidate_miners(client, from_chain, to_chain)
     if not candidates:
-        fail(f'No miners quoting {from_chain}->{to_chain} right now.')
+        fail(_no_active_miner_reason(client, from_chain, to_chain))
     best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
     if best is None:
-        fail('No miner can fund an executable swap for that amount within bounds.')
+        fail(_unfillable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap))
     cand, amts = best
 
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
