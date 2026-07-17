@@ -105,13 +105,14 @@ def test_b0_round_trip(client):
     assert cfg.halted is False
     assert list(cfg.validators) == []
 
-    # post_collateral -> MinerState + vault lamports
+    # post_collateral -> MinerState.collateral (the tracked, slashable, gating field)
     client.post_collateral(5_000_000)
     ms = client.get_miner_state(me)
     assert ms.miner == me
     assert ms.collateral == 5_000_000
     assert ms.active is False and ms.successful_swaps == 0 and ms.failed_swaps == 0
-    assert client.get_collateral_lamports(me) >= 5_000_000
+    # get_collateral_lamports returns exactly the tracked field — not vault lamports (rent-inclusive).
+    assert client.get_collateral_lamports(me) == 5_000_000
 
     # set_quote -> MinerQuote (u128 fixed-point rate)
     rate = 15 * 10**17  # 1.5 * RATE_PRECISION
