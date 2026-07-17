@@ -61,8 +61,9 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         alw swap quote --from btc --to sol --amount 0.001
     """
     set_json_output(as_json)
-    from_chain = _prompt_or_fail(from_chain, 'Source chain', '--from')
-    to_chain = _prompt_or_fail(to_chain, 'Destination chain', '--to')
+    chains = ', '.join(SUPPORTED_CHAINS)
+    from_chain = _prompt_or_fail(from_chain, f'Source chain ({chains})', '--from')
+    to_chain = _prompt_or_fail(to_chain, f'Destination chain ({chains})', '--to')
     amount = _prompt_or_fail(amount, 'Amount (source units)', '--amount', cast=float)
 
     from_chain = from_chain.lower()
@@ -85,6 +86,9 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     book = load_miner_book(client, with_reservation=False)
     candidates = []
     for e in book:
+        # Inactive miners can't be reserved (the contract rejects it) — never offer one as a quote.
+        if e.state is None or not e.state.active:
+            continue
         for q in e.quotes:
             if q.from_chain == from_chain and q.to_chain == to_chain:
                 candidates.append(
@@ -144,6 +148,15 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         fail(f'No quote available: {why} right now.')
 
     viable.sort(key=lambda x: x[1], reverse=True)
+
+    # Lead with the headline number — what you'd actually receive at the best offer — then the breakdown.
+    best_recv = viable[0][1] / 10**to_dec
+    console.print(
+        f'\n[bold green]≈ {best_recv:.8g} {to_chain.upper()}[/bold green]'
+        f'  [dim]for[/dim]  {amount:g} {from_chain.upper()}'
+        f'  [dim](best of {len(viable)} offer{"s" if len(viable) != 1 else ""}, after {100 / FEE_DIVISOR:g}% fee)[/dim]'
+    )
+
     table = Table(
         title=f'Quote: {amount:g} {from_chain.upper()} → {to_chain.upper()}  (after {100 / FEE_DIVISOR:g}% fee)',
         show_header=True,

@@ -112,3 +112,40 @@ def test_select_best_miner_skips_underfunded():
 def test_select_best_miner_none_when_all_unviable():
     cands = [MinerCandidate(miner='m', rate_display='0.6', collateral=1)]
     assert select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX) is None
+
+
+# ---- candidate_miners: active gate + tracked collateral ----
+class _FakeCandClient:
+    """Minimal client for candidate_miners: get_all('MinerQuote') + get_miner_state."""
+
+    def __init__(self, quotes, states):
+        self._quotes = quotes  # list of SimpleNamespace(miner, from_chain, to_chain, rate)
+        self._states = states  # {miner: SimpleNamespace(active, collateral)}
+
+    def get_all(self, name):
+        assert name == 'MinerQuote'
+        return [(f'pda{i}', q) for i, q in enumerate(self._quotes)]
+
+    def get_miner_state(self, miner):
+        return self._states.get(miner)
+
+
+def test_candidate_miners_excludes_inactive():
+    from types import SimpleNamespace
+
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+
+    def q(m):
+        return SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+
+    client = _FakeCandClient(
+        quotes=[q('active-m'), q('inactive-m'), q('no-state-m')],
+        states={
+            'active-m': SimpleNamespace(active=True, collateral=976_466_670),
+            'inactive-m': SimpleNamespace(active=False, collateral=5 * SOL),
+            # 'no-state-m' absent → get_miner_state returns None
+        },
+    )
+    out = candidate_miners(client, 'tao', 'sol')
+    assert [c.miner for c in out] == ['active-m']
+    assert out[0].collateral == 976_466_670  # tracked field, not vault lamports

@@ -43,15 +43,24 @@ def rate_display_from_fixed(rate_fixed: int) -> str:
 
 
 def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
-    """All miners with a posted quote for this exact direction, collateral attached.
+    """Active miners with a posted quote for this exact direction, collateral attached.
     Shared by the CLI taker path and the validator reserve engine so "who is
-    quotable" can never diverge between what a taker sees and what reserves."""
+    quotable" can never diverge between what a taker sees and what reserves.
+
+    Inactive miners are excluded: the contract rejects a reserve against them
+    (reserve_on_behalf / finalize_reservation), so a taker must never see one as
+    a candidate. One MinerState read per quoted miner gives both the active gate
+    and the tracked collateral in a single fetch."""
     out: List[MinerCandidate] = []
     for _pk, q in client.get_all('MinerQuote'):
         if q.from_chain != from_chain or q.to_chain != to_chain:
             continue
-        collateral = client.get_collateral_lamports(q.miner) or 0
-        out.append(MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=collateral))
+        ms = client.get_miner_state(q.miner)
+        if ms is None or not ms.active:
+            continue
+        out.append(
+            MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=int(ms.collateral))
+        )
     return out
 
 
