@@ -522,12 +522,9 @@ def _source_provider(from_chain: str, client, config):
 
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
     if from_chain == 'tao':
+        # Wallet only — do NOT unlock the coldkey here. `can_send_from` reads the public coldkeypub,
+        # so we defer the (possibly interactive) unlock until AFTER the user confirms the send.
         _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
-        try:
-            wallet.unlock_coldkey()
-        except Exception as e:  # noqa: BLE001 - a locked coldkey means we can't auto-send TAO; fall back
-            console.print(f'[dim]  Could not unlock coldkey for auto-send ({e}); use the manual flow.[/dim]')
-            return None
         avail.update(subtensor=subtensor, wallet=wallet)
     try:
         provider = cls(**{k: avail[k] for k in kwarg_names if k in avail})
@@ -536,6 +533,28 @@ def _source_provider(from_chain: str, client, config):
         console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')
         return None
     return provider
+
+
+def _unlock_coldkey_for_send(wallet) -> bool:
+    """Unlock the bt coldkey to sign a TAO transfer — reading MINER_BITTENSOR_COLDKEY_PASSWORD from
+    env first (seamless, no prompt), else prompting WITH context so the ask never reads as a bare,
+    unexplained 'Enter your password:'. Returns False (→ manual fallback) if it can't unlock."""
+    import os
+
+    pw = os.environ.get('MINER_BITTENSOR_COLDKEY_PASSWORD')
+    try:
+        if pw:
+            wallet.coldkey_file.save_password_to_env(pw)
+        else:
+            console.print(
+                '  [dim]Unlock your Bittensor coldkey to sign the TAO transfer '
+                '(set MINER_BITTENSOR_COLDKEY_PASSWORD to skip this):[/dim]'
+            )
+        wallet.unlock_coldkey()
+        return True
+    except Exception as e:  # noqa: BLE001 - wrong/absent password → fall back to manual send
+        console.print(f'[dim]  Could not unlock coldkey ({e}); send the TAO yourself and run post-tx.[/dim]')
+        return False
 
 
 def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from_amount, skip_confirm, btc_fee_rate):
@@ -560,6 +579,10 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
         default=True,
     ):
         return False  # user declined auto-send → manual instructions
+
+    # TAO leaves the encrypted coldkey — unlock it only now (after the confirm), with context.
+    if from_chain == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
+        return False
 
     kw = {'from_address': resv.from_addr}
     if from_chain == 'btc' and btc_fee_rate is not None:
