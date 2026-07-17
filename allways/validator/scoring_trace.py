@@ -88,7 +88,11 @@ def log_scoring_trace(
         )
         lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
 
-    for uid in sorted((u for u in range(len(rewards)) if rewards[u] > 0), key=lambda u: -float(rewards[u])):
+    # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
+    crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
+    shown = [u for u in range(len(rewards)) if rewards[u] > 0 or hotkeys[u] in crown_holders]
+
+    for uid in sorted(shown, key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
         crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
         if uid == recycle_uid and crown_secs == 0:
@@ -124,6 +128,7 @@ def log_scoring_trace(
             collaterals,
             min_swap_lamports,
             max_swap_lamports,
+            covered=crown_holders,
         )
     )
 
@@ -148,8 +153,10 @@ def non_earner_lines(
     collaterals: Optional[Dict[str, int]] = None,
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
+    covered: Optional[Set[str]] = None,
 ) -> List[str]:
     collaterals = collaterals or {}
+    covered = covered or set()
     ever_active = set(self.event_index.get_active_miners_at(window_start))
     for e in self.event_index.get_active_events_in_range(window_start, window_end):
         if e['active']:
@@ -162,7 +169,8 @@ def non_earner_lines(
 
     out: List[str] = []
     for uid, hk in enumerate(self.metagraph.hotkeys):
-        if uid == recycle_uid or rewards[uid] > 0:
+        # crown holders already got a full factor line above
+        if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
             continue
         latest_rates = rates_by_hotkey.get(hk, {})
         if not latest_rates and hk not in ever_active:
