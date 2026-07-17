@@ -135,7 +135,9 @@ def test_candidate_miners_excludes_inactive():
 
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
-    q = lambda m: SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+    def q(m):
+        return SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+
     client = _FakeCandClient(
         quotes=[q('active-m'), q('inactive-m'), q('no-state-m')],
         states={
