@@ -149,6 +149,24 @@ class BitcoinProvider(ChainProvider):
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
 
+    def can_send_from(self, address: str) -> bool:
+        """True iff BTC_PRIVATE_KEY derives ``address`` (any of its p2wpkh / p2sh-p2wpkh / p2pkh
+        forms) — i.e. this WIF can broadcast the source deposit from the pinned sender."""
+        wif = os.environ.get('BTC_PRIVATE_KEY')
+        if not wif:
+            return False
+        try:
+            from embit.ec import PrivateKey as EmbitPrivateKey
+            from embit.networks import NETWORKS
+            from embit.script import p2pkh, p2sh, p2wpkh
+
+            net = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
+            pub = EmbitPrivateKey.from_wif(wif).get_public_key()
+            seg = p2wpkh(pub)
+            return address in {seg.address(net), p2sh(seg).address(net), p2pkh(pub).address(net)}
+        except Exception:
+            return False
+
     def check_connection(self, require_send: bool = True) -> None:
         if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
             raise ConnectionError('BTC signing requires the BTC_PRIVATE_KEY env var')

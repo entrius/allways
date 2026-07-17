@@ -45,6 +45,9 @@ class SolanaProvider(ChainProvider):
     def describe(self) -> str:
         return f'Solana RPC {self.rpc_url}'
 
+    def can_send_from(self, address: str) -> bool:
+        return self.keypair is not None and str(self.keypair.pubkey()) == address
+
     def check_connection(self, require_send: bool = True, **kwargs) -> None:
         if require_send and self.keypair is None:
             raise ConnectionError('SOL send requires a Solana keypair (pass solana_keypair)')

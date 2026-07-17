@@ -38,6 +38,9 @@ class SubtensorProvider(ChainProvider):
     def describe(self) -> str:
         return f'Subtensor {self.subtensor.chain_endpoint}'
 
+    def can_send_from(self, address: str) -> bool:
+        return self.wallet is not None and self.wallet.coldkeypub.ss58_address == address
+
     def check_connection(self, **kwargs) -> None:
         try:
             block = self.subtensor.get_current_block()
