@@ -165,9 +165,22 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
             'reservation. The miner must `alw miner bind-hotkey` before this swap can be confirmed.'
         )
 
-    # Resolve the source-tx slot as a verification hint (validators can scan without it, but a slot
-    # makes it O(1)). Best-effort: fall back to 0 (server-side lookup) or the --block override.
+    swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, tx_block, on_behalf_of=user)
+    if swap_key is None:
+        # exit 1: a scripted relay must see "not accepted" as failure and re-run (idempotent).
+        fail(
+            'No validator accepted the confirm yet. Re-run `alw swap post-tx` with the same hash '
+            'in a moment. If it keeps failing, check the reservation is still active with `alw view reservation`.'
+        )
+    console.print(f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]')
+
+
+def relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, tx_block=0, *, on_behalf_of=None) -> str | None:
+    """Relay a source deposit to the validators (the shared core of ``post-tx`` and the ``swap now``
+    auto-send). Returns the swap_key hex on acceptance, else None. Idempotent: validators re-verify the
+    same on-chain deposit each call."""
     if tx_block == 0:
+        # Slot is a verification hint (O(1) lookup); validators can scan without it. Best-effort.
         try:
             info = client.rpc.get_transaction(tx_hash)
             if info and info.get('slot'):
@@ -175,7 +188,9 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
         except Exception:
             pass
 
-    on_behalf = '' if str(resv.user) == str(user) else f'  [dim](relaying on behalf of {str(resv.user)[:8]}…)[/dim]'
+    on_behalf = ''
+    if on_behalf_of is not None and str(resv.user) != str(on_behalf_of):
+        on_behalf = f'  [dim](relaying on behalf of {str(resv.user)[:8]}…)[/dim]'
     console.print(
         f'\n[bold]Confirming deposit[/bold] for {resv.from_chain.upper()}->{resv.to_chain.upper()} swap{on_behalf}\n'
         f'  Miner:   [dim]{miner_hotkey[:16]}… ({str(miner_pk)[:8]}…)[/dim]\n'
@@ -194,11 +209,10 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
     )
 
     config, _wallet, subtensor, _ = get_cli_context(need_wallet=False)
-    netuid = int(config['netuid'])
-    validator_axons = discover_validators(subtensor, netuid)
+    validator_axons = discover_validators(subtensor, int(config['netuid']))
     if not validator_axons:
         console.print('[red]No serving validators found on the metagraph.[/red]')
-        return
+        return None
 
     wallet = get_ephemeral_wallet()  # transport-only throwaway hotkey; auth is the on-chain deposit
     info = None
@@ -214,18 +228,13 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
         )
         time.sleep(_RELAY_WAIT_SECS)
 
-    if info.accepted:
-        clear_pending_swap()
-        swap_key = swap_key_from_tx_hash(tx_hash).hex()
-        console.print(
-            f'\n[green]Deposit confirmed by {info.accepted} validator(s).[/green] '
-            'The miner will fulfil the destination leg once the claim is attested.\n'
-            f'  Swap key: {swap_key}\n'
-            f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]'
-        )
-    else:
-        # exit 1: a scripted relay must see "not accepted" as failure and re-run (idempotent).
-        fail(
-            'No validator accepted the confirm yet. Re-run `alw swap post-tx` with the same hash '
-            'in a moment. If it keeps failing, check the reservation is still active with `alw view reservation`.'
-        )
+    if not info.accepted:
+        return None
+    clear_pending_swap()
+    swap_key = swap_key_from_tx_hash(tx_hash).hex()
+    console.print(
+        f'\n[green]Deposit confirmed by {info.accepted} validator(s).[/green] '
+        'The miner will fulfil the destination leg once the claim is attested.\n'
+        f'  Swap key: {swap_key}'
+    )
+    return swap_key

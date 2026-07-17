@@ -45,6 +45,13 @@ class ChainProvider(ABC):
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.get_chain().name
 
+    def can_send_from(self, address: str) -> bool:
+        """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``
+        would broadcast FROM it. Gates the CLI's auto-send: a deposit must come from the reservation's
+        pinned ``from_addr`` or the validator rejects it. Conservative default (unknown provider can't
+        prove it); each provider overrides with a real check."""
+        return False
+
     @abstractmethod
     def check_connection(self, **kwargs) -> None:
         """Verify the chain provider can reach its backend (RPC node, subtensor, etc).

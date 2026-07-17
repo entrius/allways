@@ -364,3 +364,39 @@ def test_swap_now_does_not_resume_a_foreign_seat():
     # with no _poll_drawn patched, the bid path runs its self-crank; we only assert it did NOT short-circuit
     # into a resume (no "Resuming" banner) — it treated the foreign seat as not-ours.
     assert 'Resuming' not in result.output
+
+
+def test_can_send_from_gates_on_signer(monkeypatch):
+    """The auto-send safety gate: a provider must confirm it controls the pinned sender before any
+    funds move (prevents the wrong-key deposit the validator would reject)."""
+    from types import SimpleNamespace
+
+    from allways.chain_providers.solana import SolanaProvider
+
+    kp = SimpleNamespace(pubkey=lambda: 'PINNED')
+    p = SolanaProvider.__new__(SolanaProvider)
+    p.keypair = kp
+    assert p.can_send_from('PINNED') is True
+    assert p.can_send_from('SOMEONE_ELSE') is False
+    p.keypair = None
+    assert p.can_send_from('PINNED') is False
+
+
+def test_watch_swap_reports_completed_after_close(monkeypatch):
+    """A swap account that disappears AFTER we've seen it live must read as COMPLETED, never the
+    bare 'never existed' message (the fast-close scare)."""
+    from unittest.mock import MagicMock, patch
+
+    from allways.cli.swap_commands import swap as swap_mod
+
+    active = types.SimpleNamespace(status=type('Active', (), {})())
+    client = MagicMock()
+    client.get_swap.side_effect = [active, None]  # live once, then closed
+    out = []
+    with (
+        patch('allways.cli.swap_commands.swap.time.sleep'),
+        patch.object(swap_mod.console, 'print', lambda *a, **k: out.append(' '.join(str(x) for x in a))),
+    ):
+        swap_mod._watch_swap(client, 'ab' * 32, 'tao')
+    joined = ' '.join(out)
+    assert 'COMPLETED' in joined and 'never existed' not in joined

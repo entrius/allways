@@ -33,6 +33,7 @@ from allways.cli.swap_commands.helpers import (
     get_solana_cli_context,
     hotkey_bytes_to_ss58,
     live_unclaimed,
+    loading,
 )
 from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
@@ -276,6 +277,13 @@ def _poll_routed_reservation(client, miner, user, timeout_secs: int):
 @click.option('--router', 'router_opt', default=None, help='Validator hotkey to route through (overrides config)')
 @click.option('--no-router', 'no_router', is_flag=True, help='Self-represent even when a router is configured')
 @click.option(
+    '--send/--no-send',
+    'auto_send',
+    default=None,
+    help='Auto-send the source funds from your configured wallet after reserving, then relay and '
+    'watch to completion. Default: on when interactive (prompts), off for scripts (print instructions).',
+)
+@click.option(
     '--btc-fee-rate',
     'btc_fee_rate_opt',
     type=click.IntRange(min=1),
@@ -297,6 +305,7 @@ def swap_now_command(
     skip_confirm: bool,
     router_opt: Optional[str],
     no_router: bool,
+    auto_send: Optional[bool],
     btc_fee_rate_opt: Optional[int],
 ):
     """Originate a swap: reserve a miner on-chain, then send source funds.
@@ -483,9 +492,135 @@ def swap_now_command(
         )
 
     _save_pending(cand.miner, from_chain, to_chain)
+
+    # Wizard: auto-send the source leg from the configured wallet, relay, and watch to completion.
+    # Default on when interactive (a Y/n confirm), off for scripts/agents unless --send. --no-send
+    # forces the manual print-and-exit. Falls back to manual if this wallet can't sign the source.
+    want_send = auto_send if auto_send is not None else sys.stdin.isatty()
+    if want_send and _auto_send_wizard(
+        client, config, resv, cand.miner, from_chain, to_chain, from_amount, skip_confirm, btc_fee_rate_opt
+    ):
+        return
+
     console.print(
         f'[green]  Reserved.[/green] Send [cyan]{amount_opt} {from_chain.upper()}[/cyan] to '
         f'[cyan]{resv.miner_from_addr}[/cyan], then run [bold]alw swap post-tx[/bold] with the tx hash.'
+    )
+
+
+def _source_provider(from_chain: str, client, config):
+    """Build ONLY the source chain's provider with this CLI's own signing creds (solana keypair /
+    bt wallet / BTC WIF), from the same registry the neurons use — so a new spoke chain works with
+    zero changes here. Uses the CLI's live RPC (never a fresh localhost default). Returns None
+    (→ manual fallback) if the provider can't be built with send credentials."""
+    from allways.chain_providers import PROVIDER_REGISTRY
+
+    entry = next((e for e in PROVIDER_REGISTRY if e[0] == from_chain), None)
+    if entry is None:
+        return None
+    _id, cls, kwarg_names = entry
+
+    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
+    if from_chain == 'tao':
+        _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
+        try:
+            wallet.unlock_coldkey()
+        except Exception as e:  # noqa: BLE001 - a locked coldkey means we can't auto-send TAO; fall back
+            console.print(f'[dim]  Could not unlock coldkey for auto-send ({e}); use the manual flow.[/dim]')
+            return None
+        avail.update(subtensor=subtensor, wallet=wallet)
+    try:
+        provider = cls(**{k: avail[k] for k in kwarg_names if k in avail})
+        provider.check_connection(require_send=True)
+    except Exception as e:  # noqa: BLE001 - missing creds (e.g. no BTC_PRIVATE_KEY) → manual fallback
+        console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')
+        return None
+    return provider
+
+
+def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from_amount, skip_confirm, btc_fee_rate):
+    """Send the source deposit from the configured wallet, relay it, and watch to a terminal state.
+    Returns True if it drove the send (success or a clean stop), False to fall back to manual."""
+    provider = _source_provider(from_chain, client, config)
+    if provider is None:
+        return False
+    # SAFETY: the deposit MUST come from the reservation's pinned sender or the validator rejects it
+    # (the exact wrong-key failure). Verify BEFORE moving any funds.
+    if not provider.can_send_from(resv.from_addr):
+        console.print(
+            f'[dim]  Your configured {from_chain.upper()} wallet does not control the pinned source '
+            f'address {resv.from_addr[:12]}… — sending it yourself and running post-tx.[/dim]'
+        )
+        return False
+
+    amount_disp = int(resv.from_amount) / 10 ** get_chain(from_chain).decimals
+    to_addr = resv.miner_from_addr
+    if not skip_confirm and not click.confirm(
+        f'  Send {amount_disp:g} {from_chain.upper()} from your wallet ({resv.from_addr[:10]}…) now?',
+        default=True,
+    ):
+        return False  # user declined auto-send → manual instructions
+
+    kw = {'from_address': resv.from_addr}
+    if from_chain == 'btc' and btc_fee_rate is not None:
+        kw['fee_rate_override'] = btc_fee_rate
+    with loading(f'Sending {amount_disp:g} {from_chain.upper()} to the miner…'):
+        sent = provider.send_amount(to_addr, int(resv.from_amount), **kw)
+    if not sent:
+        err = getattr(provider, 'last_send_error', None)
+        fail(
+            f'  Source send failed{f": {err}" if err else ""}. No claim relayed; your reservation is still live '
+            '— retry `alw swap now` or send manually.'
+        )
+    tx_hash = sent[0]
+    console.print(f'[green]  Sent[/green] {amount_disp:g} {from_chain.upper()} — [cyan]{tx_hash}[/cyan]')
+
+    from allways.cli.swap_commands.post_tx import relay_deposit
+
+    miner_hotkey = _miner_hotkey(client, miner_pk)
+    swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash)
+    if swap_key is None:
+        fail(
+            f'  Deposit sent but no validator accepted the relay yet. Re-run `alw swap post-tx {tx_hash}` in a moment.'
+        )
+    _watch_swap(client, swap_key, to_chain)
+    return True
+
+
+def _miner_hotkey(client, miner_pk) -> str:
+    b = client.get_binding(miner_pk)
+    return hotkey_bytes_to_ss58(b.hotkey) if b else ''
+
+
+def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 900) -> None:
+    """Watch a just-relayed swap to a terminal state, printing transitions. A closed account is the
+    SUCCESS signal (swaps close on settle) — so once we've seen it live, its disappearance reads as
+    COMPLETED, never the bare 'never existed' scare."""
+    key = bytes.fromhex(swap_key_hex)
+    console.print('[dim]  Watching your swap — this settles on its own; Ctrl-C is safe to walk away.[/dim]')
+    last, seen_live, seen_fulfilled = None, False, False
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        try:
+            acct = client.get_swap(key)
+        except Exception:
+            acct = None
+        if acct is not None:
+            seen_live = True
+            status = type(acct.status).__name__
+            if status != last:
+                console.print(f'    {status}')
+                last = status
+            if status == 'Fulfilled':
+                seen_fulfilled = True
+        elif seen_live:
+            console.print(f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.')
+            return
+        time.sleep(4)
+    tail = 'delivered' if seen_fulfilled else 'check `alw status` for your balance'
+    console.print(
+        f'[yellow]  Still settling after {timeout_secs}s[/yellow] — {tail}. '
+        f'Track: `alw view swap {swap_key_hex} --watch`.'
     )
 
 
