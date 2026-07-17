@@ -183,12 +183,14 @@ def test_rejection_reason_surfaces():
     assert 'miner is not active' in _flat(r)
 
 
-def test_env_bundles_carry_routers_and_config_key_registered():
+def test_env_bundles_router_defaults_and_config_key_registered():
     from allways.cli.main import VALID_CONFIG_KEYS
     from allways.cli.swap_commands.helpers import ENV_BUNDLES
 
     assert 'router' in VALID_CONFIG_KEYS
-    assert ENV_BUNDLES['mainnet']['router'] == ROUTER
+    # Mainnet has no routing validator yet — self-represent by default (explicit '' clears any stale
+    # router on re-run). Testnet routes through the Ventura Labs validator used in QA.
+    assert ENV_BUNDLES['mainnet']['router'] == ''
     assert ENV_BUNDLES['testnet']['router'] == '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao'
 
 

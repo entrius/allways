@@ -37,8 +37,8 @@ SOLANA_NETWORKS = {
 # Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
 BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
 # One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid
-# + the recommended router (the Ventura Labs validator per network) so reservations are
-# validator-routed out of the box. `alw config set router ""` or --no-router opts out.
+# + the default router. Testnet routes through the Ventura Labs validator; mainnet self-represents
+# (no routing validator live yet). `alw config set router <ss58>` opts into routing on mainnet.
 ENV_BUNDLES = {
     'testnet': {
         'network': 'test',
@@ -52,7 +52,9 @@ ENV_BUNDLES = {
         'solana-network': 'mainnet',
         'btc-network': 'mainnet',
         'netuid': '7',
-        'router': '5DtUJ9ytbeCMjovFieNwaxxqRP3DzT6iQPnZTyKmi3n6iXey',
+        # No routing validator on mainnet yet — bid self-represented until one ships a routing
+        # product. Explicit '' (not omitted) so re-running `env mainnet` CLEARS a stale router.
+        'router': '',
     },
 }
 
