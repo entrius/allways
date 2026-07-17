@@ -9,6 +9,7 @@ validator to enter the pool with its stake weight and finalize the won seat with
 Either way the tail is the same: send source funds + `swap post-tx`."""
 
 import json
+import sys
 import time
 from typing import NamedTuple, Optional
 
@@ -124,6 +125,16 @@ def _self_crank_resolve(client, miner) -> None:
         benign = any(n in msg for n in _BENIGN_CRANK_NAMES) or any(f"'Custom': {c}" in msg for c in _BENIGN_CRANK_CODES)
         if not benign:
             raise
+
+
+def _prompt_missing(value, prompt_text: str, opt: str, cast=str):
+    """Interactive fallback for a missing input: prompt on a TTY, else fail script-safely.
+    Mirrors `alw swap quote` so both commands feel the same when run bare."""
+    if value not in (None, ''):
+        return value
+    if sys.stdin.isatty():
+        return click.prompt(prompt_text, type=cast)
+    fail(f'{opt} is required (no TTY to prompt).')
 
 
 def _drawn_unfilled(resv) -> bool:
@@ -294,25 +305,36 @@ def swap_now_command(
     the validator enters the pool with its stake weight and finalizes for you. --no-router
     self-represents (you bid, crank, and finalize yourself, paying the entry fee).
 
-    Flag-driven form (interactive prompts + auto fund-sending land next):
+    On a TTY, omitted inputs are prompted for; scripted/non-TTY runs must pass every flag.
         alw swap now --from sol --to btc --amount 1.0 --receive-address <btc-addr> --yes[/dim]
     """
+    chains = ', '.join(SUPPORTED_CHAINS)
+    from_chain_opt = _prompt_missing(from_chain_opt, f'Source chain ({chains})', '--from')
+    to_chain_opt = _prompt_missing(to_chain_opt, f'Destination chain ({chains})', '--to')
     from_chain = (from_chain_opt or '').lower()
     to_chain = (to_chain_opt or '').lower()
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
     if from_chain == to_chain or NUMERAIRE_CHAIN not in (from_chain, to_chain):
         fail(f'A launch swap must have a {NUMERAIRE_CHAIN.upper()} leg (every pair is hub<->spoke).')
+    if amount_opt is None:
+        amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=float)
     if amount_opt is None or amount_opt <= 0:
-        fail('--amount (source-chain units) is required.')
+        fail('--amount (source-chain units) must be positive.')
     if not receive_address_opt:
-        fail('--receive-address (destination chain) is required.')
+        receive_address_opt = _prompt_missing(
+            None, f'Receive address (your {to_chain.upper()} address)', '--receive-address'
+        )
 
     config, client = get_solana_cli_context(need_keypair=True)
     config = config or {}
     user = client.keypair.pubkey()
     router_hotkey = (router_opt or config.get('router') or '').strip()
     routed = bool(router_hotkey) and not no_router
+    if from_chain != NUMERAIRE_CHAIN and not from_address_opt:
+        from_address_opt = _prompt_missing(
+            None, f'Source address (your {from_chain.upper()} address you send from)', '--from-address'
+        )
     user_from_addr = str(user) if from_chain == NUMERAIRE_CHAIN else (from_address_opt or '')
     if not user_from_addr:
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
