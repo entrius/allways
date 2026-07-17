@@ -574,8 +574,14 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
 
     amount_disp = int(resv.from_amount) / 10 ** get_chain(from_chain).decimals
     to_addr = resv.miner_from_addr
+    wallet_label = {
+        'sol': 'Solana keypair',
+        'tao': f'Bittensor coldkey ({config.get("wallet", "?")})',
+        'btc': 'Bitcoin WIF wallet',
+    }.get(from_chain, f'{from_chain.upper()} wallet')
+    console.print(f'  [dim]Source: your configured {wallet_label}[/dim]  [cyan]{resv.from_addr}[/cyan]')
     if not skip_confirm and not click.confirm(
-        f'  Send {amount_disp:g} {from_chain.upper()} from your wallet ({resv.from_addr[:10]}…) now?',
+        f'  Send {amount_disp:g} {from_chain.upper()} to the miner now?',
         default=True,
     ):
         return False  # user declined auto-send → manual instructions
