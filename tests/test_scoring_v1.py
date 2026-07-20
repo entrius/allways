@@ -1663,7 +1663,9 @@ class TestHaltShortCircuit:
 
 class TestCapacityFactorHelper:
     """Direct unit tests for the capacity_factor pure function. Full credit requires
-    backing a max_swap fill at the contract's 1.10× gate: denominator = 1.1 × max_swap."""
+    backing a max_swap fill at the contract's 1.10× gate: denominator = 1.1 × max_swap.
+    The ramp below full is convex (ratio ** CAPACITY_CURVE_EXPONENT, k=2), so partial
+    depth earns less than the raw ratio."""
 
     def test_at_required_collateral_is_full(self):
         from allways.validator.scoring import capacity_factor
@@ -1674,17 +1676,19 @@ class TestCapacityFactorHelper:
         """Collateral == max_swap can't actually accept a max_swap fill (needs 1.1×)."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(500_000_000, 500_000_000) == 500_000_000 / 550_000_000
+        assert capacity_factor(500_000_000, 500_000_000) == (500_000_000 / 550_000_000) ** 2
 
-    def test_half_required_is_half(self):
+    def test_half_required_is_quarter(self):
+        """Convex ramp (k=2): half the required collateral earns a quarter, not a half."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(275_000_000, 500_000_000) == 0.5
+        assert capacity_factor(275_000_000, 500_000_000) == 0.25
 
-    def test_quarter_required_is_quarter(self):
+    def test_quarter_required_is_sixteenth(self):
+        """Convex ramp (k=2): a quarter of required earns (1/4)^2 = 1/16."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(137_500_000, 500_000_000) == 0.25
+        assert capacity_factor(137_500_000, 500_000_000) == 0.0625
 
     def test_above_required_caps_at_one(self):
         from allways.validator.scoring import capacity_factor
@@ -1801,8 +1805,9 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
-    def test_quarter_capacity_pays_quarter(self, tmp_path: Path):
-        """Collateral at 1/4 of required (1.1 x max_swap) → 1/4 reward, 3/4 recycles."""
+    def test_quarter_collateral_pays_sixteenth(self, tmp_path: Path):
+        """Collateral at 1/4 of required (1.1 x max_swap) → convex capacity (1/4)^2 =
+        1/16 reward, the rest recycles."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
@@ -1812,11 +1817,11 @@ class TestCapacityWeighting:
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.25, atol=1e-6)
-        # Pool conservation: hk_a got POOL_BTC_SOL*0.25; the rest of both buckets
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.0625, atol=1e-6)
+        # Pool conservation: hk_a got POOL_BTC_SOL*0.0625; the rest of both buckets
         # and the unallocated pool all recycle, so recycle = 1 - that share.
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_SOL * 0.25, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_SOL * 0.0625, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1849,8 +1854,10 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[recycle_uid], 1.0, atol=1e-6)
         v.state_store.close()
 
-    def test_unequal_collateral_proportional_rewards(self, tmp_path: Path):
-        """Two miners tie crown, unequal collateral → rewards scale linearly."""
+    def test_rate_tie_broken_by_collateral(self, tmp_path: Path):
+        """Two miners tie on the best rate with unequal collateral → the crown does NOT
+        split; the deeper miner takes the whole interval (tie-break #2). hk_a (deeper,
+        full capacity) earns the entire pool; hk_b earns nothing."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -1866,10 +1873,31 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # Both split crown 50/50. A's capacity = 1.0, B's = 0.2.
-        # A earns pool * 0.5 * 1.0; B earns pool * 0.5 * 0.2.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5 * 1.0, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * 0.5 * 0.2, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], 0.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_rate_and_collateral_dead_heat_splits_evenly(self, tmp_path: Path):
+        """Same best rate AND same collateral → genuine dead-heat still splits the crown
+        evenly. Collateral only breaks the tie when it differs."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_a': 550_000_000, 'hk_b': 550_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for hk in ('hk_a', 'hk_b'):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'sol', 0.00020, 0),
+            )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        # 50/50 crown split, both at full capacity → each earns half the pool.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_cold_start_max_swap_zero_is_fail_safe(self, tmp_path: Path):
@@ -2232,7 +2260,8 @@ class TestCapacityVolumeInteraction:
     """Capacity + volume are independent multipliers — verify they compose."""
 
     def test_both_factors_compose_multiplicatively(self, tmp_path: Path):
-        """Single miner, capacity 0.5, idle on volume → reward = pool * 0.5 * (1-α)."""
+        """Single miner, half required collateral → convex capacity (0.5)^2 = 0.25, idle
+        on volume → reward = pool * 0.25 * (1-α)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -2249,8 +2278,8 @@ class TestCapacityVolumeInteraction:
         # B serves the market's (floor-clearing) volume so A's vol_share = 0.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: pool × crown 1.0 × eligible 1 × capacity 0.5 × fill_ratio 1-α (B serves the volume).
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.5 * (1 - VOLUME_WEIGHT_ALPHA), atol=1e-6)
+        # A: pool × crown 1.0 × eligible 1 × capacity 0.25 × fill_ratio 1-α (B serves the volume).
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.25 * (1 - VOLUME_WEIGHT_ALPHA), atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2380,15 +2409,16 @@ class TestHistoricalCollateralReplay:
             {'miner': 'hk_a', 'amount': 440_000_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # capacity_factor = 110M / (1.1 × 500M) = 0.2; pool 0.5 → reward 0.1.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.2, atol=1e-6)
+        # capacity_factor = (110M / (1.1 × 500M))^2 = 0.2^2 = 0.04; pool 0.5 → reward 0.02.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.04, atol=1e-6)
         v.state_store.close()
 
     def test_mid_window_topup_blends_capacity(self, tmp_path: Path):
         """A miner posts more collateral midway through the window. Capacity
-        is integrated per-block: half the window at 1/4 cap, half at full cap
-        → time-weighted average 0.625. Validates that the multiplier reflects
-        collateral *during* the interval, not at the end of it."""
+        is integrated per-block: half the window at convex 1/4-collateral cap
+        ((1/4)^2 = 0.0625), half at full cap (1.0) → time-weighted average
+        0.53125. Validates that the multiplier reflects collateral *during*
+        the interval, not at the end of it."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
@@ -2406,8 +2436,8 @@ class TestHistoricalCollateralReplay:
             {'miner': 'hk_a', 'amount': 412_500_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.625, atol=1e-6)
+        # First 150 blocks at cap 0.0625 ((1/4)^2), next 150 at cap 1.0 → mean cap 0.53125.
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.53125, atol=1e-6)
         v.state_store.close()
 
 
