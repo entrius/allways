@@ -114,8 +114,11 @@ def required_collateral(collateral_amount: int) -> int:
     return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
 
 
-# ─── Emission Recycling ────────────────────────────────────
-RECYCLE_UID = 53  # Subnet owner UID
+# ─── Emissions ─────────────────────────────────────────────
+# Subnet owner UID. No longer paid the penalty shortfall: set_weights
+# L1-normalizes scores so distributed rewards stretch to 100% of emissions
+# (burning would shrink subnet emission via 1 - miner_burn).
+RECYCLE_UID = 53
 
 # ─── Optimistic Extensions ───────────────────────────────
 # Tunables for the propose/challenge/finalize extension flow. Per-chain timing

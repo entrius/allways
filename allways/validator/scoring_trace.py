@@ -1,6 +1,6 @@
 """Per-round scoring log block: how the pool was distributed, who held
-crown, why each non-earner earned nothing, why pool recycled. Pure
-presentation — never mutates state."""
+crown, why each non-earner earned nothing, how much of the raw pool went
+undistributed before normalization. Pure presentation — never mutates state."""
 
 from __future__ import annotations
 
@@ -11,10 +11,7 @@ import bittensor as bt
 import numpy as np
 
 from allways.chains import canonical_pair
-from allways.constants import (
-    RECYCLE_UID,
-    TAO_TO_RAO,
-)
+from allways.constants import TAO_TO_RAO
 from allways.utils.rate import min_executable_sol_leg
 
 if TYPE_CHECKING:
@@ -66,18 +63,18 @@ def log_scoring_trace(
     rewards: np.ndarray,
     eligibility: Dict[str, bool],
     distributed: float,
-    recycled: float,
+    undistributed: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
-    recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
     weighting_traces = weighting_traces or {}
 
     lines = [
-        f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
+        f'V1 scoring: window=[{window_start}, {window_end}], '
+        f'distributed={distributed:.6f}, undistributed={undistributed:.6f}'
     ]
 
     for (from_c, to_c), trace in direction_traces.items():
@@ -95,9 +92,7 @@ def log_scoring_trace(
     for uid in sorted(shown, key=lambda u: -float(rewards[u])):
         hk = hotkeys[uid]
         crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
-        if uid == recycle_uid and crown_secs == 0:
-            continue
-        crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
+        crown_reward = float(rewards[uid])
         eligible = eligibility.get(hk, False)
         wt = weighting_traces.get(hk)
         extras = ''
@@ -124,7 +119,6 @@ def log_scoring_trace(
             rewards,
             eligibility,
             direction_traces,
-            recycle_uid,
             collaterals,
             min_swap_lamports,
             max_swap_lamports,
@@ -132,12 +126,14 @@ def log_scoring_trace(
         )
     )
 
-    if recycled > 0:
+    if undistributed > 0:
         parts = [
             f'{t.unfilled_time}s unfilled in {f}→{to}' for (f, to), t in direction_traces.items() if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
-        lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
+        lines.append(
+            f'  undistributed={undistributed:.3f} (stretched across earners by weight normalization) cause={cause}'
+        )
 
     bt.logging.info('\n'.join(lines))
 
@@ -149,7 +145,6 @@ def non_earner_lines(
     rewards: np.ndarray,
     eligibility: Dict[str, bool],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
-    recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
@@ -170,7 +165,7 @@ def non_earner_lines(
     out: List[str] = []
     for uid, hk in enumerate(self.metagraph.hotkeys):
         # crown holders already got a full factor line above
-        if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
+        if rewards[uid] > 0 or hk in covered:
             continue
         latest_rates = rates_by_hotkey.get(hk, {})
         if not latest_rates and hk not in ever_active:

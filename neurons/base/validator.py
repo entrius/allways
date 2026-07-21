@@ -9,7 +9,7 @@ from typing import List, Set, Union
 import bittensor as bt
 import numpy as np
 
-from allways.constants import RECYCLE_UID, VALIDATOR_POLL_INTERVAL_SECONDS
+from allways.constants import VALIDATOR_POLL_INTERVAL_SECONDS
 from allways.utils.config import add_validator_args
 from neurons.base.neuron import BaseNeuron
 from neurons.base.utils.weight_utils import (
@@ -184,16 +184,12 @@ class BaseValidatorNeuron(BaseNeuron):
 
         if np.any(norm == 0) or np.isnan(norm).any():
             # Empty/NaN scores (cold start, RPC failure, all miners deregistered).
-            # Hand the full pool to RECYCLE_UID — without this, bittensor's
-            # process_weights_for_netuid falls back to uniform 1/n across every
-            # UID and emissions split evenly instead of fully recycling.
-            n_uids = self.metagraph.n.item()
-            recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
-            raw_weights = np.zeros_like(self.scores)
-            raw_weights[recycle_uid] = 1.0
-            bt.logging.warning(f'set_weights: scores empty, routing full pool to recycle UID {recycle_uid}')
-        else:
-            raw_weights = self.scores / norm
+            # Skip the round so the chain keeps the previous weights — burning to
+            # a recycle UID would shrink subnet emissions (1 - miner_burn), and
+            # bittensor's fallback would otherwise split uniform 1/n.
+            bt.logging.warning('set_weights: scores empty, skipping weight set this round')
+            return
+        raw_weights = self.scores / norm
 
         bt.logging.debug('raw_weights', raw_weights)
         bt.logging.debug('raw_weight_uids', str(self.metagraph.uids.tolist()))

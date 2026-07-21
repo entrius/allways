@@ -202,10 +202,12 @@ def test_scoring_round_off_solana_events(env):
 
     v = _validator_ns(admin, store, index, metagraph, last_scored_time=now - 600)
 
-    # Round 1 — real eligibility: every miner ineligible → full pool recycles.
+    # Round 1 — real eligibility: every miner ineligible → nothing distributed
+    # (no burn; set_weights normalization stretches whatever is distributed).
     rewards, _ = calculate_miner_rewards(v, now + 60)
     assert rewards[0] == 0.0 and rewards[1] == 0.0 and rewards[2] == 0.0  # A, B, S
-    assert rewards[RECYCLE_UID] == pytest.approx(1.0, abs=1e-5)
+    assert rewards[RECYCLE_UID] == 0.0
+    assert float(rewards.sum()) == pytest.approx(0.0, abs=1e-5)
 
     # Round 2 — patch all eligible: the btc→sol pool is credited to crown holder A.
     # B (lower rate) and S (higher rate but unexecutable) both earn nothing — the
