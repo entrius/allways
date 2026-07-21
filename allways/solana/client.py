@@ -147,6 +147,34 @@ def contract_reject_reason(err: Exception) -> Optional[str]:
     return 'miner is not available for reservation right now'
 
 
+# Contract ErrorCode names → Anchor codes (6000 + enum index). A landed failed tx stringifies as
+# {'Custom': N} with no name (see contract_reject_reason), so benign classification matches both forms.
+_ERROR_CODES = {
+    'NotValidator': 6007,
+    'AlreadyVoted': 6012,
+    'NotPending': 6031,
+    'ClaimNotExpired': 6033,
+    'ExtensionNotLater': 6034,
+    'ExtensionExceedsCeiling': 6035,
+    'PoolNotClosed': 6042,
+    'NoRequests': 6044,
+    'SeedSlotNotYetProduced': 6045,
+    'AlreadyFilled': 6046,
+    'WeightsUpdateTooSoon': 6050,
+}
+
+
+def benign_marker(err: Exception, names: Tuple[str, ...]) -> Optional[str]:
+    """The matched benign error NAME (for terse logs), or None for a real failure. Names without a
+    code entry (framework/RPC messages) match on name alone."""
+    s = str(err)
+    for name in names:
+        code = _ERROR_CODES.get(name)
+        if name in s or (code is not None and f"'Custom': {code}" in s):
+            return name
+    return None
+
+
 class AllwaysSolanaClient:
     def __init__(
         self,

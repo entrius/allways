@@ -44,7 +44,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
-from allways.solana.client import contract_reject_reason
+from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
 from allways.synapses import SwapReserveSynapse
 from allways.utils.rate import apply_fee_deduction, directional_rate
@@ -101,15 +101,10 @@ _SEND_MARGIN_SECS = 180
 
 
 # Benign crank races — `resolve_pool` lost to another cranker (the validator, or a peer taker) or ran
-# before the draw was possible. Each surfaces in TWO string forms depending on where it was caught:
-#   • Anchor error NAME — when the tx is rejected in pre-flight simulation (e.g. "PoolNotClosed").
-#   • numeric CODE only — when the tx is submitted and *lands* in a failed state; the confirm path
-#     stringifies `status["err"]` as `{'InstructionError': [0, {'Custom': 6044}]}`, with no name.
-# Matching names alone (the old behavior) missed the code-only form, so a benign race that reached the
-# chain re-raised and aborted `swap now` — abandoning the taker's already-paid, since-drawn seat until
-# it expired (fee forfeited, miner locked busy_until). Match both forms. Codes are ErrorCode indices.
+# before the draw was possible. A miss must not abort `swap now` — that abandons the taker's already-paid,
+# since-drawn seat until it expires (fee forfeited, miner locked busy_until) — so benign_marker matches
+# both string forms (pre-flight name, landed code-only).
 _BENIGN_CRANK_NAMES = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests', 'AlreadyFilled')
-_BENIGN_CRANK_CODES = (6045, 6042, 6044, 6046)  # same order as the names above
 
 
 def _self_crank_resolve(client, miner) -> None:
@@ -122,9 +117,7 @@ def _self_crank_resolve(client, miner) -> None:
         return  # RPC hiccup while nudging the pool — the poll loop re-cranks and re-reads the real
         # outcome (the reservation). If this resolve_pool actually landed, the next pass sees the seat.
     except Exception as e:  # noqa: BLE001
-        msg = str(e)
-        benign = any(n in msg for n in _BENIGN_CRANK_NAMES) or any(f"'Custom': {c}" in msg for c in _BENIGN_CRANK_CODES)
-        if not benign:
+        if not benign_marker(e, _BENIGN_CRANK_NAMES):
             raise
 
 

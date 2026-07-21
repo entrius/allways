@@ -8,8 +8,13 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 from types import SimpleNamespace
 
 from allways.chain_providers.base import ProviderUnreachableError
-from allways.solana.client import swap_key_from_tx_hash
-from allways.validator.solana_swap_loop import SolanaSwapLoop, SwapAction, SwapDecision, _is_benign_resolve
+from allways.solana.client import benign_marker, swap_key_from_tx_hash
+from allways.validator.solana_swap_loop import (
+    _BENIGN_RESOLVE_MARKERS,
+    SolanaSwapLoop,
+    SwapAction,
+    SwapDecision,
+)
 
 INITIATED_AT = 1000  # dest-freshness floor
 RESV_CREATED_AT = 1200  # source-freshness floor
@@ -580,10 +585,14 @@ def test_resolve_pools_one_failure_does_not_break_sweep():
     assert loop.resolve_pools_once(now=500) == ['good']
 
 
-def test_is_benign_resolve_classifies_lost_race():
-    assert _is_benign_resolve(RuntimeError('custom program error: NoRequests'))
-    assert _is_benign_resolve(RuntimeError('PoolNotClosed'))
-    assert not _is_benign_resolve(RuntimeError('rpc down'))
+def test_benign_marker_classifies_lost_race():
+    assert benign_marker(RuntimeError('custom program error: NoRequests'), _BENIGN_RESOLVE_MARKERS) == 'NoRequests'
+    assert benign_marker(RuntimeError('PoolNotClosed'), _BENIGN_RESOLVE_MARKERS) == 'PoolNotClosed'
+    assert (
+        benign_marker(RuntimeError("{'InstructionError': [0, {'Custom': 6042}]}"), _BENIGN_RESOLVE_MARKERS)
+        == 'PoolNotClosed'
+    )
+    assert benign_marker(RuntimeError('rpc down'), _BENIGN_RESOLVE_MARKERS) is None
 
 
 def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():

@@ -21,7 +21,7 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
-from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
+from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
 
 
@@ -89,21 +89,6 @@ def _confs(chain_id: str, info: Any) -> str:
 
 def _swap_key_hex(key: Any) -> str:
     return key.hex() if isinstance(key, (bytes, bytearray)) else str(key)
-
-
-def _is_benign_extension(e: Exception) -> bool:
-    """A contract ceiling hit or a lost extension race — expected, not an error."""
-    return any(m in str(e) for m in _BENIGN_EXTEND_MARKERS)
-
-
-def _is_benign_resolve(e: Exception) -> bool:
-    """A lost resolve_pool race — a peer already resolved it, or the clock hasn't crossed closes_at."""
-    return any(m in str(e) for m in _BENIGN_RESOLVE_MARKERS)
-
-
-def _is_benign_close(e: Exception) -> bool:
-    """A lost close_stale_claim race — a peer already reaped it, or the reservation isn't expired yet."""
-    return any(m in str(e) for m in _BENIGN_CLOSE_MARKERS)
 
 
 def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
@@ -389,11 +374,13 @@ class SolanaSwapLoop:
             else:
                 return False  # REJECT / non-actionable: cast nothing
         except Exception as e:
-            if decision in (SwapDecision.EXTEND_RESERVATION, SwapDecision.EXTEND_TIMEOUT) and _is_benign_extension(e):
-                bt.logging.debug(f'{label}: {decision.value} no-op ({e})')
+            if decision in (SwapDecision.EXTEND_RESERVATION, SwapDecision.EXTEND_TIMEOUT) and (
+                m := benign_marker(e, _BENIGN_EXTEND_MARKERS)
+            ):
+                bt.logging.debug(f'{label}: {decision.value} no-op ({m})')
                 return False
-            if decision == SwapDecision.CANCEL and _is_benign_close(e):
-                bt.logging.debug(f'{label}: {decision.value} no-op ({e})')
+            if decision == SwapDecision.CANCEL and (m := benign_marker(e, _BENIGN_CLOSE_MARKERS)):
+                bt.logging.debug(f'{label}: {decision.value} no-op ({m})')
                 return False
             bt.logging.error(f'{label}: {decision.value} failed: {e}')
             return False
@@ -447,8 +434,8 @@ class SolanaSwapLoop:
             try:
                 self.client.resolve_pool(miner)
             except Exception as e:  # one bad pool must not break the pass
-                if _is_benign_resolve(e):
-                    bt.logging.debug(f'pool {miner}: resolve_pool no-op (peer won the race): {e}')
+                if m := benign_marker(e, _BENIGN_RESOLVE_MARKERS):
+                    bt.logging.debug(f'pool {miner}: resolve_pool no-op ({m})')
                     continue
                 bt.logging.error(f'pool {miner}: resolve_pool failed: {e}')
                 continue
