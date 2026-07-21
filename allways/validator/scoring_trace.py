@@ -131,7 +131,9 @@ def log_scoring_trace(
             f'{t.unfilled_time}s unfilled in {f}→{to}' for (f, to), t in direction_traces.items() if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
-        lines.append(f'  undistributed={undistributed:.3f} (stretched across earners by weight normalization) cause={cause}')
+        lines.append(
+            f'  undistributed={undistributed:.3f} (stretched across earners by weight normalization) cause={cause}'
+        )
 
     bt.logging.info('\n'.join(lines))
 
