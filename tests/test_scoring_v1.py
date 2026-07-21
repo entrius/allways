@@ -1121,16 +1121,16 @@ class TestLedgerSnapshotAgreement:
 
 
 class TestCalculateMinerRewards:
-    def test_empty_direction_recycles_full_pool(self, tmp_path: Path):
+    def test_empty_direction_distributes_nothing(self, tmp_path: Path):
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys)
 
         rewards, uids = calculate_miner_rewards(v, v.block)
 
         assert set(uids) == set(range(len(hotkeys)))
-        assert rewards[RECYCLE_UID] == 1.0
+        assert rewards[RECYCLE_UID] == 0.0
         assert rewards[0] == 0.0
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_single_eligible_miner_earns_full_pool(self, tmp_path: Path):
@@ -1149,12 +1149,12 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_ineligible_miner_earns_nothing(self, tmp_path: Path):
         """A crown-holding miner below the success floor gates to weight 0 and
-        the whole pool recycles — the flat gate is a hard 0/1 multiplier."""
+        nothing is distributed — the flat gate is a hard 0/1 multiplier."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         # hk_a holds the crown but has only 1 successful swap (< MIN=2).
         v = make_validator(tmp_path, hotkeys=hotkeys, miner_counters={'hk_a': (1, 0)})
@@ -1168,7 +1168,7 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         assert rewards[0] == 0.0
-        np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_eligible_high_fail_miner_excluded(self, tmp_path: Path):
@@ -1186,7 +1186,7 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         assert rewards[0] == 0.0
-        np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_unbound_miner_without_counters_ineligible(self, tmp_path: Path):
@@ -1204,7 +1204,7 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         assert rewards[0] == 0.0
-        np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_dereg_mid_window_forfeits_credit(self, tmp_path: Path):
@@ -1228,13 +1228,13 @@ class TestCalculateMinerRewards:
         np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
-    def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
+    def test_small_metagraph_empty_window_distributes_nothing(self, tmp_path: Path):
         hotkeys = ['hk_a', 'hk_b']
         v = make_validator(tmp_path, hotkeys=hotkeys)
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        assert rewards[0] == 1.0
+        assert float(rewards.sum()) == 0.0
         assert len(rewards) == 2
         v.state_store.close()
 
@@ -1265,7 +1265,7 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         assert rewards[0] == 0.0
-        assert rewards[RECYCLE_UID] == 1.0
+        assert float(rewards.sum()) == 0.0
         v.state_store.close()
 
 
@@ -1358,7 +1358,7 @@ class TestHistoricalActiveState:
 
         # Full pool across both directions goes to hk_a (uid 0).
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_multiple_active_cycles(self, tmp_path: Path):
@@ -1415,7 +1415,7 @@ class TestHistoricalActiveState:
         assert crown == {'hk_a': 400.0, 'hk_b': 600.0}
         store.close()
 
-    def test_only_miner_deactivated_mid_window_pool_partially_recycles(self, tmp_path: Path):
+    def test_only_miner_deactivated_mid_window_rest_undistributed(self, tmp_path: Path):
         """Solo miner active at window_start, deactivates mid-window."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys=hotkeys, block=1100)
@@ -1431,12 +1431,11 @@ class TestHistoricalActiveState:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        # hk_a is the only miner with a rate, so it takes the entire tao→btc
-        # pool for the blocks it held crown. btc→tao pool gets nothing (no
-        # rates posted) and recycles.
+        # hk_a is the only miner with a rate, so it takes the entire btc→sol
+        # pool for the blocks it held crown. The other pools go undistributed
+        # (no rates posted) — normalization stretches at set_weights.
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        # Everything else recycles: btc→tao pool.
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_pre_window_activation_is_reconstructed(self, tmp_path: Path):
@@ -1600,9 +1599,9 @@ class TestHistoricalActiveState:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        # hk_b (uid 0) is the only rewardable + active miner, earns btc→tao.
+        # hk_b (uid 0) is the only rewardable + active miner, earns sol→btc.
         np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
 
@@ -1622,8 +1621,8 @@ class TestEventKindOrdering:
 
 
 class TestHaltShortCircuit:
-    """Halt check at the scoring entry sidesteps event replay: full pool
-    recycles, rewards skip the crown-time path entirely."""
+    """Halt check at the scoring entry sidesteps event replay: scores are
+    frozen (no update) so the pre-halt weights persist — nothing burns."""
 
     def _make_validator_with_halt(self, tmp_path: Path, halt_return, hotkeys: list[str]) -> SimpleNamespace:
         hotkeys = pad_hotkeys_to_cover_recycle(hotkeys)
@@ -1640,25 +1639,21 @@ class TestHaltShortCircuit:
         v.update_scores = capture
         return v, captured
 
-    def test_halted_short_circuits_to_full_recycle(self, tmp_path: Path):
+    def test_halted_freezes_scores(self, tmp_path: Path):
         v, captured = self._make_validator_with_halt(tmp_path, halt_return=True, hotkeys=['hk_a', 'hk_b'])
         score_and_reward_miners(v)
-        rewards = captured['rewards']
-        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        assert rewards[recycle_uid] == 1.0
-        # every other uid must be exactly zero
-        assert float(rewards.sum()) == 1.0
+        # update_scores never runs during a halt — pre-halt weights persist.
+        assert captured == {}
 
     def test_halted_rpc_error_still_scores(self, tmp_path: Path):
         """If the halt RPC fails, scoring proceeds as normal rather than
-        zeroing every miner's reward."""
+        freezing every miner's score."""
         v, captured = self._make_validator_with_halt(tmp_path, halt_return=RuntimeError('rpc down'), hotkeys=['hk_a'])
-        # No rate / collateral seeded → replay credits nothing → full pool
-        # still recycles, but via the normal path (not the halt short-circuit).
+        # No rate / collateral seeded → replay credits nothing, but the normal
+        # path (not the halt freeze) still runs a score update.
         score_and_reward_miners(v)
         rewards = captured['rewards']
-        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        assert rewards[recycle_uid] > 0  # recycle got something via normal path
+        assert float(rewards.sum()) == 0.0  # nothing earned, nothing burned
 
 
 class TestCapacityFactorHelper:
@@ -1807,7 +1802,7 @@ class TestCapacityWeighting:
 
     def test_quarter_collateral_pays_sixteenth(self, tmp_path: Path):
         """Collateral at 1/4 of required (1.1 x max_swap) → convex capacity (1/4)^2 =
-        1/16 reward, the rest recycles."""
+        1/16 reward, the rest goes undistributed."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
@@ -1818,11 +1813,10 @@ class TestCapacityWeighting:
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.0625, atol=1e-6)
-        # Pool conservation: hk_a got POOL_BTC_SOL*0.0625; the rest of both buckets
-        # and the unallocated pool all recycle, so recycle = 1 - that share.
-        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_SOL * 0.0625, atol=1e-6)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        # The shortfall is not routed anywhere — it goes undistributed and
+        # set_weights normalization stretches the distributed mass to 100%.
+        assert rewards[RECYCLE_UID] == 0.0
+        np.testing.assert_allclose(rewards.sum(), POOL_BTC_SOL * 0.0625, atol=1e-6)
         v.state_store.close()
 
     def test_over_max_caps_at_full(self, tmp_path: Path):
@@ -1841,17 +1835,16 @@ class TestCapacityWeighting:
 
     def test_zero_collateral_zeros_reward(self, tmp_path: Path):
         """A *known* zero collateral event with max_swap set → factor 0 → no
-        reward, full recycle. Seeded as an explicit present-0 event (not an
-        absent series, which now fails open — see
+        reward, nothing distributed. Seeded as an explicit present-0 event (not
+        an absent series, which now fails open — see
         test_unknown_collateral_fails_open)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000)
         seed_collateral(v.event_watcher, 'hk_a', 0, block=0)  # present, known zero
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
         assert rewards[0] == 0.0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_rate_tie_broken_by_collateral(self, tmp_path: Path):
@@ -2283,7 +2276,8 @@ class TestCapacityVolumeInteraction:
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
-        """Reward sum + recycle = 1.0 always, regardless of capacity/volume shortfalls."""
+        """Distributed mass never exceeds the pool and none lands on the
+        recycle UID, regardless of capacity/volume shortfalls."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -2301,7 +2295,8 @@ class TestCapacityVolumeInteraction:
         conn.commit()
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'btc', 1_500_000_000, 1_500_000_000, 'sk13')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        assert 0.0 < float(rewards.sum()) <= 1.0 + 1e-6
+        assert rewards[RECYCLE_UID] == 0.0
         v.state_store.close()
 
 
@@ -2310,7 +2305,7 @@ class TestEligibilityGateEndToEnd:
 
     The gate is a hard 0/1 multiplier off the on-chain MinerState counters —
     no ramp. An eligible crown holder earns its full crown share; an ineligible
-    one earns nothing and the share recycles. Boundary cases (the success floor
+    one earns nothing and its share goes undistributed. Boundary cases (the success floor
     and the failure cap) are exercised here through the full reward pipeline."""
 
     def seed_btc_tao_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 200.0) -> None:
@@ -2360,17 +2355,16 @@ class TestEligibilityGateEndToEnd:
         np.testing.assert_allclose(rewards[0], 0.0, atol=1e-6)
         v.state_store.close()
 
-    def test_ineligible_share_recycles(self, tmp_path: Path):
-        """An ineligible holder's crown share recycles to the owner UID, not to
-        other miners — pool conservation holds."""
+    def test_ineligible_share_goes_undistributed(self, tmp_path: Path):
+        """An ineligible holder's crown share is not paid to anyone — neither
+        the owner UID nor other miners."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (1, 0)})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        # hk_a gated to 0; both pools recycle in full.
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0, atol=1e-6)
-        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        # hk_a gated to 0; nothing is distributed and nothing is burned.
+        assert rewards[RECYCLE_UID] == 0.0
+        np.testing.assert_allclose(rewards.sum(), 0.0, atol=1e-6)
         v.state_store.close()
 
 

@@ -182,8 +182,8 @@ class DatabaseStorage:
     ) -> StorageResult:
         """Halt-aware counterpart to flush_scoring_window.
 
-        During a halt, no miner earns crown and the pool recycles
-        (see ``build_halted_rewards``). Mirror that on the dashboard by
+        During a halt, no miner earns crown and scoring is frozen
+        (see ``score_and_reward_miners``). Mirror that on the dashboard by
         deleting any pre-existing crown_holders rows in the halted
         window, clearing the live score tip (nothing is being paid),
         and advancing the cursor — leaves no stale "current holder"
