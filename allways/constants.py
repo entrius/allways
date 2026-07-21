@@ -70,6 +70,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # Idle-crown penalty: 0 = none, 1 = pure volume share; a zero-fill holder floors at 1-α (0.25).
 VOLUME_WEIGHT_ALPHA: float = 0.75
+# Capacity curve exponent (>1 = convex): capacity = min(1, (collateral / required)^k). Convex so
+# thin-parked collateral is penalised harder than linear (a miner backing the best rate on a sliver
+# earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth
+# past required earns nothing extra, so it never becomes pay-to-win.
+CAPACITY_CURVE_EXPONENT: float = 2.0
 # Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
 # replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
 # it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS

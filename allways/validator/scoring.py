@@ -24,6 +24,7 @@ from allways import dev_signal
 from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import (
+    CAPACITY_CURVE_EXPONENT,
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
@@ -547,14 +548,18 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
 
 
 def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
-    """min(1, collateral / required_collateral(max_swap)) — full credit means holding enough
-    to actually accept a max_swap fill at the contract's 1.10× gate. Fail-safe to 1.0 when
-    bounds unset."""
+    """min(1, (collateral / required_collateral(max_swap))^k) — full credit means holding enough
+    to accept a max_swap fill at the contract's 1.10× gate. The exponent k (CAPACITY_CURVE_EXPONENT,
+    >1) makes the ramp convex: backing a rate on a sliver of the band earns less than the raw ratio,
+    so thin-parked collateral is penalised harder and depth is worth posting. Still capped at 1.0 —
+    collateral past the requirement earns nothing extra, so it never becomes pay-to-win. Fail-safe to
+    1.0 when bounds unset."""
     if max_swap_amount_rao <= 0:
         return 1.0
     if collateral_rao <= 0:
         return 0.0
-    return min(1.0, collateral_rao / required_collateral(max_swap_amount_rao))
+    ratio = collateral_rao / required_collateral(max_swap_amount_rao)
+    return min(1.0, ratio**CAPACITY_CURVE_EXPONENT)
 
 
 def fill_ratio(
@@ -762,7 +767,8 @@ def replay_crown_time_window(
     max_swap_lamports: int = 0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
-    Ties at the same rate split credit evenly. A miner qualifies for crown
+    Among miners tied on the best rate the crown goes to the deepest collateral;
+    only a dead-heat on both rate and collateral splits evenly. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
     that instant, in a rewardable activity state (∈ REWARD_MINER_STATES — a
     reserved/fulfilling miner forfeits), had a positive rate posted, and their
@@ -826,10 +832,16 @@ def replay_crown_time_window(
         winner_rate = rates_for_instant.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
             trace.best_rate = winner_rate
+        # Among holders tied on the best rate, the crown goes to the deepest collateral:
+        # matching the leader's rate only earns if you also back it with the most depth,
+        # so posting a sharp quote on a sliver no longer wins a free share. A genuine
+        # dead-heat — same rate AND same collateral — still splits evenly.
+        max_coll = max(collaterals.get(hk, 0) for hk in holders)
+        winners = [hk for hk in holders if collaterals.get(hk, 0) == max_coll]
         if intervals_out is not None:
-            intervals_out.append((interval_start, interval_end, list(holders), winner_rate))
-        split = duration / len(holders)
-        for hk in holders:
+            intervals_out.append((interval_start, interval_end, list(winners), winner_rate))
+        split = duration / len(winners)
+        for hk in winners:
             crown_time[hk] = crown_time.get(hk, 0.0) + split
             # Unknown collateral counts as zero, matching can_fund's fail-closed
             # (the reconcile seeds a baseline for every bound active miner);
@@ -939,9 +951,14 @@ def snapshot_current_crown_holders(
             can_fund_at_rate=can_fund if bounds_set else None,
         )
         if holders:
-            share = 1.0 / len(holders)
-            rate = rates.get(holders[0], 0.0)
-            rows_by_direction[(from_chain, to_chain)] = [(from_chain, to_chain, hk, share, rate, ts) for hk in holders]
+            # Same rate tie-break as the scoring replay: the deepest collateral among
+            # tied-rate holders takes the crown, so the live table agrees with what the
+            # round scorer will credit. A dead-heat on both rate and collateral still splits.
+            max_coll = max(collaterals.get(hk, 0) for hk in holders)
+            winners = [hk for hk in holders if collaterals.get(hk, 0) == max_coll]
+            share = 1.0 / len(winners)
+            rate = rates.get(winners[0], 0.0)
+            rows_by_direction[(from_chain, to_chain)] = [(from_chain, to_chain, hk, share, rate, ts) for hk in winners]
         else:
             rows_by_direction[(from_chain, to_chain)] = []
     return rows_by_direction
