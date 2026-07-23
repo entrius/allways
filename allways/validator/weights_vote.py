@@ -24,6 +24,7 @@ from allways.constants import (
     WEIGHTS_VOTE_INTERVAL_BLOCKS,
     WEIGHTS_VOTE_RETRY_SECS,
 )
+from allways.solana.client import benign_marker
 from allways.validator.binding import build_attribution
 
 if TYPE_CHECKING:
@@ -93,8 +94,8 @@ def _step(self: Validator, now: int) -> None:
     try:
         sig = self.solana_client.vote_set_weights(vector, [bytes(v.key) for v in config.validators])
     except Exception as e:
-        if any(m in str(e) for m in _BENIGN_WEIGHTS_MARKERS):
-            bt.logging.debug(f'weights vote: no-op ({e})')
+        if m := benign_marker(e, _BENIGN_WEIGHTS_MARKERS):
+            bt.logging.debug(f'weights vote: no-op ({m})')
             return
         raise
     bt.logging.success(f'weights vote: {vector} submitted (sig {sig[:16]}…)')
