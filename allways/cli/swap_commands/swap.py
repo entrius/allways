@@ -11,7 +11,7 @@ Either way the tail is the same: send source funds + `swap post-tx`."""
 import json
 import sys
 import time
-from typing import NamedTuple, Optional
+from typing import List, NamedTuple, Optional
 
 import click
 
@@ -568,6 +568,31 @@ def swap_now_command(
         f'[green]  Reserved.[/green] Send [cyan]{amount_opt} {from_chain.upper()}[/cyan] to '
         f'[cyan]{resv.miner_from_addr}[/cyan], then run [bold]alw swap post-tx[/bold] with the tx hash.'
     )
+    for line in _deadline_lines(int(resv.reserved_until), want_send):
+        console.print(line)
+
+
+def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = None) -> List[str]:
+    """The send-deadline notice for the manual path, where the taker sends outside this process.
+
+    `_SEND_MARGIN_SECS` is checked once, at reservation time. After that nothing re-checks it: the
+    send and the relay happen elsewhere, and a deposit that lands after `reserved_until` yields no
+    claim, no Swap, no timeout and no refund. So state the deadline as a wall-clock instant — a bare
+    countdown is stale the moment it prints, and an agent that logs it can't tell when it was true.
+    `reserved_until` is echoed raw so a script can parse it instead of the rendered time."""
+    now = int(time.time()) if now is None else now
+    at = time.strftime('%H:%M:%S UTC', time.gmtime(reserved_until))
+    lines = [
+        f'  [yellow]Deadline:[/yellow] post-tx must complete by [cyan]{at}[/cyan] '
+        f'([cyan]{max(0, reserved_until - now)}s[/cyan] from now, reserved_until={reserved_until}). '
+        'Miss it and the deposit is unrecoverable — there is no refund.'
+    ]
+    if not want_send:
+        lines.append(
+            '  [dim]Sending outside `alw` forfeits the pre-send safety check. '
+            '`alw swap now --send` does the send, the relay and the watch in one step.[/dim]'
+        )
+    return lines
 
 
 def _source_provider(from_chain: str, client, config):

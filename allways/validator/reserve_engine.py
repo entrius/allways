@@ -234,6 +234,38 @@ class ConfirmResult:
     sig: str = ''
 
 
+# Runway submit_swap_claim needs to land after a deposit verifies. Only the claim tx remains at this
+# point — the send and the relay are already done — so this is deliberately much shorter than the
+# CLI's pre-send margin. Once the Swap exists the crank owns every later extension.
+CLAIM_RELAY_MARGIN_SECS = 90
+
+
+def _extend_for_claim(client, miner_pk, reservation, now: int) -> None:
+    """Slide `reserved_until` forward so the pending claim can land, when a verified deposit arrives
+    with little runway left.
+
+    Evidence-gated on purpose: the caller has already matched this deposit against the pinned
+    reservation, so we only ever extend for a taker who demonstrably sent funds — never on request.
+    That is the same justification the crank extends under, one step earlier in the lifecycle: the
+    crank can only help once a Swap exists, and here there is no Swap yet precisely because the claim
+    has not landed.
+
+    Best-effort. A failed extension must not sink the claim — the reservation may still have just
+    enough runway, and a claim that lands is worth more than a clean error path."""
+    reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
+    ceiling = int(getattr(reservation, 'max_extend_at', 0) or 0)
+    if reserved_until - now >= CLAIM_RELAY_MARGIN_SECS:
+        return  # plenty of runway
+    target = min(now + CLAIM_RELAY_MARGIN_SECS, ceiling)
+    if target <= reserved_until:
+        return  # already at the contract ceiling — nothing left to buy
+    try:
+        client.extend_reservation(miner_pk, target)
+        bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
+    except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
+        bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')
+
+
 def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_block: int = 0) -> ConfirmResult:
     """Relay a user's source deposit into a claim: verify the tx against the pinned reservation, then
     submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
@@ -284,6 +316,11 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
         if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
             return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
+
+    # The taker's funds are already on the source chain and this deposit just verified against the
+    # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
+    # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
+    _extend_for_claim(client, miner_pk, reservation, now)
 
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0)
