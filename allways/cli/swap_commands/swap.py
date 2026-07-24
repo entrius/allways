@@ -40,7 +40,9 @@ from allways.cli.swap_commands.swap_intake import (
     compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
+    swap_viable,
     to_smallest_units,
+    viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
@@ -180,6 +182,46 @@ def _poll_reservation(client, miner, timeout_secs: int):
     return None
 
 
+_MINER_PICK = '@pick'
+MINER_RATE_WARN_FRACTION = 0.5
+
+
+def _net_receive(to_amount: int, to_chain: str) -> float:
+    return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+
+
+def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap):
+    """Resolve an explicit --miner pubkey against the same gates auto-select uses. Hard-fails with
+    the specific reason — never silently falls back to another miner."""
+    chosen = next((p for p in viable if str(p[0].miner) == miner_opt), None)
+    if chosen:
+        return chosen
+    cand = next((c for c in candidates if str(c.miner) == miner_opt), None)
+    if cand is None:
+        fail(f'Miner {miner_opt[:8]}… is not active or not quoting {from_chain}->{to_chain}.')
+    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
+    _, reason = swap_viable(amts.collateral_amount, cand.collateral, min_swap, max_swap)
+    fail(f'Miner {miner_opt[:8]}… cannot take this swap: {reason or "rate not executable"}.')
+
+
+def _pick_intake(viable, from_chain, to_chain):
+    """Interactive miner picker over the viable set, best rate first."""
+    if not sys.stdin.isatty():
+        fail('Bare --miner needs a terminal; pass --miner <pubkey> when scripting.')
+    ranked = sorted(viable, key=lambda p: p[1].to_amount, reverse=True)
+    sol_decimals = get_chain(NUMERAIRE_CHAIN).decimals
+    console.print(f'\n  Miners quoting {from_chain.upper()}->{to_chain.upper()} (best first):')
+    for i, (c, amts) in enumerate(ranked, 1):
+        rate_disp = directional_rate(from_chain, to_chain, c.rate_display)
+        console.print(
+            f'  [{i}] [dim]{c.miner}[/dim]  rate {rate_disp} {to_chain.upper()}/{from_chain.upper()}'
+            f'  receive ~[cyan]{_net_receive(amts.to_amount, to_chain):.8g} {to_chain.upper()}[/cyan]'
+            f'  collateral {c.collateral / 10**sol_decimals:g} SOL'
+        )
+    idx = click.prompt('  Miner #', type=click.IntRange(1, len(ranked)))
+    return ranked[idx - 1]
+
+
 class _RoutedUnavailable(Exception):
     """A routed attempt failed BEFORE any pool was entered on our behalf (no axon, rejected, or the
     dendrite went unanswered) — safe to offer the self-represented path instead."""
@@ -266,6 +308,14 @@ def _poll_routed_reservation(client, miner, user, timeout_secs: int):
 @click.option('--receive-address', 'receive_address_opt', default=None, help='Receive address on destination chain')
 @click.option('--from-address', 'from_address_opt', default=None, help='Source address on source chain')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
+@click.option(
+    '--miner',
+    'miner_opt',
+    is_flag=False,
+    flag_value=_MINER_PICK,
+    default=None,
+    help='Miner pubkey to use instead of auto-select; bare --miner opens an interactive picker',
+)
 @click.option('--yes', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
 @click.option('--router', 'router_opt', default=None, help='Validator hotkey to route through (overrides config)')
 @click.option('--no-router', 'no_router', is_flag=True, help='Self-represent even when a router is configured')
@@ -295,6 +345,7 @@ def swap_now_command(
     receive_address_opt: Optional[str],
     from_address_opt: Optional[str],
     from_tx_hash_opt: Optional[str],
+    miner_opt: Optional[str],
     skip_confirm: bool,
     router_opt: Optional[str],
     no_router: bool,
@@ -351,10 +402,28 @@ def swap_now_command(
     candidates = candidate_miners(client, from_chain, to_chain)
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
-    if best is None:
-        fail('No miner can fund an executable swap for that amount within bounds.')
-    cand, amts = best
+    if miner_opt:
+        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        if not viable:
+            fail('No miner can fund an executable swap for that amount within bounds.')
+        best_to = max(p[1].to_amount for p in viable)
+        if miner_opt == _MINER_PICK:
+            cand, amts = _pick_intake(viable, from_chain, to_chain)
+        else:
+            cand, amts = _named_intake(
+                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap
+            )
+        if amts.to_amount < best_to * (1 - MINER_RATE_WARN_FRACTION):
+            pct = (1 - amts.to_amount / best_to) * 100
+            console.print(
+                f'  [yellow]This miner pays {pct:.0f}% less than the best available[/yellow] '
+                f'(~{_net_receive(best_to, to_chain):.8g} {to_chain.upper()}).'
+            )
+    else:
+        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        if best is None:
+            fail('No miner can fund an executable swap for that amount within bounds.')
+        cand, amts = best
 
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
@@ -375,7 +444,7 @@ def swap_now_command(
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(contention.rate))
     # Quote the NET dest leg — the miner delivers `to_amount` less the protocol fee, same as
     # `alw swap quote`. The gross `to_amount` is what gets pinned on-chain, not what you receive.
-    recv = apply_fee_deduction(amts.to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    recv = _net_receive(amts.to_amount, to_chain)
 
     rate_display = rate_display_from_fixed(contention.rate) if pinned and contention.rate > 0 else cand.rate_display
     rate_disp = directional_rate(from_chain, to_chain, rate_display)
