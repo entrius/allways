@@ -240,7 +240,7 @@ class ConfirmResult:
 CLAIM_RELAY_MARGIN_SECS = 90
 
 
-def _extend_for_claim(client, miner_pk, reservation, now: int) -> None:
+def _extend_for_claim(client, miner_pk, reservation) -> None:
     """Slide `reserved_until` forward so the pending claim can land, when a verified deposit arrives
     with little runway left.
 
@@ -252,6 +252,9 @@ def _extend_for_claim(client, miner_pk, reservation, now: int) -> None:
 
     Best-effort. A failed extension must not sink the claim — the reservation may still have just
     enough runway, and a claim that lands is worth more than a clean error path."""
+    # Re-read the clock rather than take the caller's: verify_transaction is a source-chain RPC that
+    # can burn seconds, and a stale `now` both overstates the runway and undershoots the target.
+    now = int(time.time())
     reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
     ceiling = int(getattr(reservation, 'max_extend_at', 0) or 0)
     if reserved_until - now >= CLAIM_RELAY_MARGIN_SECS:
@@ -320,7 +323,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
-    _extend_for_claim(client, miner_pk, reservation, now)
+    _extend_for_claim(client, miner_pk, reservation)
 
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0)

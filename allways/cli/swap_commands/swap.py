@@ -587,11 +587,12 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
         f'([cyan]{max(0, reserved_until - now)}s[/cyan] from now, reserved_until={reserved_until}). '
         'Miss it and the deposit is unrecoverable — there is no refund.'
     ]
+    # The warning is unconditional: reaching this notice means the send happens outside `alw`, and
+    # --send that fell back to manual (no creds, wrong wallet) is exactly the case that needs telling.
+    # Only the hint is gated — pointless for someone who just asked for --send.
+    lines.append('  [dim]Sending outside `alw` forfeits the pre-send safety check.[/dim]')
     if not want_send:
-        lines.append(
-            '  [dim]Sending outside `alw` forfeits the pre-send safety check. '
-            '`alw swap now --send` does the send, the relay and the watch in one step.[/dim]'
-        )
+        lines.append('  [dim]`alw swap now --send` does the send, the relay and the watch in one step.[/dim]')
     return lines
 
 

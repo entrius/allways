@@ -515,6 +515,32 @@ def test_confirm_extends_reservation_when_runway_is_short():
     assert client.extensions[0] >= int(time.time()) + rc.CLAIM_RELAY_MARGIN_SECS - 5
 
 
+def test_confirm_measures_runway_after_the_source_rpc(monkeypatch):
+    # verify_transaction is a source-chain RPC that can burn seconds on BTC. Runway read before it
+    # runs can say "ample" while the real window is already short, and an extension computed off that
+    # stale clock buys less than the margin — so the helper re-reads the clock.
+    start = int(time.time())
+    clock = {'t': start}
+    resv = _confirm_reservation(reserved_until=start + rc.CLAIM_RELAY_MARGIN_SECS + 30, max_extend_at=start + 10_000)
+    client = _ConfirmClient(resv)
+
+    class _SlowProvider(_FakeProvider):
+        def verify_transaction(self, **kw):
+            clock['t'] += 60  # the RPC hung; the window shrank while we waited
+            return super().verify_transaction(**kw)
+
+    validator = SimpleNamespace(
+        solana_client=client,
+        axon_chain_providers={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
+        axon_lock=threading.RLock(),
+    )
+    monkeypatch.setattr(rc.time, 'time', lambda: clock['t'])
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims
+    # Off the pre-RPC clock this reservation looks ample and never extends.
+    assert client.extensions == [clock['t'] + rc.CLAIM_RELAY_MARGIN_SECS]
+
+
 def test_confirm_does_not_extend_when_runway_is_ample():
     # Don't burn an extension (or the ceiling budget) on a reservation that has plenty left.
     r, client = _confirm(_near_expiry(rc.CLAIM_RELAY_MARGIN_SECS + 60), _tx(confirmed=False, block_time=None))

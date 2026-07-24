@@ -418,13 +418,20 @@ def test_deadline_notice_states_the_wall_clock_instant():
     assert 'no refund' in body
 
 
-def test_deadline_notice_warns_only_when_not_auto_sending():
+def test_deadline_notice_always_warns_that_the_guard_is_forfeit():
+    # Reaching this notice means the send happens outside `alw` either way. --send that degraded to
+    # manual (missing creds, wrong wallet) is the case that most needs telling, so never gate this.
     now = 1_700_000_000
-    manual = ' '.join(_deadline_lines(now + 300, want_send=False, now=now))
-    assert 'forfeits the pre-send safety check' in manual
-    # --send keeps send+relay in-process, so the guard still applies — don't cry wolf.
-    auto = ' '.join(_deadline_lines(now + 300, want_send=True, now=now))
-    assert 'forfeits' not in auto
+    for want_send in (False, True):
+        body = ' '.join(_deadline_lines(now + 300, want_send=want_send, now=now))
+        assert 'forfeits the pre-send safety check' in body
+
+
+def test_deadline_notice_hints_at_send_only_when_it_was_not_asked_for():
+    now = 1_700_000_000
+    assert '--send' in ' '.join(_deadline_lines(now + 300, want_send=False, now=now))
+    # Redundant for a taker who already asked for --send and fell through to manual.
+    assert '--send' not in ' '.join(_deadline_lines(now + 300, want_send=True, now=now))
 
 
 def test_deadline_notice_never_shows_negative_runway():
