@@ -14,6 +14,7 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
     to_smallest_units,
+    viable_intakes,
 )
 
 SOL = 1_000_000_000  # 1 SOL in lamports (9 dec)
@@ -112,6 +113,27 @@ def test_select_best_miner_skips_underfunded():
 def test_select_best_miner_none_when_all_unviable():
     cands = [MinerCandidate(miner='m', rate_display='0.6', collateral=1)]
     assert select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX) is None
+
+
+def test_viable_intakes_filters_and_keeps_input_order():
+    cands = [
+        MinerCandidate(miner='m_low', rate_display='0.4', collateral=2 * SOL),
+        MinerCandidate(miner='m_underfunded', rate_display='0.6', collateral=SOL),  # can't back 1.1 SOL
+        MinerCandidate(miner='m_bad_rate', rate_display='junk', collateral=2 * SOL),
+        MinerCandidate(miner='m_high', rate_display='0.6', collateral=2 * SOL),
+    ]
+    viable = viable_intakes(cands, 'sol', 'btc', SOL, MIN, MAX)
+    assert [c.miner for c, _ in viable] == ['m_low', 'm_high']
+    assert [a.to_amount for _, a in viable] == [40_000_000, 60_000_000]
+
+
+def test_select_best_miner_ties_break_first_seen():
+    cands = [
+        MinerCandidate(miner='m_first', rate_display='0.5', collateral=2 * SOL),
+        MinerCandidate(miner='m_second', rate_display='0.5', collateral=2 * SOL),
+    ]
+    best = select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX)
+    assert best is not None and best[0].miner == 'm_first'
 
 
 # ---- candidate_miners: active gate + tracked collateral ----

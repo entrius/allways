@@ -96,6 +96,32 @@ def swap_viable(collateral_amount: int, collateral: int, min_swap: int, max_swap
     return True, ''
 
 
+def viable_intakes(
+    candidates: List[MinerCandidate],
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+    min_swap: int,
+    max_swap: int,
+) -> List[Tuple[MinerCandidate, IntakeAmounts]]:
+    """Every candidate passing the executable-rate + viability gates, with derived amounts.
+    Stable input order. The single gating path shared by auto-select and --miner."""
+    out: List[Tuple[MinerCandidate, IntakeAmounts]] = []
+    for c in candidates:
+        try:
+            rate = float(c.rate_display)
+        except (TypeError, ValueError):
+            continue
+        if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
+            continue
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
+        if amts.to_amount <= 0:
+            continue
+        if swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)[0]:
+            out.append((c, amts))
+    return out
+
+
 def select_best_miner(
     candidates: List[MinerCandidate],
     from_chain: str,
@@ -107,20 +133,5 @@ def select_best_miner(
     """Among executable + viable miners, pick the one giving the user the most dest (``to_amount``).
 
     None if no miner qualifies. Ties broken by first-seen (stable input order)."""
-    best: Optional[Tuple[MinerCandidate, IntakeAmounts]] = None
-    for c in candidates:
-        try:
-            rate = float(c.rate_display)
-        except (TypeError, ValueError):
-            continue
-        if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
-            continue
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
-        if amts.to_amount <= 0:
-            continue
-        ok, _ = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
-        if not ok:
-            continue
-        if best is None or amts.to_amount > best[1].to_amount:
-            best = (c, amts)
-    return best
+    viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+    return max(viable, key=lambda p: p[1].to_amount, default=None)
