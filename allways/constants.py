@@ -68,8 +68,6 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
     for spoke in LAUNCH_SPOKES
     for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
 }
-# Idle-crown penalty: 0 = none, 1 = pure volume share; a zero-fill holder floors at 1-α (0.25).
-VOLUME_WEIGHT_ALPHA: float = 0.75
 # Capacity curve exponent (>1 = convex): capacity = min(1, (collateral / required)^k). Convex so
 # thin-parked collateral is penalised harder than linear (a miner backing the best rate on a sliver
 # earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth

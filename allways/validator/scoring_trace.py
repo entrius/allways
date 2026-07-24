@@ -24,7 +24,7 @@ NON_EARNER_LINE_CAP = 30
 
 @dataclass
 class WeightingTrace:
-    """Per-hotkey capacity + volume + eligibility factors for the scoring log.
+    """Per-hotkey capacity + eligibility factors for the scoring log.
 
     ``capacity_factor`` is the time-weighted average of
     ``min(1, collateral / (1.1 × max_swap))`` over the miner's crown intervals — the
@@ -33,22 +33,10 @@ class WeightingTrace:
     crown gate read off the on-chain MinerState counters (B3.3)."""
 
     capacity_factor: float = 1.0
-    volume_rao: int = 0
-    crown_share: float = 0.0
-    volume_share: float = 0.0
-    participation: float = 1.0
-    fill_ratio: float = 1.0
     eligible: bool = False
 
     def record_capacity(self, factor: float) -> None:
         self.capacity_factor = factor
-
-    def record_volume(self, vol_rao: int, total_volume_rao: int, crown_share: float, factor: float) -> None:
-        self.volume_rao = vol_rao
-        self.crown_share = crown_share
-        self.volume_share = (vol_rao / total_volume_rao) if total_volume_rao > 0 else 0.0
-        self.participation = min(1.0, self.volume_share / crown_share) if crown_share > 0 else 1.0
-        self.fill_ratio = factor
 
     def record_eligibility(self, eligible: bool) -> None:
         self.eligible = eligible
@@ -97,11 +85,7 @@ def log_scoring_trace(
         wt = weighting_traces.get(hk)
         extras = ''
         if wt is not None:
-            extras = (
-                f' cap={wt.capacity_factor:.2f}'
-                f' vol={wt.volume_rao / TAO_TO_RAO:g}t vol_share={wt.volume_share:.2f}'
-                f' crown_share={wt.crown_share:.2f} fill={wt.fill_ratio:.2f}'
-            )
+            extras = f' cap={wt.capacity_factor:.2f}'
         lines.append(
             f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
         )
