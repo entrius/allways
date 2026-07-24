@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 from allways.cli.swap_commands.helpers import live_unclaimed
 from allways.cli.swap_commands.swap import (
     _SEND_MARGIN_SECS,
+    _deadline_lines,
     _poll_drawn,
     _poll_reservation,
     _self_crank_resolve,
@@ -400,3 +401,40 @@ def test_watch_swap_reports_completed_after_close(monkeypatch):
         swap_mod._watch_swap(client, 'ab' * 32, 'tao')
     joined = ' '.join(out)
     assert 'COMPLETED' in joined and 'never existed' not in joined
+
+
+# ── manual-path deadline notice ─────────────────────────────────────────────
+# _SEND_MARGIN_SECS is checked once, at reservation time. On the manual path the send and the relay
+# happen outside this process, so nothing re-checks it — and a deposit landing after reserved_until
+# yields no claim, no Swap, no timeout and no refund. The notice is the only thing standing between
+# an out-of-band sender and a silent, permanent loss.
+def test_deadline_notice_states_the_wall_clock_instant():
+    now = 1_700_000_000
+    lines = _deadline_lines(now + 300, want_send=False, now=now)
+    body = ' '.join(lines)
+    assert '300s' in body  # runway from the caller's `now`, not from import time
+    assert 'reserved_until=1700000300' in body  # raw, so an agent can parse it
+    assert time.strftime('%H:%M:%S UTC', time.gmtime(now + 300)) in body
+    assert 'no refund' in body
+
+
+def test_deadline_notice_always_warns_that_the_guard_is_forfeit():
+    # Reaching this notice means the send happens outside `alw` either way. --send that degraded to
+    # manual (missing creds, wrong wallet) is the case that most needs telling, so never gate this.
+    now = 1_700_000_000
+    for want_send in (False, True):
+        body = ' '.join(_deadline_lines(now + 300, want_send=want_send, now=now))
+        assert 'forfeits the pre-send safety check' in body
+
+
+def test_deadline_notice_hints_at_send_only_when_it_was_not_asked_for():
+    now = 1_700_000_000
+    assert '--send' in ' '.join(_deadline_lines(now + 300, want_send=False, now=now))
+    # Redundant for a taker who already asked for --send and fell through to manual.
+    assert '--send' not in ' '.join(_deadline_lines(now + 300, want_send=True, now=now))
+
+
+def test_deadline_notice_never_shows_negative_runway():
+    now = 1_700_000_000
+    body = ' '.join(_deadline_lines(now - 50, want_send=False, now=now))
+    assert '0s' in body and '-50' not in body

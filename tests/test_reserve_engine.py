@@ -6,6 +6,7 @@ a joiner quotes against the PINNED pool rate (not the live quote) so it stays ra
 
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -366,6 +367,7 @@ def test_malformed_swap_key_raises_value_error(tmp_path):
 # ── confirm_deposit: deferred-confirmation intake. Accepts a content-valid deposit even before it fully
 # confirms (the crank defers voting until confirmations accrue); fast-fails without a claim on absent/mismatch
 # (None) or a stale MINED deposit, so the short reservation TTL frees the miner.
+import allways.validator.reserve_engine as rc  # noqa: E402
 from allways.chain_providers.base import ProviderUnreachableError, TransactionInfo  # noqa: E402
 from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
 
@@ -377,6 +379,8 @@ class _ConfirmClient(FakeClient):
         super().__init__(**kw)
         self._reservation = reservation
         self.claims = []
+        self.extensions = []
+        self.extend_raises = False
 
     def get_reservation(self, miner):
         return self._reservation
@@ -384,6 +388,12 @@ class _ConfirmClient(FakeClient):
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
         self.claims.append((swap_key, from_tx_hash, from_tx_block))
         return 'claimsig'
+
+    def extend_reservation(self, miner, target_at):
+        if self.extend_raises:
+            raise RuntimeError('rpc down')
+        self.extensions.append(target_at)
+        return 'extendsig'
 
 
 class _FakeProvider:
@@ -410,6 +420,7 @@ def _confirm_reservation(**over):
         from_amount=100_000,
         from_addr='userBTC',
         created_at=CONFIRM_CREATED_AT,
+        max_extend_at=FUTURE,
     )
     d.update(over)
     return SimpleNamespace(**d)
@@ -486,3 +497,74 @@ def test_confirm_rejects_when_reservation_already_claimed():
 def test_confirm_provider_unreachable_resends_without_claim():
     r, client = _confirm(_confirm_reservation(), None, unreachable=True)
     assert not r.ok and not client.claims and 'unreachable' in r.reason.lower()
+
+
+# ── claim runway: a verified deposit must not lose its window mid-relay ──────
+# submit_swap_claim needs reserved_until >= now. If it lapses between the taker sending and the
+# relay landing there is no claim, no Swap, no timeout and no refund — the deposit is just gone.
+# So a deposit that has already verified against the pinned reservation buys runway first.
+def _near_expiry(secs_left, **over):
+    return _confirm_reservation(reserved_until=int(time.time()) + secs_left, **over)
+
+
+def test_confirm_extends_reservation_when_runway_is_short():
+    r, client = _confirm(_near_expiry(20), _tx(confirmed=False, block_time=None))
+    assert r.ok and client.claims, 'the claim must still be submitted'
+    assert len(client.extensions) == 1
+    # Extended to a real margin ahead of now, not merely one second past the old deadline.
+    assert client.extensions[0] >= int(time.time()) + rc.CLAIM_RELAY_MARGIN_SECS - 5
+
+
+def test_confirm_measures_runway_after_the_source_rpc(monkeypatch):
+    # verify_transaction is a source-chain RPC that can burn seconds on BTC. Runway read before it
+    # runs can say "ample" while the real window is already short, and an extension computed off that
+    # stale clock buys less than the margin — so the helper re-reads the clock.
+    start = int(time.time())
+    clock = {'t': start}
+    resv = _confirm_reservation(reserved_until=start + rc.CLAIM_RELAY_MARGIN_SECS + 30, max_extend_at=start + 10_000)
+    client = _ConfirmClient(resv)
+
+    class _SlowProvider(_FakeProvider):
+        def verify_transaction(self, **kw):
+            clock['t'] += 60  # the RPC hung; the window shrank while we waited
+            return super().verify_transaction(**kw)
+
+    validator = SimpleNamespace(
+        solana_client=client,
+        axon_chain_providers={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
+        axon_lock=threading.RLock(),
+    )
+    monkeypatch.setattr(rc.time, 'time', lambda: clock['t'])
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims
+    # Off the pre-RPC clock this reservation looks ample and never extends.
+    assert client.extensions == [clock['t'] + rc.CLAIM_RELAY_MARGIN_SECS]
+
+
+def test_confirm_does_not_extend_when_runway_is_ample():
+    # Don't burn an extension (or the ceiling budget) on a reservation that has plenty left.
+    r, client = _confirm(_near_expiry(rc.CLAIM_RELAY_MARGIN_SECS + 60), _tx(confirmed=False, block_time=None))
+    assert r.ok and client.claims
+    assert client.extensions == []
+
+
+def test_confirm_does_not_extend_past_the_contract_ceiling():
+    # max_extend_at is frozen at creation; the contract rejects a target above it, so don't try.
+    now = int(time.time())
+    resv = _confirm_reservation(reserved_until=now + 20, max_extend_at=now + 20)
+    r, client = _confirm(resv, _tx(confirmed=False, block_time=None))
+    assert r.ok and client.claims, 'no headroom left, but the claim is still worth attempting'
+    assert client.extensions == []
+
+
+def test_confirm_claims_even_if_the_extension_fails():
+    # Best-effort: the reservation may still have just enough runway, and a claim that lands beats a
+    # clean error path. A failed extension must never sink the deposit.
+    client = _ConfirmClient(_near_expiry(20))
+    client.extend_raises = True
+    provider = _FakeProvider(_tx(confirmed=False, block_time=None))
+    validator = SimpleNamespace(
+        solana_client=client, axon_chain_providers={'btc': provider}, axon_lock=threading.RLock()
+    )
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims
