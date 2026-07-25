@@ -4,6 +4,8 @@
 
 Trustless native transactions across independent assets — Bittensor Subnet 7 (SN7).
 
+[![Twitter](https://img.shields.io/twitter/follow/allways_io?style=social)](https://x.com/allways_io)
+
 ## Overview
 
 Allways creates a verification layer above independent systems. Assets move natively. Miners complete transactions, validators independently verify the results, and a smart contract enforces outcomes through collateral and slashing.
