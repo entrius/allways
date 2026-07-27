@@ -2436,15 +2436,18 @@ class TestScoreSnapshots:
         kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
         rows = kwargs['miner_score_rows']
         assert len(rows) == 1
-        (round_ts, hotkey, from_c, to_c, eligible, crown_share, capacity, reward) = rows[0]
+        (round_ts, hotkey, from_c, to_c, eligible, pool, crown_share, capacity, reward) = rows[0]
         assert round_ts == v.block  # round keyed by window_end
         assert (hotkey, from_c, to_c) == ('hk_a', 'btc', 'sol')
         assert eligible is True
         np.testing.assert_allclose((crown_share, capacity), (1.0, 1.0))
+        # hk_a's own swap put all the window's volume on the BTC pair, so the
+        # pool is tilted — and the row carries it, because a reader given only
+        # the other factors could not tell which pool the round paid on.
+        np.testing.assert_allclose(pool, POOL_BUSY_PAIR_LEG, atol=1e-9)
         # The persisted factors reproduce the persisted reward, and the
-        # persisted reward is what the weights actually paid. hk_a's own swap
-        # put all the window's volume on the BTC pair, so its pool is tilted.
-        expected = POOL_BUSY_PAIR_LEG * crown_share * capacity
+        # persisted reward is what the weights actually paid.
+        expected = pool * crown_share * capacity
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
@@ -2463,10 +2466,11 @@ class TestScoreSnapshots:
         rewards, _ = calculate_miner_rewards(v, v.block)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
         assert len(rows) == 1
-        row = rows[0]
-        assert row[4] is False  # eligible
-        np.testing.assert_allclose(row[5], 1.0)  # crown_share still recorded
-        assert row[7] == 0.0  # reward
+        (_ts, _hk, _from_c, _to_c, eligible, pool, crown_share, _cap, reward) = rows[0]
+        assert eligible is False
+        np.testing.assert_allclose(crown_share, 1.0)  # crown_share still recorded
+        assert pool > 0.0  # the pool the round would have paid on is recorded too
+        assert reward == 0.0
         assert rewards[0] == 0.0
         v.state_store.close()
 

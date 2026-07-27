@@ -55,10 +55,11 @@ DO UPDATE SET credit = EXCLUDED.credit,
 # the crown ledger. Idempotent on retry of the same round.
 BULK_UPSERT_MINER_SCORES = """
 INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, eligible,
-                          crown_share, capacity, reward)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                          pool, crown_share, capacity, reward)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (round_ts, hotkey, from_chain, to_chain)
 DO UPDATE SET eligible    = EXCLUDED.eligible,
+              pool        = EXCLUDED.pool,
               crown_share = EXCLUDED.crown_share,
               capacity    = EXCLUDED.capacity,
               reward      = EXCLUDED.reward
@@ -73,6 +74,6 @@ DELETE FROM current_miner_scores
 
 BULK_INSERT_CURRENT_MINER_SCORES = """
 INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, eligible,
-                                  crown_share, capacity, reward, updated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                  pool, crown_share, capacity, reward, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 """

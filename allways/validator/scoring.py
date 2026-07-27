@@ -208,12 +208,14 @@ class ScoreRow:
     actually used, in the shape the ``miner_scores`` / ``current_miner_scores``
     tables persist. ``reward`` is the direction's final emission share (post
     eligibility gate); the other fields are its inputs, so the dashboard can
-    write the multiplication out."""
+    write the multiplication out. ``pool`` rides along because it is
+    volume-weighted per round — a reader cannot re-derive it."""
 
     hotkey: str
     from_chain: str
     to_chain: str
     eligible: bool
+    pool: float
     crown_share: float
     capacity: float
     reward: float
@@ -251,6 +253,7 @@ def build_direction_score_rows(
                 from_chain=from_chain,
                 to_chain=to_chain,
                 eligible=eligible,
+                pool=pool,
                 crown_share=crown_share_dir,
                 capacity=cap,
                 reward=(1.0 if eligible else 0.0) * pool * crown_share_dir * cap,
@@ -451,6 +454,7 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
             r.from_chain,
             r.to_chain,
             r.eligible,
+            r.pool,
             r.crown_share,
             r.capacity,
             r.reward,
