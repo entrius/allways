@@ -175,10 +175,16 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
     console.print(f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]')
 
 
-def relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, tx_block=0, *, on_behalf_of=None) -> str | None:
+def relay_deposit(
+    client, resv, miner_pk, miner_hotkey, tx_hash, tx_block=0, *, on_behalf_of=None, validator_axons=None
+) -> str | None:
     """Relay a source deposit to the validators (the shared core of ``post-tx`` and the ``swap now``
     auto-send). Returns the swap_key hex on acceptance, else None. Idempotent: validators re-verify the
-    same on-chain deposit each call."""
+    same on-chain deposit each call.
+
+    ``validator_axons`` may be pre-resolved by the caller. ``swap now --send`` does this BEFORE moving
+    funds, so the fragile subtensor connect can't fail *after* the send and strand the deposit; the
+    standalone ``post-tx`` (funds already sent in a prior run) leaves it None and discovers here."""
     if tx_block == 0:
         # Slot is a verification hint (O(1) lookup); validators can scan without it. Best-effort.
         try:
@@ -208,8 +214,9 @@ def relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, tx_block=0, *, 
         to_chain=resv.to_chain,
     )
 
-    config, _wallet, subtensor, _ = get_cli_context(need_wallet=False)
-    validator_axons = discover_validators(subtensor, int(config['netuid']))
+    if validator_axons is None:
+        config, _wallet, subtensor, _ = get_cli_context(need_wallet=False)
+        validator_axons = discover_validators(subtensor, int(config['netuid']))
     if not validator_axons:
         console.print('[red]No serving validators found on the metagraph.[/red]')
         return None

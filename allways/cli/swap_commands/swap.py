@@ -18,6 +18,7 @@ import click
 from allways.chains import SUPPORTED_CHAINS, get_chain
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
+    discover_validators,
     find_validator_axon,
     get_ephemeral_wallet,
     invalidate_axon_cache,
@@ -678,6 +679,22 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     if from_chain == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
         return False
 
+    from allways.cli.swap_commands.post_tx import relay_deposit
+
+    # Resolve validators BEFORE moving funds. This is the fragile network step — a subtensor websocket
+    # connect + metagraph read — and it needs nothing from the send. Doing it first means a transient
+    # connect failure aborts with the deposit untouched, instead of unwinding as a traceback *after* the
+    # money is out (which stranded a deposit past its reservation TTL, with no claim, Swap, or refund).
+    try:
+        vconfig, _vw, subtensor, _ = get_cli_context(need_wallet=False)
+        validator_axons = discover_validators(subtensor, int(vconfig['netuid']))
+    except Exception as e:  # noqa: BLE001 - funds still safe → clean fallback, nothing lost
+        console.print(f'[yellow]  Could not reach the chain to resolve validators ({e}); no funds moved.[/yellow]')
+        return False
+    if not validator_axons:
+        console.print('[yellow]  No serving validators found; no funds moved.[/yellow]')
+        return False
+
     kw = {'from_address': resv.from_addr}
     if from_chain == 'btc' and btc_fee_rate is not None:
         kw['fee_rate_override'] = btc_fee_rate
@@ -692,10 +709,16 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     tx_hash = sent[0]
     console.print(f'[green]  Sent[/green] {amount_disp:g} {from_chain.upper()} — [cyan]{tx_hash}[/cyan]')
 
-    from allways.cli.swap_commands.post_tx import relay_deposit
-
+    # Funds are OUT. Past this line no exception may escape as a traceback: the deposit is idempotent to
+    # relay, so any failure must become a recoverable "re-run post-tx" instruction inside the TTL.
     miner_hotkey = _miner_hotkey(client, miner_pk)
-    swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash)
+    try:
+        swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, validator_axons=validator_axons)
+    except Exception as e:  # noqa: BLE001 - money committed; convert any error into a re-run, never a crash
+        fail(
+            f'  Deposit sent ({tx_hash}) but the confirm relay errored: {e}. '
+            f'Re-run `alw swap post-tx {tx_hash}` now, before the reservation expires.'
+        )
     if swap_key is None:
         fail(
             f'  Deposit sent but no validator accepted the relay yet. Re-run `alw swap post-tx {tx_hash}` in a moment.'
