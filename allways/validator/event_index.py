@@ -89,6 +89,14 @@ class SolanaEventIndex:
             return True
         if name == 'PoolResolved':
             return self._apply_reservation(hotkey, block_time)
+        if name == 'SwapFulfilled':
+            # Persist the delivery hash for post-close receipts — the Swap PDA (and its
+            # to_tx_hash) is gone once the swap completes, and the offering's receipt links
+            # both legs. No activity edge: FULFILL_END comes from the terminal events.
+            self.state_store.record_swap_fulfillment(
+                bytes(rec.fields['swap_key']).hex(), str(rec.fields['to_tx_hash']), block_time
+            )
+            return True
         if name in _FULFILL_TRANSITIONS:
             self.state_store.insert_activity_event(block_time, hotkey, _FULFILL_TRANSITIONS[name])
             outcome = _OUTCOME_BY_EVENT.get(name)
