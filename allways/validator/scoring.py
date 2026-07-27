@@ -24,10 +24,14 @@ from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import (
     CAPACITY_CURVE_EXPONENT,
+    CLEARING_RETENTION_SECS,
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    NUMERAIRE_CHAIN,
+    POOL_VOLUME_ALPHA,
+    POOL_VOLUME_WINDOW_SECS,
     RECYCLE_UID,
     REWARD_MINER_STATES,
     SCORING_WINDOW_BLOCKS,
@@ -159,9 +163,9 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_active_events(cutoff)
     self.state_store.prune_activity_events(cutoff)
     self.state_store.prune_collateral_events(cutoff)
-    # clearing_rates keeps backfill headroom beyond the crown cutoff so a
-    # stalled validator can still score the volumes of a caught-up window.
-    self.state_store.prune_clearing_rates(current_time - MAX_SCORING_BACKFILL_SECS)
+    # clearing_rates outlives the crown cutoff by a full pool-volume window
+    # (plus stall headroom) — the per-round pool weighting reads a day back.
+    self.state_store.prune_clearing_rates(current_time - CLEARING_RETENTION_SECS)
     self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
@@ -255,6 +259,42 @@ def build_direction_score_rows(
     return rows
 
 
+def compute_direction_pools(
+    clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
+) -> Dict[Tuple[str, str], float]:
+    """Volume-weighted pools from a trailing window of realized swaps
+    (``get_clearing_volumes`` shape). Each hub↔spoke *pair* earns
+    ``(1−α)/pairs + α × its share of SOL notional``, split evenly between its
+    two directions — weighting at pair level means one leg can't be inflated
+    without inflating the whole pair. No volume anywhere → the equal split."""
+    pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+    for from_chain, to_chain in DIRECTION_POOLS:
+        pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
+
+    pair_volumes: Dict[Tuple[str, str], int] = {}
+    for pair, directions in pair_directions.items():
+        volume = 0
+        for from_chain, to_chain in directions:
+            # Hub-and-spoke: every direction has SOL on exactly one leg, so the
+            # SOL side is the notional comparable across pairs (all lamports).
+            leg = 0 if from_chain == NUMERAIRE_CHAIN else 1
+            volume += sum(sums[leg] for sums in clearing_volumes.get((from_chain, to_chain), {}).values())
+        pair_volumes[pair] = volume
+
+    total_volume = sum(pair_volumes.values())
+    if total_volume <= 0:
+        return dict(DIRECTION_POOLS)
+
+    pools: Dict[Tuple[str, str], float] = {}
+    equal_pair_share = 1.0 / len(pair_directions)
+    for pair, directions in pair_directions.items():
+        volume_share = pair_volumes[pair] / total_volume
+        pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
+        for direction in directions:
+            pools[direction] = pair_share / len(directions)
+    return pools
+
+
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
     (eligible × pool × crown_share × capacity), recycle the rest.
@@ -304,7 +344,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         bt.logging.warning(f'min_swap_amount read failed: {e}')
         min_swap_amount = 0
 
-    for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
+    # Pools follow realized demand: one volume read for the trailing day, shared
+    # by every direction this round so the pools it pays sum to exactly 1.
+    pools = compute_direction_pools(
+        self.state_store.get_clearing_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
+    )
+
+    for (from_chain, to_chain), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         direction_traces[(from_chain, to_chain)] = trace
         intervals: Optional[List[Tuple[int, int, List[str], float]]] = None
@@ -435,7 +481,8 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
         bt.logging.warning(f'swap-bounds read failed in live score snapshot: {e}')
         min_swap_amount = max_swap_amount = 0
     rows: List[ScoreRow] = []
-    for (from_chain, to_chain), pool in DIRECTION_POOLS.items():
+    pools = compute_direction_pools(self.state_store.get_clearing_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts))
+    for (from_chain, to_chain), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         crown_time = replay_crown_time_window(
             store=self.state_store,
