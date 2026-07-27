@@ -100,7 +100,7 @@ class Repository(BaseRepository):
         commit: bool = True,
     ) -> int:
         """Upsert per-round score snapshots. Rows: (round_ts, hotkey, from_chain,
-        to_chain, eligible, crown_share, capacity, reward)."""
+        to_chain, eligible, pool, crown_share, capacity, reward)."""
         if not rows:
             return 0
         try:
@@ -121,7 +121,7 @@ class Repository(BaseRepository):
         commit: bool = True,
     ) -> int:
         """Wipe + rewrite the live score tip. Rows: (ts, hotkey, from_chain,
-        to_chain, eligible, crown_share, capacity, reward).
+        to_chain, eligible, pool, crown_share, capacity, reward).
         The table only holds the in-progress round, so
         the delete is unconditional; one transaction so readers never see a
         partial tip. An empty row list clears it (halt, or no crown holder)."""
