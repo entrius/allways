@@ -330,6 +330,29 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     return ConfirmResult(True, '', swap_key.hex(), sig)
 
 
+def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
+    """Tx hash of a user deposit matching the miner's live unclaimed reservation, if the source
+    chain's provider can scan by address (BTC esplora, SOL signatures; TAO has no address index →
+    always None, that leg stays manual/wallet-driven). A hash-finder only — ``confirm_deposit``
+    remains the sole verifier, so a loose match can never mis-claim."""
+    client = validator.solana_client
+    miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
+    if miner_pk is None:
+        return None
+    reservation = client.get_reservation(miner_pk)
+    if reservation is None:
+        return None
+    if reservation.reserved_until == 0 or reservation.reserved_until < time.time():
+        return None
+    if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
+        return None
+    provider = validator.axon_chain_providers.get(reservation.from_chain)
+    scan = getattr(provider, 'find_recent_outgoing', None)
+    if scan is None:
+        return None
+    return scan(reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount))
+
+
 @dataclass
 class BestQuote:
     miner_hotkey: str
@@ -430,6 +453,9 @@ def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapSta
     if swap_key == EMPTY_SWAP_KEY:
         return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
     swap = client.get_swap(swap_key)
+    if swap is not None:
+        detail['from_tx_hash'] = swap.from_tx_hash
+        detail['to_tx_hash'] = swap.to_tx_hash
     stage = _swap_stage(validator, swap, swap_key)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
 
@@ -452,6 +478,8 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_amount': int(swap.from_amount),
         'to_amount': int(swap.to_amount),
         'miner_from_addr': swap.miner_from_addr,
+        'from_tx_hash': swap.from_tx_hash,
+        'to_tx_hash': swap.to_tx_hash,
     }
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
 

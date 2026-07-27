@@ -242,3 +242,46 @@ def test_chain_metadata():
     assert chain is CHAIN_SOL
     assert chain.id == 'sol' and chain.native_unit == 'lamport' and chain.decimals == 9
     assert chain.min_onchain_amount == 890880  # rent-exempt floor (0-data System account)
+
+
+class ScanRpc(FakeRpc):
+    """FakeRpc + an address-signature index for the deposit scanner."""
+
+    def __init__(self, sigs, txs, raise_scan=False):
+        super().__init__()
+        self.sigs = sigs
+        self.txs = txs
+        self.raise_scan = raise_scan
+
+    def get_signatures_for_address(self, address, before=None, until=None, limit=1000, commitment='confirmed'):
+        if self.raise_scan:
+            raise ConnectionError('rpc down')
+        return self.sigs
+
+    def get_transaction(self, sig, commitment='confirmed'):
+        return self.txs.get(sig)
+
+
+class TestFindRecentOutgoing:
+    def test_finds_matching_deposit(self):
+        tx = make_tx('MINER', 5000, sender='USER')
+        p = provider_with(ScanRpc([{'signature': 'sigA', 'err': None}], {'sigA': tx}))
+        assert p.find_recent_outgoing('USER', 'MINER', 5000) == 'sigA'
+
+    def test_skips_wrong_sender_and_underpay(self):
+        wrong_sender = make_tx('MINER', 5000, sender='OTHER')
+        underpay = make_tx('MINER', 4999, sender='USER')
+        hit = make_tx('MINER', 5000, sender='USER')
+        sigs = [{'signature': s, 'err': None} for s in ('s1', 's2', 's3')]
+        p = provider_with(ScanRpc(sigs, {'s1': wrong_sender, 's2': underpay, 's3': hit}))
+        assert p.find_recent_outgoing('USER', 'MINER', 5000) == 's3'
+
+    def test_skips_errored_entries_and_failed_txs(self):
+        failed = make_tx('MINER', 5000, sender='USER', err={'InstructionError': []})
+        sigs = [{'signature': 's1', 'err': 'x'}, {'signature': 's2', 'err': None}]
+        p = provider_with(ScanRpc(sigs, {'s1': make_tx('MINER', 5000, sender='USER'), 's2': failed}))
+        assert p.find_recent_outgoing('USER', 'MINER', 5000) is None
+
+    def test_scan_failure_returns_none(self):
+        p = provider_with(ScanRpc([], {}, raise_scan=True))
+        assert p.find_recent_outgoing('USER', 'MINER', 5000) is None

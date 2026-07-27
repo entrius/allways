@@ -144,6 +144,36 @@ class SolanaProvider(ChainProvider):
             return None
         return int(post[i]) - int(pre[i])
 
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Signature of a recent tx from ``from_addr`` crediting ``to_addr`` >= ``amount`` lamports,
+        else None. The Solana sibling of the Bitcoin scanner: a hash-finder for deposit detection —
+        ``fetch_matching_tx``/``verify_transaction`` stay the sole verifiers."""
+        try:
+            sigs = self.rpc.get_signatures_for_address(to_addr, limit=20)
+        except Exception as e:
+            bt.logging.debug(f'{LOG_SOL} find_recent_outgoing signature scan failed: {e}')
+            return None
+        for entry in sigs or []:
+            sig = entry.get('signature')
+            if not sig or entry.get('err') is not None:
+                continue
+            try:
+                tx = self.rpc.get_transaction(sig)
+            except Exception:
+                continue
+            if not tx:
+                continue
+            meta = tx.get('meta') or {}
+            if meta.get('err') is not None:
+                continue
+            keys = self._account_keys(tx, meta)
+            if not keys or keys[0] != from_addr:
+                continue
+            credit = self._match_native_credit(keys, meta, to_addr)
+            if credit is not None and credit >= amount:
+                return sig
+        return None
+
     def _confirmations(self, slot: Optional[int]) -> int:
         """Confirmations = slots since the tx's slot (the tx slot counts as 1). 0 if unknown.
 

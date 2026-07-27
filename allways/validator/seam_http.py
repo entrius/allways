@@ -14,7 +14,13 @@ from urllib.parse import parse_qs, urlparse
 
 import bittensor as bt
 
-from allways.validator.reserve_engine import best_quote, confirm_deposit, reserve_on_behalf, swap_status
+from allways.validator.reserve_engine import (
+    best_quote,
+    confirm_deposit,
+    reserve_on_behalf,
+    scan_deposit,
+    swap_status,
+)
 
 SEAM_HOST = '127.0.0.1'
 
@@ -57,6 +63,9 @@ def _make_handler(validator, secret: str):
                     # swap directly — the only route to post-attestation stages, since vote_initiate
                     # consumes the reservation at quorum.
                     return self._send(200, swap_status(validator, q['miner_hotkey'], q.get('swap_key', '')).__dict__)
+                if url.path == '/deposit-scan':
+                    # Hash-finder for the offering's deposit watcher — /confirm stays the verifier.
+                    return self._send(200, {'tx_hash': scan_deposit(validator, q['miner_hotkey'])})
                 if url.path == '/health':
                     return self._send(200, {'ok': True})
             except (KeyError, ValueError) as e:

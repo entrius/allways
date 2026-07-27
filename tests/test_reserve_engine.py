@@ -273,6 +273,8 @@ def _live_swap(variant: str):
         from_amount=1_000_000_000,
         to_amount=210_000,
         miner_from_addr='minerSOLaddr',
+        from_tx_hash='srcTxHash',
+        to_tx_hash='',
     )
 
 
@@ -568,3 +570,80 @@ def test_confirm_claims_even_if_the_extension_fails():
     )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
+
+
+# --- scan_deposit: the deposit watcher's hash-finder (confirm_deposit stays the verifier) ---
+
+
+class _ScanProvider:
+    def __init__(self, tx_hash=None):
+        self.tx_hash = tx_hash
+        self.calls = []
+
+    def find_recent_outgoing(self, from_addr, to_addr, amount):
+        self.calls.append((from_addr, to_addr, amount))
+        return self.tx_hash
+
+
+def _scan_reservation(reserved_until, claimed=False):
+    return SimpleNamespace(
+        reserved_until=reserved_until,
+        claimed_swap_key=(b'\x09' * 32) if claimed else b'\x00' * 32,
+        user='userSOLpk',
+        from_chain='btc',
+        to_chain='sol',
+        from_amount=10_000,
+        to_amount=47_000_000,
+        miner_from_addr='tb1qminer',
+        from_addr='tb1quser',
+    )
+
+
+def _scan_validator(tmp_path, reservation, provider):
+    from allways.validator.reserve_engine import scan_deposit
+
+    client = StatusClient(reservation=reservation)
+    validator, store = _status_validator(tmp_path, client)
+    validator.axon_chain_providers = {'btc': provider} if provider else {}
+    return scan_deposit, validator, store
+
+
+def test_scan_deposit_finds_hash_for_live_unclaimed_reservation(tmp_path):
+    provider = _ScanProvider('depositTx')
+    scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), provider)
+    assert scan_deposit(validator, HOTKEY) == 'depositTx'
+    # Scans against the PINNED reservation triple — declared sender, miner deposit addr, exact amount.
+    assert provider.calls == [('tb1quser', 'tb1qminer', 10_000)]
+    store.close()
+
+
+def test_scan_deposit_none_when_provider_cannot_scan(tmp_path):
+    # TAO (no address index) exposes no find_recent_outgoing — the leg stays manual/wallet-driven.
+    scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), object())
+    validator.axon_chain_providers = {'btc': object()}
+    assert scan_deposit(validator, HOTKEY) is None
+    store.close()
+
+
+def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
+    import time as _time
+
+    provider = _ScanProvider('depositTx')
+    scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(int(_time.time()) - 5), provider)
+    assert scan_deposit(validator, HOTKEY) is None  # expired — no late auto-claims, ever
+    validator.solana_client._reservation = _scan_reservation(FUTURE, claimed=True)
+    assert scan_deposit(validator, HOTKEY) is None  # already claimed
+    validator.solana_client._reservation = None
+    assert scan_deposit(validator, HOTKEY) is None  # nothing reserved
+    assert provider.calls == []
+    store.close()
+
+
+def test_status_by_key_detail_carries_leg_hashes(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    client = StatusClient(swap=_live_swap('Fulfilled'), reservation=SimpleNamespace(reserved_until=0))
+    validator, store = _status_validator(tmp_path, client)
+    s = swap_status(validator, HOTKEY, (b'\x05' * 32).hex())
+    assert s.detail['from_tx_hash'] == 'srcTxHash' and s.detail['to_tx_hash'] == ''
+    store.close()
