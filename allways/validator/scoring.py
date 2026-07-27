@@ -2,9 +2,10 @@
 
 Reward per miner is ``eligible × pool × crown_share × capacity``, where
 ``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState`` counters
-(B3.3) — it replaces the old ``sr³ × credibility ramp``. Penalty shortfall is
-not burned: ``set_weights`` L1-normalizes, stretching distributed rewards to
-100% of emissions. Entry is ``score_and_reward_miners``.
+(B3.3) — it replaces the old ``sr³ × credibility ramp``. Any shortfall recycles
+to ``RECYCLE_UID`` — the burn is dynamic (whatever the pool did not earn) and
+deliberate: it keeps a penalty absolute rather than something weight
+normalization stretches back to 100%. Entry is ``score_and_reward_miners``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from allways.constants import (
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    RECYCLE_UID,
     REWARD_MINER_STATES,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
@@ -77,16 +79,12 @@ def score_and_reward_miners(self: Validator) -> None:
         now = int(time.time())
         halted = contract_is_halted(self)
         if halted:
-            # No crown accrues during a halt, and burning the pool would shrink
-            # subnet emissions (price × (1 - miner_burn)). Freeze scores so the
-            # pre-halt weights persist until scoring resumes.
-            bt.logging.info('V1 scoring: halted, scores frozen')
+            rewards, miner_uids = build_halted_rewards(self)
             _flush_halt_window(self, now)
-            dev_signal.emit('scoring_rewards', halted=True, rewards={})
         else:
             rewards, miner_uids = calculate_miner_rewards(self, now)
-            self.update_scores(rewards, miner_uids)
-            dev_signal.emit('scoring_rewards', halted=False, rewards={i: float(r) for i, r in enumerate(rewards) if r})
+        self.update_scores(rewards, miner_uids)
+        dev_signal.emit('scoring_rewards', halted=halted, rewards={i: float(r) for i, r in enumerate(rewards) if r})
         prune_crown_events(self, now)
         # Advance both cursors only after a round completes, so a mid-round
         # failure retries the same window next forward. last_scored_block gates
@@ -102,7 +100,7 @@ def _flush_halt_window(self: Validator, current_time: int) -> None:
     sync_cursor watermarks, and clear the live current_crown_holders
     table. Mirrors the daemon's halt-tick semantics so the dashboard
     doesn't keep showing pre-halt holders while the validator has
-    frozen scoring. Live-table clear lives here (not in the
+    recycled the pool. Live-table clear lives here (not in the
     per-forward snapshot) so we don't pay an RPC every step just to
     check halt — halt is rare; one clear per round is enough."""
     if not self.database_storage.is_enabled():
@@ -135,6 +133,18 @@ def contract_is_halted(self: Validator) -> bool:
     except Exception as e:
         bt.logging.warning(f'halt RPC check failed, proceeding as not-halted: {e}')
         return False
+
+
+def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
+    """During a halt, no miner earns crown; the full pool recycles."""
+    n_uids = self.metagraph.n.item()
+    rewards = np.zeros(n_uids, dtype=np.float32)
+    if n_uids == 0:
+        return rewards, set()
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
+    rewards[recycle_uid] = 1.0
+    bt.logging.info('V1 scoring: halted, recycled full pool')
+    return rewards, set(range(n_uids))
 
 
 def prune_crown_events(self: Validator, current_time: int) -> None:
@@ -247,8 +257,7 @@ def build_direction_score_rows(
 
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
     """Replay the crown-time event stream, derive per-miner rewards
-    (eligible × pool × crown_share × capacity); the shortfall is not burned —
-    weight normalization stretches distributed rewards to 100%.
+    (eligible × pool × crown_share × capacity), recycle the rest.
     ``current_time`` is the unix-seconds window_end (the crown axis)."""
     n_uids = self.metagraph.n.item()
     if n_uids == 0:
@@ -320,7 +329,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         bt.logging.debug(f'V1 scoring [{from_chain}→{to_chain}]: total_crown={total_crown_dir:.1f}s')
 
         if total_crown_dir == 0:
-            continue  # empty bucket — its pool spreads to earners via normalization
+            continue  # empty bucket — pool recycles via the remainder below
 
         rows = build_direction_score_rows(
             from_chain,
@@ -340,11 +349,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             rewards[uid] += row.reward
             score_rows.append(row)
 
-    # Penalty shortfall is deliberately NOT routed to a burn/recycle UID:
-    # set_weights L1-normalizes scores, so the distributed mass stretches to
-    # 100% of emissions (subnet emission scales with 1 - miner_burn).
+    # The shortfall is burned to RECYCLE_UID rather than left for weight
+    # normalization to stretch back over the earners. Normalization preserves
+    # every ratio, so an undistributed pool would cost a shallow field nothing.
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
-    undistributed = max(0.0, 1.0 - distributed)
+    recycled = max(0.0, 1.0 - distributed)
+    rewards[recycle_uid] += recycled
 
     log_scoring_trace(
         self,
@@ -354,7 +365,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         rewards=rewards,
         eligibility=eligibility,
         distributed=distributed,
-        undistributed=undistributed,
+        recycled=recycled,
         weighting_traces=weighting_traces,
         min_swap_lamports=min_swap_amount,
         max_swap_lamports=max_swap_amount,
@@ -406,7 +417,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     """Mid-round live tip: the factors each crown holder would be paid on if
     the in-progress round [last_scored_time, now] flushed right now — the same
     replay + ``build_direction_score_rows`` math ``calculate_miner_rewards``
-    runs, minus weights/traces. Returns ``current_miner_scores``-shaped
+    runs, minus weights/traces/recycle. Returns ``current_miner_scores``-shaped
     tuples for the per-forward-step wipe+insert (``miner_scores``' live
     counterpart, same pattern as ``current_crown_holders``).
 
@@ -762,7 +773,7 @@ def snapshot_current_crown_holders(
     scoring round when a halt is detected. Worst case the live table
     shows the actual best-rate holder during halt for ~1h, while the
     HaltBanner + top-right indicator (both fed by /halt off
-    contract_events) signal the halt state to users."""
+    contract_events) signal the recycle state to users."""
     # The live crown reads per-instant state at "now" on the unix-time
     # (blockTime) axis the event tables use. Tests pass an explicit instant.
     ts = int(time.time()) if at_time is None else at_time
