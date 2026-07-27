@@ -313,9 +313,10 @@ class ValidatorStateStore:
 
     def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
         """``{(from_chain, to_chain): {hotkey: (from_amount_sum, to_amount_sum)}}``
-        over ``(start_time, end_time]`` — the windowed realized-volume read the
-        reward weighting consumes. Summed in Python: the legs are stored as TEXT
-        (u128-safe) and SQL SUM would coerce them to float."""
+        over ``(start_time, end_time]`` — the windowed realized-volume read.
+        Scoring no longer consumes it; the dashboard and treasury reporting do.
+        Summed in Python: the legs are stored as TEXT (u128-safe) and SQL SUM
+        would coerce them to float."""
         rows = self._fetchall(
             """
             SELECT from_chain, to_chain, hotkey, from_amount, to_amount FROM clearing_rates
@@ -649,7 +650,7 @@ class ValidatorStateStore:
                     ON collateral_events(hotkey);
 
                 -- Per-swap realized legs from SwapCompleted. One row per completed
-                -- swap; the windowed volume read (fill_ratio's input) sums these.
+                -- swap; the windowed volume read sums these for reporting.
                 -- from_amount/to_amount are TEXT because the on-chain legs are
                 -- u128 and overflow SQLite's signed-64 INTEGER.
                 CREATE TABLE IF NOT EXISTS clearing_rates (

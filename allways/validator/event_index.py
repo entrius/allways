@@ -6,8 +6,8 @@ collateral, quoted rate) through a small read interface. B1/B2 fed that interfac
 this index persists them into the ``state_store`` event tables, attributing each on-chain Solana pubkey to
 its bound Bittensor hotkey at write time (B3.2). The crown math is unchanged — it consumes the same
 ``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed. ``SwapCompleted`` additionally
-persists its realized legs into ``clearing_rates``, the per-swap history the windowed volume read
-(``fill_ratio``'s input) sums over. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
+persists its realized legs into ``clearing_rates``, the per-swap realized-volume history the dashboard and
+treasury reporting read. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
 ``swap_outcomes``, the seam's post-close completed-vs-slashed truth (terminal swap PDAs are closed on-chain).
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
