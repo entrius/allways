@@ -357,11 +357,30 @@ class ValidatorStateStore:
         return row['outcome'] if row is not None else None
 
     def prune_swap_outcomes(self, cutoff_block: int) -> None:
-        """Drop outcome rows older than ``cutoff_block``. No anchor row — each row is
-        an independent terminal fact, only queried while the offering still polls."""
+        """Drop outcome (and fulfillment-hash) rows older than ``cutoff_block``. No anchor row —
+        each row is an independent terminal fact, only queried while the offering still polls."""
         if cutoff_block <= 0:
             return
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
+        self._execute('DELETE FROM swap_fulfillments WHERE block_time < ?', (cutoff_block,))
+
+    # ─── swap_fulfillments (delivery-leg hash for post-close receipts) ──
+
+    def record_swap_fulfillment(self, swap_key: str, to_tx_hash: str, block_time: int) -> None:
+        """Persist the miner's delivery tx hash (``SwapFulfilled`` event) keyed by swap_key hex.
+        The Swap PDA — and its ``to_tx_hash`` — closes at terminal, so this index is the seam's
+        only post-close source of the delivery leg. Upsert: a cursor-reset re-ingest is a no-op."""
+        self._execute(
+            """
+            INSERT INTO swap_fulfillments (swap_key, to_tx_hash, block_time) VALUES (?, ?, ?)
+            ON CONFLICT(swap_key) DO UPDATE SET to_tx_hash = excluded.to_tx_hash, block_time = excluded.block_time
+            """,
+            (swap_key, to_tx_hash, block_time),
+        )
+
+    def get_swap_fulfillment(self, swap_key: str) -> Optional[str]:
+        row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
+        return row['to_tx_hash'] if row is not None else None
 
     # ─── routed_requests (on-behalf reservation queue) ──────────────────
     # The ONLY table not rebuildable from chain events: a routed user's details
@@ -677,6 +696,15 @@ class ValidatorStateStore:
                 CREATE TABLE IF NOT EXISTS swap_outcomes (
                     swap_key    TEXT PRIMARY KEY,
                     outcome     TEXT NOT NULL,
+                    block_time  INTEGER NOT NULL
+                );
+
+                -- Delivery-leg tx hash per swap (SwapFulfilled), keyed by swap_key hex.
+                -- The Swap PDA closes at terminal, so post-close receipts read the
+                -- delivery hash from here. Same retention sweep as swap_outcomes.
+                CREATE TABLE IF NOT EXISTS swap_fulfillments (
+                    swap_key    TEXT PRIMARY KEY,
+                    to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
                 );
 

@@ -470,7 +470,13 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
     swap = validator.solana_client.get_swap(swap_key)
     stage = _swap_stage(validator, swap, swap_key)
     if swap is None:
-        return SwapStatus(stage, swap_key=swap_key_hex)
+        # Closed PDA: the delivery hash survives in the fulfillment index — receipts read it
+        # from here, since the consumer may only poll again after the account is gone.
+        detail = {}
+        to_tx_hash = validator.state_store.get_swap_fulfillment(swap_key_hex)
+        if to_tx_hash:
+            detail['to_tx_hash'] = to_tx_hash
+        return SwapStatus(stage, swap_key=swap_key_hex, detail=detail)
     # Same detail shape as the reservation path — the Swap PDA carries the full legs.
     detail = {
         'from_chain': swap.from_chain,

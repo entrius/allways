@@ -647,3 +647,17 @@ def test_status_by_key_detail_carries_leg_hashes(tmp_path):
     s = swap_status(validator, HOTKEY, (b'\x05' * 32).hex())
     assert s.detail['from_tx_hash'] == 'srcTxHash' and s.detail['to_tx_hash'] == ''
     store.close()
+
+
+def test_closed_pda_by_key_serves_delivery_hash_from_fulfillment_index(tmp_path):
+    # The Swap PDA (and its to_tx_hash) is gone at terminal — the receipt's delivery link must
+    # survive via the SwapFulfilled ingest, served on the closed-PDA by-key path.
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x08' * 32
+    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
+    store.record_swap_outcome(key.hex(), 'completed', 100)
+    store.record_swap_fulfillment(key.hex(), 'destTx', 90)
+    s = swap_status(validator, HOTKEY, key.hex())
+    assert s.stage == 'completed' and s.detail == {'to_tx_hash': 'destTx'}
+    store.close()
