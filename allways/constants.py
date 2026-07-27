@@ -62,12 +62,23 @@ REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILAB
 # collateral_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
 NUMERAIRE_CHAIN = 'sol'
 LAUNCH_SPOKES = ('btc', 'tao')  # chains paired against the hub; add a chain here to launch its pair
-# Emission pool per direction, split evenly across every hub↔spoke direction (both ways).
+# Direction registry and the equal-split fallback: one entry per hub↔spoke direction
+# (both ways). The per-round pool values are volume-weighted at pair level
+# (scoring.compute_direction_pools); these constants are what zero volume falls back to.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
     pair: 1.0 / (2 * len(LAUNCH_SPOKES))
     for spoke in LAUNCH_SPOKES
     for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
 }
+# Volume-weighted pools: each pair's emission share follows the SOL notional it cleared
+# over the trailing window, blended with the equal split so a quiet pair never starves
+# and a busy one is capped at α + (1−α)/pairs. Weighting sits at PAIR level and splits
+# evenly between the two legs — one leg can't be inflated without inflating the pair.
+POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
+POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
+# clearing_rates rows must outlive the pool volume window (plus stall headroom) — the
+# crown tables only need SCORING_WINDOW_SECS, but pools read a full day back.
+CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
 # Capacity curve exponent (>1 = convex): capacity = min(1, (collateral / required)^k). Convex so
 # thin-parked collateral is penalised harder than linear (a miner backing the best rate on a sliver
 # earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth

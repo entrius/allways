@@ -14,6 +14,7 @@ from allways.constants import (
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    POOL_VOLUME_ALPHA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     required_collateral,
@@ -24,6 +25,7 @@ from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
     build_eligibility,
     calculate_miner_rewards,
+    compute_direction_pools,
     crown_can_fund,
     crown_holders_at_instant,
     due_for_scoring,
@@ -40,6 +42,9 @@ from allways.validator.state_store import ValidatorStateStore
 # Mirror production pool shares so these stay in sync if DIRECTION_POOLS changes.
 POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
+# Leg pool when one pair carried ALL the window's clearing volume: the pair
+# share tilts to (1−α)/2 + α and splits evenly across its two directions.
+POOL_BUSY_PAIR_LEG = ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA) / 2
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -370,6 +375,48 @@ class TestGetClearingVolumes:
         store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 3, 1, 'sk10')
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (10**30 + 10, 2)
         store.close()
+
+
+class TestComputeDirectionPools:
+    """Pair-level volume weighting: each pair's share is (1−α)/pairs + α·volume_share
+    of trailing SOL notional, split evenly between its two legs; zero volume falls
+    back to the equal DIRECTION_POOLS split."""
+
+    # With two launch pairs: a pair's floor share is (1−α)/2, its cap α + (1−α)/2.
+    FLOOR_LEG = (1 - POOL_VOLUME_ALPHA) / 2 / 2
+
+    def test_no_volume_falls_back_to_equal_split(self):
+        assert compute_direction_pools({}) == DIRECTION_POOLS
+
+    def test_single_pair_volume_tilts_both_its_legs_equally(self):
+        pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
+        assert pools[('btc', 'sol')] == pytest.approx(self.FLOOR_LEG + POOL_VOLUME_ALPHA / 2)
+        assert pools[('sol', 'btc')] == pools[('btc', 'sol')]  # quiet leg rides its pair
+        assert pools[('sol', 'tao')] == pytest.approx(self.FLOOR_LEG)
+        assert pools[('tao', 'sol')] == pytest.approx(self.FLOOR_LEG)
+        assert sum(pools.values()) == pytest.approx(1.0)
+
+    def test_volume_is_the_sol_leg_summed_per_pair(self):
+        # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair:
+        # 100 SOL (from_amount is the SOL leg of sol→tao). Spoke-side legs are
+        # deliberately huge to prove they never enter the weighting.
+        pools = compute_direction_pools(
+            {
+                ('btc', 'sol'): {'hk_a': (10**15, 200), 'hk_b': (10**15, 100)},
+                ('sol', 'tao'): {'hk_c': (100, 10**15)},
+            }
+        )
+        floor_pair = (1 - POOL_VOLUME_ALPHA) / 2
+        assert pools[('btc', 'sol')] == pytest.approx((floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
+        assert pools[('tao', 'sol')] == pytest.approx((floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2)
+        assert sum(pools.values()) == pytest.approx(1.0)
+
+    def test_leg_direction_within_pair_is_irrelevant(self):
+        # 500 SOL cleared btc→sol vs 500 SOL cleared sol→btc: same pair volume,
+        # identical pools — one leg can't be tilted independently of its twin.
+        forward = compute_direction_pools({('btc', 'sol'): {'hk': (1, 500)}})
+        reverse = compute_direction_pools({('sol', 'btc'): {'hk': (500, 1)}})
+        assert forward == reverse
 
 
 class TestCrownHoldersHelper:
@@ -1925,8 +1972,9 @@ class TestWeightingTraceRecorders:
 
 
 class TestVolumeIsNotARewardTerm:
-    """Realized volume no longer enters the reward. These pin that: the ledger
-    can say anything and the payout is still pool x crown_share x capacity."""
+    """Realized volume never enters a MINER's multiplier — payout is still
+    pool x crown_share x capacity with no per-miner volume term. Volume only
+    sizes the direction pools, at pair level (compute_direction_pools)."""
 
     def seed_sol_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
         conn = v.state_store.require_connection()
@@ -1950,21 +1998,22 @@ class TestVolumeIsNotARewardTerm:
         )
 
     def test_zero_volume_crown_holder_earns_full_reward(self, tmp_path: Path):
-        """Regression: a crown holder that served nothing used to keep only
-        1-alpha (0.25) of its crown reward. It now earns the full pool."""
+        """A crown holder that served nothing still earns the full direction
+        pool — whoever's volume tilted it, only crown decides who's paid."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
         # B posts no rate, so it never holds crown — it only serves the volume.
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BUSY_PAIR_LEG, atol=1e-6)
         assert rewards[1] == 0.0
         v.state_store.close()
 
-    def test_idle_network_pays_the_same_as_a_busy_one(self, tmp_path: Path):
-        """The old term made a direction that traded pay less than one that sat
-        idle. Same crown, same capacity -> same reward either way."""
+    def test_pair_volume_tilts_the_pool_not_the_miner_term(self, tmp_path: Path):
+        """An idle network falls back to the equal split; a pair that carried
+        volume tilts its legs' pools up. The miner's own multiplier is
+        unchanged either way — same crown, same capacity, bigger pool."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v_idle = make_validator(tmp_path / 'idle', hotkeys)
         self.seed_sol_btc_crown(v_idle, 'hk_a')
@@ -1977,8 +2026,8 @@ class TestVolumeIsNotARewardTerm:
         busy_rewards, _ = calculate_miner_rewards(v_busy, v_busy.block)
         v_busy.state_store.close()
 
-        np.testing.assert_allclose(idle_rewards[0], busy_rewards[0], atol=1e-9)
         np.testing.assert_allclose(idle_rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(busy_rewards[0], POOL_BUSY_PAIR_LEG, atol=1e-6)
 
     def test_crown_split_ignores_who_served(self, tmp_path: Path):
         """Two holders splitting crown evenly split the pool evenly, even when
@@ -2016,8 +2065,8 @@ class TestCapacityVolumeInteraction:
         # B serves all the volume; A still holds the crown and is paid on it.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: pool × crown 1.0 × eligible 1 × capacity 0.25.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 1.0 * 0.25, atol=1e-6)
+        # A: pool (BTC pair carried all volume) × crown 1.0 × eligible 1 × capacity 0.25.
+        np.testing.assert_allclose(rewards[0], POOL_BUSY_PAIR_LEG * 1.0 * 0.25, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2393,8 +2442,9 @@ class TestScoreSnapshots:
         assert eligible is True
         np.testing.assert_allclose((crown_share, capacity), (1.0, 1.0))
         # The persisted factors reproduce the persisted reward, and the
-        # persisted reward is what the weights actually paid.
-        expected = POOL_BTC_SOL * crown_share * capacity
+        # persisted reward is what the weights actually paid. hk_a's own swap
+        # put all the window's volume on the BTC pair, so its pool is tilted.
+        expected = POOL_BUSY_PAIR_LEG * crown_share * capacity
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
