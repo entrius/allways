@@ -255,6 +255,12 @@ class SubtensorProvider(ChainProvider):
                 return None
             attributes = balances['Transfer']
 
+        # Past this point the record IS a Balances.Transfer, so a payload we can't read is
+        # 'unknown', never 'absent'. Returning None here would read a real deposit as moving
+        # no funds — on a dest leg that is slash-eligible, so shape drift would false-slash.
+        def unreadable(detail: str) -> ProviderUnreachableError:
+            return ProviderUnreachableError(f'unreadable Balances.Transfer payload ({detail}): {attributes!r:.200}')
+
         if isinstance(attributes, dict):
             sender = attributes.get('from')
             dest = attributes.get('to')
@@ -265,16 +271,16 @@ class SubtensorProvider(ChainProvider):
             if isinstance(sender, dict):
                 sender, dest, amount = (p.get('value') for p in (sender, dest, amount))
         else:
-            return None
+            raise unreadable(f'{type(attributes).__name__}')
 
         sender = cls._as_ss58(sender)
         dest = cls._as_ss58(dest)
         if not sender or not dest:
-            return None
+            raise unreadable('unresolved from/to')
         try:
             return sender, dest, int(amount)
-        except (TypeError, ValueError):
-            return None
+        except (TypeError, ValueError) as e:
+            raise unreadable('non-numeric amount') from e
 
     @staticmethod
     def _as_ss58(value: Any) -> str:
@@ -303,7 +309,12 @@ class SubtensorProvider(ChainProvider):
 
         credited = 0
         sender = ''
-        for record in self.get_block_events(block_hash):
+        indexed = 0
+        events = self.get_block_events(block_hash)
+        for record in events:
+            if self._event_extrinsic_idx(record) is None:
+                continue
+            indexed += 1
             if self._event_extrinsic_idx(record) != extrinsic_idx:
                 continue
             transfer = self._transfer_from_event(record)
@@ -314,6 +325,14 @@ class SubtensorProvider(ChainProvider):
                 continue
             credited += ev_amount
             sender = sender or ev_sender
+
+        # Any block holding extrinsics emits ApplyExtrinsic records, so recognising none of them
+        # means the phase shape moved, not that the block is empty. Same reasoning as above: that
+        # is 'unknown', and reporting it as no-credit would false-slash on shape drift alone.
+        if events and not indexed:
+            raise ProviderUnreachableError(
+                f'no ApplyExtrinsic phase recognised in {len(events)} events at block {block_num}'
+            )
 
         if credited <= 0:
             return None
