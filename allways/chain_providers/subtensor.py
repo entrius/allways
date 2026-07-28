@@ -31,6 +31,8 @@ class SubtensorProvider(ChainProvider):
         self.subtensor = subtensor
         self.wallet = wallet
         self.block_cache: Dict[int, dict] = {}
+        # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
+        self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
 
     def get_chain(self) -> ChainDefinition:
         return CHAIN_TAO
@@ -299,18 +301,29 @@ class SubtensorProvider(ChainProvider):
     @staticmethod
     def match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
         """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
+        decoded = SubtensorProvider.decode_transfer(ext, is_raw)
+        if decoded is None or decoded[0] != tx_hash:
+            return None
+        _, dest, amount, sender = decoded
+        return dest, amount, sender
+
+    @staticmethod
+    def decode_transfer(ext, is_raw: bool) -> Optional[Tuple[str, str, int, str]]:
+        """Decode a transfer extrinsic into (tx_hash, dest, amount, sender), or None if it
+        isn't a transfer. The single decode shared by the by-hash verifier (match_transfer)
+        and the by-content deposit scanner (find_recent_outgoing)."""
         if is_raw:
             ext_hash = ext.get('extrinsic_hash', '')
-            if ext_hash != tx_hash:
+            if not ext_hash:
                 return None
-            return ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
+            return ext_hash, ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
 
         ext_hash = getattr(ext, 'extrinsic_hash', None) or (
             ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
         )
         if isinstance(ext_hash, bytes):
             ext_hash = '0x' + ext_hash.hex()
-        if ext_hash != tx_hash:
+        if not ext_hash:
             return None
 
         ext_data = ext.value if hasattr(ext, 'value') else ext
@@ -333,7 +346,44 @@ class SubtensorProvider(ChainProvider):
             elif name == 'value':
                 amount = int(val)
 
-        return dest, amount, sender
+        return ext_hash, dest, amount, sender
+
+    # Substrate has no address index (unlike Esplora / getSignaturesForAddress), so the TAO
+    # deposit scanner follows the chain head incrementally: each call scans only the blocks
+    # minted since the last call for this (from, to, amount) triple — amortized ~1 block per
+    # watcher tick — bounded by SCAN_LOOKBACK_BLOCKS on the first call or after a gap
+    # (≈5 min of 12s blocks, mirroring the BTC scanner's window).
+    SCAN_LOOKBACK_BLOCKS = 25
+    _MAX_SCAN_CURSORS = 64
+
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Extrinsic hash of a recent transfer ``from_addr`` → ``to_addr`` of >= ``amount`` rao,
+        else None. The TAO sibling of the BTC/SOL deposit scanners: a hash-finder only — the
+        seam's confirm re-verifies everything by hash, so a miss here just means the manual
+        rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
+        head = self.get_current_block_height()
+        if head is None:
+            return None
+        key = (from_addr, to_addr, int(amount))
+        floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
+        last = self.scan_cursors.get(key, floor)
+        for block_num in range(max(last, floor) + 1, head + 1):
+            block = self.get_block(block_num)
+            if not block or 'extrinsics' not in block:
+                continue
+            is_raw = block.get('_raw', False)
+            for ext in block['extrinsics']:
+                decoded = self.decode_transfer(ext, is_raw)
+                if decoded is None:
+                    continue
+                ext_hash, dest, amt, sender = decoded
+                if dest == to_addr and sender == from_addr and int(amt) >= int(amount):
+                    self.scan_cursors.pop(key, None)
+                    return ext_hash
+        self.scan_cursors[key] = head
+        if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
+            self.scan_cursors.pop(next(iter(self.scan_cursors)))
+        return None
 
     def get_current_block_height(self) -> Optional[int]:
         try:
