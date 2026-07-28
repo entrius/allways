@@ -31,6 +31,8 @@ class SubtensorProvider(ChainProvider):
         self.subtensor = subtensor
         self.wallet = wallet
         self.block_cache: Dict[int, dict] = {}
+        self.block_hash_cache: Dict[int, str] = {}
+        self.events_cache: Dict[str, list] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
 
@@ -53,6 +55,8 @@ class SubtensorProvider(ChainProvider):
     def clear_cache(self):
         """Clear the block cache. Call at the start of each poll cycle."""
         self.block_cache.clear()
+        self.block_hash_cache.clear()
+        self.events_cache.clear()
 
     @staticmethod
     def decode_compact(data: bytes) -> Tuple[int, int]:
@@ -93,11 +97,12 @@ class SubtensorProvider(ChainProvider):
             if not (body[0] & 0x80):
                 return None
 
-            # Sender AccountId is at bytes 1..33
-            if len(body) < 33:
+            # body[1] is the MultiAddress variant; only Id (0x00) carries a bare AccountId, at
+            # body[2:34]. Reading from body[1] straddles the variant byte and yields a shifted
+            # (valid-looking but wrong) ss58, so anything else fails closed.
+            if len(body) < 34 or body[1] != 0x00:
                 return None
-            sender_bytes = body[1:33]
-            sender = ss58_encode(sender_bytes, ss58_format=42)
+            sender = ss58_encode(body[2:34], ss58_format=42)
 
             # Find the transfer call: pallet_index=5, call_index in {0,3,7}
             # The call data follows the signature block. Instead of parsing the full
@@ -137,12 +142,21 @@ class SubtensorProvider(ChainProvider):
         except Exception:
             return None
 
+    def get_block_hash(self, block_num: int) -> Optional[str]:
+        """Block hash for a height, cached per poll cycle (settlement checks re-need it)."""
+        if block_num in self.block_hash_cache:
+            return self.block_hash_cache[block_num]
+        block_hash = self.subtensor.substrate.get_block_hash(block_num)
+        if block_hash:
+            self.block_hash_cache[block_num] = block_hash
+        return block_hash
+
     def get_block(self, block_num: int) -> Optional[dict]:
         """Fetch a block, using cache to avoid redundant RPC calls within a poll cycle."""
         if block_num in self.block_cache:
             return self.block_cache[block_num]
 
-        block_hash = self.subtensor.substrate.get_block_hash(block_num)
+        block_hash = self.get_block_hash(block_num)
         if not block_hash:
             return None
 
@@ -164,10 +178,13 @@ class SubtensorProvider(ChainProvider):
             raw_block = result.get('result', {}).get('block', {})
             raw_exts = raw_block.get('extrinsics', [])
 
+            # Keep the true position: this list is filtered to transfers, but the settlement
+            # check keys events on the extrinsic's index within the full block.
             parsed_exts = []
-            for ext_hex in raw_exts:
+            for idx, ext_hex in enumerate(raw_exts):
                 parsed = self.parse_raw_extrinsic(ext_hex)
                 if parsed:
+                    parsed['extrinsic_idx'] = idx
                     parsed_exts.append(parsed)
 
             block = {'extrinsics': parsed_exts, '_raw': True}
@@ -176,6 +193,155 @@ class SubtensorProvider(ChainProvider):
         except Exception as e:
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
             return None
+
+    def get_block_events(self, block_hash: str) -> list:
+        """System.Events for a block, cached per poll cycle.
+
+        Raises ProviderUnreachableError when events can't be read: callers must treat that as
+        'unknown', never as 'no transfer'. Returning None here would map to a slash-eligible
+        verdict on a node hiccup.
+        """
+        if block_hash in self.events_cache:
+            return self.events_cache[block_hash]
+        try:
+            events = self.subtensor.substrate.get_events(block_hash)
+        except Exception as e:
+            raise ProviderUnreachableError(f'TAO events unavailable for {block_hash[:16]}...: {e}') from e
+        if events is None:
+            raise ProviderUnreachableError(f'TAO events unavailable for {block_hash[:16]}...')
+        events = list(events)
+        self.events_cache[block_hash] = events
+        return events
+
+    @staticmethod
+    def _event_extrinsic_idx(record: Any) -> Optional[int]:
+        """Index of the extrinsic that emitted this event record, or None if not extrinsic-applied."""
+        if not isinstance(record, dict):
+            return None
+        idx = record.get('extrinsic_idx')
+        if isinstance(idx, int):
+            return idx
+        phase = record.get('phase')
+        if isinstance(phase, dict):
+            applied = phase.get('ApplyExtrinsic')
+            if isinstance(applied, int):
+                return applied
+        return None
+
+    @classmethod
+    def _transfer_from_event(cls, record: Any) -> Optional[Tuple[str, str, int]]:
+        """(sender, dest, amount) if this record is a Balances.Transfer, else None.
+
+        Tolerates the shapes scalecodec emits across runtime/metadata versions: flat
+        module_id/event_id with dict or positional attributes, and the nested
+        {'Balances': {'Transfer': ...}} variant form.
+        """
+        if not isinstance(record, dict):
+            return None
+        event = record.get('event', record)
+        if not isinstance(event, dict):
+            return None
+
+        attributes: Any = None
+        module = event.get('module_id') or event.get('module') or event.get('pallet')
+        name = event.get('event_id') or event.get('event') or event.get('name')
+        if isinstance(module, str) and isinstance(name, str):
+            if module != 'Balances' or name != 'Transfer':
+                return None
+            attributes = event.get('attributes', event.get('params'))
+        else:
+            balances = event.get('Balances')
+            if not isinstance(balances, dict) or 'Transfer' not in balances:
+                return None
+            attributes = balances['Transfer']
+
+        # Past this point the record IS a Balances.Transfer, so a payload we can't read is
+        # 'unknown', never 'absent'. Returning None here would read a real deposit as moving
+        # no funds — on a dest leg that is slash-eligible, so shape drift would false-slash.
+        def unreadable(detail: str) -> ProviderUnreachableError:
+            return ProviderUnreachableError(f'unreadable Balances.Transfer payload ({detail}): {attributes!r:.200}')
+
+        if isinstance(attributes, dict):
+            sender = attributes.get('from')
+            dest = attributes.get('to')
+            amount = attributes.get('amount', attributes.get('value'))
+        elif isinstance(attributes, (list, tuple)) and len(attributes) >= 3:
+            sender, dest, amount = attributes[0], attributes[1], attributes[2]
+            # Older shapes wrap each param as {'name': ..., 'value': ...}.
+            if isinstance(sender, dict):
+                sender, dest, amount = (p.get('value') for p in (sender, dest, amount))
+        else:
+            raise unreadable(f'{type(attributes).__name__}')
+
+        sender = cls._as_ss58(sender)
+        dest = cls._as_ss58(dest)
+        if not sender or not dest:
+            raise unreadable('unresolved from/to')
+        try:
+            return sender, dest, int(amount)
+        except (TypeError, ValueError) as e:
+            raise unreadable('non-numeric amount') from e
+
+    @staticmethod
+    def _as_ss58(value: Any) -> str:
+        """Normalise an AccountId event field (ss58 str, {'Id': ...}, or raw bytes) to ss58."""
+        if isinstance(value, dict):
+            value = value.get('Id', value.get('value'))
+        if isinstance(value, (bytes, bytearray)) and len(value) == 32:
+            return ss58_encode(bytes(value), ss58_format=42)
+        if isinstance(value, str):
+            if value.startswith('0x') and len(value) == 66:
+                return ss58_encode(bytes.fromhex(value[2:]), ss58_format=42)
+            return value
+        return ''
+
+    def settled_credit(self, block_num: int, extrinsic_idx: int, recipient: str) -> Optional[Tuple[str, int]]:
+        """(sender, credited_rao) actually paid to ``recipient`` by this extrinsic, else None.
+
+        Inclusion in a block is not settlement: a signed transfer that dispatches with an error
+        (e.g. insufficient balance) still occupies a block and still decodes to the intended
+        dest/amount. Only a Balances.Transfer event proves funds moved, so the event — not the
+        call — is what the amount and sender are read from.
+        """
+        block_hash = self.get_block_hash(block_num)
+        if not block_hash:
+            raise ProviderUnreachableError(f'TAO block hash unavailable for {block_num}')
+
+        # Reached only once an extrinsic was located in this block, so the block provably holds one
+        # and must emit its ApplyExtrinsic records. An empty list is a broken response, not an
+        # empty block, and reporting it as no-credit would false-slash on an RPC hiccup alone.
+        events = self.get_block_events(block_hash)
+        if not events:
+            raise ProviderUnreachableError(f'no events returned for block {block_num}, which holds extrinsics')
+
+        credited = 0
+        sender = ''
+        indexed = 0
+        for record in events:
+            idx = self._event_extrinsic_idx(record)
+            if idx is None:
+                continue
+            indexed += 1
+            if idx != extrinsic_idx:
+                continue
+            transfer = self._transfer_from_event(record)
+            if transfer is None:
+                continue
+            ev_sender, ev_dest, ev_amount = transfer
+            if ev_dest != recipient:
+                continue
+            credited += ev_amount
+            sender = sender or ev_sender
+
+        # Recognising none of them means the phase shape moved, not that nothing was applied.
+        if not indexed:
+            raise ProviderUnreachableError(
+                f'no ApplyExtrinsic phase recognised in {len(events)} events at block {block_num}'
+            )
+
+        if credited <= 0:
+            return None
+        return sender, credited
 
     def get_block_time(self, block_num: int) -> Optional[int]:
         """Block's mined time in unix seconds, via the Timestamp pallet at that block hash (millis ÷ 1000).
@@ -251,25 +417,45 @@ class SubtensorProvider(ChainProvider):
 
                 is_raw = block.get('_raw', False)
 
-                for ext in block['extrinsics']:
+                for position, ext in enumerate(block['extrinsics']):
                     match = self.match_transfer(ext, tx_hash, is_raw)
                     if match is None:
                         continue
 
                     tx_hash_seen = True
-                    dest, amount, sender = match
+                    dest, amount, _ = match
                     confs = current_block - block_num
-                    if dest == expected_recipient and amount >= expected_amount:
-                        return TransactionInfo(
-                            tx_hash=tx_hash,
-                            confirmed=confs >= self.get_chain().min_confirmations,
-                            sender=sender,
-                            recipient=dest,
-                            amount=amount,
-                            block_number=block_num,
-                            confirmations=confs,
-                            block_time=self.get_block_time(block_num),
+                    if dest != expected_recipient or amount < expected_amount:
+                        continue
+
+                    # The call only states intent. Require the Balances.Transfer event before
+                    # treating this as a deposit, and take the amount/sender from the event.
+                    ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
+                    settled = self.settled_credit(block_num, ext_idx, expected_recipient)
+                    if settled is None:
+                        bt.logging.warning(
+                            f'{LOG_SUB} tx {tx_hash[:16]}... is in block {block_num} but moved no funds '
+                            f'to {expected_recipient[:8]}... (dispatch failed) — rejecting'
                         )
+                        continue
+                    settled_sender, settled_amount = settled
+                    if settled_amount < expected_amount:
+                        bt.logging.warning(
+                            f'{LOG_SUB} tx {tx_hash[:16]}... settled {settled_amount} rao to '
+                            f'{expected_recipient[:8]}..., below the {expected_amount} required — rejecting'
+                        )
+                        continue
+
+                    return TransactionInfo(
+                        tx_hash=tx_hash,
+                        confirmed=confs >= self.get_chain().min_confirmations,
+                        sender=settled_sender,
+                        recipient=expected_recipient,
+                        amount=settled_amount,
+                        block_number=block_num,
+                        confirmations=confs,
+                        block_time=self.get_block_time(block_num),
+                    )
 
             if tx_hash_seen:
                 bt.logging.warning(
@@ -372,14 +558,23 @@ class SubtensorProvider(ChainProvider):
             if not block or 'extrinsics' not in block:
                 continue
             is_raw = block.get('_raw', False)
-            for ext in block['extrinsics']:
+            for position, ext in enumerate(block['extrinsics']):
                 decoded = self.decode_transfer(ext, is_raw)
                 if decoded is None:
                     continue
                 ext_hash, dest, amt, sender = decoded
-                if dest == to_addr and sender == from_addr and int(amt) >= int(amount):
-                    self.scan_cursors.pop(key, None)
-                    return ext_hash
+                if dest != to_addr or sender != from_addr or int(amt) < int(amount):
+                    continue
+                # Call-level match is only a candidate; confirm the funds actually moved.
+                ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
+                try:
+                    settled = self.settled_credit(block_num, ext_idx, to_addr)
+                except ProviderUnreachableError:
+                    continue
+                if settled is None or settled[1] < int(amount):
+                    continue
+                self.scan_cursors.pop(key, None)
+                return ext_hash
         self.scan_cursors[key] = head
         if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
             self.scan_cursors.pop(next(iter(self.scan_cursors)))
