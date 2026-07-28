@@ -13,9 +13,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 DISCLAIMER = (
-    'Allways is permissionless, open-source, beta software. The protocol facilitates trustless'
-    ' peer-to-peer transactions -- the creators and contributors do not custody, control, or'
-    ' intermediate any funds. Use at your own risk. No warranty. Not financial advice.'
+    'Allways is permissionless, open-source, beta software. Swaps settle directly between'
+    ' counterparty wallets; the protocol never takes custody of user funds, and the protocol fee is'
+    ' charged against miner collateral rather than any user transfer. Validator operators, including'
+    ' those run by the project, verify swap outcomes but cannot redirect or receive any transferred'
+    ' amount. Use at your own risk. No warranty. Not financial advice.'
 )
 
 
