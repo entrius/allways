@@ -331,10 +331,10 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
 
 
 def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
-    """Tx hash of a user deposit matching the miner's live unclaimed reservation, if the source
-    chain's provider can scan by address (BTC esplora, SOL signatures; TAO has no address index →
-    always None, that leg stays manual/wallet-driven). A hash-finder only — ``confirm_deposit``
-    remains the sole verifier, so a loose match can never mis-claim."""
+    """Tx hash of a user deposit matching the miner's live unclaimed reservation. Every launch
+    chain scans: BTC by esplora address index, SOL by signature index, TAO by an incremental
+    head-follow block scan (Substrate has no address index). A hash-finder only —
+    ``confirm_deposit`` remains the sole verifier, so a loose match can never mis-claim."""
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
