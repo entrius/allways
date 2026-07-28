@@ -598,3 +598,24 @@ class TestReconcileLiveState:
         assert len(store.load_all_active_events()) == 1
         assert len(store.load_all_collateral_events()) == 1
         store.close()
+
+
+class TestSwapFulfillmentHash:
+    def test_swap_fulfilled_persists_delivery_hash(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest([rec('SwapFulfilled', block_time=300, to_tx_hash='destTx', to_amount=500)], ATTR)
+        assert store.get_swap_fulfillment(DEFAULT_SWAP_KEY.hex()) == 'destTx'
+        # Re-ingest (cursor reset) is a no-op upsert, and unknown keys read None.
+        idx.ingest([rec('SwapFulfilled', block_time=300, to_tx_hash='destTx', to_amount=500)], ATTR)
+        assert store.get_swap_fulfillment(DEFAULT_SWAP_KEY.hex()) == 'destTx'
+        assert store.get_swap_fulfillment('ff' * 32) is None
+        store.close()
+
+    def test_fulfillment_hash_pruned_with_outcomes(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.ingest([rec('SwapFulfilled', block_time=100, to_tx_hash='destTx', to_amount=500)], ATTR)
+        store.prune_swap_outcomes(200)
+        assert store.get_swap_fulfillment(DEFAULT_SWAP_KEY.hex()) is None
+        store.close()
