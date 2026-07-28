@@ -24,8 +24,9 @@ class SubtensorProvider(ChainProvider):
     uses_substrate = True
 
     # Balances pallet index and transfer call indices on Subtensor.
-    # transfer_all is deliberately absent: its extrinsic carries no amount (the true amount
-    # lives only in the Balances.Transfer event), so it must never decode as a transfer.
+    # transfer_all (call index 4) is deliberately absent: its extrinsic carries no amount
+    # (the true amount lives only in the Balances.Transfer event), so it must never decode
+    # as a transfer.
     _BALANCES_PALLET = 5
     _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive'}
 

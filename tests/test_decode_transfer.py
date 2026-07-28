@@ -1,9 +1,9 @@
 """A1 — decode_transfer is gated to Balances.{transfer_allow_death, transfer_keep_alive}.
 
 The old decode substring-matched any ``*transfer*`` call with no module check, and the raw
-SCALE path listed call index 7 (transfer_all), whose ``keep_alive`` bool parsed as the amount.
-transfer_all's true amount lives only in the Balances.Transfer event, so decoding it from the
-extrinsic must yield None in BOTH paths — never an amount the verifier could approve.
+SCALE path's call table listed transfer_all (under index 7 — its real Subtensor index is 4,
+so it never actually matched). transfer_all's true amount lives only in the Balances.Transfer
+event, so it must decode to None in BOTH paths — never an amount the verifier could approve.
 Backends are mocked — no network.
 """
 
@@ -122,4 +122,6 @@ def test_raw_path_parses_transfer_keep_alive():
 
 
 def test_raw_path_rejects_transfer_all_index():
-    assert SubtensorProvider.parse_raw_extrinsic(_raw_transfer_hex(call_idx=7)) is None
+    # transfer_all's real call index on Subtensor (verified against finney metadata) —
+    # fails if anyone maps it back into _TRANSFER_CALLS.
+    assert SubtensorProvider.parse_raw_extrinsic(_raw_transfer_hex(call_idx=4)) is None
