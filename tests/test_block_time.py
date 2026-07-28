@@ -83,3 +83,70 @@ def test_subtensor_get_block_time_none_on_error():
     substrate.get_block_hash.side_effect = RuntimeError('rpc down')
     p.subtensor = SimpleNamespace(substrate=substrate)
     assert p.get_block_time(1) is None
+
+
+# ─── TAO deposit scanner (find_recent_outgoing) ─────────────────────────────
+# Substrate has no address index, so the scanner follows the head incrementally.
+
+
+def _scan_provider(head, blocks):
+    p = SubtensorProvider.__new__(SubtensorProvider)  # skip __init__ (no real subtensor needed)
+    p.subtensor = MagicMock()
+    p.subtensor.get_current_block.return_value = head
+    p.block_cache = {}
+    p.scan_cursors = {}
+    p.get_block = lambda n: blocks.get(n)
+    return p
+
+
+def _raw_transfer_block(txid, dest, amount, sender):
+    return {
+        '_raw': True,
+        'extrinsics': [{'extrinsic_hash': txid, 'dest': dest, 'amount': amount, 'sender': sender}],
+    }
+
+
+def test_tao_scanner_finds_matching_transfer_in_new_blocks():
+    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
+    p = _scan_provider(head=100, blocks=blocks)
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
+    # A hit clears the cursor so a fresh reservation with the same triple rescans.
+    assert p.scan_cursors == {}
+
+
+def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
+    blocks = {
+        99: _raw_transfer_block('0xother', 'minerTAO', 5000, 'someoneElse'),
+        100: _raw_transfer_block('0xsmall', 'minerTAO', 4999, 'userTAO'),
+    }
+    p = _scan_provider(head=100, blocks=blocks)
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
+    assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 100
+    # Next tick scans ONLY blocks past the cursor — the amortized-O(1) property.
+    seen = []
+    p.get_block = lambda n: seen.append(n) or blocks.get(n)
+    p.subtensor.get_current_block.return_value = 102
+    blocks[102] = _raw_transfer_block('0xdep', 'minerTAO', 6000, 'userTAO')
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
+    assert seen == [101, 102]
+
+
+def test_tao_scanner_bounds_first_scan_to_lookback():
+    p = _scan_provider(head=1000, blocks={})
+    seen = []
+    p.get_block = lambda n: seen.append(n) or None
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
+    assert len(seen) == SubtensorProvider.SCAN_LOOKBACK_BLOCKS
+    assert seen[0] == 1000 - SubtensorProvider.SCAN_LOOKBACK_BLOCKS + 1
+
+
+def test_tao_scanner_none_when_head_unreachable():
+    p = _scan_provider(head=100, blocks={})
+    p.subtensor.get_current_block.side_effect = RuntimeError('down')
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
+
+
+def test_match_transfer_still_matches_by_hash_through_shared_decode():
+    ext = {'extrinsic_hash': '0xabc', 'dest': 'minerTAO', 'amount': 7, 'sender': 'userTAO'}
+    assert SubtensorProvider.match_transfer(ext, '0xabc', True) == ('minerTAO', 7, 'userTAO')
+    assert SubtensorProvider.match_transfer(ext, '0xother', True) is None

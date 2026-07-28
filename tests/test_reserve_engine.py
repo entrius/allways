@@ -618,7 +618,7 @@ def test_scan_deposit_finds_hash_for_live_unclaimed_reservation(tmp_path):
 
 
 def test_scan_deposit_none_when_provider_cannot_scan(tmp_path):
-    # TAO (no address index) exposes no find_recent_outgoing — the leg stays manual/wallet-driven.
+    # A provider without find_recent_outgoing (hypothetical new chain) degrades to manual/wallet paths.
     scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), object())
     validator.axon_chain_providers = {'btc': object()}
     assert scan_deposit(validator, HOTKEY) is None
