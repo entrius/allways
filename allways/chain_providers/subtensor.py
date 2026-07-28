@@ -307,15 +307,22 @@ class SubtensorProvider(ChainProvider):
         if not block_hash:
             raise ProviderUnreachableError(f'TAO block hash unavailable for {block_num}')
 
+        # Reached only once an extrinsic was located in this block, so the block provably holds one
+        # and must emit its ApplyExtrinsic records. An empty list is a broken response, not an
+        # empty block, and reporting it as no-credit would false-slash on an RPC hiccup alone.
+        events = self.get_block_events(block_hash)
+        if not events:
+            raise ProviderUnreachableError(f'no events returned for block {block_num}, which holds extrinsics')
+
         credited = 0
         sender = ''
         indexed = 0
-        events = self.get_block_events(block_hash)
         for record in events:
-            if self._event_extrinsic_idx(record) is None:
+            idx = self._event_extrinsic_idx(record)
+            if idx is None:
                 continue
             indexed += 1
-            if self._event_extrinsic_idx(record) != extrinsic_idx:
+            if idx != extrinsic_idx:
                 continue
             transfer = self._transfer_from_event(record)
             if transfer is None:
@@ -326,10 +333,8 @@ class SubtensorProvider(ChainProvider):
             credited += ev_amount
             sender = sender or ev_sender
 
-        # Any block holding extrinsics emits ApplyExtrinsic records, so recognising none of them
-        # means the phase shape moved, not that the block is empty. Same reasoning as above: that
-        # is 'unknown', and reporting it as no-credit would false-slash on shape drift alone.
-        if events and not indexed:
+        # Recognising none of them means the phase shape moved, not that nothing was applied.
+        if not indexed:
             raise ProviderUnreachableError(
                 f'no ApplyExtrinsic phase recognised in {len(events)} events at block {block_num}'
             )

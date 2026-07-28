@@ -117,13 +117,35 @@ def _transfer_event(dest, amount, sender, extrinsic_idx=0):
     }
 
 
+def _failed_dispatch_events(sender):
+    """What a failed transfer leaves behind: the fee is taken, no Transfer is emitted."""
+    return [
+        {
+            'extrinsic_idx': 0,
+            'event': {
+                'module_id': 'Balances',
+                'event_id': 'Withdraw',
+                'attributes': {'who': sender, 'amount': 166_249},
+            },
+        },
+        {
+            'extrinsic_idx': 0,
+            'event': {
+                'module_id': 'System',
+                'event_id': 'ExtrinsicFailed',
+                'attributes': {'dispatch_error': {'Token': 'FundsUnavailable'}},
+            },
+        },
+    ]
+
+
 def _raw_transfer_block(txid, dest, amount, sender, settled=True):
-    """A block holding one transfer. ``settled=False`` models a dispatch that failed: the
-    extrinsic is in the block and decodes normally, but emits no Balances.Transfer event."""
+    """A block holding one transfer. ``settled=False`` models a dispatch that failed: the extrinsic
+    is in the block and decodes normally, but the events carry only the fee, no Balances.Transfer."""
     return {
         '_raw': True,
         'extrinsics': [{'extrinsic_hash': txid, 'dest': dest, 'amount': amount, 'sender': sender}],
-        '_events': [_transfer_event(dest, amount, sender)] if settled else [],
+        '_events': [_transfer_event(dest, amount, sender)] if settled else _failed_dispatch_events(sender),
     }
 
 

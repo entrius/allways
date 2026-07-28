@@ -203,6 +203,9 @@ def test_unrecognised_phase_shape_raises_rather_than_matching_nothing():
         p.settled_credit(BLOCK, 0, MINER)
 
 
-def test_block_with_no_events_at_all_is_not_treated_as_shape_drift():
+def test_empty_event_list_is_unknown_not_a_no_credit():
+    """We only get here having found an extrinsic in this block, so it must emit ApplyExtrinsic
+    records. No events means a broken response, not a block where nothing settled."""
     p = _provider(events=[])
-    assert p.settled_credit(BLOCK, 0, MINER) is None
+    with pytest.raises(ProviderUnreachableError):
+        p.settled_credit(BLOCK, 0, MINER)
