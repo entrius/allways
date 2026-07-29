@@ -62,11 +62,15 @@ REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILAB
 # collateral_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
 NUMERAIRE_CHAIN = 'sol'
 LAUNCH_SPOKES = ('btc', 'tao')  # chains paired against the hub; add a chain here to launch its pair
+# Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
+# BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
+BURN_RATE = 0.90
+MINER_POOL_SHARE = 1.0 - BURN_RATE
 # Direction registry and the equal-split fallback: one entry per hub↔spoke direction
 # (both ways). The per-round pool values are volume-weighted at pair level
 # (scoring.compute_direction_pools); these constants are what zero volume falls back to.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    pair: 1.0 / (2 * len(LAUNCH_SPOKES))
+    pair: MINER_POOL_SHARE / (2 * len(LAUNCH_SPOKES))
     for spoke in LAUNCH_SPOKES
     for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
 }

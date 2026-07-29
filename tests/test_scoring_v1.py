@@ -14,6 +14,7 @@ from allways.constants import (
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
@@ -44,7 +45,7 @@ POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
 # Leg pool when one pair carried ALL the window's clearing volume: the pair
 # share tilts to (1−α)/2 + α and splits evenly across its two directions.
-POOL_BUSY_PAIR_LEG = ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA) / 2
+POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA) / 2
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -383,18 +384,18 @@ class TestComputeDirectionPools:
     back to the equal DIRECTION_POOLS split."""
 
     # With two launch pairs: a pair's floor share is (1−α)/2, its cap α + (1−α)/2.
-    FLOOR_LEG = (1 - POOL_VOLUME_ALPHA) / 2 / 2
+    FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / 2 / 2
 
     def test_no_volume_falls_back_to_equal_split(self):
         assert compute_direction_pools({}) == DIRECTION_POOLS
 
     def test_single_pair_volume_tilts_both_its_legs_equally(self):
         pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
-        assert pools[('btc', 'sol')] == pytest.approx(self.FLOOR_LEG + POOL_VOLUME_ALPHA / 2)
+        assert pools[('btc', 'sol')] == pytest.approx(self.FLOOR_LEG + MINER_POOL_SHARE * POOL_VOLUME_ALPHA / 2)
         assert pools[('sol', 'btc')] == pools[('btc', 'sol')]  # quiet leg rides its pair
         assert pools[('sol', 'tao')] == pytest.approx(self.FLOOR_LEG)
         assert pools[('tao', 'sol')] == pytest.approx(self.FLOOR_LEG)
-        assert sum(pools.values()) == pytest.approx(1.0)
+        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_volume_is_the_sol_leg_summed_per_pair(self):
         # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair:
@@ -407,9 +408,9 @@ class TestComputeDirectionPools:
             }
         )
         floor_pair = (1 - POOL_VOLUME_ALPHA) / 2
-        assert pools[('btc', 'sol')] == pytest.approx((floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
-        assert pools[('tao', 'sol')] == pytest.approx((floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2)
-        assert sum(pools.values()) == pytest.approx(1.0)
+        assert pools[('btc', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
+        assert pools[('tao', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2)
+        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_leg_direction_within_pair_is_irrelevant(self):
         # 500 SOL cleared btc→sol vs 500 SOL cleared sol→btc: same pair volume,

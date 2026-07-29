@@ -29,6 +29,7 @@ from allways.constants import (
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
+    MINER_POOL_SHARE,
     NUMERAIRE_CHAIN,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
@@ -269,7 +270,8 @@ def compute_direction_pools(
     (``get_clearing_volumes`` shape). Each hub↔spoke *pair* earns
     ``(1−α)/pairs + α × its share of SOL notional``, split evenly between its
     two directions — weighting at pair level means one leg can't be inflated
-    without inflating the whole pair. No volume anywhere → the equal split."""
+    without inflating the whole pair. No volume anywhere → the equal split.
+    Pools sum to ``MINER_POOL_SHARE``, not 1.0 — the burn lives here."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -294,7 +296,7 @@ def compute_direction_pools(
         volume_share = pair_volumes[pair] / total_volume
         pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
         for direction in directions:
-            pools[direction] = pair_share / len(directions)
+            pools[direction] = MINER_POOL_SHARE * pair_share / len(directions)
     return pools
 
 
@@ -401,6 +403,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # The shortfall is burned to RECYCLE_UID rather than left for weight
     # normalization to stretch back over the earners. Normalization preserves
     # every ratio, so an undistributed pool would cost a shallow field nothing.
+    # Pools sum to MINER_POOL_SHARE, so at least BURN_RATE recycles every round.
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
     recycled = max(0.0, 1.0 - distributed)
