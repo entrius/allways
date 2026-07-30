@@ -176,10 +176,20 @@ def test_candidate_miners_excludes_inactive():
 
 def test_unviable_reason_below_min_swap():
     # 0.1 TAO at 1.2 TAO/SOL → 0.0833 SOL leg, under a 0.1 SOL min — the exact taker-facing case.
+    # The bound must read in the SOURCE asset: 0.1 SOL × 1.2 TAO/SOL = 0.12 TAO.
     cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * SOL)]
     assert select_best_miner(cands, 'tao', 'sol', 100_000_000, SOL // 10, SOL) is None
     reason = unviable_reason(cands, 'tao', 'sol', 100_000_000, SOL // 10, SOL)
     assert 'below min swap' in reason
+    assert '≈0.12 TAO' in reason
+    assert '0.1000 SOL leg' in reason
+
+
+def test_unviable_reason_sol_source_stays_exact():
+    # SOL is the bounded asset itself — no ≈ conversion, just the exact bound.
+    cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * SOL)]
+    reason = unviable_reason(cands, 'sol', 'tao', SOL // 20, SOL // 10, SOL)
+    assert reason == 'below min swap (0.1000 SOL)'
 
 
 def test_unviable_reason_no_direction():
