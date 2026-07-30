@@ -20,6 +20,7 @@ from allways.cli.swap_commands.swap_intake import (
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
+    unviable_reason,
 )
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.validator.binding import hotkey_ss58, verify_binding
@@ -376,6 +377,21 @@ def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> O
     )
     if best is None:
         return None
+    return _best_quote_result(validator, best)
+
+
+def quote_rejection_reason(validator, from_chain: str, to_chain: str, from_amount: int) -> str:
+    """Why ``best_quote`` came back empty — same candidates, same gates, spelled out."""
+    client = validator.solana_client
+    cfg = client.get_config()
+    min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
+    max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
+    return unviable_reason(
+        candidate_miners(client, from_chain, to_chain), from_chain, to_chain, from_amount, min_swap, max_swap
+    )
+
+
+def _best_quote_result(validator, best) -> Optional[BestQuote]:
     cand, amts = best
     hotkey = _miner_hotkey_for(validator, cand.miner)
     if hotkey is None:

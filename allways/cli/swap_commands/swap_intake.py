@@ -122,6 +122,38 @@ def viable_intakes(
     return out
 
 
+def unviable_reason(
+    candidates: List[MinerCandidate],
+    from_chain: str,
+    to_chain: str,
+    from_amount: int,
+    min_swap: int,
+    max_swap: int,
+) -> str:
+    """Why nothing was quotable — the gates of ``viable_intakes``, spelled out for the taker.
+
+    Only meaningful when ``select_best_miner`` returned None for the same inputs."""
+    if not candidates:
+        return 'no miner offers this direction'
+    reasons: List[str] = []
+    for c in candidates:
+        try:
+            rate = float(c.rate_display)
+        except (TypeError, ValueError):
+            continue
+        if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
+            reasons.append('rate not executable')
+            continue
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
+        if amts.to_amount <= 0:
+            reasons.append('amount too small')
+            continue
+        ok, why = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
+        if not ok:
+            reasons.append(why)
+    return '; '.join(dict.fromkeys(reasons)) or 'no executable quote'
+
+
 def select_best_miner(
     candidates: List[MinerCandidate],
     from_chain: str,
