@@ -1,9 +1,11 @@
 """Localhost HTTP seam — the offering transport onto the shared kernel ops (reserve/confirm/rate/status).
 
-Loopback-only, shared-secret auth. A validator's product offering (a separate process) calls IN here to
-enter the reservation lottery on a user's behalf and to read swap status; the kernel never calls out. Not
-for public exposure — bind 127.0.0.1 and front it with the product server. Off by default: starts only when
-``ALLWAYS_SEAM_SECRET`` is set (see ``maybe_start_seam``).
+Loopback-only by default, shared-secret auth. A validator's product offering (a separate process) calls IN
+here to enter the reservation lottery on a user's behalf and to read swap status; the kernel never calls
+out. Not for public exposure. Off by default: starts only when ``ALLWAYS_SEAM_SECRET`` is set (see
+``maybe_start_seam``). A containerized validator sets ``ALLWAYS_SEAM_HOST=0.0.0.0`` — a container-loopback
+bind is unreachable even from the offering — and relies on the docker network + secret for isolation,
+publishing no port.
 """
 
 import json
@@ -22,7 +24,7 @@ from allways.validator.reserve_engine import (
     swap_status,
 )
 
-SEAM_HOST = '127.0.0.1'
+SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
 
 
 def _make_handler(validator, secret: str):
