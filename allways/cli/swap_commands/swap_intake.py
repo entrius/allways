@@ -122,6 +122,28 @@ def viable_intakes(
     return out
 
 
+def _bound_in_source(bound_lamports: int, from_chain: str, rate_display: str) -> str:
+    """A SOL-leg bound phrased in the taker's source asset at this candidate's canonical rate.
+
+    Bounds are contract facts in SOL lamports; takers think in what they're sending. Display
+    conversion only (float, marked ≈) — never fed back into any gate."""
+    sol = f'{bound_lamports / 1e9:.4f} {NUMERAIRE_CHAIN.upper()}'
+    if from_chain == NUMERAIRE_CHAIN:
+        return sol
+    src_amount = bound_lamports / 1e9 * float(rate_display)
+    return f'≈{src_amount:.6g} {from_chain.upper()} ({sol} leg)'
+
+
+def _taker_reason(why: str, from_chain: str, rate_display: str, min_swap: int, max_swap: int) -> str:
+    """Rephrase ``swap_viable``'s SOL-denominated bound reasons for the taker. Prefix-coupled to
+    swap_viable's strings — pinned by test_unviable_reason_below_min_swap."""
+    if why.startswith('below min swap'):
+        return f'below min swap ({_bound_in_source(min_swap, from_chain, rate_display)})'
+    if why.startswith('above max swap'):
+        return f'above max swap ({_bound_in_source(max_swap, from_chain, rate_display)})'
+    return why
+
+
 def unviable_reason(
     candidates: List[MinerCandidate],
     from_chain: str,
@@ -150,7 +172,7 @@ def unviable_reason(
             continue
         ok, why = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
         if not ok:
-            reasons.append(why)
+            reasons.append(_taker_reason(why, from_chain, c.rate_display, min_swap, max_swap))
     return '; '.join(dict.fromkeys(reasons)) or 'no executable quote'
 
 
