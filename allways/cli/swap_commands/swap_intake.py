@@ -82,17 +82,34 @@ def compute_intake_amounts(from_chain: str, to_chain: str, from_amount: int, rat
     return IntakeAmounts(collateral_amount=collateral_amount, from_amount=from_amount, to_amount=to_amount)
 
 
-def swap_viable(collateral_amount: int, collateral: int, min_swap: int, max_swap: int) -> Tuple[bool, str]:
-    """Pre-flight the contract's open_or_request guards (bounds + collateral). Reason empty on success.
+# swap_gate verdicts — the contract's open_or_request guards as data, formatted by the caller.
+GATE_BELOW_MIN = 'below_min'
+GATE_ABOVE_MAX = 'above_max'
+GATE_LOW_COLLATERAL = 'low_collateral'
+
+
+def swap_gate(collateral_amount: int, collateral: int, min_swap: int, max_swap: int) -> str:
+    """Pre-flight the contract's open_or_request guards (bounds + collateral). '' when viable.
 
     Bounds are SOL lamports (0 = unset sentinel → that side not enforced)."""
     if min_swap > 0 and collateral_amount < min_swap:
-        return False, f'below min swap ({min_swap / 1e9:.4f} SOL)'
+        return GATE_BELOW_MIN
     if max_swap > 0 and collateral_amount > max_swap:
+        return GATE_ABOVE_MAX
+    if collateral < required_collateral(collateral_amount):
+        return GATE_LOW_COLLATERAL
+    return ''
+
+
+def swap_viable(collateral_amount: int, collateral: int, min_swap: int, max_swap: int) -> Tuple[bool, str]:
+    """``swap_gate`` with SOL-denominated messages — the miner/CLI-facing phrasing."""
+    gate = swap_gate(collateral_amount, collateral, min_swap, max_swap)
+    if gate == GATE_BELOW_MIN:
+        return False, f'below min swap ({min_swap / 1e9:.4f} SOL)'
+    if gate == GATE_ABOVE_MAX:
         return False, f'above max swap ({max_swap / 1e9:.4f} SOL)'
-    needed = required_collateral(collateral_amount)
-    if collateral < needed:
-        return False, f'miner collateral too low (needs {needed / 1e9:.4f} SOL)'
+    if gate == GATE_LOW_COLLATERAL:
+        return False, f'miner collateral too low (needs {required_collateral(collateral_amount) / 1e9:.4f} SOL)'
     return True, ''
 
 
@@ -117,7 +134,7 @@ def viable_intakes(
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
         if amts.to_amount <= 0:
             continue
-        if swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)[0]:
+        if not swap_gate(amts.collateral_amount, c.collateral, min_swap, max_swap):
             out.append((c, amts))
     return out
 
@@ -132,16 +149,6 @@ def _bound_in_source(bound_lamports: int, from_chain: str, rate_display: str) ->
         return sol
     src_amount = bound_lamports / 1e9 * float(rate_display)
     return f'≈{src_amount:.6g} {from_chain.upper()} ({sol} leg)'
-
-
-def _taker_reason(why: str, from_chain: str, rate_display: str, min_swap: int, max_swap: int) -> str:
-    """Rephrase ``swap_viable``'s SOL-denominated bound reasons for the taker. Prefix-coupled to
-    swap_viable's strings — pinned by test_unviable_reason_below_min_swap."""
-    if why.startswith('below min swap'):
-        return f'below min swap ({_bound_in_source(min_swap, from_chain, rate_display)})'
-    if why.startswith('above max swap'):
-        return f'above max swap ({_bound_in_source(max_swap, from_chain, rate_display)})'
-    return why
 
 
 def unviable_reason(
@@ -170,9 +177,14 @@ def unviable_reason(
         if amts.to_amount <= 0:
             reasons.append('amount too small')
             continue
-        ok, why = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
-        if not ok:
-            reasons.append(_taker_reason(why, from_chain, c.rate_display, min_swap, max_swap))
+        gate = swap_gate(amts.collateral_amount, c.collateral, min_swap, max_swap)
+        if gate == GATE_BELOW_MIN:
+            reasons.append(f'below min swap ({_bound_in_source(min_swap, from_chain, c.rate_display)})')
+        elif gate == GATE_ABOVE_MAX:
+            reasons.append(f'above max swap ({_bound_in_source(max_swap, from_chain, c.rate_display)})')
+        elif gate == GATE_LOW_COLLATERAL:
+            needed = required_collateral(amts.collateral_amount)
+            reasons.append(f'miner collateral too low (needs {needed / 1e9:.4f} SOL)')
     return '; '.join(dict.fromkeys(reasons)) or 'no executable quote'
 
 
