@@ -14,6 +14,7 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
     to_smallest_units,
+    unviable_reason,
     viable_intakes,
 )
 
@@ -171,3 +172,21 @@ def test_candidate_miners_excludes_inactive():
     out = candidate_miners(client, 'tao', 'sol')
     assert [c.miner for c in out] == ['active-m']
     assert out[0].collateral == 976_466_670  # tracked field, not vault lamports
+
+
+def test_unviable_reason_below_min_swap():
+    # 0.1 TAO at 1.2 TAO/SOL → 0.0833 SOL leg, under a 0.1 SOL min — the exact taker-facing case.
+    cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * SOL)]
+    assert select_best_miner(cands, 'tao', 'sol', 100_000_000, SOL // 10, SOL) is None
+    reason = unviable_reason(cands, 'tao', 'sol', 100_000_000, SOL // 10, SOL)
+    assert 'below min swap' in reason
+
+
+def test_unviable_reason_no_direction():
+    assert unviable_reason([], 'tao', 'sol', SOL, 0, 0) == 'no miner offers this direction'
+
+
+def test_unviable_reason_collateral():
+    cands = [MinerCandidate(miner='m', rate_display='1.0', collateral=SOL // 10)]
+    reason = unviable_reason(cands, 'tao', 'sol', 1_000_000_000, 0, 0)
+    assert 'collateral too low' in reason

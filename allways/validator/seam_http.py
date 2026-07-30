@@ -19,6 +19,7 @@ import bittensor as bt
 from allways.validator.reserve_engine import (
     best_quote,
     confirm_deposit,
+    quote_rejection_reason,
     reserve_on_behalf,
     scan_deposit,
     swap_status,
@@ -58,7 +59,8 @@ def _make_handler(validator, secret: str):
                 if url.path == '/rate':
                     bq = best_quote(validator, q['from'], q['to'], int(q['amount']))
                     if bq is None:
-                        return self._send(404, {'error': 'no executable quote for that pair/amount'})
+                        reason = quote_rejection_reason(validator, q['from'], q['to'], int(q['amount']))
+                        return self._send(404, {'error': reason})
                     return self._send(200, bq.__dict__)
                 if url.path == '/status':
                     # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
