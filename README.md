@@ -11,6 +11,11 @@ Native transactions across independent assets — no wrapped tokens, no bridges,
 Allways creates a verification layer above independent systems. Assets move natively. Miners complete transactions, validators independently verify the results, and a smart contract enforces outcomes through collateral and slashing.
 
 Currently live with BTC ↔ TAO. Designed to scale to any verifiable asset.
+
+## Miner Risk Disclaimer
+
+The miner in this repository is **reference software**. Review the code thoroughly and build it out with your own safety and optimization measures before running it. Running the base miner, or anything you build on top of it, is at your own risk.
+
 ## Getting Started
 
 ### Requirements
