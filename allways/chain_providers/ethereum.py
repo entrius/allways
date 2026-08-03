@@ -1,5 +1,6 @@
 import os
 import re
+from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -28,6 +29,9 @@ DEFAULT_RPC_URLS = {
 TRANSFER_GAS = 21_000
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+
+# Settled-tx cache bound — comfortably above any realistic concurrent-leg count.
+_SETTLED_CACHE_MAX_DEFAULT = 512
 # eth_maxPriorityFeePerGas fallback when an endpoint doesn't serve it (1 gwei clears
 # comfortably in normal conditions without meaningfully overpaying a 21k-gas send).
 FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
@@ -67,6 +71,13 @@ class EthereumProvider(ChainProvider):
         self.http.headers['Connection'] = 'close'
 
         self.last_send_error: Optional[str] = None
+        # Settled-tx cache, keyed tx_hash → {block_hash, block_number, block_time}. A mined tx's
+        # receipt and its block's timestamp are immutable per block hash, so the validator's 12s
+        # re-verify pays 1 RPC (getTransactionByHash) instead of 3 — parity with BTC's single /tx.
+        # Reorg-safe: an entry is served only while the fresh tx fetch reports the SAME blockHash
+        # (key-by-hash); a reorg changes it → miss → full refetch. Only fully-settled entries
+        # (status 1 + timestamp) are cached — never pending/absent/reverted.
+        self._settled_cache: OrderedDict[str, dict] = OrderedDict()
         # Scopes find_recent_outgoing reuse to this process — a fresh send can't return a
         # tx hash already consumed by an earlier swap.
         self.broadcasted_txids: set[str] = set()
@@ -210,33 +221,62 @@ class EthereumProvider(ChainProvider):
                 block_time=None,
             )
 
-        try:
-            receipt = self.eth_rpc('eth_getTransactionReceipt', [tx_hash])
-        except Exception as e:
-            raise ProviderUnreachableError(f'ETH receipt fetch failed for {tx_hash[:16]}...: {e}') from e
-        if receipt is None:
-            raise ProviderUnreachableError(f'ETH tx {tx_hash[:16]}... is mined but its receipt is unavailable')
-        if int(receipt.get('status') or '0x0', 16) != 1:
-            bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
-            return None
+        # Cache hit: the fresh tx fetch reports the same blockHash a fully-settled read was
+        # cached under, so its receipt/status/timestamp are immutable — skip the receipt+block
+        # RPCs (2 of the 3 calls on the validator's 12s re-verify path). The blockHash equality
+        # IS the canonical-continuity check: a reorg changes it → miss → full refetch below.
+        tx_block_hash = tx.get('blockHash') or ''
+        cached = self._settled_cache.get(tx_hash)
+        if cached is not None and tx_block_hash and cached['block_hash'] == tx_block_hash:
+            block_number = cached['block_number']
+            block_time = cached['block_time']
+            tip = self.cached_block_height()
+            confirmations = max(0, tip - block_number + 1) if tip is not None else 0
+            is_confirmed = confirmations >= self.get_chain().min_confirmations
+        else:
+            try:
+                receipt = self.eth_rpc('eth_getTransactionReceipt', [tx_hash])
+            except Exception as e:
+                raise ProviderUnreachableError(f'ETH receipt fetch failed for {tx_hash[:16]}...: {e}') from e
+            if receipt is None:
+                raise ProviderUnreachableError(f'ETH tx {tx_hash[:16]}... is mined but its receipt is unavailable')
+            if int(receipt.get('status') or '0x0', 16) != 1:
+                bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
+                return None
 
-        block_number = int(receipt['blockNumber'], 16)
-        tip = self.cached_block_height()
-        confirmations = max(0, tip - block_number + 1) if tip is not None else 0
-        is_confirmed = confirmations >= self.get_chain().min_confirmations
+            block_number = int(receipt['blockNumber'], 16)
+            tip = self.cached_block_height()
+            confirmations = max(0, tip - block_number + 1) if tip is not None else 0
+            is_confirmed = confirmations >= self.get_chain().min_confirmations
 
-        # Block timestamp (replay-freshness floor) + best-effort canonical-chain check: any
-        # failure here leaves the accept-path intact rather than breaking on an RPC hiccup.
-        block_time = None
-        try:
-            block = self.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
-            if block:
-                block_time = int(block.get('timestamp') or '0x0', 16) or None
-                if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
-                    bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
-                    return None
-        except Exception as e:
-            bt.logging.debug(f'{LOG_ETH} block-time/canonical check skipped for {tx_hash[:16]}...: {e}')
+            # Block timestamp (replay-freshness floor) + best-effort canonical-chain check: any
+            # failure here leaves the accept-path intact rather than breaking on an RPC hiccup.
+            block_time = None
+            try:
+                block = self.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
+                if block:
+                    block_time = int(block.get('timestamp') or '0x0', 16) or None
+                    if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
+                        bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
+                        return None
+            except Exception as e:
+                bt.logging.debug(f'{LOG_ETH} block-time/canonical check skipped for {tx_hash[:16]}...: {e}')
+
+            # Cache only a fully-settled, internally-consistent read (status 1, timestamped,
+            # tx/receipt agree on the block hash) — pending/absent/reverted are never cached.
+            receipt_block_hash = receipt.get('blockHash') or ''
+            if (
+                receipt_block_hash
+                and block_time is not None
+                and (not tx_block_hash or tx_block_hash == receipt_block_hash)
+            ):
+                self._settled_cache[tx_hash] = {
+                    'block_hash': receipt_block_hash,
+                    'block_number': block_number,
+                    'block_time': block_time,
+                }
+                while len(self._settled_cache) > self._SETTLED_CACHE_MAX:
+                    self._settled_cache.popitem(last=False)
 
         return TransactionInfo(
             tx_hash=tx_hash,
@@ -400,6 +440,8 @@ class EthereumProvider(ChainProvider):
             return self.eth_rpc('eth_getTransactionByHash', [txid]) is not None
         except Exception:
             return False
+
+    _SETTLED_CACHE_MAX = _SETTLED_CACHE_MAX_DEFAULT
 
     # Plain JSON-RPC has no address→tx index (Esplora/getSignaturesForAddress have one), so the
     # deposit scanner follows the head incrementally like the TAO provider: each call scans only

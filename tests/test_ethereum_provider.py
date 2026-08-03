@@ -57,11 +57,25 @@ def mined_tx_responses(
             'to': to,
             'value': value_hex,
             'blockNumber': block_number,
+            'blockHash': block_hash,
         },
         'eth_getTransactionReceipt': receipt,
         'eth_blockNumber': hex(tip),
         'eth_getBlockByNumber': {'hash': block_hash, 'timestamp': '0x64'},
     }
+
+
+def counting_rpc_stub(provider, responses: dict):
+    """rpc_stub that also tallies calls per method into the returned dict."""
+    calls: dict = {}
+
+    def fake_rpc(method, params, timeout=15):
+        calls[method] = calls.get(method, 0) + 1
+        value = responses[method]
+        return value(params) if callable(value) else value
+
+    provider.eth_rpc = fake_rpc
+    return calls
 
 
 class TestAddresses:
@@ -202,6 +216,58 @@ class TestFetchMatchingTx:
         provider.eth_rpc = boom
         with pytest.raises(ProviderUnreachableError):
             provider.fetch_matching_tx(TX, RECIPIENT, 1)
+
+
+class TestSettledCache:
+    """The 12s re-verify path must cost 1 RPC once a tx is settled — receipt/status/timestamp are
+    immutable per block hash, so only the tx fetch (which carries blockHash) repeats. A reorg
+    changes the hash → cache miss → full refetch. Pending/reverted reads are never cached."""
+
+    def test_reverify_skips_receipt_and_block(self, provider):
+        calls = counting_rpc_stub(provider, mined_tx_responses())
+        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
+        assert calls['eth_getTransactionReceipt'] == 1
+        assert calls['eth_getBlockByNumber'] == 1
+        # Second and third verifies: tx fetch only (+ tip, which the base caches under its TTL).
+        info = provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
+        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
+        assert calls['eth_getTransactionByHash'] == 3
+        assert calls['eth_getTransactionReceipt'] == 1
+        assert calls['eth_getBlockByNumber'] == 1
+        # Cached fields still populate the result (freshness floor needs block_time every pass).
+        assert info.block_time == 100
+        assert info.block_number == 1_000_000
+
+    def test_reorg_invalidates_cache(self, provider):
+        responses = mined_tx_responses()
+        calls = counting_rpc_stub(provider, responses)
+        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
+        # Reorg: the tx now reports a different blockHash — receipt must be refetched, and with
+        # the receipt/block now disagreeing with the mined-at hash, the leg is rejected until the
+        # view settles (next pass refetches cleanly).
+        new_hash = '0x' + 'ee' * 32
+        responses['eth_getTransactionByHash'] = dict(responses['eth_getTransactionByHash'], blockHash=new_hash)
+        provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
+        assert calls['eth_getTransactionReceipt'] == 2
+
+    def test_pending_and_reverted_never_cached(self, provider):
+        pending = mined_tx_responses()
+        pending['eth_getTransactionByHash'] = dict(
+            pending['eth_getTransactionByHash'], blockNumber=None, blockHash=None
+        )
+        rpc_stub(provider, pending)
+        assert not provider.fetch_matching_tx(TX, RECIPIENT, 10**18).confirmed
+        assert TX not in provider._settled_cache
+        rpc_stub(provider, mined_tx_responses(status='0x0'))
+        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is None
+        assert TX not in provider._settled_cache
+
+    def test_cache_is_bounded(self, provider):
+        provider._settled_cache['0x' + 'aa' * 32] = {'block_hash': 'x', 'block_number': 1, 'block_time': 1}
+        provider._SETTLED_CACHE_MAX = 2
+        rpc_stub(provider, mined_tx_responses())
+        provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
+        assert len(provider._settled_cache) <= 2
 
 
 class TestVerifyTransactionCasing:
