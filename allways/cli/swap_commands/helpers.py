@@ -36,6 +36,8 @@ SOLANA_NETWORKS = {
 }
 # Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
 BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
+# Names the ETH provider (ETH_NETWORK env) accepts; endpoints default to public JSON-RPC per network.
+ETH_NETWORKS = ('mainnet', 'sepolia')
 # One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid
 # + the default router. Testnet routes through the Ventura Labs validator; mainnet self-represents
 # (no routing validator live yet). `alw config set router <ss58>` opts into routing on mainnet.
@@ -44,6 +46,7 @@ ENV_BUNDLES = {
         'network': 'test',
         'solana-network': 'devnet',
         'btc-network': 'testnet4',
+        'eth-network': 'sepolia',
         'netuid': '19',
         'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
     },
@@ -51,6 +54,7 @@ ENV_BUNDLES = {
         'network': 'finney',
         'solana-network': 'mainnet',
         'btc-network': 'mainnet',
+        'eth-network': 'mainnet',
         'netuid': '7',
         # No routing validator on mainnet yet — bid self-represented until one ships a routing
         # product. Explicit '' (not omitted) so re-running `env mainnet` CLEARS a stale router.
@@ -105,6 +109,13 @@ def apply_btc_network_env(config: dict) -> None:
     A real BTC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
     if not os.environ.get('BTC_NETWORK') and config.get('btc-network'):
         os.environ['BTC_NETWORK'] = config['btc-network']
+
+
+def apply_eth_network_env(config: dict) -> None:
+    """Feed eth-network config into the ETH provider, which reads ETH_NETWORK from the env.
+    A real ETH_NETWORK env wins (explicit override); otherwise the configured name is applied."""
+    if not os.environ.get('ETH_NETWORK') and config.get('eth-network'):
+        os.environ['ETH_NETWORK'] = config['eth-network']
 
 
 # Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().

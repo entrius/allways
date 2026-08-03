@@ -1,0 +1,448 @@
+import os
+import re
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
+
+import bittensor as bt
+import requests
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from eth_utils import is_checksum_address
+
+from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.chains import CHAIN_ETH, ChainDefinition
+
+LOG_ETH = '[EthRpc]'
+
+# eth_chainId is checked against the configured network at startup — a wrong-network RPC
+# (mainnet URL while ETH_NETWORK=sepolia) fails fast instead of verifying the wrong chain.
+CHAIN_IDS = {'mainnet': 1, 'sepolia': 11_155_111}
+
+# Public JSON-RPC defaults per network, tried in order. Override with ETH_RPC_URLS
+# (keyed/paid endpoints embed their key in the URL path, so no header plumbing needed).
+DEFAULT_RPC_URLS = {
+    'mainnet': ('https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org'),
+    'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.drpc.org'),
+}
+
+TRANSFER_GAS = 21_000
+
+_HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+# eth_maxPriorityFeePerGas fallback when an endpoint doesn't serve it (1 gwei clears
+# comfortably in normal conditions without meaningfully overpaying a 21k-gas send).
+FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
+
+
+def rpc_tag(base: str) -> str:
+    """Short, log-friendly host label for an RPC endpoint (e.g. 'publicnode', 'drpc')."""
+    host = (urlparse(base).netloc or base).split(':')[0].removeprefix('www.')
+    parts = host.split('.')
+    return parts[-2] if len(parts) >= 2 else host
+
+
+class EthereumProvider(ChainProvider):
+    """Ethereum chain provider: eth-account + public JSON-RPC (no local node required).
+
+    Plain EOA value transfers only, by design: a swap leg is verified off the transaction's
+    own from/to/value, which internal (contract-mediated) transfers don't populate — and the
+    sender-pinning defense needs a provable EOA sender anyway.
+
+    Addresses are hex and case-insensitive (EIP-55 is a display checksum), so every
+    comparison goes through ``normalize_address`` (lowercase) — on-chain strings keep
+    whatever casing the user committed.
+    """
+
+    def __init__(self):
+        self.network = os.environ.get('ETH_NETWORK', '').lower()
+        if not self.network:
+            self.network = 'mainnet'
+            bt.logging.warning('ETH_NETWORK unset — defaulting to mainnet; set ETH_NETWORK=sepolia for testnet.')
+        if self.network not in CHAIN_IDS:
+            bt.logging.warning(f'Unknown ETH_NETWORK {self.network!r} (expected {list(CHAIN_IDS)}); using mainnet.')
+            self.network = 'mainnet'
+
+        # Same rationale as the BTC provider: long-running validators + pooled idle TLS
+        # sockets that public CDNs silently drop → wedged reads until timeout.
+        self.http = requests.Session()
+        self.http.headers['Connection'] = 'close'
+
+        self.last_send_error: Optional[str] = None
+        # Scopes find_recent_outgoing reuse to this process — a fresh send can't return a
+        # tx hash already consumed by an earlier swap.
+        self.broadcasted_txids: set[str] = set()
+        # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
+        self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
+
+        raw = os.environ.get('ETH_RPC_URLS', '')
+        self.rpc_bases = [u.strip().rstrip('/') for u in raw.split(',') if u.strip()] or list(
+            DEFAULT_RPC_URLS[self.network]
+        )
+
+    def _send_error(self, msg: str) -> None:
+        self.last_send_error = msg
+        bt.logging.error(msg)
+
+    def get_chain(self) -> ChainDefinition:
+        return CHAIN_ETH
+
+    def describe(self) -> str:
+        hosts = ', '.join(urlparse(base).netloc or base for base in self.rpc_bases)
+        return f'Ethereum JSON-RPC ({self.network}): {hosts}'
+
+    def normalize_address(self, address: str) -> str:
+        return address.lower() if isinstance(address, str) else address
+
+    # --- JSON-RPC plumbing (failover mirrors the BTC provider's Esplora narration) ---
+
+    def eth_rpc(self, method: str, params: list, timeout: int = 15) -> Any:
+        """Call ``method`` against each endpoint in order, narrating every failover.
+
+        A JSON-RPC ``error`` object is treated as endpoint trouble (rate limit, pruned
+        state, method gap) and falls through; ``result: null`` is authoritative data
+        ("no such tx") and is returned as None. Raises the last error when all fail.
+        """
+        payload = {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}
+        last_err: Optional[Exception] = None
+        for i, base in enumerate(self.rpc_bases):
+            pos = f'[{i + 1}/{len(self.rpc_bases)}]'
+            tag = rpc_tag(base)
+            nxt = rpc_tag(self.rpc_bases[i + 1]) if i + 1 < len(self.rpc_bases) else None
+            tail = f'falling back to: {nxt}' if nxt else 'no providers left, giving up'
+            try:
+                resp = self.http.post(base, json=payload, timeout=timeout)
+            except Exception as e:
+                last_err = e
+                bt.logging.warning(f'EthRpc {pos} {tag} {method} → request error: {e}; {tail}')
+                continue
+
+            if resp.status_code != 200:
+                last_err = requests.HTTPError(f'{base} {method}: {resp.status_code}', response=resp)
+                bt.logging.warning(f'EthRpc {pos} {tag} {method} → HTTP {resp.status_code}; {tail}')
+                continue
+
+            try:
+                body = resp.json()
+            except ValueError as e:
+                last_err = e
+                bt.logging.warning(f'EthRpc {pos} {tag} {method} → bad JSON: {e}; {tail}')
+                continue
+
+            if 'error' in body:
+                err = body['error']
+                last_err = RuntimeError(f'{base} {method}: rpc error {err}')
+                bt.logging.warning(f'EthRpc {pos} {tag} {method} → rpc error {err}; {tail}')
+                continue
+
+            if i > 0:
+                bt.logging.info(f'EthRpc {pos} {tag} {method} → ok (served after {i} fallback(s))')
+            else:
+                bt.logging.debug(f'EthRpc {pos} {tag} {method} → ok')
+            return body.get('result')
+        raise last_err or RuntimeError('all ETH RPCs failed')
+
+    def check_connection(self, require_send: bool = True) -> None:
+        if require_send:
+            key = os.environ.get('ETH_PRIVATE_KEY')
+            if not key:
+                raise ConnectionError('ETH signing requires the ETH_PRIVATE_KEY env var')
+            try:
+                Account.from_key(key)
+            except Exception as e:
+                raise ConnectionError(f'ETH_PRIVATE_KEY is not a valid 32-byte hex key: {e}') from e
+        try:
+            chain_id = int(self.eth_rpc('eth_chainId', [], timeout=10), 16)
+            tip = int(self.eth_rpc('eth_blockNumber', [], timeout=10), 16)
+        except Exception as e:
+            raise ConnectionError(f'Cannot reach Ethereum RPC: {e}') from e
+        expected = CHAIN_IDS[self.network]
+        if chain_id != expected:
+            raise ConnectionError(
+                f'ETH RPC serves chain id {chain_id}, expected {expected} for {self.network} — '
+                'ETH_RPC_URLS and ETH_NETWORK disagree'
+            )
+        bt.logging.success(f'{LOG_ETH} connected: network={self.network}, chain_id={chain_id}, tip={tip}')
+
+    # --- Verification ---
+
+    def fetch_matching_tx(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,  # unused — eth_getTransactionByHash is an O(1) index
+    ) -> Optional[TransactionInfo]:
+        """Look up an Ethereum tx by hash and match recipient + amount.
+
+        Inclusion is not settlement (the TAO lesson): a mined tx can still have reverted, so
+        a mined match requires ``eth_getTransactionReceipt`` status 1 before it counts. A
+        mined tx whose receipt can't be read is 'unknown', never 'absent' — that raises
+        ProviderUnreachableError rather than risking a false slash verdict.
+        """
+        try:
+            tx = self.eth_rpc('eth_getTransactionByHash', [tx_hash])
+        except Exception as e:
+            raise ProviderUnreachableError(f'ETH RPC unreachable: {e}') from e
+        if tx is None:
+            bt.logging.debug(f'{LOG_ETH} tx {tx_hash[:16]}... not found')
+            return None
+
+        to = self.normalize_address(tx.get('to') or '')  # null for contract creation
+        sender = self.normalize_address(tx.get('from') or '')
+        amount = int(tx.get('value') or '0x0', 16)
+        if to != self.normalize_address(expected_recipient) or amount < expected_amount:
+            bt.logging.warning(
+                f'{LOG_ETH} tx {tx_hash[:16]}... does not pay {expected_recipient} >= {expected_amount} wei '
+                f'(to={tx.get("to")}, value={amount})'
+            )
+            return None
+
+        if tx.get('blockNumber') is None:
+            # In the mempool: a valid match, just not mined yet — callers queue and retry.
+            return TransactionInfo(
+                tx_hash=tx_hash,
+                confirmed=False,
+                sender=sender,
+                recipient=expected_recipient,
+                amount=amount,
+                block_number=None,
+                confirmations=0,
+                block_time=None,
+            )
+
+        try:
+            receipt = self.eth_rpc('eth_getTransactionReceipt', [tx_hash])
+        except Exception as e:
+            raise ProviderUnreachableError(f'ETH receipt fetch failed for {tx_hash[:16]}...: {e}') from e
+        if receipt is None:
+            raise ProviderUnreachableError(f'ETH tx {tx_hash[:16]}... is mined but its receipt is unavailable')
+        if int(receipt.get('status') or '0x0', 16) != 1:
+            bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
+            return None
+
+        block_number = int(receipt['blockNumber'], 16)
+        tip = self.cached_block_height()
+        confirmations = max(0, tip - block_number + 1) if tip is not None else 0
+        is_confirmed = confirmations >= self.get_chain().min_confirmations
+
+        # Block timestamp (replay-freshness floor) + best-effort canonical-chain check: any
+        # failure here leaves the accept-path intact rather than breaking on an RPC hiccup.
+        block_time = None
+        try:
+            block = self.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
+            if block:
+                block_time = int(block.get('timestamp') or '0x0', 16) or None
+                if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
+                    bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
+                    return None
+        except Exception as e:
+            bt.logging.debug(f'{LOG_ETH} block-time/canonical check skipped for {tx_hash[:16]}...: {e}')
+
+        return TransactionInfo(
+            tx_hash=tx_hash,
+            confirmed=is_confirmed,
+            sender=sender,
+            recipient=expected_recipient,
+            amount=amount,
+            block_number=block_number,
+            confirmations=confirmations,
+            block_time=block_time,
+        )
+
+    def get_current_block_height(self) -> Optional[int]:
+        try:
+            return int(self.eth_rpc('eth_blockNumber', [], timeout=10), 16)
+        except Exception as e:
+            bt.logging.debug(f'ETH get_current_block_height failed: {e}')
+            return None
+
+    def get_balance(self, address: str) -> int:
+        """Balance in wei at latest, 0 on failure (mirrors the other providers)."""
+        try:
+            return int(self.eth_rpc('eth_getBalance', [address, 'latest']), 16)
+        except Exception as e:
+            bt.logging.error(f'ETH get_balance failed for {address}: {e}')
+            return 0
+
+    def is_valid_address(self, address: str) -> bool:
+        """0x + 40 hex, and if mixed-case the EIP-55 checksum must verify (typo protection,
+        no RPC). Done by hand: eth_utils 5+ ``is_address`` accepts unprefixed hex and stopped
+        validating checksums, which would wave through exactly the typos EIP-55 exists to catch."""
+        if not isinstance(address, str) or not _HEX_ADDR_RE.match(address):
+            return False
+        body = address[2:]
+        if body == body.lower() or body == body.upper():
+            return True
+        return is_checksum_address(address)
+
+    def _account(self, key: Optional[Any] = None):
+        raw = key if isinstance(key, str) and key else os.environ.get('ETH_PRIVATE_KEY')
+        if not raw:
+            return None
+        try:
+            return Account.from_key(raw)
+        except Exception as e:
+            bt.logging.error(f'ETH private key unusable: {e}')
+            return None
+
+    def can_send_from(self, address: str) -> bool:
+        acct = self._account()
+        return acct is not None and self.normalize_address(acct.address) == self.normalize_address(address)
+
+    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
+        """EIP-191 personal_sign over ``message``. key: hex private key; None → ETH_PRIVATE_KEY."""
+        acct = self._account(key)
+        if acct is None:
+            bt.logging.error('ETH signing requires the ETH_PRIVATE_KEY env var (or an explicit key)')
+            return ''
+        if self.normalize_address(acct.address) != self.normalize_address(address):
+            bt.logging.error(f'ETH key derives {acct.address} but the proof address is {address} — key mismatch')
+            return ''
+        try:
+            signed = Account.sign_message(encode_defunct(text=message), acct.key)
+            return signed.signature.hex()
+        except Exception as e:
+            bt.logging.error(f'ETH sign_from_proof failed: {e}')
+            return ''
+
+    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
+        """Recover the EIP-191 signer and compare case-insensitively. No RPC dependency."""
+        try:
+            sig = signature if signature.startswith('0x') else f'0x{signature}'
+            recovered = Account.recover_message(encode_defunct(text=message), signature=sig)
+            return self.normalize_address(recovered) == self.normalize_address(address)
+        except Exception as e:
+            bt.logging.error(f'ETH verify_from_proof failed: {e}')
+            return False
+
+    # --- Sending ---
+
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None
+    ) -> Optional[Tuple[str, int]]:
+        """Send ETH via a type-2 (EIP-1559) transfer signed with ETH_PRIVATE_KEY. Amount in wei.
+
+        ``from_address`` (the miner's committed address) must match the key — validators
+        enforce sender == committed address, so sending from any other key is a wasted tx.
+        Returns (tx_hash, 0) or None.
+        """
+        self.last_send_error = None
+        acct = self._account()
+        if acct is None:
+            self._send_error('ETH_PRIVATE_KEY not set or unusable')
+            return None
+        if from_address and self.normalize_address(acct.address) != self.normalize_address(from_address):
+            self._send_error(f'ETH key derives {acct.address} but committed address is {from_address} — key mismatch')
+            return None
+
+        try:
+            # Reuse only txids this process broadcast — otherwise (from, to, amount) would
+            # match a prior-swap tx the contract has already consumed (#461 class).
+            existing = self.find_recent_outgoing(acct.address, to_address, amount)
+            if existing and existing in self.broadcasted_txids:
+                bt.logging.info(f'Reusing prior tx {existing} from {acct.address} → {to_address} ({amount} wei)')
+                return (existing, 0)
+
+            latest = self.eth_rpc('eth_getBlockByNumber', ['latest', False])
+            base_fee = int((latest or {}).get('baseFeePerGas') or '0x0', 16)
+            try:
+                tip_fee = int(self.eth_rpc('eth_maxPriorityFeePerGas', []), 16)
+            except Exception:
+                tip_fee = FALLBACK_PRIORITY_FEE_WEI
+            # 2× base fee absorbs six consecutive maximally-full blocks before the cap binds.
+            max_fee = 2 * base_fee + tip_fee
+
+            nonce = int(self.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
+
+            balance = self.get_balance(acct.address)
+            needed = amount + TRANSFER_GAS * max_fee
+            if balance < needed:
+                self._send_error(f'Insufficient ETH: have {balance} wei, need {amount} + {TRANSFER_GAS * max_fee} gas')
+                return None
+
+            signed = Account.sign_transaction(
+                {
+                    'chainId': CHAIN_IDS[self.network],
+                    'nonce': nonce,
+                    'to': to_address,
+                    'value': amount,
+                    'gas': TRANSFER_GAS,
+                    'maxFeePerGas': max_fee,
+                    'maxPriorityFeePerGas': tip_fee,
+                },
+                acct.key,
+            )
+            expected_txid = signed.hash.hex()
+            expected_txid = expected_txid if expected_txid.startswith('0x') else f'0x{expected_txid}'
+            # Record before broadcasting so a same-session retry can reclaim it via
+            # find_recent_outgoing even if the response is lost (mirrors the BTC provider).
+            self.broadcasted_txids.add(expected_txid)
+
+            raw = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
+            raw_hex = raw.hex()
+            raw_hex = raw_hex if raw_hex.startswith('0x') else f'0x{raw_hex}'
+            try:
+                tx_hash = self.eth_rpc('eth_sendRawTransaction', [raw_hex], timeout=30)
+            except Exception as e:
+                if self.tx_exists(expected_txid):
+                    return (expected_txid, 0)
+                self._send_error(f'ETH broadcast failed: {e}')
+                return None
+
+            bt.logging.info(f'Sent {amount} wei to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
+            return (tx_hash, 0)
+        except Exception as e:
+            self._send_error(f'ETH send failed: {type(e).__name__}: {e}')
+            return None
+
+    def tx_exists(self, txid: str) -> bool:
+        try:
+            return self.eth_rpc('eth_getTransactionByHash', [txid]) is not None
+        except Exception:
+            return False
+
+    # Plain JSON-RPC has no address→tx index (Esplora/getSignaturesForAddress have one), so the
+    # deposit scanner follows the head incrementally like the TAO provider: each call scans only
+    # blocks minted since the last call for this (from, to, amount) triple, bounded by
+    # SCAN_LOOKBACK_BLOCKS on the first call or after a gap (≈5 min of 12s blocks).
+    SCAN_LOOKBACK_BLOCKS = 25
+    _MAX_SCAN_CURSORS = 64
+
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Tx hash of a recent settled transfer ``from_addr`` → ``to_addr`` of >= ``amount`` wei,
+        else None. A hash-finder only — the seam's confirm re-verifies everything by hash, so a
+        miss just means the manual rescue paths. Mined blocks only (plain JSON-RPC exposes no
+        mempool filter), so it lags a broadcast by up to one block."""
+        head = self.get_current_block_height()
+        if head is None:
+            return None
+        want_from = self.normalize_address(from_addr)
+        want_to = self.normalize_address(to_addr)
+        key = (want_from, want_to, int(amount))
+        floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
+        last = self.scan_cursors.get(key, floor)
+        for block_num in range(max(last, floor) + 1, head + 1):
+            try:
+                block = self.eth_rpc('eth_getBlockByNumber', [hex(block_num), True])
+            except Exception:
+                continue
+            for tx in (block or {}).get('transactions', []):
+                if self.normalize_address(tx.get('from') or '') != want_from:
+                    continue
+                if self.normalize_address(tx.get('to') or '') != want_to:
+                    continue
+                if int(tx.get('value') or '0x0', 16) < int(amount):
+                    continue
+                # A mined match can still have reverted — require receipt status 1.
+                try:
+                    receipt = self.eth_rpc('eth_getTransactionReceipt', [tx['hash']])
+                except Exception:
+                    continue
+                if receipt is None or int(receipt.get('status') or '0x0', 16) != 1:
+                    continue
+                self.scan_cursors.pop(key, None)
+                return tx['hash']
+        self.scan_cursors[key] = head
+        if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
+            self.scan_cursors.pop(next(iter(self.scan_cursors)))
+        return None

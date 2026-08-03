@@ -45,6 +45,14 @@ class ChainProvider(ABC):
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.get_chain().name
 
+    def normalize_address(self, address: str) -> str:
+        """Canonical comparison form for this chain's addresses (identity by default).
+
+        Chains whose address encoding is case-insensitive (ETH hex / EIP-55 checksum casing)
+        override this so equality checks never fail on casing alone. Comparison only — never
+        feed the normalized form back on-chain or into display."""
+        return address
+
     def can_send_from(self, address: str) -> bool:
         """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``
         would broadcast FROM it. Gates the CLI's auto-send: a deposit must come from the reservation's
@@ -130,7 +138,7 @@ class ChainProvider(ABC):
             )
             return None
 
-        if expected_sender and tx_info.sender != expected_sender:
+        if expected_sender and self.normalize_address(tx_info.sender) != self.normalize_address(expected_sender):
             bt.logging.warning(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
                 f'(expected {expected_sender}, got {tx_info.sender!r})'
@@ -140,7 +148,7 @@ class ChainProvider(ABC):
         # A self-transfer (sender == recipient) is never a real swap leg: the
         # paying and receiving parties are always distinct. Rejecting it blocks
         # same-wallet A->A volume fakes; A->B self-flow is bounded economically.
-        if tx_info.sender and tx_info.sender == expected_recipient:
+        if tx_info.sender and self.normalize_address(tx_info.sender) == self.normalize_address(expected_recipient):
             bt.logging.warning(
                 f'verify_transaction: self-transfer on tx {tx_hash[:16]}... '
                 f'(sender == recipient {expected_recipient}) — rejecting'

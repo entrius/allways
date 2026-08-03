@@ -29,6 +29,7 @@ dependencies = [
     "python-dotenv==1.2.1",
     "requests",
     "bitcoin-message-tool",
+    "eth-account",
     "click",
     "rich",
     "embit",

@@ -4,6 +4,7 @@ import bittensor as bt
 
 from allways.chain_providers.base import ChainProvider, TransactionInfo
 from allways.chain_providers.bitcoin import BitcoinProvider
+from allways.chain_providers.ethereum import EthereumProvider
 from allways.chain_providers.solana import SolanaProvider
 from allways.chain_providers.subtensor import SubtensorProvider
 
@@ -13,6 +14,7 @@ __all__ = [
     'BitcoinProvider',
     'SubtensorProvider',
     'SolanaProvider',
+    'EthereumProvider',
     'create_chain_providers',
 ]
 
@@ -21,6 +23,7 @@ PROVIDER_REGISTRY: Tuple[Tuple[str, Type[ChainProvider], Tuple[str, ...]], ...] 
     ('btc', BitcoinProvider, ()),
     ('tao', SubtensorProvider, ('subtensor', 'wallet')),
     ('sol', SolanaProvider, ('solana_rpc_url', 'solana_keypair')),
+    ('eth', EthereumProvider, ()),
 )
 
 

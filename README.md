@@ -10,7 +10,7 @@ Native transactions across independent assets — no wrapped tokens, no bridges,
 
 Allways creates a verification layer above independent systems. Assets move natively. Miners complete transactions, validators independently verify the results, and a smart contract enforces outcomes through collateral and slashing.
 
-Currently live with BTC ↔ TAO. Designed to scale to any verifiable asset.
+Currently live with SOL ↔ BTC, SOL ↔ TAO, and SOL ↔ ETH (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 
 ## Miner Risk Disclaimer
 
@@ -69,7 +69,7 @@ needs to persist across restarts.
 
 ## Miner Environment Variables
 
-- `BTC_MODE`, `BTC_PRIVATE_KEY`, `BTC_RPC_URL`, etc. — see `.env.example`.
+- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ETH_RPC_URLS`, etc. — see `.env.example`.
 
 ## Running a Local Subtensor Lite Node (Validators)
 

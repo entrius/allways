@@ -14,8 +14,10 @@ import pytest
 from allways.cli.swap_commands.helpers import (
     BTC_NETWORKS,
     ENV_BUNDLES,
+    ETH_NETWORKS,
     SOLANA_NETWORKS,
     apply_btc_network_env,
+    apply_eth_network_env,
     load_cli_keypair,
     resolve_solana_keypair_path,
     resolve_solana_rpc,
@@ -78,12 +80,13 @@ def test_api_key_composes_onto_network_name(monkeypatch):
     assert resolve_solana_rpc({'solana-network': 'devnet'}) == SOLANA_NETWORKS['devnet'] + '?api-key=k1'
 
 
-def test_env_bundles_cover_all_three_chains():
+def test_env_bundles_cover_all_chains():
     for name in ('testnet', 'mainnet'):
         b = ENV_BUNDLES[name]
-        assert set(b) == {'network', 'solana-network', 'btc-network', 'netuid', 'router'}
+        assert set(b) == {'network', 'solana-network', 'btc-network', 'eth-network', 'netuid', 'router'}
         assert b['solana-network'] in SOLANA_NETWORKS
         assert b['btc-network'] in BTC_NETWORKS
+        assert b['eth-network'] in ETH_NETWORKS
 
 
 def test_btc_shim_sets_env_when_unset(monkeypatch):
@@ -100,6 +103,22 @@ def test_btc_shim_respects_real_env(monkeypatch):
     import os
 
     assert os.environ['BTC_NETWORK'] == 'mainnet'  # explicit env wins
+
+
+def test_eth_shim_sets_env_when_unset(monkeypatch):
+    monkeypatch.delenv('ETH_NETWORK', raising=False)
+    apply_eth_network_env({'eth-network': 'sepolia'})
+    import os
+
+    assert os.environ.get('ETH_NETWORK') == 'sepolia'
+
+
+def test_eth_shim_respects_real_env(monkeypatch):
+    monkeypatch.setenv('ETH_NETWORK', 'mainnet')
+    apply_eth_network_env({'eth-network': 'sepolia'})
+    import os
+
+    assert os.environ['ETH_NETWORK'] == 'mainnet'  # explicit env wins
 
 
 def test_keypair_env_wins_over_config(monkeypatch):

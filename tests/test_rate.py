@@ -344,6 +344,18 @@ class TestIsExecutableRate:
         assert is_executable_rate(1e10, 'btc', 'sol', 0, 0) is True
         assert is_executable_rate(1e-10, 'sol', 'btc', 0, 0) is True
 
+    def test_sane_eth_rates_executable(self):
+        """ETH is the first spoke with MORE decimals than the hub (18 vs 9), so the eth↔sol
+        decimal_factor is fractional (1e-9) — the gate math must survive that regime.
+        ~20 SOL per ETH: 0.1 SOL ÷ (20 × 1e-9) = 5e6 wei min source, comfortably fundable."""
+        assert is_executable_rate(20.0, 'eth', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(20.0, 'sol', 'eth', self.MIN, self.MAX) is True
+
+    def test_huge_eth_to_sol_rate_rejected(self):
+        """1e20 SOL/ETH: even the min_onchain_amount source (5e13 wei) maps to
+        5e13 × 1e20 × 1e-9 = 5e24 lamports — absurdly above max. No fundable source fits."""
+        assert is_executable_rate(1e20, 'eth', 'sol', self.MIN, self.MAX) is False
+
     def test_max_unset_only_lower_bound_enforced(self):
         """If only min_swap is set, every rate above the floor is executable."""
         assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, 0) is True
