@@ -28,6 +28,7 @@ from allways.validator.scoring import (
     calculate_miner_rewards,
     compute_direction_pools,
     crown_can_fund,
+    crown_depth_shares,
     crown_holders_at_instant,
     due_for_scoring,
     is_eligible,
@@ -473,6 +474,55 @@ class TestCrownHoldersHelper:
         sentinel still wins. Ensures existing callers aren't surprised."""
         rates = {'sentinel': 1e10, 'sane': 326.0}
         assert crown_holders_at_instant(rates, {'sentinel', 'sane'}) == ['sentinel']
+
+
+class TestCrownRateBand:
+    """rate_band semantics: qualified quotes within the band of the best
+    qualified rate hold the crown together, anchor first."""
+
+    def test_near_rates_join_band_higher_wins(self):
+        # b is 0.45% off the leader (inside a 0.5% band); c at 1.5% stays out.
+        rates = {'a': 0.00020, 'b': 0.0001991, 'c': 0.000197}
+        holders = crown_holders_at_instant(rates, {'a', 'b', 'c'}, rate_band=0.005)
+        assert holders == ['a', 'b']
+
+    def test_near_rates_join_band_lower_wins(self):
+        # Lower is better: b asks 0.4% more (inside), c 1.2% more (outside).
+        rates = {'a': 250.0, 'b': 251.0, 'c': 253.0}
+        holders = crown_holders_at_instant(rates, {'a', 'b', 'c'}, lower_rate_wins=True, rate_band=0.005)
+        assert holders == ['a', 'b']
+
+    def test_band_anchors_on_best_qualified_rate(self):
+        # A busy leader can't drag the band out of everyone else's reach: the
+        # anchor is the best *qualified* rate, and the band opens around it.
+        rates = {'busy': 0.00030, 'a': 0.00020, 'b': 0.0001995}
+        holders = crown_holders_at_instant(rates, {'busy', 'a', 'b'}, rewardable_by_state={'a', 'b'}, rate_band=0.005)
+        assert holders == ['a', 'b']
+
+    def test_unqualified_band_member_excluded(self):
+        rates = {'a': 0.00020, 'b': 0.0001995}
+        holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state={'a'}, rate_band=0.005)
+        assert holders == ['a']
+
+    def test_band_zero_keeps_exact_best_only(self):
+        rates = {'a': 0.00020, 'b': 0.00019999}
+        assert crown_holders_at_instant(rates, {'a', 'b'}, rate_band=0.0) == ['a']
+
+
+class TestCrownDepthShares:
+    def test_proportional_to_collateral(self):
+        shares = crown_depth_shares(['a', 'b'], {'a': 300, 'b': 100}, 0)
+        assert shares == {'a': 0.75, 'b': 0.25}
+
+    def test_depth_capped_at_full_capacity(self):
+        # 2 SOL vs the 0.55 cap for a 0.5 max_swap: collateral past a
+        # full-capacity fill buys no extra share (never pay-to-win).
+        shares = crown_depth_shares(['whale', 'full'], {'whale': 2_000_000_000, 'full': 550_000_000}, 500_000_000)
+        assert shares == {'whale': 0.5, 'full': 0.5}
+
+    def test_all_zero_depth_splits_evenly(self):
+        shares = crown_depth_shares(['a', 'b'], {}, 500_000_000)
+        assert shares == {'a': 0.5, 'b': 0.5}
 
 
 class TestReplayCrownTime:
@@ -1840,10 +1890,11 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[recycle_uid], 1.0, atol=1e-6)
         v.state_store.close()
 
-    def test_rate_tie_broken_by_collateral(self, tmp_path: Path):
-        """Two miners tie on the best rate with unequal collateral → the crown does NOT
-        split; the deeper miner takes the whole interval (tie-break #2). hk_a (deeper,
-        full capacity) earns the entire pool; hk_b earns nothing."""
+    def test_rate_tie_splits_by_collateral_depth(self, tmp_path: Path):
+        """Two miners tie on the best rate with unequal collateral → the crown splits in
+        proportion to depth (crown_depth_shares). hk_a at full capacity for max_swap 500M
+        (550M = the depth cap) takes 5/6 of the crown; hk_b's 110M takes 1/6, further
+        shrunk by its thin capacity multiplier ((110/550)^2 = 0.04)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -1859,13 +1910,39 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], 0.0, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (5 / 6), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        v.state_store.close()
+
+    def test_thin_undercut_inside_band_shares_instead_of_taking_all(self, tmp_path: Path):
+        """The headline CROWN_RATE_BAND behaviour: a thin miner posting the best rate
+        by a hair (0.4%, inside the band) no longer takes the whole crown from the
+        deep miner behind it — the interval splits by depth, 5/6 to the deep quote.
+        A third quote 1.5% off stays outside the band and earns nothing. btc→sol
+        rates are TAO-per-BTC-style asks, so lower is better: hk_thin leads."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_thin', 'hk_deep', 'hk_far'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            collaterals={'hk_thin': 110_000_000, 'hk_deep': 550_000_000, 'hk_far': 550_000_000},
+        )
+        conn = v.state_store.require_connection()
+        for hk, rate in (('hk_thin', 0.000197), ('hk_deep', 0.0001979), ('hk_far', 0.00020)):
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                (hk, 'btc', 'sol', rate, 0),
+            )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * (5 / 6), atol=1e-6)
+        np.testing.assert_allclose(rewards[2], 0.0, atol=1e-6)
         v.state_store.close()
 
     def test_rate_and_collateral_dead_heat_splits_evenly(self, tmp_path: Path):
-        """Same best rate AND same collateral → genuine dead-heat still splits the crown
-        evenly. Collateral only breaks the tie when it differs."""
+        """Same best rate AND same collateral → equal depth shares split the crown
+        evenly, the degenerate case of the proportional split."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,

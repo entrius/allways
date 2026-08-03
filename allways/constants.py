@@ -32,6 +32,13 @@ RATE_PRECISION = 10**18
 # stored, and the validator floors on ingest to close the pre-redeploy migration window. Below
 # this precision an undercut is imperceptible to takers, so the crown ignores it (equal buckets tie).
 RATE_SIG_FIGS = 5
+# Crown rate band: quotes within this fraction of the best qualified rate share the
+# crown in proportion to collateral depth instead of losing outright to a one-tick
+# undercut. Sized from mainnet data: absorbs quote staleness (~0.03% median executed-rate
+# drift inside an hour) and rate gaps takers demonstrably ignore (~0.5%), while staying
+# far below genuine pricing tiers (~2.6% between quote clusters) so a materially better
+# rate still evicts the band and takes the crown outright. 0 restores exact-tie behaviour.
+CROWN_RATE_BAND = 0.005
 
 # ─── Transaction Fees ────────────────────────────────────
 # Small headroom kept aside for extrinsic fees so a deposit doesn't burn gas
