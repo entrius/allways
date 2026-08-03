@@ -1,7 +1,7 @@
 [project]
 name = "allways"
 version = "2.1.0"
-description = "Allways - Universal Transaction Layer: Trustless cross-chain swaps on Bittensor Subnet 7"
+description = "Allways - Universal Transaction Layer: Collateral-backed cross-chain swaps on Bittensor Subnet 7"
 license = "MIT"
 requires-python = ">=3.10,<3.15"
 authors = [{ name = "Allways" }]
