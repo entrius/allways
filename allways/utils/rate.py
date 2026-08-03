@@ -100,6 +100,33 @@ def calculate_to_amount(
             return from_amount * rate_fixed // (RATE_PRECISION * 10 ** (-decimal_diff))
 
 
+def max_from_for_to_cap(
+    to_cap: int,
+    rate,
+    is_reverse: bool,
+    to_decimals: int,
+    from_decimals: int,
+) -> int:
+    """Largest from_amount whose ``calculate_to_amount`` stays <= ``to_cap`` — its exact floor-division
+    inverse, branch for branch, so the pair can never disagree. 0 when no positive amount fits."""
+    rate_fixed = int(rate) if isinstance(rate, int) else int(Decimal(rate) * RATE_PRECISION)
+    if rate_fixed == 0 or to_cap <= 0:
+        return 0
+    decimal_diff = to_decimals - from_decimals
+    if is_reverse:
+        if decimal_diff >= 0:
+            num, den = RATE_PRECISION, rate_fixed * 10**decimal_diff
+        else:
+            num, den = RATE_PRECISION * 10 ** (-decimal_diff), rate_fixed
+    else:
+        if decimal_diff >= 0:
+            num, den = rate_fixed * 10**decimal_diff, RATE_PRECISION
+        else:
+            num, den = rate_fixed, RATE_PRECISION * 10 ** (-decimal_diff)
+    # to = from × num // den  ⇒  largest from with from × num < (to_cap + 1) × den
+    return max(0, ((to_cap + 1) * den - 1) // num)
+
+
 def expected_swap_amounts(swap: 'SolanaSwap', fee_divisor: int) -> Tuple[int, int]:
     """Compute expected to_amount and fee-adjusted user_receives from a swap's on-chain fields.
 

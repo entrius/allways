@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from allways.validator import seam_http
-from allways.validator.reserve_engine import BestQuote, ConfirmResult, ReserveResult, SwapStatus
+from allways.validator.reserve_engine import BestQuote, ConfirmResult, RateQuote, ReserveResult, SwapStatus
 
 SECRET = 'test-secret'
 
@@ -17,7 +17,16 @@ SECRET = 'test-secret'
 def server(monkeypatch):
     monkeypatch.setattr(seam_http, 'reserve_on_behalf', lambda *a, **k: ReserveResult(True, '', 123, 'sig'))
     monkeypatch.setattr(seam_http, 'confirm_deposit', lambda *a, **k: ConfirmResult(True, '', 'deadbeef', 'sig'))
-    monkeypatch.setattr(seam_http, 'best_quote', lambda *a, **k: BestQuote('hk', 'pk', '0.0021', 1, 1, 210000))
+    monkeypatch.setattr(
+        seam_http,
+        'rate_quote',
+        lambda *a, **k: RateQuote(
+            BestQuote('hk', 'pk', '0.0021', 1, 1, 210000),
+            '',
+            [{'rate_display': '0.0021', 'max_from_amount': 2_000_000_000}],
+            2_000_000_000,
+        ),
+    )
     monkeypatch.setattr(seam_http, 'swap_status', lambda *a, **k: SwapStatus('reserved', 999, 'user', ''))
     srv = seam_http.start_seam(SimpleNamespace(), 0, SECRET)
     yield srv
@@ -96,6 +105,25 @@ def test_confirm_ok(server):
 def test_rate(server):
     code, payload = _req(server, 'GET', '/rate?from=sol&to=btc&amount=1000000000')
     assert code == 200 and payload['to_amount'] == 210000 and payload['miner_hotkey'] == 'hk'
+    assert payload['levels'] == [{'rate_display': '0.0021', 'max_from_amount': 2_000_000_000}]
+    assert payload['max_from_amount'] == 2_000_000_000
+
+
+def test_rate_miss_carries_depth(server, monkeypatch):
+    """The oversize UX needs the true max exactly when nothing fits — depth must ride the 404 too."""
+    monkeypatch.setattr(
+        seam_http,
+        'rate_quote',
+        lambda *a, **k: RateQuote(
+            None,
+            'miner collateral too low (needs 1.1000 SOL)',
+            [{'rate_display': '0.0021', 'max_from_amount': 900_000_000}],
+            900_000_000,
+        ),
+    )
+    code, payload = _req(server, 'GET', '/rate?from=sol&to=btc&amount=1000000000')
+    assert code == 404 and 'collateral too low' in payload['error']
+    assert payload['max_from_amount'] == 900_000_000 and len(payload['levels']) == 1
 
 
 def test_status(server):

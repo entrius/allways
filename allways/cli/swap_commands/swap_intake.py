@@ -11,8 +11,14 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain
-from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, required_collateral
-from allways.utils.rate import calculate_to_amount, is_executable_rate, normalize_rate, quantize_rate_fixed
+from allways.constants import COLLATERAL_REQUIREMENT_BPS, NUMERAIRE_CHAIN, RATE_PRECISION, required_collateral
+from allways.utils.rate import (
+    calculate_to_amount,
+    is_executable_rate,
+    max_from_for_to_cap,
+    normalize_rate,
+    quantize_rate_fixed,
+)
 
 
 @dataclass
@@ -137,6 +143,36 @@ def viable_intakes(
         if not swap_gate(amts.collateral_amount, c.collateral, min_swap, max_swap):
             out.append((c, amts))
     return out
+
+
+def max_intake_from_amount(
+    candidate: MinerCandidate,
+    from_chain: str,
+    to_chain: str,
+    min_swap: int,
+    max_swap: int,
+) -> int:
+    """Largest source amount (smallest units) this candidate can execute right now — the depth behind
+    its rate. The same gates as ``viable_intakes``, solved for size instead of checked at one: the
+    collateral requirement inverted exactly, clamped by ``max_swap``, 0 when even ``min_swap`` doesn't fit."""
+    try:
+        rate = float(candidate.rate_display)
+    except (TypeError, ValueError):
+        return 0
+    if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
+        return 0
+    # Largest SOL leg with required_collateral(leg) <= collateral — exact inverse of the 1.1× floor.
+    cap = ((candidate.collateral + 1) * 10_000 - 1) // COLLATERAL_REQUIREMENT_BPS
+    if max_swap > 0:
+        cap = min(cap, max_swap)
+    if cap <= 0 or cap < min_swap:
+        return 0
+    if from_chain == NUMERAIRE_CHAIN:
+        return cap
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    return max_from_for_to_cap(
+        cap, candidate.rate_display, True, get_chain(canon_to).decimals, get_chain(canon_from).decimals
+    )
 
 
 def _bound_in_source(bound_lamports: int, from_chain: str, rate_display: str) -> str:
