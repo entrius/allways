@@ -25,6 +25,7 @@ from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import (
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
+    CROWN_RATE_BAND,
     DIRECTION_POOLS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
@@ -337,7 +338,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # replay_crown_time_window is a no-op when intervals_out is None, so
     # disabled validators pay zero cost here.
     storage_enabled = self.database_storage.is_enabled()
-    intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, List[str], float]]] = {}
+    intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, Dict[str, float], float]]] = {}
     try:
         max_swap_amount = int(self.solana_config_cache.max_swap_amount())
     except Exception as e:
@@ -358,7 +359,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     for (from_chain, to_chain), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         direction_traces[(from_chain, to_chain)] = trace
-        intervals: Optional[List[Tuple[int, int, List[str], float]]] = None
+        intervals: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain)] = intervals
@@ -654,6 +655,26 @@ def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_lamports, max_sw
     return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
 
+def crown_depth_shares(
+    holders: List[str],
+    collaterals: Dict[str, int],
+    max_swap_lamports: int,
+) -> Dict[str, float]:
+    """Split one interval's crown credit across band holders in proportion to
+    collateral depth, so matching the leader's rate earns share only to the
+    extent it is backed — depth becomes something a rival can take from you.
+    Depth is capped at ``required_collateral(max_swap)``: collateral past a
+    full-capacity fill buys no extra share (same never-pay-to-win bound
+    ``capacity_factor`` applies at 1.0). All-zero depth (bounds unset in tests,
+    or a band of unknown collaterals) falls back to an even split."""
+    cap = required_collateral(max_swap_lamports) if max_swap_lamports > 0 else None
+    depths = {hk: min(collaterals.get(hk, 0), cap) if cap else collaterals.get(hk, 0) for hk in holders}
+    total = sum(depths.values())
+    if total <= 0:
+        return {hk: 1.0 / len(holders) for hk in holders}
+    return {hk: depth / total for hk, depth in depths.items()}
+
+
 def make_crown_predicates(from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
     """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
     scoring replay and the live snapshot, so the live crown view can never diverge
@@ -686,13 +707,16 @@ def replay_crown_time_window(
     window_end: int,
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
-    intervals_out: Optional[List[Tuple[int, int, List[str], float]]] = None,
+    intervals_out: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None,
     min_swap_lamports: int = 0,
     max_swap_lamports: int = 0,
+    rate_band: float = CROWN_RATE_BAND,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
-    Among miners tied on the best rate the crown goes to the deepest collateral;
-    only a dead-heat on both rate and collateral splits evenly. A miner qualifies for crown
+    Every qualified miner within ``rate_band`` of the best qualified rate holds
+    the crown together, splitting each interval by collateral depth
+    (``crown_depth_shares``); band 0 narrows the holder set to the exact best
+    rate, where depth still apportions any tie. A miner qualifies for crown
     at an instant iff they are on the current metagraph, were active at
     that instant, in a rewardable activity state (∈ REWARD_MINER_STATES — a
     reserved/fulfilling miner forfeits), had a positive rate posted, and their
@@ -748,6 +772,7 @@ def replay_crown_time_window(
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
             can_fund_at_rate=can_fund if bounds_set else None,
+            rate_band=rate_band,
         )
         if not holders:
             if trace is not None:
@@ -756,16 +781,15 @@ def replay_crown_time_window(
         winner_rate = rates_for_instant.get(holders[0], 0.0)
         if trace is not None and winner_rate > 0:
             trace.best_rate = winner_rate
-        # Among holders tied on the best rate, the crown goes to the deepest collateral:
-        # matching the leader's rate only earns if you also back it with the most depth,
-        # so posting a sharp quote on a sliver no longer wins a free share. A genuine
-        # dead-heat — same rate AND same collateral — still splits evenly.
-        max_coll = max(collaterals.get(hk, 0) for hk in holders)
-        winners = [hk for hk in holders if collaterals.get(hk, 0) == max_coll]
+        # Holders are every qualified miner within CROWN_RATE_BAND of the best
+        # rate; the interval splits across them by collateral depth, so a
+        # one-tick undercut no longer takes the crown outright and depth is the
+        # axis a rival must beat you on inside the band.
+        shares = crown_depth_shares(holders, collaterals, max_swap_lamports)
         if intervals_out is not None:
-            intervals_out.append((interval_start, interval_end, list(winners), winner_rate))
-        split = duration / len(winners)
-        for hk in winners:
+            intervals_out.append((interval_start, interval_end, dict(shares), winner_rate))
+        for hk, share in shares.items():
+            split = duration * share
             crown_time[hk] = crown_time.get(hk, 0.0) + split
             # Unknown collateral counts as zero, matching can_fund's fail-closed
             # (the reconcile seeds a baseline for every bound active miner);
@@ -873,39 +897,39 @@ def snapshot_current_crown_holders(
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
             can_fund_at_rate=can_fund if bounds_set else None,
+            rate_band=CROWN_RATE_BAND,
         )
         if holders:
-            # Same rate tie-break as the scoring replay: the deepest collateral among
-            # tied-rate holders takes the crown, so the live table agrees with what the
-            # round scorer will credit. A dead-heat on both rate and collateral still splits.
-            max_coll = max(collaterals.get(hk, 0) for hk in holders)
-            winners = [hk for hk in holders if collaterals.get(hk, 0) == max_coll]
-            share = 1.0 / len(winners)
-            rate = rates.get(winners[0], 0.0)
-            rows_by_direction[(from_chain, to_chain)] = [(from_chain, to_chain, hk, share, rate, ts) for hk in winners]
+            # Same band + depth split as the scoring replay, so the live table agrees
+            # with what the round scorer will credit. Every row carries the band's
+            # anchor (best) rate — the direction's crown rate as a taker sees it.
+            shares = crown_depth_shares(holders, collaterals, max_swap_amount)
+            rate = rates.get(holders[0], 0.0)
+            rows_by_direction[(from_chain, to_chain)] = [
+                (from_chain, to_chain, hk, share, rate, ts) for hk, share in shares.items()
+            ]
         else:
             rows_by_direction[(from_chain, to_chain)] = []
     return rows_by_direction
 
 
 def intervals_to_crown_rows(
-    intervals: List[Tuple[int, int, List[str], float]],
+    intervals: List[Tuple[int, int, Dict[str, float], float]],
     from_chain: str,
     to_chain: str,
 ) -> List[Tuple[int, int, str, str, str, float, float]]:
     """Convert uniform-state crown intervals to crown_holders rows.
 
-    For each (started_at, ended_at, holders, rate) emit one row per holder
-    with credit = 1/len(holders), so the per-interval per-direction credits
-    sum to 1.0 — the validator's fair-tie semantics. A holder's crown *time*
+    For each (started_at, ended_at, shares, rate) emit one row per holder
+    carrying its depth-proportional credit (``crown_depth_shares`` output, so
+    per-interval per-direction credits sum to 1.0). A holder's crown *time*
     over a window is then ``SUM((ended_at - started_at) * credit)``, matching
     the duration the scoring replay already integrates (no per-tick expansion)."""
     rows: List[Tuple[int, int, str, str, str, float, float]] = []
-    for lo, hi, holders, rate in intervals:
-        if not holders or hi <= lo:
+    for lo, hi, shares, rate in intervals:
+        if not shares or hi <= lo:
             continue
-        share = 1.0 / len(holders)
-        for hotkey in holders:
+        for hotkey, share in shares.items():
             rows.append((lo, hi, from_chain, to_chain, hotkey, share, rate))
     return rows
 
@@ -918,11 +942,18 @@ def crown_holders_at_instant(
     lower_rate_wins: bool = False,
     executable_rate_check: Optional[Callable[[float], bool]] = None,
     can_fund_at_rate: Optional[Callable[[str, float], bool]] = None,
+    rate_band: float = 0.0,
 ) -> List[str]:
     """Take the miners posting the best rate, but only if they satisfy every
     other condition (rewardable, active, activity ∈ REWARD_MINER_STATES, rate >
     0, executable). If the best rate has no qualified miner, fall through to the
     next-best rate.
+
+    ``rate_band`` widens the winning set: every qualified miner whose rate is
+    within that fraction of the best *qualified* rate is a holder (best first).
+    The anchor is the best qualified rate, not the best posted one — an
+    unqualified sentinel can't drag the band out of everyone else's reach.
+    0 keeps the historical exact-best-rate behaviour.
 
     ``lower_rate_wins`` flips the sort: rates are stored as canonical_dest
     per canonical_source (TAO per BTC), so higher-is-better only holds in
@@ -969,9 +1000,20 @@ def crown_holders_at_instant(
         if rate > 0:
             by_rate.setdefault(rate, []).append(hotkey)
 
-    for rate in sorted(by_rate, reverse=not lower_rate_wins):
+    ordered = sorted(by_rate, reverse=not lower_rate_wins)
+    for i, rate in enumerate(ordered):
         winners = [hk for hk in by_rate[rate] if qualifies(hk)]
-        if winners:
-            return winners
+        if not winners:
+            continue
+        if rate_band > 0:
+            # Anchor at the best qualified rate, then sweep worse levels while
+            # they stay inside the band. Levels are already sorted best-first,
+            # so the first out-of-band level ends the sweep.
+            edge = rate * (1 + rate_band) if lower_rate_wins else rate * (1 - rate_band)
+            for worse in ordered[i + 1 :]:
+                if (worse > edge) if lower_rate_wins else (worse < edge):
+                    break
+                winners.extend(hk for hk in by_rate[worse] if qualifies(hk))
+        return winners
 
     return []
