@@ -9,9 +9,11 @@ import pytest
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     compute_intake_amounts,
+    max_intake_from_amount,
     rate_display_from_fixed,
     required_collateral,
     select_best_miner,
+    swap_gate,
     swap_viable,
     to_smallest_units,
     unviable_reason,
@@ -200,3 +202,49 @@ def test_unviable_reason_collateral():
     cands = [MinerCandidate(miner='m', rate_display='1.0', collateral=SOL // 10)]
     reason = unviable_reason(cands, 'tao', 'sol', 1_000_000_000, 0, 0)
     assert 'collateral too low' in reason
+
+
+# ---- max_intake_from_amount: the depth behind a rate, solved for size ----
+def _cand(rate, collateral):
+    return MinerCandidate(miner='m', rate_display=rate, collateral=collateral)
+
+
+def test_max_intake_sol_source_is_exact_collateral_inverse():
+    # 1.1 SOL collateral backs exactly a 1 SOL leg; one more lamport must fail the gate.
+    cap = max_intake_from_amount(_cand('0.5', 1_100_000_000), 'sol', 'btc', MIN, MAX)
+    assert cap == SOL
+    assert swap_gate(cap, 1_100_000_000, MIN, MAX) == ''
+    assert swap_gate(cap + 1, 1_100_000_000, MIN, MAX) != ''
+
+
+def test_max_intake_clamped_by_max_swap():
+    assert max_intake_from_amount(_cand('0.5', 100 * SOL), 'sol', 'btc', MIN, MAX) == MAX
+
+
+def test_max_intake_zero_when_min_swap_unreachable():
+    # Collateral backs at most ~0.09 SOL — under the 0.1 SOL min, so no viable size exists.
+    assert max_intake_from_amount(_cand('0.5', SOL // 10), 'sol', 'btc', MIN, MAX) == 0
+
+
+def test_max_intake_zero_on_junk_rate():
+    assert max_intake_from_amount(_cand('junk', 2 * SOL), 'sol', 'btc', MIN, MAX) == 0
+
+
+def test_max_intake_spoke_source_inverts_to_amount_exactly():
+    # btc→sol at 0.5 BTC/SOL: the SOL leg is to_amount. The returned max must be the LARGEST
+    # source whose derived leg still passes the gate — its successor must overshoot.
+    coll = 1_650_000_000  # backs a 1.5 SOL leg
+    max_from = max_intake_from_amount(_cand('0.5', coll), 'btc', 'sol', MIN, MAX)
+    at_max = compute_intake_amounts('btc', 'sol', max_from, '0.5')
+    past_max = compute_intake_amounts('btc', 'sol', max_from + 1, '0.5')
+    assert swap_gate(at_max.collateral_amount, coll, MIN, MAX) == ''
+    assert swap_gate(past_max.collateral_amount, coll, MIN, MAX) != ''
+    assert at_max.collateral_amount == 1_500_000_000  # 0.075 BTC → exactly the 1.5 SOL cap
+
+
+def test_max_intake_spoke_source_respects_max_swap():
+    # Deep collateral, 10 SOL max_swap: max source is the amount whose leg lands exactly on max.
+    max_from = max_intake_from_amount(_cand('0.5', 100 * SOL), 'btc', 'sol', MIN, MAX)
+    at_max = compute_intake_amounts('btc', 'sol', max_from, '0.5')
+    past_max = compute_intake_amounts('btc', 'sol', max_from + 1, '0.5')
+    assert at_max.collateral_amount <= MAX < past_max.collateral_amount

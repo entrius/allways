@@ -17,11 +17,13 @@ from allways.chain_providers.base import ProviderUnreachableError
 from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
+    max_intake_from_amount,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
     unviable_reason,
 )
+from allways.constants import NUMERAIRE_CHAIN
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.validator.binding import hotkey_ss58, verify_binding
 
@@ -364,31 +366,40 @@ class BestQuote:
     to_amount: int
 
 
-def best_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> Optional[BestQuote]:
-    """Best executable quote for ``from_amount`` (source smallest-units): the miner giving the most dest.
+# Depth rungs served alongside /rate — enough to show the market, few enough to stay a glance.
+RATE_LEVELS_LIMIT = 5
 
-    Mirrors ``select_best_miner`` so the displayed rate == the reservable rate. None if none qualify."""
+
+@dataclass
+class RateQuote:
+    quote: Optional[BestQuote]  # best executable quote for the asked size, None if nothing fits
+    reason: str  # why quote is None ('' on a hit)
+    levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
+    max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
+
+
+def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
+    """Everything ``/rate`` serves, from ONE candidate scan: the best executable quote for
+    ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
+    the reservable rate) plus the depth behind it. Rung order matches the selector's ranking (most
+    dest per source); same-rate quotes collapse to the deepest. Capacities are per-rung maxima,
+    never cumulative — a swap fills against a single miner."""
     client = validator.solana_client
     cfg = client.get_config()
     min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
     max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
-    best = select_best_miner(
-        candidate_miners(client, from_chain, to_chain), from_chain, to_chain, from_amount, min_swap, max_swap
-    )
-    if best is None:
-        return None
-    return _best_quote_result(validator, best)
-
-
-def quote_rejection_reason(validator, from_chain: str, to_chain: str, from_amount: int) -> str:
-    """Why ``best_quote`` came back empty — same candidates, same gates, spelled out."""
-    client = validator.solana_client
-    cfg = client.get_config()
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
-    return unviable_reason(
-        candidate_miners(client, from_chain, to_chain), from_chain, to_chain, from_amount, min_swap, max_swap
-    )
+    cands = candidate_miners(client, from_chain, to_chain)
+    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap)
+    bq = _best_quote_result(validator, best) if best else None
+    reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap)
+    depth: dict = {}
+    for cand in cands:
+        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap)
+        if cap > 0:
+            depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
+    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_chain == NUMERAIRE_CHAIN)
+    levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0))
 
 
 def _best_quote_result(validator, best) -> Optional[BestQuote]:

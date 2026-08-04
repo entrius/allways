@@ -17,9 +17,8 @@ from urllib.parse import parse_qs, urlparse
 import bittensor as bt
 
 from allways.validator.reserve_engine import (
-    best_quote,
     confirm_deposit,
-    quote_rejection_reason,
+    rate_quote,
     reserve_on_behalf,
     scan_deposit,
     swap_status,
@@ -57,11 +56,13 @@ def _make_handler(validator, secret: str):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == '/rate':
-                    bq = best_quote(validator, q['from'], q['to'], int(q['amount']))
-                    if bq is None:
-                        reason = quote_rejection_reason(validator, q['from'], q['to'], int(q['amount']))
-                        return self._send(404, {'error': reason})
-                    return self._send(200, bq.__dict__)
+                    # Depth rides along on hit AND miss — the offering's oversize copy ("max right
+                    # now is X") needs the true max exactly when no quote fits the asked size.
+                    rq = rate_quote(validator, q['from'], q['to'], int(q['amount']))
+                    depth = {'levels': rq.levels, 'max_from_amount': rq.max_from_amount}
+                    if rq.quote is None:
+                        return self._send(404, {'error': rq.reason, **depth})
+                    return self._send(200, {**rq.quote.__dict__, **depth})
                 if url.path == '/status':
                     # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
                     # swap directly — the only route to post-attestation stages, since vote_initiate
