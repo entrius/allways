@@ -1,0 +1,176 @@
+"""CollateralFloorSweep: the vote_deactivate driver for the min_collateral-raise
+edge case. The properties under test: steady state costs no RPC, the miner scan
+runs only on boot / floor raise, busy miners are retried instead of dropped, and
+a cast vote stays pending until quorum actually flips the miner inactive."""
+
+from types import SimpleNamespace
+
+from solders.pubkey import Pubkey
+
+from allways.solana import pdas
+from allways.validator.floor_sweep import CollateralFloorSweep
+
+FLOOR = 1_000_000_000  # 1 SOL
+
+MINER_A = Pubkey.new_unique()
+MINER_B = Pubkey.new_unique()
+
+
+def miner_state(miner, collateral, active=True, has_active_swap=False, busy_until=0):
+    return SimpleNamespace(
+        miner=bytes(miner),
+        collateral=collateral,
+        active=active,
+        has_active_swap=has_active_swap,
+        busy_until=busy_until,
+    )
+
+
+class FakeClient:
+    def __init__(self, states):
+        # {pubkey_str: miner_state}; mutate `states` to simulate chain changes.
+        self.states = states
+        self.keypair = SimpleNamespace(pubkey=lambda: Pubkey.new_unique())
+        self.voted = set()
+        self.calls = {'get_all': 0, 'get_miner_state': 0, 'vote_deactivate': 0}
+
+    def get_all(self, name):
+        assert name == 'MinerState'
+        self.calls['get_all'] += 1
+        return [(k, v) for k, v in self.states.items()]
+
+    def get_miner_state(self, miner):
+        self.calls['get_miner_state'] += 1
+        return self.states.get(str(miner))
+
+    def has_voted(self, req_type, miner, voter):
+        assert req_type == pdas.REQ_DEACTIVATE
+        return str(miner) in self.voted
+
+    def vote_deactivate(self, miner):
+        self.calls['vote_deactivate'] += 1
+        self.voted.add(str(miner))
+        return 'sig'
+
+
+class Clock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class TestSteadyState:
+    def test_first_step_scans_once_then_unchanged_floor_is_free(self):
+        client = FakeClient({str(MINER_A): miner_state(MINER_A, FLOOR)})
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR)
+        assert client.calls['get_all'] == 1  # boot scan covers a raise-while-offline
+        for _ in range(50):
+            sweep.step(FLOOR)
+        assert client.calls['get_all'] == 1
+        assert client.calls['get_miner_state'] == 0
+        assert client.calls['vote_deactivate'] == 0
+
+    def test_floor_decrease_does_not_rescan(self):
+        client = FakeClient({})
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR)
+        sweep.step(FLOOR // 2)
+        assert client.calls['get_all'] == 1
+
+
+class TestRaise:
+    def test_raise_kicks_underfloor_active_idle_miner(self):
+        client = FakeClient(
+            {
+                str(MINER_A): miner_state(MINER_A, 150_000_000),  # under new floor
+                str(MINER_B): miner_state(MINER_B, 2 * FLOOR),  # comfortably above
+            }
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(100_000_000)  # boot at the old floor: everyone compliant
+        assert client.calls['vote_deactivate'] == 0
+        sweep.step(FLOOR)  # the raise
+        assert client.calls['get_all'] == 2
+        assert client.voted == {str(MINER_A)}
+
+    def test_inactive_and_topped_up_miners_are_ignored(self):
+        client = FakeClient(
+            {
+                str(MINER_A): miner_state(MINER_A, 100, active=False),
+                str(MINER_B): miner_state(MINER_B, FLOOR),
+            }
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 0
+
+
+class TestPending:
+    def test_busy_miner_retried_after_interval_not_before(self):
+        clock = Clock()
+        state = miner_state(MINER_A, 100, has_active_swap=True)
+        client = FakeClient({str(MINER_A): state})
+        sweep = CollateralFloorSweep(client, clock=clock)
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 0  # busy: contract would reject
+
+        sweep.step(FLOOR)  # inside retry interval — no reads
+        assert client.calls['get_miner_state'] == 0
+
+        state.has_active_swap = False  # swap resolved on-chain
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['get_miner_state'] == 1
+        assert client.voted == {str(MINER_A)}
+
+    def test_voted_miner_stays_pending_until_quorum_flips_inactive(self):
+        clock = Clock()
+        state = miner_state(MINER_A, 100)
+        client = FakeClient({str(MINER_A): state})
+        sweep = CollateralFloorSweep(client, clock=clock)
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 1
+
+        # Quorum not reached yet: recheck must not double-vote (has_voted gate)
+        # but must keep the miner pending.
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 1
+
+        state.active = False  # peers reached quorum
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)  # pending drained: no further reads
+        assert client.calls['get_miner_state'] == 2
+
+    def test_miner_topping_up_while_pending_is_released(self):
+        clock = Clock()
+        state = miner_state(MINER_A, 100, has_active_swap=True)
+        client = FakeClient({str(MINER_A): state})
+        sweep = CollateralFloorSweep(client, clock=clock)
+        sweep.step(FLOOR)
+
+        state.has_active_swap = False
+        state.collateral = FLOOR  # posted collateral to comply instead
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 0
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['get_miner_state'] == 1  # released, no more rechecks
+
+
+class TestReadOnly:
+    def test_watch_mode_never_votes_but_keeps_watching(self):
+        clock = Clock()
+        client = FakeClient({str(MINER_A): miner_state(MINER_A, 100)})
+        sweep = CollateralFloorSweep(client, read_only=True, clock=clock)
+        sweep.step(FLOOR)
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 0
+        assert client.calls['get_miner_state'] == 1  # still tracked as pending

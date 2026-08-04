@@ -48,6 +48,7 @@ from allways.validator.axon_handlers import (  # noqa: E402
 from allways.validator.binding import warn_if_unbound  # noqa: E402
 from allways.validator.bounds_cache import SolanaConfigCache  # noqa: E402
 from allways.validator.event_index import SolanaEventIndex  # noqa: E402
+from allways.validator.floor_sweep import CollateralFloorSweep  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
 from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
@@ -124,6 +125,9 @@ class Validator(BaseValidatorNeuron):
         # swap bounds + halt off the Config account (replacing substrate reads).
         self.event_ingest = SolanaEventIngest(self.solana_client)
         self.solana_config_cache = SolanaConfigCache(self.solana_client)
+        # Kicks miners stranded active under a raised min_collateral (they can't
+        # be reserved, so the contract's fee/slash auto-deactivation never fires).
+        self.floor_sweep = CollateralFloorSweep(self.solana_client, read_only=solana_read_only)
         # event_index synthesizes each reservation's RESERVE_EXPIRE at
         # block_time + reservation_ttl_secs, read off the config cache (D4).
         self.event_index = SolanaEventIndex(self.state_store, self.solana_config_cache.reservation_ttl_secs)

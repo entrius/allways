@@ -595,6 +595,21 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('vote_activate', b'', metas)])
 
+    def vote_deactivate(self, miner) -> str:
+        """Vote to force-deactivate an idle active miner; on quorum active flips false.
+        The contract rejects busy miners (in-flight swap / unexpired busy_until)."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_DEACTIVATE, m, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('vote_deactivate', b'', metas)])
+
     def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
         """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.
         The round PDA is keyed by the snapshot hash, so competing proposals coexist instead of blocking."""
