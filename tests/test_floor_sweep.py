@@ -33,14 +33,21 @@ class FakeClient:
         self.keypair = SimpleNamespace(pubkey=lambda: Pubkey.new_unique())
         self.voted = set()
         self.calls = {'get_all': 0, 'get_miner_state': 0, 'vote_deactivate': 0}
+        self.fail_get_all = 0  # raise on this many get_all calls before serving
+        self.fail_state_for = set()  # miner keys whose reads raise
 
     def get_all(self, name):
         assert name == 'MinerState'
         self.calls['get_all'] += 1
+        if self.fail_get_all > 0:
+            self.fail_get_all -= 1
+            raise RuntimeError('rpc down')
         return [(k, v) for k, v in self.states.items()]
 
     def get_miner_state(self, miner):
         self.calls['get_miner_state'] += 1
+        if str(miner) in self.fail_state_for:
+            raise RuntimeError('rpc down')
         return self.states.get(str(miner))
 
     def has_voted(self, req_type, miner, voter):
@@ -162,6 +169,53 @@ class TestPending:
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
         assert client.calls['get_miner_state'] == 1  # released, no more rechecks
+
+
+class TestRpcFailure:
+    def test_failed_arm_scan_is_retried_not_lost(self):
+        """A raise whose scan RPC fails must stay armed: the floor is only
+        committed after a successful scan, so the raise re-fires on the retry
+        cadence instead of being swallowed forever."""
+        clock = Clock()
+        client = FakeClient({str(MINER_A): miner_state(MINER_A, 100)})
+        client.fail_get_all = 1
+        sweep = CollateralFloorSweep(client, clock=clock)
+        try:
+            sweep.step(FLOOR)  # production wraps this in maybe_sweep_floor
+        except RuntimeError:
+            pass
+        assert client.voted == set()
+
+        sweep.step(FLOOR)  # inside back-off: no immediate re-scan hammering
+        assert client.calls['get_all'] == 1
+
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.calls['get_all'] == 2
+        assert client.voted == {str(MINER_A)}
+
+    def test_one_unreadable_pending_miner_does_not_block_the_rest(self):
+        clock = Clock()
+        client = FakeClient(
+            {
+                str(MINER_A): miner_state(MINER_A, 100, has_active_swap=True),
+                str(MINER_B): miner_state(MINER_B, 100, has_active_swap=True),
+            }
+        )
+        sweep = CollateralFloorSweep(client, clock=clock)
+        sweep.step(FLOOR)  # both pending (busy)
+
+        for ms in client.states.values():
+            ms.has_active_swap = False
+        client.fail_state_for = {str(MINER_A)}
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)
+        assert client.voted == {str(MINER_B)}  # B kicked despite A's read failing
+
+        client.fail_state_for = set()
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)  # next cadence, not next step
+        assert client.voted == {str(MINER_A), str(MINER_B)}
 
 
 class TestReadOnly:

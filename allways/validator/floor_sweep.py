@@ -36,40 +36,59 @@ class CollateralFloorSweep:
         self._read_only = read_only
         self._clock = clock or time.time
         self._last_floor: Optional[int] = None
+        # Scan owed: set on boot and on every raise edge, cleared only by a
+        # completed scan — an RPC failure at the raise moment keeps it set, so
+        # the sweep retries on the slow cadence instead of losing the event.
+        self._armed = False
         # Miner pubkey strings still needing a kick (busy, or vote short of quorum).
         self._pending: Set[str] = set()
         self._next_retry: float = 0.0
 
     def step(self, floor: int) -> None:
-        """One forward-step tick. Steady state (floor unchanged, nothing pending)
-        costs one int comparison; everything heavier is gated behind a raise."""
-        first = self._last_floor is None
-        raised = not first and floor > self._last_floor
-        self._last_floor = floor
+        """One forward-step tick. Steady state (floor unchanged, nothing armed
+        or pending) costs two comparisons; everything heavier sits behind a
+        raise edge or the retry cursor."""
         now = self._clock()
-        if first or raised:
+        if self._last_floor is None or floor > self._last_floor:
+            # Arm, and reset the cursor so a genuine raise scans immediately
+            # instead of waiting out a previous back-off. The edge fires once
+            # per raise (floor commits below), so this can't re-fire per step.
+            self._armed = True
+            self._next_retry = now
+        self._last_floor = floor
+        if now < self._next_retry:
+            return
+        if self._armed:
             self._scan(floor, now)
-        elif self._pending and now >= self._next_retry:
+            self._armed = False
+        elif self._pending:
             self._recheck(floor, now)
 
     def _scan(self, floor: int, now: float) -> None:
-        """Full MinerState scan — the rare, arm-time path."""
+        """Full MinerState scan — the rare, arm-time path. The retry cursor
+        advances before the RPC so a throwing scan backs off instead of
+        re-firing every forward step."""
+        self._next_retry = now + self.RETRY_SECS
         self._pending = set()
         for _, ms in self._client.get_all('MinerState'):
             miner = self._miner_key(ms)
             if not self._resolve(miner, ms, floor, now):
                 self._pending.add(miner)
-        self._next_retry = now + self.RETRY_SECS
         if self._pending:
             bt.logging.info(f'floor sweep: {len(self._pending)} active miner(s) under floor {floor}, pending kick')
 
     def _recheck(self, floor: int, now: float) -> None:
-        """Per-miner account reads for the stragglers only."""
+        """Per-miner account reads for the stragglers only. Cursor-first for the
+        same back-off reason as ``_scan``; one unreadable miner skips, not aborts."""
+        self._next_retry = now + self.RETRY_SECS
         for miner in list(self._pending):
-            ms = self._client.get_miner_state(miner)
+            try:
+                ms = self._client.get_miner_state(miner)
+            except Exception as e:
+                bt.logging.warning(f'floor sweep: {miner}: {e}')
+                continue
             if ms is None or self._resolve(miner, ms, floor, now):
                 self._pending.discard(miner)
-        self._next_retry = now + self.RETRY_SECS
 
     def _resolve(self, miner: str, ms, floor: int, now: float) -> bool:
         """Returns True when this miner needs nothing further. A cast vote is not
