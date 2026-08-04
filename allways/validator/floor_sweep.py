@@ -23,6 +23,7 @@ import bittensor as bt
 from solders.pubkey import Pubkey
 
 from allways.solana import pdas
+from allways.solana.client import benign_marker
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -105,8 +106,17 @@ class CollateralFloorSweep:
                 return False
             if self._client.has_voted(pdas.REQ_DEACTIVATE, miner, self._client.keypair.pubkey()):
                 return False
-            sig = self._client.vote_deactivate(miner)
-            bt.logging.info(f'floor sweep: voted to deactivate {miner} (collateral < {floor}): {sig}')
+            try:
+                sig = self._client.vote_deactivate(miner)
+                bt.logging.info(f'floor sweep: voted to deactivate {miner} (collateral < {floor}): {sig}')
+            except Exception as e:
+                # The has_voted read and the send can race (our vote lands in
+                # between, or the stale-round clock disagrees by seconds) — the
+                # contract's AlreadyVoted is an authoritative no-op, not a failure.
+                if benign_marker(e, ('AlreadyVoted',)):
+                    bt.logging.debug(f'floor sweep: {miner}: vote already recorded')
+                else:
+                    raise
         except Exception as e:
             bt.logging.warning(f'floor sweep: {miner}: {e}')
         return False

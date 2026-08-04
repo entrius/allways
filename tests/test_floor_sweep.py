@@ -218,6 +218,54 @@ class TestRpcFailure:
         assert client.voted == {str(MINER_A), str(MINER_B)}
 
 
+class TestStaleVoteRound:
+    def test_stale_round_vote_does_not_gate_a_revote(self):
+        """The contract reopens a round older than VOTE_ROUND_TTL_SECS and lets
+        prior voters vote again; the client's has_voted must mirror that, or a
+        first pass that missed quorum leaves every prior voter skipping forever
+        and the miner stranded (review finding on #616)."""
+        from solders.keypair import Keypair
+
+        from allways.constants import VOTE_ROUND_TTL_SECS
+        from allways.solana.client import AllwaysSolanaClient
+
+        voter = Keypair().pubkey()
+        client = AllwaysSolanaClient('http://127.0.0.1:1', program_id=Pubkey.new_unique(), keypair=Keypair())
+        round_ = SimpleNamespace(voters=[voter], created_at=10_000)
+        client.get_vote_round = lambda req_type, target: round_
+
+        live = 10_000 + VOTE_ROUND_TTL_SECS  # exactly at the TTL: still live
+        assert client.has_voted(pdas.REQ_DEACTIVATE, MINER_A, voter, now=live) is True
+        stale = 10_000 + VOTE_ROUND_TTL_SECS + 1
+        assert client.has_voted(pdas.REQ_DEACTIVATE, MINER_A, voter, now=stale) is False
+
+        # An empty round is closed/reset — never a gate.
+        client.get_vote_round = lambda req_type, target: SimpleNamespace(voters=[], created_at=0)
+        assert client.has_voted(pdas.REQ_DEACTIVATE, MINER_A, voter, now=live) is False
+
+    def test_already_voted_race_is_benign_and_miner_stays_pending(self):
+        """If the vote lands AlreadyVoted (the has_voted read raced the send),
+        the sweep treats it as an on-chain no-op — and the miner stays pending
+        until quorum flips it inactive."""
+        clock = Clock()
+        state = miner_state(MINER_A, 100)
+        client = FakeClient({str(MINER_A): state})
+
+        def racing_vote(miner):
+            client.calls['vote_deactivate'] += 1
+            raise RuntimeError('custom program error. Error Message: AlreadyVoted.')
+
+        client.vote_deactivate = racing_vote
+        sweep = CollateralFloorSweep(client, clock=clock)
+        sweep.step(FLOOR)
+        assert client.calls['vote_deactivate'] == 1
+
+        state.active = False  # quorum reached via peers
+        clock.now += CollateralFloorSweep.RETRY_SECS
+        sweep.step(FLOOR)  # still pending → rechecked → released
+        assert client.calls['get_miner_state'] == 1
+
+
 class TestReadOnly:
     def test_watch_mode_never_votes_but_keeps_watching(self):
         clock = Clock()

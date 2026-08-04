@@ -114,6 +114,9 @@ RECONCILE_QUIET_SECS = 600
 SECONDS_PER_BLOCK = 12
 WEIGHTS_STAKE_BUCKET_ALPHA = 50_000  # alpha per draw-weight unit; floor rounding
 WEIGHTS_VOTE_INTERVAL_BLOCKS = 3_600  # ~12h — posting boundary cadence
+# Contract vote-round lifetime — mirrors constants.rs. A non-empty round older than this is
+# stale: record_vote clears and reopens it, and prior voters may legally vote again.
+VOTE_ROUND_TTL_SECS = 1_800
 # In-epoch retry throttle: one attempt per contract vote-round lifetime (VOTE_ROUND_TTL_SECS),
 # so an unlanded round has expired (and is reopenable with our snapshot) by the time we retry.
 WEIGHTS_VOTE_RETRY_SECS = 1_800
