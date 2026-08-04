@@ -19,6 +19,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
+from allways.constants import VOTE_ROUND_TTL_SECS
 from allways.solana import layouts, pdas
 from allways.solana.program import resolve_program_id
 from allways.solana.rpc import SolanaRpc
@@ -243,10 +244,17 @@ class AllwaysSolanaClient:
     def get_vote_round(self, req_type: int, target=None):
         return self._get('VoteRound', pdas.vote_round_pda(req_type, target, self.program_id))
 
-    def has_voted(self, req_type: int, target, voter) -> bool:
-        """True if `voter` (Pubkey/bytes) already recorded a vote in this round — skip a wasted re-vote."""
+    def has_voted(self, req_type: int, target, voter, now: Optional[int] = None) -> bool:
+        """True if `voter` (Pubkey/bytes) has a LIVE vote in this round — skip a wasted re-vote.
+        Mirrors record_vote's staleness rule: a non-empty round older than VOTE_ROUND_TTL_SECS is
+        reopenable and prior voters may legally vote again, so a stale-round vote must not gate a
+        retry — a first pass that missed quorum would otherwise strand the target forever, with
+        every prior voter skipping on each recheck."""
         vr = self.get_vote_round(req_type, target)
-        if vr is None:
+        if vr is None or not vr.voters:
+            return False
+        age = (now if now is not None else int(time.time())) - int(vr.created_at)
+        if age > VOTE_ROUND_TTL_SECS:
             return False
         vb = bytes(_as_pubkey(voter))
         return any(bytes(v) == vb for v in vr.voters)
@@ -594,6 +602,21 @@ class AllwaysSolanaClient:
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('vote_activate', b'', metas)])
+
+    def vote_deactivate(self, miner) -> str:
+        """Vote to force-deactivate an idle active miner; on quorum active flips false.
+        The contract rejects busy miners (in-flight swap / unexpired busy_until)."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_DEACTIVATE, m, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('vote_deactivate', b'', metas)])
 
     def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
         """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.

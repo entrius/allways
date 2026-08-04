@@ -42,6 +42,9 @@ class SolanaConfigCache:
     def min_swap_amount(self) -> int:
         return int(self._fresh_config().min_swap_amount)
 
+    def min_collateral(self) -> int:
+        return int(self._fresh_config().min_collateral)
+
     def max_swap_amount(self) -> int:
         return int(self._fresh_config().max_swap_amount)
 

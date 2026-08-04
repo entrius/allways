@@ -11,6 +11,7 @@ import bittensor as bt
 from allways import dev_signal
 from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
+from allways.validator.floor_sweep import maybe_sweep_floor
 from allways.validator.reserve_engine import finalize_won_seats
 from allways.validator.scoring import (
     due_for_scoring,
@@ -61,6 +62,11 @@ async def forward(self: Validator) -> None:
 
     # Block-aligned stake-weight vote: keeps Config.validators draw weights stake-true.
     maybe_vote_weights(self, now)
+
+    # Floor sweep: votes out miners stranded active under a raised min_collateral.
+    # Steady state is one comparison against the TTL-cached Config (no RPC); the
+    # miner scan runs only on boot or when the cached floor rises.
+    maybe_sweep_floor(self)
 
     if due_for_scoring(self.block, self.last_scored_block, self.initial_scoring_done):
         score_and_reward_miners(self)
