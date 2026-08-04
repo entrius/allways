@@ -70,10 +70,29 @@ CHAIN_SOL = ChainDefinition(
     min_onchain_amount=890880,
 )
 
+CHAIN_ETH = ChainDefinition(
+    id='eth',
+    name='Ethereum',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='ETH',
+    seconds_per_block=12,
+    # ~1 beacon epoch. True finality is 2 epochs (~64 blocks); post-merge reorgs deeper than
+    # 2 blocks are vanishingly rare, so 32 buys near-finality without doubling the leg time.
+    min_confirmations=32,
+    # No protocol dust floor on ETH; economic floor ≈ a few × the 21k-gas transfer fee, so a
+    # leg can never be worth less than the gas it burns (5e13 wei = 0.00005 ETH).
+    min_onchain_amount=50_000_000_000_000,
+    # Timestamps must strictly exceed the parent's, so a mined deposit can never stamp
+    # earlier than a reservation created before it — no BTC-style median-time lag.
+    replay_grace_secs=0,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
     'sol': CHAIN_SOL,
+    'eth': CHAIN_ETH,
 }
 
 

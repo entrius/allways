@@ -56,8 +56,10 @@ from allways.cli.swap_commands.helpers import (  # noqa: E402
     BTC_NETWORKS,
     CONFIG_FILE,
     ENV_BUNDLES,
+    ETH_NETWORKS,
     SOLANA_NETWORKS,
     apply_btc_network_env,
+    apply_eth_network_env,
     apply_global_flags,
     console,
     fail,
@@ -65,8 +67,9 @@ from allways.cli.swap_commands.helpers import (  # noqa: E402
 )
 from allways.constants import NETUID_FINNEY  # noqa: E402
 
-# Feed a configured btc-network into the BTC provider (which reads BTC_NETWORK from env; a real env wins).
+# Feed configured chain networks into the providers (which read {BTC,ETH}_NETWORK from env; a real env wins).
 apply_btc_network_env(get_effective_config())
+apply_eth_network_env(get_effective_config())
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
@@ -159,6 +162,7 @@ def _effective_settings(config: dict) -> list:
         program_id = f'invalid: {e}'
 
     btc_env = os.environ.get('BTC_NETWORK')
+    eth_env = os.environ.get('ETH_NETWORK')
     return [
         row('network', default='finney'),
         row('netuid', default=NETUID_FINNEY),
@@ -171,6 +175,11 @@ def _effective_settings(config: dict) -> list:
             'btc-network',
             config.get('btc-network') or btc_env or 'mainnet',
             'config' if config.get('btc-network') else 'env' if btc_env else 'default',
+        ),
+        (
+            'eth-network',
+            config.get('eth-network') or eth_env or 'mainnet',
+            'config' if config.get('eth-network') else 'env' if eth_env else 'default',
         ),
         row('router'),
         ('program-id', program_id, program_src),
@@ -207,6 +216,7 @@ VALID_CONFIG_KEYS = (
     'solana-network',
     'solana-keypair',
     'btc-network',
+    'eth-network',
     'router',
     'env',
 )
@@ -219,7 +229,7 @@ def config_set(key: str, value: str):
     """Set a configuration value.
 
     [dim]Valid keys:
-        env                 One-liner bundle: sets network + solana-network + btc-network + netuid + router
+        env                 One-liner bundle: sets network + solana-network + btc-network + eth-network + netuid + router
         wallet              Bittensor wallet name
         hotkey              Bittensor hotkey name
         network             Bittensor network name (test/finney/local) or ws:// endpoint
@@ -228,17 +238,19 @@ def config_set(key: str, value: str):
         solana-rpc          Custom Solana RPC URL (escape hatch; SOLANA_RPC_URL env wins)
         solana-keypair      Path to the Solana keypair that signs miner/admin ops (SOLANA_KEYPAIR_PATH env wins)
         btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
+        eth-network         Ethereum network name (mainnet/sepolia)
         router              Validator hotkey (ss58) to route reservations through; "" = self-represent
         program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:
-        env:            testnet | mainnet   (sets all three chains at once)
+        env:            testnet | mainnet   (sets all chains at once)
         network:        finney | test | local | ws://...
         solana-network: devnet | mainnet | localnet   (or set a custom solana-rpc URL)
-        btc-network:    mainnet | testnet4 | testnet | signet[/dim]
+        btc-network:    mainnet | testnet4 | testnet | signet
+        eth-network:    mainnet | sepolia[/dim]
 
     [dim]Examples:
-        $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + netuid 19
+        $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + eth sepolia + netuid 19
         $ alw config set wallet alice
         $ alw config set solana-network devnet
         $ alw config set solana-keypair ~/.config/solana/dev.json
@@ -272,6 +284,9 @@ def config_set(key: str, value: str):
         return
     if key == 'btc-network' and value not in BTC_NETWORKS:
         console.print(f'[red]Unknown btc-network {value!r}; expected {list(BTC_NETWORKS)}.[/red]')
+        return
+    if key == 'eth-network' and value not in ETH_NETWORKS:
+        console.print(f'[red]Unknown eth-network {value!r}; expected {list(ETH_NETWORKS)}.[/red]')
         return
 
     # Validate the keypair at set time and echo its pubkey, so a typo'd path or wrong file

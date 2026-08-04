@@ -4,6 +4,7 @@ import pytest
 
 from allways.chains import (
     CHAIN_BTC,
+    CHAIN_ETH,
     CHAIN_TAO,
     EXTENSION_BUCKET_SECONDS,
     canonical_pair,
@@ -19,9 +20,12 @@ class TestGetChain:
     def test_tao(self):
         assert get_chain('tao') is CHAIN_TAO
 
+    def test_eth(self):
+        assert get_chain('eth') is CHAIN_ETH
+
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
-            get_chain('eth')
+            get_chain('doge')
 
 
 class TestCanonicalPair:
@@ -46,6 +50,8 @@ class TestCanonicalPair:
         assert canonical_pair('btc', 'sol') == ('sol', 'btc')
         assert canonical_pair('sol', 'tao') == ('sol', 'tao')
         assert canonical_pair('tao', 'sol') == ('sol', 'tao')
+        assert canonical_pair('sol', 'eth') == ('sol', 'eth')
+        assert canonical_pair('eth', 'sol') == ('sol', 'eth')
 
     def test_non_sol_pairs_unchanged(self):
         # Re-anchor must not perturb the active tao<->btc directions.
@@ -89,6 +95,10 @@ class TestComputeExtensionTargetSecs:
         ceiling = self.NOW + 500
         assert compute_extension_target_secs('btc', 0, self.NOW, ceiling) == ceiling
 
+    def test_eth_remaining_confs(self):
+        # ETH needs 32 confs, 12s each: remaining=32, raw = 10000 + 384 + 120 = 10504, bucket up to 10800.
+        assert compute_extension_target_secs('eth', 0, self.NOW, self.CEILING) == 10_800
+
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
-            compute_extension_target_secs('eth', 0, self.NOW, self.CEILING)
+            compute_extension_target_secs('doge', 0, self.NOW, self.CEILING)

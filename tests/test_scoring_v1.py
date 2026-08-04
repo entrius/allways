@@ -11,6 +11,7 @@ import pytest
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     DIRECTION_POOLS,
+    LAUNCH_SPOKES,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
@@ -45,8 +46,9 @@ from allways.validator.state_store import ValidatorStateStore
 POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
 # Leg pool when one pair carried ALL the window's clearing volume: the pair
-# share tilts to (1−α)/2 + α and splits evenly across its two directions.
-POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA) / 2
+# share tilts to (1−α)/pairs + α and splits evenly across its two directions.
+N_PAIRS = len(LAUNCH_SPOKES)
+POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / N_PAIRS + POOL_VOLUME_ALPHA) / 2
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -384,8 +386,8 @@ class TestComputeDirectionPools:
     of trailing SOL notional, split evenly between its two legs; zero volume falls
     back to the equal DIRECTION_POOLS split."""
 
-    # With two launch pairs: a pair's floor share is (1−α)/2, its cap α + (1−α)/2.
-    FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / 2 / 2
+    # A pair's floor share is (1−α)/pairs, its cap α + (1−α)/pairs.
+    FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / N_PAIRS / 2
 
     def test_no_volume_falls_back_to_equal_split(self):
         assert compute_direction_pools({}) == DIRECTION_POOLS
@@ -408,7 +410,7 @@ class TestComputeDirectionPools:
                 ('sol', 'tao'): {'hk_c': (100, 10**15)},
             }
         )
-        floor_pair = (1 - POOL_VOLUME_ALPHA) / 2
+        floor_pair = (1 - POOL_VOLUME_ALPHA) / N_PAIRS
         assert pools[('btc', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
         assert pools[('tao', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2)
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
