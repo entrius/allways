@@ -95,6 +95,17 @@ def test_open_happy_path_persists_routed_request():
     store.close()
 
 
+def test_undeliverable_destination_rejects_before_any_bid():
+    # B-lite reserve gate: a dest that provably refuses transfers bounces before funds move.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_chain_providers = {'btc': SimpleNamespace(can_deliver_to=lambda addr, amt: False)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'rejects incoming transfers' in result.reason
+    assert client.calls == []  # bounced before the on-chain bid
+
+
 def test_inactive_miner_rejects():
     r, store = _reserve(FakeClient(active=False))
     assert not r.ok and 'not active' in r.reason

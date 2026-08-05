@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -27,6 +28,10 @@ DEFAULT_RPC_URLS = {
 }
 
 TRANSFER_GAS = 21_000
+# Refuse destinations whose receive hook wants more than this — bounds the miner's gas
+# spend against a hostile contract; the slash gate exempts code-bearing dests anyway.
+MAX_TRANSFER_GAS = 100_000
+ZERO_ADDRESS = '0x' + '00' * 20
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
@@ -415,12 +420,17 @@ class EthereumProvider(ChainProvider):
             # 2× base fee absorbs six consecutive maximally-full blocks before the cap binds.
             max_fee = 2 * base_fee + tip_fee
 
+            gas = self._transfer_gas(acct.address, to_address, amount)
+            if gas is None:
+                self._send_error(f'destination {to_address} refuses ETH transfers — not sending')
+                return None
+
             nonce = int(self.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
 
             balance = self.get_balance(acct.address)
-            needed = amount + TRANSFER_GAS * max_fee
+            needed = amount + gas * max_fee
             if balance < needed:
-                self._send_error(f'Insufficient ETH: have {balance} wei, need {amount} + {TRANSFER_GAS * max_fee} gas')
+                self._send_error(f'Insufficient ETH: have {balance} wei, need {amount} + {gas * max_fee} gas')
                 return None
 
             signed = Account.sign_transaction(
@@ -429,7 +439,7 @@ class EthereumProvider(ChainProvider):
                     'nonce': nonce,
                     'to': to_address,
                     'value': amount,
-                    'gas': TRANSFER_GAS,
+                    'gas': gas,
                     'maxFeePerGas': max_fee,
                     'maxPriorityFeePerGas': tip_fee,
                 },
@@ -486,6 +496,39 @@ class EthereumProvider(ChainProvider):
                 return txid
             del self.broadcasted_txids[txid]
         return None
+
+    def _transfer_gas(self, from_addr: str, to_addr: str, amount: int) -> Optional[int]:
+        """Gas limit via eth_estimateGas (+20% headroom for smart-wallet receive hooks); None
+        when the destination refuses or wants absurd gas. Estimator trouble falls back to the
+        plain-transfer minimum rather than blocking an EOA payout."""
+        try:
+            est = int(self.eth_rpc('eth_estimateGas', [{'from': from_addr, 'to': to_addr, 'value': hex(amount)}]), 16)
+        except Exception as e:
+            return None if 'revert' in str(e).lower() else TRANSFER_GAS
+        gas = est + est // 5
+        return None if gas > MAX_TRANSFER_GAS else gas
+
+    def can_deliver_to(self, address: str, amount: int) -> bool:
+        """Reserve-time gate: an EOA can never refuse a transfer; a code-bearing dest must pass
+        a simulated transfer. Fails open — only a positive revert blocks a reservation."""
+        try:
+            if (self.eth_rpc('eth_getCode', [address, 'latest']) or '0x') == '0x':
+                return True
+            self.eth_rpc('eth_estimateGas', [{'from': ZERO_ADDRESS, 'to': address, 'value': hex(amount)}])
+            return True
+        except Exception as e:
+            return 'revert' not in str(e).lower()
+
+    def delivery_refused(self, address: str, since_unix: int) -> bool:
+        """Slash gate: code at the destination — now or sampled across the window since
+        ``since_unix`` — is positive evidence a transfer could fail; never slash over it.
+        getCode is dest-only (miner can't influence it) where a simulation is gameable by
+        either side. Raises when the chain view is unavailable (caller defers)."""
+        tip = int(self.eth_rpc('eth_blockNumber', []), 16)
+        # Probe depth clamped to what non-archive public nodes serve (~128 blocks).
+        span = min(120, max(0, int(time.time()) - int(since_unix)) // self.get_chain().seconds_per_block)
+        probes = ['latest'] + [hex(max(0, tip - span // d)) for d in (1, 2)]
+        return any((self.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
     _SETTLED_CACHE_MAX = _SETTLED_CACHE_MAX_DEFAULT
 

@@ -652,3 +652,87 @@ class TestScannerCursorParking:
         assert provider.scan_cursors[key] == 79
         state['broken'] = False
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 10**18) == self.MATCH['hash']
+
+
+class TestDeliveryGates:
+    """B-lite: simulation where helpful (reserve UX, miner gas), getCode where the decision
+    must be ungameable (slash gate)."""
+
+    def _revert(self, params):
+        raise RuntimeError('rpc error execution reverted')
+
+    def test_can_deliver_to_eoa_true_without_simulation(self, provider):
+        calls = counting_rpc_stub(provider, {'eth_getCode': '0x'})
+        assert provider.can_deliver_to(RECIPIENT, 10**15)
+        assert 'eth_estimateGas' not in calls
+
+    def test_can_deliver_to_accepting_contract(self, provider):
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': '0xb000'})
+        assert provider.can_deliver_to(RECIPIENT, 10**15)
+
+    def test_can_deliver_to_reverting_contract_false(self, provider):
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': self._revert})
+        assert not provider.can_deliver_to(RECIPIENT, 10**15)
+
+    def test_can_deliver_to_fails_open_on_rpc_trouble(self, provider):
+        def down(params):
+            raise ConnectionError('down')
+
+        rpc_stub(provider, {'eth_getCode': down})
+        assert provider.can_deliver_to(RECIPIENT, 10**15)
+
+    def test_delivery_refused_code_at_latest(self, provider):
+        rpc_stub(
+            provider, {'eth_blockNumber': hex(1000), 'eth_getCode': lambda p: '0xef0100' if p[1] == 'latest' else '0x'}
+        )
+        assert provider.delivery_refused(RECIPIENT, 0)
+
+    def test_delivery_refused_code_only_in_window_history(self, provider):
+        # Code was attached mid-window then detached — the historical probe still sees it.
+        rpc_stub(
+            provider, {'eth_blockNumber': hex(1000), 'eth_getCode': lambda p: '0x' if p[1] == 'latest' else '0x6080'}
+        )
+        assert provider.delivery_refused(RECIPIENT, 0)
+
+    def test_delivery_refused_clean_eoa_false(self, provider):
+        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getCode': '0x'})
+        assert not provider.delivery_refused(RECIPIENT, 0)
+
+    def test_delivery_refused_raises_when_view_unavailable(self, provider):
+        def down(params):
+            raise ConnectionError('down')
+
+        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getCode': down})
+        with pytest.raises(Exception):
+            provider.delivery_refused(RECIPIENT, 0)
+
+
+class TestTransferGas:
+    @pytest.fixture(autouse=True)
+    def _key(self, provider, monkeypatch):
+        monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
+
+    def _send(self, provider, estimate):
+        responses = dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32, eth_estimateGas=estimate)
+        rpc_stub(provider, responses)
+        return provider.send_amount(RECIPIENT, 10**15)
+
+    def test_estimate_sizes_the_send_with_headroom(self, provider):
+        assert self._send(provider, hex(50_000)) is not None  # 60k limit, under cap
+
+    def test_reverting_destination_refuses_send(self, provider):
+        def revert(params):
+            raise RuntimeError('rpc error execution reverted')
+
+        assert self._send(provider, revert) is None
+        assert 'refuses' in provider.last_send_error
+
+    def test_absurd_estimate_refuses_send(self, provider):
+        assert self._send(provider, hex(500_000)) is None
+        assert 'refuses' in provider.last_send_error
+
+    def test_estimator_down_falls_back_to_plain_transfer_gas(self, provider):
+        def down(params):
+            raise ConnectionError('down')
+
+        assert self._send(provider, down) is not None
