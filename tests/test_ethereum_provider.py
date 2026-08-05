@@ -498,6 +498,7 @@ class TestBlockTimeUnknownNotStale:
 
 
 SEND_RESPONSES = {
+    'eth_blockNumber': hex(100),
     'eth_getBlockByNumber': {'baseFeePerGas': hex(10**9)},
     'eth_maxPriorityFeePerGas': hex(10**9),
     'eth_getTransactionCount': '0x0',
@@ -542,22 +543,79 @@ class TestSendResilience:
         assert 'broadcast failed' in provider.last_send_error
 
     def test_prior_broadcast_in_mempool_is_reused_not_resent(self, provider):
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
         # No eth_sendRawTransaction in the map: a resend attempt would fail the test.
         rpc_stub(provider, dict(SEND_RESPONSES, eth_getTransactionByHash={'hash': TX}))
         assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
+
+    def test_settled_prior_broadcast_is_reused(self, provider):
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        rpc_stub(
+            provider,
+            dict(
+                SEND_RESPONSES,
+                eth_getTransactionByHash={'hash': TX, 'blockNumber': hex(96)},
+                eth_getTransactionReceipt={'status': '0x1'},
+            ),
+        )
+        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
+
+    def test_reverted_prior_broadcast_clears_and_sends_fresh(self, provider):
+        # A reverted tx moved no funds — reusing its hash would hand the validator a
+        # rejected leg forever. It must clear and allow a fresh send.
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        rpc_stub(
+            provider,
+            dict(
+                SEND_RESPONSES,
+                eth_getTransactionByHash={'hash': TX, 'blockNumber': hex(96)},
+                eth_getTransactionReceipt={'status': '0x0'},
+                eth_sendRawTransaction='0x' + 'cc' * 32,
+            ),
+        )
+        assert provider.send_amount(RECIPIENT, 10**15) == ('0x' + 'cc' * 32, 0)
+        assert TX not in provider.broadcasted_txids
+
+    def test_prior_broadcast_outside_window_is_pruned_not_reused(self, provider):
+        # Head 100, seen at 60 → beyond SCAN_LOOKBACK_BLOCKS: a later same-amount swap must
+        # never resolve to an earlier swap's consumed tx (freshness would slash the miner).
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 60)
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32))
+        assert provider.send_amount(RECIPIENT, 10**15) == ('0x' + 'cc' * 32, 0)
+        assert TX not in provider.broadcasted_txids
+
+    def test_mined_prior_with_unavailable_receipt_blocks_send(self, provider):
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        rpc_stub(
+            provider,
+            dict(
+                SEND_RESPONSES,
+                eth_getTransactionByHash={'hash': TX, 'blockNumber': hex(96)},
+                eth_getTransactionReceipt=None,
+            ),
+        )
+        assert provider.send_amount(RECIPIENT, 10**15) is None
+        assert 'double send' in provider.last_send_error
 
     def test_unresolved_prior_broadcast_blocks_a_fresh_send(self, provider):
         def boom(params):
             raise ConnectionError('down')
 
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
         rpc_stub(provider, dict(SEND_RESPONSES, eth_getTransactionByHash=boom))
         assert provider.send_amount(RECIPIENT, 10**15) is None
         assert 'double send' in provider.last_send_error
 
+    def test_unreadable_chain_head_blocks_send(self, provider):
+        def down(params):
+            raise ConnectionError('down')
+
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_blockNumber=down))
+        assert provider.send_amount(RECIPIENT, 10**15) is None
+        assert 'chain head' in provider.last_send_error
+
     def test_prior_broadcast_to_other_dest_does_not_interfere(self, provider):
-        provider.broadcasted_txids[TX] = ('0x' + '22' * 20, 10**15)
+        provider.broadcasted_txids[TX] = ('0x' + '22' * 20, 10**15, 95)
         rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32))
         result = provider.send_amount(RECIPIENT, 10**15)
         assert result == ('0x' + 'cc' * 32, 0)

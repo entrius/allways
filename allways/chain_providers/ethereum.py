@@ -78,8 +78,10 @@ class EthereumProvider(ChainProvider):
         # (key-by-hash); a reorg changes it → miss → full refetch. Only fully-settled entries
         # (status 1 + timestamp) are cached — never pending/absent/reverted.
         self._settled_cache: OrderedDict[str, dict] = OrderedDict()
-        # Own broadcasts, tx_hash → (to, amount): send dedup scoped to this process (#461 class).
-        self.broadcasted_txids: Dict[str, Tuple[str, int]] = {}
+        # Own broadcasts, tx_hash → (to, amount, head at broadcast): send dedup scoped to this
+        # process and to SCAN_LOOKBACK_BLOCKS (#461 class — a later same-amount swap must never
+        # resolve to an earlier swap's consumed tx).
+        self.broadcasted_txids: Dict[str, Tuple[str, int, int]] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
 
@@ -386,22 +388,23 @@ class EthereumProvider(ChainProvider):
             self._send_error(f'ETH key derives {acct.address} but committed address is {from_address} — key mismatch')
             return None
 
+        head = self.get_current_block_height()
+        if head is None:
+            self._send_error('cannot read the chain head to scope send dedup — not sending')
+            return None
+
         try:
             # A prior own broadcast to this dest blocks a fresh send unless provably absent
             # from every endpoint — probing by hash sees the mempool; never risk paying twice.
             want = (self.normalize_address(to_address), int(amount))
-            for txid, dest in self.broadcasted_txids.items():
-                if dest != want:
-                    continue
-                try:
-                    if self.eth_rpc('eth_getTransactionByHash', [txid], null_needs_quorum=True) is not None:
-                        bt.logging.info(f'Reusing prior tx {txid} from {acct.address} → {to_address} ({amount} wei)')
-                        return (txid, 0)
-                except Exception as e:
-                    self._send_error(
-                        f'prior broadcast {txid[:16]}... unresolved ({e}) — refusing a possible double send'
-                    )
-                    return None
+            try:
+                prior = self._prior_broadcast(want, head)
+            except Exception as e:
+                self._send_error(f'prior broadcast unresolved ({e}) — refusing a possible double send')
+                return None
+            if prior:
+                bt.logging.info(f'Reusing prior tx {prior} from {acct.address} → {to_address} ({amount} wei)')
+                return (prior, 0)
 
             latest = self.eth_rpc('eth_getBlockByNumber', ['latest', False])
             base_fee = int((latest or {}).get('baseFeePerGas') or '0x0', 16)
@@ -435,7 +438,7 @@ class EthereumProvider(ChainProvider):
             expected_txid = signed.hash.hex()
             expected_txid = expected_txid if expected_txid.startswith('0x') else f'0x{expected_txid}'
             # Record pre-broadcast so a retry can reclaim it even if the response is lost.
-            self.broadcasted_txids[expected_txid] = want
+            self.broadcasted_txids[expected_txid] = (*want, head)
 
             raw = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
             raw_hex = raw.hex()
@@ -458,6 +461,31 @@ class EthereumProvider(ChainProvider):
         except Exception as e:
             self._send_error(f'ETH send failed: {type(e).__name__}: {e}')
             return None
+
+    def _prior_broadcast(self, want: Tuple[str, int], head: int) -> Optional[str]:
+        """Reusable tx hash from a prior own broadcast to (to, amount); None when a fresh send is
+        provably safe; raises when an in-flight duplicate can't be ruled out. Reuse requires the
+        tx to be in the mempool or settled (status 1) — a reverted tx moved no funds and clears.
+        Entries age out after SCAN_LOOKBACK_BLOCKS (the old mined-scan bound), so a later
+        same-amount swap can never resolve to an earlier swap's consumed tx."""
+        for txid, (to_norm, amt, seen) in list(self.broadcasted_txids.items()):
+            if head - seen > self.SCAN_LOOKBACK_BLOCKS:
+                del self.broadcasted_txids[txid]
+                continue
+            if (to_norm, amt) != want:
+                continue
+            tx = self.eth_rpc('eth_getTransactionByHash', [txid], null_needs_quorum=True)
+            if tx is None:
+                continue
+            if tx.get('blockNumber') is None:
+                return txid
+            receipt = self.eth_rpc('eth_getTransactionReceipt', [txid])
+            if receipt is None:
+                raise RuntimeError(f'prior tx {txid[:16]}... mined but its receipt is unavailable')
+            if int(receipt.get('status') or '0x0', 16) == 1:
+                return txid
+            del self.broadcasted_txids[txid]
+        return None
 
     _SETTLED_CACHE_MAX = _SETTLED_CACHE_MAX_DEFAULT
 
@@ -486,7 +514,7 @@ class EthereumProvider(ChainProvider):
                 block = self.eth_rpc('eth_getBlockByNumber', [hex(block_num), True])
             except Exception:
                 # Never leap an unreadable block — park just below it and retry next call.
-                self.scan_cursors[key] = block_num - 1
+                self._set_cursor(key, block_num - 1)
                 return None
             for tx in (block or {}).get('transactions', []):
                 if self.normalize_address(tx.get('from') or '') != want_from:
@@ -504,7 +532,10 @@ class EthereumProvider(ChainProvider):
                     continue
                 self.scan_cursors.pop(key, None)
                 return tx['hash']
-        self.scan_cursors[key] = head
+        self._set_cursor(key, head)
+        return None
+
+    def _set_cursor(self, key: Tuple[str, str, int], height: int) -> None:
+        self.scan_cursors[key] = height
         if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
             self.scan_cursors.pop(next(iter(self.scan_cursors)))
-        return None
