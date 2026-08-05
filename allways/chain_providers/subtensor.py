@@ -23,9 +23,12 @@ class SubtensorProvider(ChainProvider):
     # RPCs run on the shared substrate websocket — callers serialise via axon_lock.
     uses_substrate = True
 
-    # Balances pallet index and transfer call indices on Subtensor
+    # Balances pallet index and transfer call indices on Subtensor.
+    # transfer_all (call index 4) is deliberately absent: its extrinsic carries no amount
+    # (the true amount lives only in the Balances.Transfer event), so it must never decode
+    # as a transfer.
     _BALANCES_PALLET = 5
-    _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive', 7: 'transfer_all'}
+    _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive'}
 
     def __init__(self, subtensor: bt.Subtensor, wallet: Optional['bt.Wallet'] = None):
         self.subtensor = subtensor
@@ -104,7 +107,7 @@ class SubtensorProvider(ChainProvider):
                 return None
             sender = ss58_encode(body[2:34], ss58_format=42)
 
-            # Find the transfer call: pallet_index=5, call_index in {0,3,7}
+            # Find the transfer call: pallet_index=5, call_index in _TRANSFER_CALLS
             # The call data follows the signature block. Instead of parsing the full
             # signature, search for the Balances pallet marker after the signature.
             # Signature occupies ~65 bytes (1 type + 64 sig) + era + nonce + tip
@@ -494,16 +497,8 @@ class SubtensorProvider(ChainProvider):
         return dest, amount, sender
 
     @staticmethod
-    def decode_transfer(ext, is_raw: bool) -> Optional[Tuple[str, str, int, str]]:
-        """Decode a transfer extrinsic into (tx_hash, dest, amount, sender), or None if it
-        isn't a transfer. The single decode shared by the by-hash verifier (match_transfer)
-        and the by-content deposit scanner (find_recent_outgoing)."""
-        if is_raw:
-            ext_hash = ext.get('extrinsic_hash', '')
-            if not ext_hash:
-                return None
-            return ext_hash, ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
-
+    def _structured_call(ext) -> Optional[Tuple[str, dict, str]]:
+        """Extract (extrinsic_hash, call, sender) from a structured extrinsic, or None."""
         ext_hash = getattr(ext, 'extrinsic_hash', None) or (
             ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
         )
@@ -511,20 +506,34 @@ class SubtensorProvider(ChainProvider):
             ext_hash = '0x' + ext_hash.hex()
         if not ext_hash:
             return None
-
         ext_data = ext.value if hasattr(ext, 'value') else ext
-        call = ext_data.get('call', {}) if isinstance(ext_data, dict) else {}
-        call_function = call.get('call_function', '')
-        call_args = call.get('call_args', [])
+        if not isinstance(ext_data, dict):
+            return None
+        return ext_hash, ext_data.get('call', {}) or {}, ext_data.get('address', '')
 
-        if 'transfer' not in call_function.lower():
+    @staticmethod
+    def decode_transfer(ext, is_raw: bool) -> Optional[Tuple[str, str, int, str]]:
+        """Decode a Balances transfer extrinsic into (tx_hash, dest, amount, sender), or None
+        if it isn't one. The single decode shared by the by-hash verifier (match_transfer)
+        and the by-content deposit scanner (find_recent_outgoing)."""
+        if is_raw:
+            ext_hash = ext.get('extrinsic_hash', '')
+            if not ext_hash:
+                return None
+            return ext_hash, ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
+
+        parsed = SubtensorProvider._structured_call(ext)
+        if parsed is None:
+            return None
+        ext_hash, call, sender = parsed
+        if call.get('call_module') != 'Balances':
+            return None
+        if call.get('call_function') not in SubtensorProvider._TRANSFER_CALLS.values():
             return None
 
         dest = ''
         amount = 0
-        sender = ext_data.get('address', '') if isinstance(ext_data, dict) else ''
-
-        for arg in call_args:
+        for arg in call.get('call_args', []):
             name = arg.get('name', '') if isinstance(arg, dict) else ''
             val = arg.get('value', '') if isinstance(arg, dict) else ''
             if name in ('dest', 'destination'):
@@ -533,6 +542,30 @@ class SubtensorProvider(ChainProvider):
                 amount = int(val)
 
         return ext_hash, dest, amount, sender
+
+    @staticmethod
+    def decode_stake_transfer(ext) -> Optional[dict]:
+        """Decode a SubtensorModule.transfer_stake extrinsic (structured blocks only) into its
+        args plus tx_hash/sender, or None. alpha_amount is informational — alpha deposits are
+        credited from the received stake delta, never from the extrinsic."""
+        parsed = SubtensorProvider._structured_call(ext)
+        if parsed is None:
+            return None
+        ext_hash, call, sender = parsed
+        if call.get('call_module') != 'SubtensorModule' or call.get('call_function') != 'transfer_stake':
+            return None
+
+        args = {a.get('name'): a.get('value') for a in call.get('call_args', []) if isinstance(a, dict)}
+        dest = args.get('destination_coldkey', '')
+        return {
+            'tx_hash': ext_hash,
+            'sender': sender,
+            'destination_coldkey': dest.get('Id', dest) if isinstance(dest, dict) else dest,
+            'hotkey': args.get('hotkey', ''),
+            'origin_netuid': int(args.get('origin_netuid', 0)),
+            'destination_netuid': int(args.get('destination_netuid', 0)),
+            'alpha_amount': int(args.get('alpha_amount', 0)),
+        }
 
     # Substrate has no address index (unlike Esplora / getSignaturesForAddress), so the TAO
     # deposit scanner follows the chain head incrementally: each call scans only the blocks
