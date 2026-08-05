@@ -62,8 +62,8 @@ class EthereumProvider(ChainProvider):
             self.network = 'mainnet'
             bt.logging.warning('ETH_NETWORK unset — defaulting to mainnet; set ETH_NETWORK=sepolia for testnet.')
         if self.network not in CHAIN_IDS:
-            bt.logging.warning(f'Unknown ETH_NETWORK {self.network!r} (expected {list(CHAIN_IDS)}); using mainnet.')
-            self.network = 'mainnet'
+            # A typo silently becoming mainnet would pay real ETH against test swaps.
+            raise ValueError(f'Unknown ETH_NETWORK {self.network!r} — expected one of {list(CHAIN_IDS)}')
 
         # Same rationale as the BTC provider: long-running validators + pooled idle TLS
         # sockets that public CDNs silently drop → wedged reads until timeout.
@@ -78,9 +78,10 @@ class EthereumProvider(ChainProvider):
         # (key-by-hash); a reorg changes it → miss → full refetch. Only fully-settled entries
         # (status 1 + timestamp) are cached — never pending/absent/reverted.
         self._settled_cache: OrderedDict[str, dict] = OrderedDict()
-        # Scopes find_recent_outgoing reuse to this process — a fresh send can't return a
-        # tx hash already consumed by an earlier swap.
-        self.broadcasted_txids: set[str] = set()
+        # Own broadcasts, tx_hash → (to, amount, head at broadcast): send dedup scoped to this
+        # process and to SCAN_LOOKBACK_BLOCKS (#461 class — a later same-amount swap must never
+        # resolve to an earlier swap's consumed tx).
+        self.broadcasted_txids: Dict[str, Tuple[str, int, int]] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
 
@@ -105,15 +106,20 @@ class EthereumProvider(ChainProvider):
 
     # --- JSON-RPC plumbing (failover mirrors the BTC provider's Esplora narration) ---
 
-    def eth_rpc(self, method: str, params: list, timeout: int = 15) -> Any:
+    def eth_rpc(self, method: str, params: list, timeout: int = 15, null_needs_quorum: bool = False) -> Any:
         """Call ``method`` against each endpoint in order, narrating every failover.
 
         A JSON-RPC ``error`` object is treated as endpoint trouble (rate limit, pruned
         state, method gap) and falls through; ``result: null`` is authoritative data
         ("no such tx") and is returned as None. Raises the last error when all fail.
+
+        ``null_needs_quorum``: return None only when every endpoint reachably agrees;
+        null + an unreachable endpoint raises. For paths where "absent" costs money —
+        one stale node in a public load balancer must not read as "never happened".
         """
         payload = {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}
         last_err: Optional[Exception] = None
+        saw_null = False
         for i, base in enumerate(self.rpc_bases):
             pos = f'[{i + 1}/{len(self.rpc_bases)}]'
             tag = rpc_tag(base)
@@ -144,11 +150,20 @@ class EthereumProvider(ChainProvider):
                 bt.logging.warning(f'EthRpc {pos} {tag} {method} → rpc error {err}; {tail}')
                 continue
 
+            result = body.get('result')
+            if result is None and null_needs_quorum:
+                saw_null = True
+                bt.logging.debug(f'EthRpc {pos} {tag} {method} → null; seeking quorum from remaining endpoint(s)')
+                continue
             if i > 0:
                 bt.logging.info(f'EthRpc {pos} {tag} {method} → ok (served after {i} fallback(s))')
             else:
                 bt.logging.debug(f'EthRpc {pos} {tag} {method} → ok')
-            return body.get('result')
+            return result
+        if saw_null and last_err is None:
+            return None
+        if saw_null:
+            raise ProviderUnreachableError(f'{method}: null without quorum (an endpoint was unreachable): {last_err}')
         raise last_err or RuntimeError('all ETH RPCs failed')
 
     def check_connection(self, require_send: bool = True) -> None:
@@ -191,7 +206,7 @@ class EthereumProvider(ChainProvider):
         ProviderUnreachableError rather than risking a false slash verdict.
         """
         try:
-            tx = self.eth_rpc('eth_getTransactionByHash', [tx_hash])
+            tx = self.eth_rpc('eth_getTransactionByHash', [tx_hash], null_needs_quorum=True)
         except Exception as e:
             raise ProviderUnreachableError(f'ETH RPC unreachable: {e}') from e
         if tx is None:
@@ -249,27 +264,25 @@ class EthereumProvider(ChainProvider):
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
             is_confirmed = confirmations >= self.get_chain().min_confirmations
 
-            # Block timestamp (replay-freshness floor) + best-effort canonical-chain check: any
-            # failure here leaves the accept-path intact rather than breaking on an RPC hiccup.
-            block_time = None
+            # The freshness gate fails closed on a missing block_time, so an unreadable
+            # timestamp must be 'unknown' (raise), never a verdict — same as the receipt above.
             try:
                 block = self.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
-                if block:
-                    block_time = int(block.get('timestamp') or '0x0', 16) or None
-                    if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
-                        bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
-                        return None
             except Exception as e:
-                bt.logging.debug(f'{LOG_ETH} block-time/canonical check skipped for {tx_hash[:16]}...: {e}')
+                raise ProviderUnreachableError(f'ETH block fetch failed for {tx_hash[:16]}...: {e}') from e
+            block_time = int((block or {}).get('timestamp') or '0x0', 16) or None
+            if block_time is None:
+                raise ProviderUnreachableError(
+                    f'ETH tx {tx_hash[:16]}... is mined but block {block_number} has no readable timestamp'
+                )
+            if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
+                bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
+                return None
 
             # Cache only a fully-settled, internally-consistent read (status 1, timestamped,
             # tx/receipt agree on the block hash) — pending/absent/reverted are never cached.
             receipt_block_hash = receipt.get('blockHash') or ''
-            if (
-                receipt_block_hash
-                and block_time is not None
-                and (not tx_block_hash or tx_block_hash == receipt_block_hash)
-            ):
+            if receipt_block_hash and (not tx_block_hash or tx_block_hash == receipt_block_hash):
                 self._settled_cache[tx_hash] = {
                     'block_hash': receipt_block_hash,
                     'block_number': block_number,
@@ -375,13 +388,23 @@ class EthereumProvider(ChainProvider):
             self._send_error(f'ETH key derives {acct.address} but committed address is {from_address} — key mismatch')
             return None
 
+        head = self.get_current_block_height()
+        if head is None:
+            self._send_error('cannot read the chain head to scope send dedup — not sending')
+            return None
+
         try:
-            # Reuse only txids this process broadcast — otherwise (from, to, amount) would
-            # match a prior-swap tx the contract has already consumed (#461 class).
-            existing = self.find_recent_outgoing(acct.address, to_address, amount)
-            if existing and existing in self.broadcasted_txids:
-                bt.logging.info(f'Reusing prior tx {existing} from {acct.address} → {to_address} ({amount} wei)')
-                return (existing, 0)
+            # A prior own broadcast to this dest blocks a fresh send unless provably absent
+            # from every endpoint — probing by hash sees the mempool; never risk paying twice.
+            want = (self.normalize_address(to_address), int(amount))
+            try:
+                prior = self._prior_broadcast(want, head)
+            except Exception as e:
+                self._send_error(f'prior broadcast unresolved ({e}) — refusing a possible double send')
+                return None
+            if prior:
+                bt.logging.info(f'Reusing prior tx {prior} from {acct.address} → {to_address} ({amount} wei)')
+                return (prior, 0)
 
             latest = self.eth_rpc('eth_getBlockByNumber', ['latest', False])
             base_fee = int((latest or {}).get('baseFeePerGas') or '0x0', 16)
@@ -414,32 +437,55 @@ class EthereumProvider(ChainProvider):
             )
             expected_txid = signed.hash.hex()
             expected_txid = expected_txid if expected_txid.startswith('0x') else f'0x{expected_txid}'
-            # Record before broadcasting so a same-session retry can reclaim it via
-            # find_recent_outgoing even if the response is lost (mirrors the BTC provider).
-            self.broadcasted_txids.add(expected_txid)
+            # Record pre-broadcast so a retry can reclaim it even if the response is lost.
+            self.broadcasted_txids[expected_txid] = (*want, head)
 
             raw = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
             raw_hex = raw.hex()
             raw_hex = raw_hex if raw_hex.startswith('0x') else f'0x{raw_hex}'
             try:
                 tx_hash = self.eth_rpc('eth_sendRawTransaction', [raw_hex], timeout=30)
-            except Exception as e:
-                if self.tx_exists(expected_txid):
-                    return (expected_txid, 0)
-                self._send_error(f'ETH broadcast failed: {e}')
+            except Exception as broadcast_err:
+                # The tx may have been accepted anyway — check before declaring failure.
+                try:
+                    if self.eth_rpc('eth_getTransactionByHash', [expected_txid], null_needs_quorum=True) is not None:
+                        return (expected_txid, 0)
+                except Exception:
+                    pass
+                self._send_error(f'ETH broadcast failed: {broadcast_err}')
                 return None
 
             bt.logging.info(f'Sent {amount} wei to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
-            return (tx_hash, 0)
+            # A quirky null broadcast reply must never persist as a blank tx hash.
+            return (tx_hash or expected_txid, 0)
         except Exception as e:
             self._send_error(f'ETH send failed: {type(e).__name__}: {e}')
             return None
 
-    def tx_exists(self, txid: str) -> bool:
-        try:
-            return self.eth_rpc('eth_getTransactionByHash', [txid]) is not None
-        except Exception:
-            return False
+    def _prior_broadcast(self, want: Tuple[str, int], head: int) -> Optional[str]:
+        """Reusable tx hash from a prior own broadcast to (to, amount); None when a fresh send is
+        provably safe; raises when an in-flight duplicate can't be ruled out. Reuse requires the
+        tx to be in the mempool or settled (status 1) — a reverted tx moved no funds and clears.
+        Entries age out after SCAN_LOOKBACK_BLOCKS (the old mined-scan bound), so a later
+        same-amount swap can never resolve to an earlier swap's consumed tx."""
+        for txid, (to_norm, amt, seen) in list(self.broadcasted_txids.items()):
+            if head - seen > self.SCAN_LOOKBACK_BLOCKS:
+                del self.broadcasted_txids[txid]
+                continue
+            if (to_norm, amt) != want:
+                continue
+            tx = self.eth_rpc('eth_getTransactionByHash', [txid], null_needs_quorum=True)
+            if tx is None:
+                continue
+            if tx.get('blockNumber') is None:
+                return txid
+            receipt = self.eth_rpc('eth_getTransactionReceipt', [txid])
+            if receipt is None:
+                raise RuntimeError(f'prior tx {txid[:16]}... mined but its receipt is unavailable')
+            if int(receipt.get('status') or '0x0', 16) == 1:
+                return txid
+            del self.broadcasted_txids[txid]
+        return None
 
     _SETTLED_CACHE_MAX = _SETTLED_CACHE_MAX_DEFAULT
 
@@ -467,7 +513,9 @@ class EthereumProvider(ChainProvider):
             try:
                 block = self.eth_rpc('eth_getBlockByNumber', [hex(block_num), True])
             except Exception:
-                continue
+                # Never leap an unreadable block — park just below it and retry next call.
+                self._set_cursor(key, block_num - 1)
+                return None
             for tx in (block or {}).get('transactions', []):
                 if self.normalize_address(tx.get('from') or '') != want_from:
                     continue
@@ -484,7 +532,10 @@ class EthereumProvider(ChainProvider):
                     continue
                 self.scan_cursors.pop(key, None)
                 return tx['hash']
-        self.scan_cursors[key] = head
+        self._set_cursor(key, head)
+        return None
+
+    def _set_cursor(self, key: Tuple[str, str, int], height: int) -> None:
+        self.scan_cursors[key] = height
         if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
             self.scan_cursors.pop(next(iter(self.scan_cursors)))
-        return None
