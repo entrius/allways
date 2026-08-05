@@ -116,6 +116,12 @@ def reserve_on_behalf(
     if not ok:
         return ReserveResult(False, reason)
 
+    # Deliverability gate — BEFORE any funds move: a dest that provably refuses transfers
+    # (e.g. a reverting contract wallet) must bounce here, not strand a paid swap later.
+    provider = getattr(validator, 'axon_chain_providers', {}).get(to_chain)
+    if provider is not None and not provider.can_deliver_to(user_to_addr, amts.to_amount):
+        return ReserveResult(False, 'destination address rejects incoming transfers')
+
     try:
         user_pk = Pubkey.from_string(user_pubkey)
     except Exception:

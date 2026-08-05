@@ -194,6 +194,14 @@ class ChainProvider(ABC):
     @abstractmethod
     def is_valid_address(self, address: str) -> bool: ...
 
+    def can_deliver_to(self, address: str, amount: int) -> bool:
+        """Reserve-time gate: False only on positive evidence the destination cannot receive."""
+        return True
+
+    def delivery_refused(self, address: str, since_unix: int) -> bool:
+        """Slash gate: True only on positive evidence delivery was refusable since ``since_unix``."""
+        return False
+
     @abstractmethod
     def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """Sign a source proof message with the given key. Returns hex signature."""
