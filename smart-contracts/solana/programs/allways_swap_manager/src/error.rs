@@ -137,8 +137,4 @@ pub enum ErrorCode {
     InvalidUser,
     #[msg("round_key does not match the keccak hash of the submitted weights snapshot")]
     WeightsRoundKeyMismatch,
-
-    // --- Chain-id canonicalization ---
-    #[msg("Chain ids must be lowercase")]
-    ChainNotLowercase,
 }
