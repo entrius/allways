@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple
 
 import bittensor as bt
 
+from allways.assets.chain import Chain
 from allways.chains import ChainDefinition
 
 
@@ -24,13 +25,18 @@ class TransactionInfo:
     block_time: Optional[int] = None  # Block's mined time, unix seconds (replay-freshness floor; B2)
 
 
-class ChainProvider(ABC):
-    """Abstract interface for chain verification.
+class Asset(ABC):
+    """A thing you can swap: verify a payment of it, send it, gate it.
 
-    Adding a new chain:
-    1. Add ChainDefinition to chains.py
-    2. Implement this interface
-    3. Add {ENV_PREFIX}_* vars to .env
+    Every asset lives on a `Chain` (`self.chain`). Single-asset networks (btc/tao/sol,
+    and eth until a second EVM asset lands) fuse the two: the class implements both and
+    `.chain` returns itself. The registry row stays a `ChainDefinition` in chains.py —
+    the wire says chain; in code an id resolves to an Asset.
+
+    Adding a new asset:
+    1. Add its ChainDefinition to chains.py
+    2. Implement this interface (or reuse a family class, e.g. an ERC-20)
+    3. Register it in ASSET_REGISTRY; add {ENV_PREFIX}_* vars to .env
     """
 
     # True if this provider's RPCs hit the shared substrate websocket, so
@@ -40,6 +46,13 @@ class ChainProvider(ABC):
 
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
+
+    @property
+    def chain(self) -> Chain:
+        """The network this asset lives on. Fused single-asset classes are their own chain."""
+        if isinstance(self, Chain):
+            return self
+        raise NotImplementedError(f'{type(self).__name__} must bind a Chain')
 
     def describe(self) -> str:
         """One-line summary of the backend/API this provider talks to, for startup logs."""

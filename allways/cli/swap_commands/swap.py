@@ -602,9 +602,9 @@ def _source_provider(from_chain: str, client, config):
     bt wallet / BTC WIF), from the same registry the neurons use — so a new spoke chain works with
     zero changes here. Uses the CLI's live RPC (never a fresh localhost default). Returns None
     (→ manual fallback) if the provider can't be built with send credentials."""
-    from allways.chain_providers import PROVIDER_REGISTRY
+    from allways.assets import ASSET_REGISTRY
 
-    entry = next((e for e in PROVIDER_REGISTRY if e[0] == from_chain), None)
+    entry = next((e for e in ASSET_REGISTRY if e[0] == from_chain), None)
     if entry is None:
         return None
     _id, cls, kwarg_names = entry

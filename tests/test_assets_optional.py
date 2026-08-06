@@ -3,7 +3,7 @@ chains still fail hard — a tao<->sol miner must start without BTC creds, a btc
 
 import pytest
 
-from allways import chain_providers as cp
+from allways import assets as cp
 
 
 class _Boom:
@@ -21,20 +21,20 @@ class _Ok:
 
 @pytest.fixture
 def registry(monkeypatch):
-    monkeypatch.setattr(cp, 'PROVIDER_REGISTRY', (('btc', _Boom, ()), ('sol', _Ok, ())))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', _Boom, ()), ('sol', _Ok, ())))
 
 
 def test_unrequired_failure_degrades_to_warning(registry):
-    providers = cp.create_chain_providers(check=True, required_chains={'sol'})
+    providers = cp.create_assets(check=True, required_chains={'sol'})
     assert 'sol' in providers
     assert 'btc' not in providers
 
 
 def test_required_failure_still_raises(registry):
     with pytest.raises(RuntimeError, match='failed startup check'):
-        cp.create_chain_providers(check=True, required_chains={'btc', 'sol'})
+        cp.create_assets(check=True, required_chains={'btc', 'sol'})
 
 
 def test_none_means_all_required(registry):
     with pytest.raises(RuntimeError, match='failed startup check'):
-        cp.create_chain_providers(check=True)
+        cp.create_assets(check=True)
