@@ -216,6 +216,19 @@ fn test_same_chain_rejected() {
 }
 
 #[test]
+fn test_uppercase_chain_id_rejected() {
+    // "sol"-vs-"SOL" aliasing sizes collateral against the wrong leg and splits quote PDAs;
+    // intake must reject any casing but lowercase.
+    let (mut svm, program_id) = setup();
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 10_000_000_000).unwrap();
+    for (f, t) in [("BTC", "tao"), ("btc", "TAO"), ("Btc", "tao")] {
+        let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), f, t, "a", "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
+        assert!(r.is_err(), "non-lowercase chain id {f}->{t} must be rejected");
+    }
+}
+
+#[test]
 fn test_empty_field_rejected() {
     let (mut svm, program_id) = setup();
     let miner = Keypair::new();

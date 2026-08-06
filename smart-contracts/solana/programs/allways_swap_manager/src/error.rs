@@ -93,6 +93,8 @@ pub enum ErrorCode {
     SameChain,
     #[msg("A required string field is empty")]
     EmptyField,
+    #[msg("Chain ids must be lowercase")]
+    ChainNotLowercase,
 
     // --- Phase 9: reservation lottery ---
     #[msg("Miner has an open reservation pool for a different pair; wait for it to resolve")]

@@ -83,6 +83,7 @@ pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String
         from_chain.len() <= MAX_CHAIN_LEN && to_chain.len() <= MAX_CHAIN_LEN,
         ErrorCode::StringTooLong
     );
+    crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
 
     require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
     require!(
