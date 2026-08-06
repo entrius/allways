@@ -9,10 +9,12 @@ use crate::constants::{
 };
 use crate::error::ErrorCode;
 
-/// Chain ids must be lowercase at intake. The program's chain-identity sites disagree on casing
-/// (the grace table matches case-insensitively, the numeraire collateral bind and the quote/pool
-/// PDA seeds are byte-exact), so a mixed-case id silently sizes collateral against the wrong leg
-/// and splits quote records. One gate at the two intake doors kills the whole class.
+/// Chain ids must be lowercase at intake. The program's chain-identity sites disagree on ASCII
+/// casing (the grace table matches case-insensitively, the numeraire collateral bind and the
+/// quote/pool PDA seeds are byte-exact), so "SOL" aliases "sol" in some sites while acting as a
+/// different chain in the money-critical ones — silently sizing collateral against the wrong leg.
+/// This gate at the two intake doors kills the ASCII-casing alias class; any other unknown string
+/// (typos, homoglyphs) is simply a distinct id that matches no real quote and dies unfunded.
 pub fn chain_ids_lowercase(from_chain: &str, to_chain: &str) -> Result<()> {
     let lower = |s: &str| !s.bytes().any(|b| b.is_ascii_uppercase());
     require!(lower(from_chain) && lower(to_chain), ErrorCode::ChainNotLowercase);

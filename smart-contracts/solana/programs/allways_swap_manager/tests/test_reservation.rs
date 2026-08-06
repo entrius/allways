@@ -14,7 +14,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{FINALIZE_WINDOW_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Pool, Reservation, Treasury},
+    allways_swap_manager::state::{MinerQuote, MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
     solana_hash::Hash,
     solana_keypair::Keypair,
@@ -514,15 +514,38 @@ fn test_requires_active_miner() {
 }
 
 #[test]
-fn test_open_rejects_uppercase_chain_id() {
-    // A "SOL"-cased hub leg would dodge the byte-exact numeraire bind and size collateral
-    // against the spoke leg. No casing variant may open: the mixed-case quote PDA cannot exist
-    // (set_quote guard) and the intake guard rejects even a legacy pre-guard one.
+fn test_open_rejects_legacy_uppercase_quote() {
+    // A "SOL"-cased hub leg would dodge the byte-exact numeraire bind and size collateral against
+    // the spoke leg. Through the public path a mixed-case open dies earlier (its quote PDA cannot
+    // exist — set_quote guard), so plant a pre-guard "SOL"/"btc" quote directly and prove the
+    // open_or_request guard itself refuses it.
+    use anchor_lang::AccountSerialize;
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    for (f, t) in [("SOL", "btc"), ("sol", "BTC"), ("Sol", "btc")] {
-        let r = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), f, t), &vals[0].pubkey(), &vals[0]);
-        assert!(r.is_err(), "non-lowercase chain id {f}->{t} must be rejected");
-    }
+    let (pda, bump) = Pubkey::find_program_address(
+        &[b"quote", miner.pubkey().as_ref(), "SOL".as_bytes(), "btc".as_bytes()],
+        &pid(),
+    );
+    let legacy = MinerQuote {
+        miner: miner.pubkey(),
+        from_chain: "SOL".into(),
+        to_chain: "btc".into(),
+        miner_from_addr: MFROM.into(),
+        miner_to_addr: MTO.into(),
+        rate: RATE,
+        liquidity: 0,
+        updated_at: BASE_TS,
+        bump,
+    };
+    let mut data = vec![];
+    legacy.try_serialize(&mut data).unwrap();
+    svm.set_account(
+        pda,
+        solana_account::Account { lamports: 10_000_000, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+    let err = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "SOL", "btc"), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(err.contains("ChainNotLowercase"), "intake guard must reject the legacy quote, got: {err}");
 }
 
 #[test]
