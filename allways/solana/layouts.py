@@ -99,6 +99,7 @@ Reservation = CStruct(
     'user_to_addr' / String,
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
@@ -123,6 +124,7 @@ Swap = CStruct(
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
+    'collateral_chain' / String,
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
@@ -167,6 +169,10 @@ Config = CStruct(
     'fulfillment_timeout_secs' / I64,
     'min_swap_amount' / U64,
     'max_swap_amount' / U64,
+    # TAO-backed bounds (rao) + the busy-until-settled grace — W1 split-collateral seam.
+    'tao_min_swap_amount' / U64,
+    'tao_max_swap_amount' / U64,
+    'settlement_grace_secs' / I64,
     'reservation_ttl_secs' / I64,
     'consensus_threshold_percent' / U8,
     'validators' / Vec(ValidatorInfo),
@@ -288,6 +294,7 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'rate' / U128,
+        'collateral_chain' / String,
     ),
     'SwapFulfilled': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'to_tx_hash' / String, 'to_amount' / U128),
     'SwapInitiated': CStruct(
@@ -299,7 +306,17 @@ EVENT_LAYOUTS = {
         'to_amount' / U128,
         'initiated_at' / I64,
     ),
-    'SwapTimedOut': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'collateral_amount' / U64, 'slash' / U64),
+    # `slash` is what moved on Solana (0 for a non-"sol" backing); `penalty`/`reimbursement` are the
+    # absolute figures the backing chain owes — the slash relay's inputs.
+    'SwapTimedOut': CStruct(
+        'swap_key' / Hash32,
+        'miner' / Pubkey32,
+        'collateral_amount' / U64,
+        'slash' / U64,
+        'collateral_chain' / String,
+        'penalty' / U64,
+        'reimbursement' / U64,
+    ),
     'SwapTimeoutExtended': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'validator' / Pubkey32, 'timeout_at' / I64),
     'TreasuryWithdrawn': CStruct('recipient' / Pubkey32, 'amount' / U64, 'total' / U64),
     'ValidatorWeightsUpdated': CStruct('count' / U8, 'updated_at' / I64),

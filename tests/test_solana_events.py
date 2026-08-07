@@ -66,6 +66,7 @@ def test_decode_swap_completed_roundtrip():
             'from_amount': 100_000,
             'to_amount': 345_000_000,
             'rate': 345 * 10**18,
+            'collateral_chain': 'sol',
         },
     )
     name, f = decode_event(raw)

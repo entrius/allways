@@ -53,6 +53,7 @@ def test_reservation_roundtrip_u128_rate_and_strings():
         'user_to_addr': 'userSOLaddr',
         'from_chain': 'BTC',
         'to_chain': 'SOL',
+        'collateral_chain': 'sol',
         'collateral_amount': 2_000_000_000,
         'from_amount': 100_000,
         'to_amount': 7,
@@ -82,6 +83,7 @@ def test_swap_roundtrip_enum_status():
         'miner_from_addr': 'c',
         'miner_to_addr': 'd',
         'rate': 1_500_000_000_000_000_000,
+        'collateral_chain': 'sol',
         'collateral_amount': 1,
         'from_amount': 2,
         'to_amount': 3,
@@ -122,12 +124,15 @@ def test_pool_roundtrip_vec_of_request():
 def test_config_roundtrip_vec_of_validatorinfo():
     v = {
         'admin': bytes(32),
-        'version': 10,
+        'version': 11,
         'min_collateral': 1,
         'max_collateral': 2,
         'fulfillment_timeout_secs': 100,
         'min_swap_amount': 0,
         'max_swap_amount': 0,
+        'tao_min_swap_amount': 1_000,
+        'tao_max_swap_amount': 0,
+        'settlement_grace_secs': 900,
         'reservation_ttl_secs': 1800,
         'consensus_threshold_percent': 66,
         'validators': [{'key': bytes(range(32)), 'weight': 7}],
@@ -141,7 +146,7 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'bump': 1,
     }
     p = _roundtrip(layouts.Config, v)
-    assert p.version == 10 and len(p.validators) == 1 and p.validators[0].weight == 7
+    assert p.version == 11 and len(p.validators) == 1 and p.validators[0].weight == 7
 
 
 def test_pda_derivation():
