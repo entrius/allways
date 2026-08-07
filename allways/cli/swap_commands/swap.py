@@ -527,6 +527,7 @@ def swap_now_command(
                 from_amount,
                 pool_window,
                 drawn=None,
+                backing=cand.backing,
             )
     else:
         resv = _reserve_self_represented(
@@ -540,6 +541,7 @@ def swap_now_command(
             from_amount,
             pool_window,
             drawn=existing if resume_drawn else None,
+            backing=cand.backing,
         )
     recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
@@ -777,7 +779,17 @@ def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 90
 
 
 def _reserve_self_represented(
-    client, miner, user, user_from_addr, user_to_addr, from_chain, to_chain, from_amount, pool_window, drawn=None
+    client,
+    miner,
+    user,
+    user_from_addr,
+    user_to_addr,
+    from_chain,
+    to_chain,
+    from_amount,
+    pool_window,
+    drawn=None,
+    backing=NUMERAIRE_CHAIN,
 ):
     """Self-represented phases 1-3: bid (unless resuming a ``drawn`` seat), self-crank the draw, and
     finalize against the PINNED rate. Returns the live reservation or ``fail``s with send-safety
@@ -788,7 +800,7 @@ def _reserve_self_represented(
         # Phase 1 — BID (pair only; no taker, no amounts). A contract rejection (miner busy,
         # already reserved, …) is a normal outcome — fail with its message, never a traceback.
         try:
-            sig = client.open_or_request(miner, from_chain, to_chain)
+            sig = client.open_or_request(miner, from_chain, to_chain, backing)
         except Exception as e:
             reason = contract_reject_reason(e)
             if reason is None:

@@ -234,3 +234,53 @@ def test_admin_setters_refuse_out_of_range_values_before_sending(argv):
     assert res.exit_code != 0
     for name in ('set_settlement_grace', 'set_attest_max_age', 'set_tao_min_collateral'):
         getattr(c, name).assert_not_called()
+
+
+# --- taker side: the bid must land on the quote that won ----------------------------------------
+
+
+class _TwoQuoteClient:
+    """A dual-purse miner standing two offers on sol->tao at different rates — the D2 market."""
+
+    def __init__(self):
+        self.quotes = [
+            SimpleNamespace(miner='m1', from_chain='sol', to_chain='tao', rate=10 * 10**18, collateral_chain='sol'),
+            SimpleNamespace(miner='m1', from_chain='sol', to_chain='tao', rate=11 * 10**18, collateral_chain='tao'),
+        ]
+        self.state_reads = 0
+
+    def get_all(self, name):
+        assert name == 'MinerQuote'
+        return [(f'pda{i}', q) for i, q in enumerate(self.quotes)]
+
+    def get_miner_state(self, miner):
+        self.state_reads += 1
+        return SimpleNamespace(active=True, collateral=10**11)
+
+
+def test_candidate_miners_surfaces_both_offers_with_their_backings():
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+
+    c = _TwoQuoteClient()
+    cands = candidate_miners(c, 'sol', 'tao')
+    assert len(cands) == 2, 'both offers compete — one market per pair, mixed by rate'
+    assert {x.backing for x in cands} == {'sol', 'tao'}
+    # The two offers belong to the same miner, so its state is read once, not once per quote.
+    assert c.state_reads == 1
+
+
+def test_the_better_offer_carries_its_own_backing_to_the_bid():
+    from allways.cli.swap_commands.swap_intake import candidate_miners, select_best_miner
+
+    cands = candidate_miners(_TwoQuoteClient(), 'sol', 'tao')
+    best = select_best_miner(cands, 'sol', 'tao', 10**9, 0, 0)
+    assert best is not None
+    # The tao-backed quote prices higher, so it wins on to_amount — and the bid must name "tao", or it
+    # would land on the sol-backed quote's PDA (a different offer at a different rate).
+    assert best[0].backing == 'tao'
+
+
+def test_a_candidate_defaults_to_the_local_purse_when_a_quote_predates_the_field():
+    from allways.cli.swap_commands.swap_intake import MinerCandidate
+
+    assert MinerCandidate(miner='m', rate_display='1', collateral=0).backing == 'sol'

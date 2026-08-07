@@ -9,6 +9,8 @@ source chain's confirmation depth, which accrues after the claim via the crank's
 
 import time
 import types
+
+from allways.cli.swap_commands.swap_intake import MinerCandidate
 from unittest.mock import MagicMock, patch
 
 from allways.cli.swap_commands.helpers import live_unclaimed
@@ -124,7 +126,9 @@ def _run_swap_now(reserved_until, from_chain='btc'):
     client.get_reservation.return_value = None  # no seat held yet -> normal bid path (not a resume)
     client.open_or_request.return_value = 'sig' * 8
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    # The real dataclass, not a look-alike: a fake that drifts from MinerCandidate stops testing
+    # the wiring it is supposed to lock.
+    cand = MinerCandidate(miner='miner-pk', rate_display='0.0021', collateral=10**10)
 
     argv = ['--from', from_chain, '--to', 'sol', '--amount', '0.00005']
     argv += ['--from-address', 'tb1qsource', '--receive-address', user, '--yes']
@@ -298,7 +302,9 @@ def _run_resume(existing, poll_resv):
         min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
     )
     client.get_reservation.return_value = existing
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    # The real dataclass, not a look-alike: a fake that drifts from MinerCandidate stops testing
+    # the wiring it is supposed to lock.
+    cand = MinerCandidate(miner='miner-pk', rate_display='0.0021', collateral=10**10)
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
     argv = [
         '--from',

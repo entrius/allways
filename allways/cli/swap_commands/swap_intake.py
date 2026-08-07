@@ -33,6 +33,10 @@ class MinerCandidate:
     miner: object  # solders Pubkey
     rate_display: str  # canonical 'dest per 1 SOL' rate, display units
     collateral: int  # miner collateral, lamports
+    # The backing the winning QUOTE declared — one market per pair, mixed by rate (D2). A dual-purse
+    # miner can appear twice on one direction; only this tells the two offers apart, and it is what a
+    # bid must name to land on the right one.
+    backing: str = NUMERAIRE_CHAIN
 
 
 def to_smallest_units(amount: float, chain: str) -> int:
@@ -58,14 +62,25 @@ def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandid
     a candidate. One MinerState read per quoted miner gives both the active gate
     and the tracked collateral in a single fetch."""
     out: List[MinerCandidate] = []
+    # One state read per distinct miner: a dual-purse miner can appear twice on a direction now, and
+    # its `active` flag and collateral are the same for both offers.
+    states: dict = {}
     for _pk, q in client.get_all('MinerQuote'):
         if q.from_chain != from_chain or q.to_chain != to_chain:
             continue
-        ms = client.get_miner_state(q.miner)
+        key = str(q.miner)
+        if key not in states:
+            states[key] = client.get_miner_state(q.miner)
+        ms = states[key]
         if ms is None or not ms.active:
             continue
         out.append(
-            MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=int(ms.collateral))
+            MinerCandidate(
+                miner=q.miner,
+                rate_display=rate_display_from_fixed(q.rate),
+                collateral=int(ms.collateral),
+                backing=getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN,
+            )
         )
     return out
 
