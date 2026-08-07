@@ -353,3 +353,23 @@ class TestToMainnetAddress:
 
     def test_unparseable_returns_unchanged(self):
         assert to_mainnet_address('notanaddress') == 'notanaddress'
+
+
+class TestNormalizeAddress:
+    """bech32 is case-insensitive per BIP-173 (uppercase is standard in QR codes);
+    base58 legacy addresses are case-sensitive and must pass through untouched."""
+
+    def test_uppercase_bech32_matches_lowercase(self):
+        btc = Bitcoin()
+        upper = 'BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4'
+        assert btc.normalize_address(upper) == upper.lower()
+
+    def test_testnet_and_regtest_prefixes(self):
+        btc = Bitcoin()
+        assert btc.normalize_address('TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX').startswith('tb1q')
+        assert btc.normalize_address('BCRT1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KYGT080').startswith('bcrt1q')
+
+    def test_base58_passes_through_case_sensitive(self):
+        btc = Bitcoin()
+        legacy = '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'
+        assert btc.normalize_address(legacy) == legacy

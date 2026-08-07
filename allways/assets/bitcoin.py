@@ -150,6 +150,10 @@ class Bitcoin(Asset, Chain):
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
 
+    def normalize_address(self, address: str) -> str:
+        """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
+        return address.lower() if address.lower().startswith(('bc1', 'tb1', 'bcrt1')) else address
+
     def can_send_from(self, address: str) -> bool:
         """True iff BTC_PRIVATE_KEY derives ``address`` (any of its p2wpkh / p2sh-p2wpkh / p2pkh
         forms) — i.e. this WIF can broadcast the source deposit from the pinned sender."""
