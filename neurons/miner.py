@@ -20,7 +20,7 @@ load_dotenv()
 import bittensor as bt  # noqa: E402
 from bittensor import Keypair as BtKeypair  # noqa: E402
 
-from allways.chain_providers import create_chain_providers  # noqa: E402
+from allways.assets import create_assets  # noqa: E402
 from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS, NUMERAIRE_CHAIN  # noqa: E402
 from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
@@ -62,7 +62,7 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.warning(f'Could not read own quotes at startup ({e}); requiring all chain providers.')
             required_chains = None
-        self.chain_providers = create_chain_providers(
+        self.assets = create_assets(
             check=True,
             required_chains=required_chains,
             subtensor=self.subtensor,
@@ -84,7 +84,7 @@ class Miner(BaseMinerNeuron):
 
         self.swap_fulfiller = SwapFulfiller(
             solana_client=self.solana_client,
-            chain_providers=self.chain_providers,
+            assets=self.assets,
             sent_cache_path=sent_cache_path,
             my_addresses=self.my_addresses,
         )
@@ -196,7 +196,7 @@ class Miner(BaseMinerNeuron):
         chain providers need the refreshed connection.
         """
         self.reconnect_subtensor()
-        tao_provider = self.chain_providers.get('tao')
+        tao_provider = self.assets.get('tao')
         if tao_provider and hasattr(tao_provider, 'subtensor'):
             tao_provider.subtensor = self.subtensor
 

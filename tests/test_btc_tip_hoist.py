@@ -15,9 +15,9 @@ class _Resp:
 
 def _provider(monkeypatch):
     monkeypatch.setenv('BTC_MODE', 'lightweight')
-    from allways.chain_providers.bitcoin import BitcoinProvider
+    from allways.assets.bitcoin import Bitcoin
 
-    return BitcoinProvider()
+    return Bitcoin()
 
 
 def test_confirmations_from_cached_tip(monkeypatch):

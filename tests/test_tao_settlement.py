@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from allways.chain_providers.base import ProviderUnreachableError
-from allways.chain_providers.subtensor import SubtensorProvider
+from allways.assets.base import ProviderUnreachableError
+from allways.assets.subtensor import Tao
 
 MINER = 'minerTAO'
 USER = 'userTAO'
@@ -31,7 +31,7 @@ def _transfer_event(dest, amount, sender, extrinsic_idx=0):
 
 
 def _provider(*, call_amount=5_000, events, head=BLOCK + 10):
-    p = SubtensorProvider.__new__(SubtensorProvider)  # skip __init__ (no real subtensor needed)
+    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
     p.subtensor = MagicMock()
     p.subtensor.get_current_block.return_value = head
     p.block_cache = {}
@@ -138,7 +138,7 @@ def test_events_are_fetched_once_per_block():
     real_events = [_transfer_event(MINER, 5_000, USER)]
     p.subtensor.substrate = SimpleNamespace(get_events=lambda h: calls.append(h) or real_events)
     del p.get_block_events  # exercise the real caching path
-    p.get_block_events = SubtensorProvider.get_block_events.__get__(p)
+    p.get_block_events = Tao.get_block_events.__get__(p)
     assert p.settled_credit(BLOCK, 0, MINER) == (USER, 5_000)
     assert p.settled_credit(BLOCK, 0, MINER) == (USER, 5_000)
     assert len(calls) == 1
@@ -164,7 +164,7 @@ def test_unreadable_transfer_payload_raises_rather_than_reading_as_absent(attrib
         'event': {'module_id': 'Balances', 'event_id': 'Transfer', 'attributes': attributes},
     }
     with pytest.raises(ProviderUnreachableError):
-        SubtensorProvider._transfer_from_event(record)
+        Tao._transfer_from_event(record)
 
 
 def test_unreadable_payload_on_a_non_transfer_event_is_still_just_absent():
@@ -173,7 +173,7 @@ def test_unreadable_payload_on_a_non_transfer_event_is_still_just_absent():
         'extrinsic_idx': 0,
         'event': {'module_id': 'Balances', 'event_id': 'Withdraw', 'attributes': 'unexpected-scalar'},
     }
-    assert SubtensorProvider._transfer_from_event(record) is None
+    assert Tao._transfer_from_event(record) is None
 
 
 def test_unreadable_transfer_payload_surfaces_through_settled_credit():

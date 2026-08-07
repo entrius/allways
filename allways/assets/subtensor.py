@@ -5,13 +5,14 @@ import bittensor as bt
 from bittensor import Keypair
 from bittensor.utils import is_valid_ss58_address, ss58_encode
 
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 
 LOG_SUB = '[Subtensor]'
 
 
-class SubtensorProvider(ChainProvider):
+class Tao(Asset, Chain):
     """TAO chain provider using bt.Subtensor and substrate-interface.
 
     Owns its signing ``bt.Wallet`` when one is supplied at construction, so
@@ -487,7 +488,7 @@ class SubtensorProvider(ChainProvider):
     @staticmethod
     def match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
         """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
-        decoded = SubtensorProvider.decode_transfer(ext, is_raw)
+        decoded = Tao.decode_transfer(ext, is_raw)
         if decoded is None or decoded[0] != tx_hash:
             return None
         _, dest, amount, sender = decoded
@@ -631,7 +632,7 @@ class SubtensorProvider(ChainProvider):
     ) -> Optional[Tuple[str, int]]:
         """Send TAO via subtensor transfer. Amount is in rao."""
         if self.wallet is None:
-            bt.logging.error('TAO send_amount called on a read-only SubtensorProvider (no wallet)')
+            bt.logging.error('TAO send_amount called on a read-only Tao (no wallet)')
             return None
         try:
             response = self.subtensor.transfer(

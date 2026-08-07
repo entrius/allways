@@ -1,4 +1,4 @@
-"""Unit tests for SolanaProvider (B7) — the native-SOL swap-leg provider.
+"""Unit tests for Sol (B7) — the native-SOL swap-leg provider.
 
 No chain: a fake RPC returns canned getTransaction/getSlot/getBalance results. Covers fetch/verify,
 block_time extraction, amount matching (>=), confirmations, failed/missing tx, unreachable backend,
@@ -9,8 +9,8 @@ import pytest
 import requests
 from solders.keypair import Keypair
 
-from allways.chain_providers.base import ProviderUnreachableError
-from allways.chain_providers.solana import SolanaProvider
+from allways.assets.base import ProviderUnreachableError
+from allways.assets.solana import Sol
 from allways.chains import CHAIN_SOL
 
 
@@ -51,7 +51,7 @@ class FakeRpc:
 
 
 def provider_with(rpc, keypair=None):
-    p = SolanaProvider(solana_rpc_url='fake://rpc', solana_keypair=keypair)
+    p = Sol(solana_rpc_url='fake://rpc', solana_keypair=keypair)
     p.rpc = rpc
     return p
 

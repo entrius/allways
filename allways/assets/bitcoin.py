@@ -10,7 +10,8 @@ from bitcoin_message_tool.bmt import sign_message, verify_message
 from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.chain import Chain
 from allways.chains import CHAIN_BTC, ChainDefinition
 
 ADDR_TYPE_P2PKH = 'p2pkh'
@@ -94,7 +95,7 @@ def esplora_tag(base: str) -> str:
     return parts[-2] if len(parts) >= 2 else host
 
 
-class BitcoinProvider(ChainProvider):
+class Bitcoin(Asset, Chain):
     """Bitcoin chain provider: embit + Esplora HTTP API (no local node required).
 
     Verification reads the Esplora API; signing/broadcast uses embit with a WIF from

@@ -372,10 +372,10 @@ def test_can_send_from_gates_on_signer(monkeypatch):
     funds move (prevents the wrong-key deposit the validator would reject)."""
     from types import SimpleNamespace
 
-    from allways.chain_providers.solana import SolanaProvider
+    from allways.assets.solana import Sol
 
     kp = SimpleNamespace(pubkey=lambda: 'PINNED')
-    p = SolanaProvider.__new__(SolanaProvider)
+    p = Sol.__new__(Sol)
     p.keypair = kp
     assert p.can_send_from('PINNED') is True
     assert p.can_send_from('SOMEONE_ELSE') is False

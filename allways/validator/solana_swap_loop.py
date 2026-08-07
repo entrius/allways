@@ -17,7 +17,7 @@ import bittensor as bt
 from solders.pubkey import Pubkey
 
 from allways import dev_signal
-from allways.chain_providers.base import ProviderUnreachableError
+from allways.assets.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
@@ -109,12 +109,12 @@ class SolanaSwapLoop:
     def __init__(
         self,
         solana_client: Any,
-        chain_providers: Dict[str, Any],
+        assets: Dict[str, Any],
         fee_divisor: int = 100,
         read_only: bool = False,
     ):
         self.client = solana_client
-        self.providers = chain_providers
+        self.providers = assets
         self.fee_divisor = fee_divisor
         self.read_only = read_only
         self.reject_warned: Set[str] = set()  # dedupe rate-reject warnings, one per swap key

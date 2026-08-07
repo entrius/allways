@@ -11,7 +11,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.chain import Chain
 from allways.chains import CHAIN_ETH, ChainDefinition
 
 LOG_ETH = '[EthRpc]'
@@ -49,7 +50,7 @@ def rpc_tag(base: str) -> str:
     return parts[-2] if len(parts) >= 2 else host
 
 
-class EthereumProvider(ChainProvider):
+class EvmCoin(Asset, Chain):
     """Ethereum chain provider: eth-account + public JSON-RPC (no local node required).
 
     Plain EOA value transfers only, by design: a swap leg is verified off the transaction's

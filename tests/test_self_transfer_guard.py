@@ -10,11 +10,11 @@ reward-side limits, so it still passes here.
 
 from typing import Optional
 
-from allways.chain_providers.base import ChainProvider, TransactionInfo
+from allways.assets.base import Asset, TransactionInfo
 from allways.chains import CHAIN_TAO, ChainDefinition
 
 
-class FakeProvider(ChainProvider):
+class FakeProvider(Asset):
     """Returns a single canned tx; only the base post-checks are exercised."""
 
     def __init__(self, tx: TransactionInfo):

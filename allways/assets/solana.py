@@ -8,14 +8,15 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.solana.rpc import SolanaRpc, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
 
-class SolanaProvider(ChainProvider):
+class Sol(Asset, Chain):
     """Solana swap-leg provider for native SOL transfers.
 
     The SOL leg of a launch pair (sol↔btc, sol↔tao) is a peer-to-peer user↔miner
@@ -245,7 +246,7 @@ class SolanaProvider(ChainProvider):
         Signs with the provider's own keypair (callers pass no key material). Returns
         (signature, slot) or None. Retries on stale-blockhash like the program client."""
         if self.keypair is None:
-            bt.logging.error('SOL send_amount called on a read-only SolanaProvider (no keypair)')
+            bt.logging.error('SOL send_amount called on a read-only Sol (no keypair)')
             return None
         try:
             from solders.hash import Hash

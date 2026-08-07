@@ -13,7 +13,7 @@ import bittensor as bt
 from bittensor import Keypair
 from solders.pubkey import Pubkey
 
-from allways.chain_providers.base import ProviderUnreachableError
+from allways.assets.base import ProviderUnreachableError
 from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
@@ -118,7 +118,7 @@ def reserve_on_behalf(
 
     # Deliverability gate — BEFORE any funds move: a dest that provably refuses transfers
     # (e.g. a reverting contract wallet) must bounce here, not strand a paid swap later.
-    provider = getattr(validator, 'axon_chain_providers', {}).get(to_chain)
+    provider = getattr(validator, 'axon_assets', {}).get(to_chain)
     if provider is not None and not provider.can_deliver_to(user_to_addr, amts.to_amount):
         return ReserveResult(False, 'destination address rejects incoming transfers')
 
@@ -303,7 +303,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
         return ConfirmResult(False, 'Reservation already has a claimed swap')
 
-    provider = validator.axon_chain_providers.get(reservation.from_chain)
+    provider = validator.axon_assets.get(reservation.from_chain)
     if provider is None:
         return ConfirmResult(False, f'Unsupported source chain: {reservation.from_chain}')
 
@@ -355,7 +355,7 @@ def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
         return None
     if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
         return None
-    provider = validator.axon_chain_providers.get(reservation.from_chain)
+    provider = validator.axon_assets.get(reservation.from_chain)
     scan = getattr(provider, 'find_recent_outgoing', None)
     if scan is None:
         return None
