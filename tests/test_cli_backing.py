@@ -284,3 +284,16 @@ def test_a_candidate_defaults_to_the_local_purse_when_a_quote_predates_the_field
     from allways.cli.swap_commands.swap_intake import MinerCandidate
 
     assert MinerCandidate(miner='m', rate_display='1', collateral=0).backing == 'sol'
+
+
+# --- taker preview: the guarantee is stated, not implied ----------------------------------------
+
+
+def test_the_quote_preview_states_each_backings_guarantee():
+    from allways.cli.swap_commands.quote import GUARANTEE
+
+    # Timing is the difference, and both halves must say so — the SOL path is instant, the TAO path
+    # is "shortly after". A taker choosing between two offers is choosing between these two lines.
+    assert 'instant' in GUARANTEE['sol'].lower()
+    assert 'tao' in GUARANTEE['tao'].lower() and 'timeout' in GUARANTEE['tao'].lower()
+    assert set(GUARANTEE) == {'sol', 'tao'}, 'every backing needs stated copy before it can trade'
