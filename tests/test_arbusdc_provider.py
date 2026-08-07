@@ -277,10 +277,19 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': eth_call_views(blacklisted=[RECIPIENT])})
         assert provider.delivery_refused(RECIPIENT, since_unix=0) is True
 
+    def test_slash_gate_paused_token(self, provider):
+        # A pause makes delivery impossible for EVERYONE through no fault of the miner —
+        # the slash gate must defer exactly like the reserve gate refuses.
+        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': eth_call_views(paused=True)})
+        assert provider.delivery_refused(RECIPIENT, since_unix=0) is True
+
     def test_slash_gate_samples_history(self, provider):
         # Clean at latest, blacklisted at a sampled historical block (freeze lifted mid-window).
         def call(params):
-            if params[0]['data'].startswith(SEL_IS_BLACKLISTED):
+            data = params[0]['data']
+            if data.startswith(SEL_PAUSED):
+                return '0x0'
+            if data.startswith(SEL_IS_BLACKLISTED):
                 return hex(int(params[1] != 'latest'))
             raise AssertionError(params)
 
@@ -346,6 +355,20 @@ class TestSendGuards:
         rpc_stub(provider, self._send_responses(gas_balance=10))
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
         assert 'Insufficient gas balance' in provider.last_send_error
+
+    def test_insufficient_balance_diagnosed_before_estimator_revert(self, provider, monkeypatch):
+        # An underfunded transfer reverts in the estimator too — the balance check runs first
+        # so a token-poor miner reads "Insufficient", not "destination refuses".
+        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        responses = self._send_responses(token_balance=AMOUNT - 1)
+
+        def revert(params):
+            raise RuntimeError('execution reverted: transfer amount exceeds balance')
+
+        responses['eth_estimateGas'] = revert
+        rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, AMOUNT) is None
+        assert 'Insufficient ARBUSDC' in provider.last_send_error
 
     def test_reverting_transfer_refused(self, provider, monkeypatch):
         monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
@@ -479,6 +502,18 @@ class TestCheckConnection:
     def test_missing_key_fails_when_send_required(self, provider):
         with pytest.raises(ConnectionError, match='ARBUSDC_PRIVATE_KEY'):
             provider.check_connection(require_send=True)
+
+    def test_wrong_network_endpoint_deeper_in_ladder_fails_boot(self, provider):
+        # Every configured endpoint is probed at startup — a wrong-network URL at position 2
+        # would otherwise surface only mid-outage, quietly serving wrong-chain verifications.
+        def fake_rpc(method, params, timeout=15, bases=None, **kw):
+            if method == 'eth_chainId':
+                return '0x1' if bases and 'drpc' in bases[0] else hex(421_614)
+            return '0x10'
+
+        provider.chain.eth_rpc = fake_rpc
+        with pytest.raises(ConnectionError, match='drpc serves chain id 1'):
+            provider.check_connection(require_send=False)
 
     def test_codeless_contract_fails(self, provider):
         rpc_stub(provider, {'eth_chainId': hex(421_614), 'eth_blockNumber': '0x10', 'eth_getCode': '0x'})

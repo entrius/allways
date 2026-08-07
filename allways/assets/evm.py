@@ -113,7 +113,14 @@ class EvmChain(Chain):
     def _key_env(self) -> str:
         return f'{self.env_prefix}_PRIVATE_KEY'
 
-    def eth_rpc(self, method: str, params: list, timeout: int = 15, null_needs_quorum: bool = False) -> Any:
+    def eth_rpc(
+        self,
+        method: str,
+        params: list,
+        timeout: int = 15,
+        null_needs_quorum: bool = False,
+        bases: Optional[Tuple[str, ...]] = None,
+    ) -> Any:
         """Call ``method`` against each endpoint in order, narrating every failover.
 
         A JSON-RPC ``error`` object is treated as endpoint trouble (rate limit, pruned
@@ -123,15 +130,19 @@ class EvmChain(Chain):
         ``null_needs_quorum``: return None only when every endpoint reachably agrees;
         null + an unreachable endpoint raises. For paths where "absent" costs money —
         one stale node in a public load balancer must not read as "never happened".
+
+        ``bases``: restrict the call to specific endpoints (startup per-endpoint probes);
+        None = the configured ladder.
         """
+        rpc_bases = list(bases) if bases else self.rpc_bases
         log = f'{self.network_def.label}Rpc'
         payload = {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}
         last_err: Optional[Exception] = None
         saw_null = False
-        for i, base in enumerate(self.rpc_bases):
-            pos = f'[{i + 1}/{len(self.rpc_bases)}]'
+        for i, base in enumerate(rpc_bases):
+            pos = f'[{i + 1}/{len(rpc_bases)}]'
             tag = rpc_tag(base)
-            nxt = rpc_tag(self.rpc_bases[i + 1]) if i + 1 < len(self.rpc_bases) else None
+            nxt = rpc_tag(rpc_bases[i + 1]) if i + 1 < len(rpc_bases) else None
             tail = f'falling back to: {nxt}' if nxt else 'no providers left, giving up'
             try:
                 resp = self.http.post(base, json=payload, timeout=timeout)
@@ -175,17 +186,29 @@ class EvmChain(Chain):
         raise last_err or RuntimeError(f'all {self.network_def.label} RPCs failed')
 
     def connect_network(self) -> Tuple[int, int]:
-        """(chain_id, tip) from the ladder; raises ConnectionError on unreachable or wrong network."""
+        """(chain_id, tip); raises ConnectionError when no endpoint answers or ANY answering
+        endpoint serves the wrong network. EVERY configured endpoint is probed: a wrong-network
+        URL deeper in the ladder would otherwise surface only mid-outage, quietly serving
+        wrong-chain verifications. An unreachable endpoint just warns — flaky ≠ misconfigured."""
+        chain_id = None
+        for base in self.rpc_bases:
+            try:
+                served = int(self.eth_rpc('eth_chainId', [], timeout=10, bases=(base,)), 16)
+            except Exception as e:
+                bt.logging.warning(f'{self.env_prefix} endpoint {rpc_tag(base)} unreachable at startup: {e}')
+                continue
+            if served != self.chain_id:
+                raise ConnectionError(
+                    f'{self.env_prefix} endpoint {rpc_tag(base)} serves chain id {served}, expected {self.chain_id} '
+                    f'for {self.network} — {self.env_prefix}_RPC_URLS and {self.env_prefix}_NETWORK disagree'
+                )
+            chain_id = served
+        if chain_id is None:
+            raise ConnectionError(f'Cannot reach any {self.network_def.label} RPC')
         try:
-            chain_id = int(self.eth_rpc('eth_chainId', [], timeout=10), 16)
             tip = int(self.eth_rpc('eth_blockNumber', [], timeout=10), 16)
         except Exception as e:
             raise ConnectionError(f'Cannot reach {self.network_def.label} RPC: {e}') from e
-        if chain_id != self.chain_id:
-            raise ConnectionError(
-                f'{self.env_prefix} RPC serves chain id {chain_id}, expected {self.chain_id} for {self.network} — '
-                f'{self.env_prefix}_RPC_URLS and {self.env_prefix}_NETWORK disagree'
-            )
         return chain_id, tip
 
     def get_current_block_height(self) -> Optional[int]:

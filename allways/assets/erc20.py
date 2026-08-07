@@ -342,16 +342,19 @@ class Erc20(EvmAsset):
                 tip_fee = FALLBACK_PRIORITY_FEE_WEI
             max_fee = 2 * base_fee + tip_fee
 
+            # Token balance BEFORE the gas estimate: an underfunded transfer reverts in the
+            # estimator too, which would misread as the destination refusing.
+            token_balance = self.get_balance(acct.address)
+            if token_balance < amount:
+                self._send_error(f'Insufficient {prefix}: have {token_balance} units, need {amount}')
+                return None
+
             calldata = SEL_TRANSFER[2:] + _pad_addr(to_address) + f'{int(amount):064x}'
             gas = self._transfer_gas(acct.address, calldata)
             if gas is None:
                 self._send_error(f'destination {to_address} refuses {prefix} transfers — not sending')
                 return None
 
-            token_balance = self.get_balance(acct.address)
-            if token_balance < amount:
-                self._send_error(f'Insufficient {prefix}: have {token_balance} units, need {amount}')
-                return None
             gas_balance = int(self.chain.eth_rpc('eth_getBalance', [acct.address, 'latest']), 16)
             if gas_balance < gas * max_fee:
                 self._send_error(f'Insufficient gas balance: have {gas_balance} wei, need {gas * max_fee}')
@@ -422,26 +425,31 @@ class Erc20(EvmAsset):
         except Exception:
             return True
 
-    def delivery_refused(self, address: str, since_unix: int) -> bool:
-        """Slash gate: a blacklisted destination — now or sampled across the window since
-        ``since_unix`` — is positive evidence delivery could fail; never slash over it.
+    def _refused_at(self, address: str, block: str = 'latest') -> bool:
+        """Issuer refusal at ``block``: dest blacklisted, or the whole token paused."""
+        return bool(self._eth_call(SEL_IS_BLACKLISTED, address, block)) or bool(self._eth_call(SEL_PAUSED, '', block))
 
-        The LATEST probe is the load-bearing signal (issuer freezes persist for months, so a
-        freeze that broke delivery is still visible at slash time): its RPC failure raises and
-        the caller defers — a flaky RPC postpones a slash, never falsifies one. Historical
-        samples are best-effort (public nodes serve historical eth_call only ~a minute deep at
-        1s blocks; verified live 2026-08-07): a failing sample is skipped with a warning rather
-        than deferring every slash on the pair forever."""
-        if self._eth_call(SEL_IS_BLACKLISTED, address):
+    def delivery_refused(self, address: str, since_unix: int) -> bool:
+        """Slash gate: issuer refusal (blacklisted dest, or token paused — both make delivery
+        impossible through no fault of the miner) — now or sampled across the window since
+        ``since_unix`` — is positive evidence; never slash over it.
+
+        The LATEST probe is the load-bearing signal (freezes persist for months, pauses until
+        the issuer acts, so a refusal that broke delivery is still visible at slash time): its
+        RPC failure raises and the caller defers — a flaky RPC postpones a slash, never
+        falsifies one. Historical samples are best-effort (public nodes serve historical
+        eth_call only ~a minute deep at 1s blocks; verified live 2026-08-07): a failing sample
+        is skipped with a warning rather than deferring every slash on the pair forever."""
+        if self._refused_at(address):
             return True
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
         span = min(60, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         for probe in dict.fromkeys(hex(max(0, tip - span // d)) for d in (1, 2)):
             try:
-                if self._eth_call(SEL_IS_BLACKLISTED, address, probe):
+                if self._refused_at(address, probe):
                     return True
             except Exception as e:
-                bt.logging.warning(f'{self._log} historical blacklist sample at {probe} failed ({e}) — skipping')
+                bt.logging.warning(f'{self._log} historical refusal sample at {probe} failed ({e}) — skipping')
         return False
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:

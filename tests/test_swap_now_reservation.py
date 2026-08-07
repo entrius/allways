@@ -510,3 +510,33 @@ def test_screen_blocks_malformed_miner_receive_address():
     client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
     with pytest.raises(SystemExit):
         _screen(_Gate(malformed={'mineraddr'}), 'arbusdc', 'sol', client)
+
+
+def test_screen_rejection_aborts_swap_now_before_any_bid():
+    # Placement guard: the screen fires inside `swap now` BEFORE the resume/bid machinery —
+    # a doomed dest aborts the flow with no bid placed and no reservation touched.
+    from click.testing import CliRunner
+
+    from allways.cli.swap_commands.swap import swap_now_command
+
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    client = MagicMock()
+    client.keypair.pubkey.return_value = user
+    client.get_config.return_value = types.SimpleNamespace(
+        min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
+    )
+    amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
+    with (
+        patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=_Gate(reject={'userBTCaddr'})),
+        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
+        patch('allways.cli.swap_commands.swap._save_pending'),
+    ):
+        result = CliRunner().invoke(swap_now_command, argv)
+    assert result.exit_code != 0
+    assert 'cannot accept' in result.output
+    client.open_or_request.assert_not_called()
+    client.get_reservation.assert_not_called()
