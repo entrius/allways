@@ -132,7 +132,7 @@ fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
 fn deactivate_ix(miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::Deactivate {}.data(),
+        &allways_swap_manager::instruction::Deactivate { backing: None }.data(),
         allways_swap_manager::accounts::Deactivate {
             miner: *miner,
             miner_state: miner_pda(miner),

@@ -26,6 +26,8 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
@@ -85,8 +87,12 @@ fn attest_round_pda(m: &Pubkey, chain: &str) -> Pubkey {
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
 }
-fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
-    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes(), b.as_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
@@ -163,11 +169,15 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
     )
 }
 fn set_quote_ix(miner: &Pubkey, f: &str, t: &str) -> Instruction {
+    set_quote_backed_ix(miner, f, t, BACKING)
+}
+fn set_quote_backed_ix(miner: &Pubkey, f: &str, t: &str, b: &str) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::SetQuote {
             from_chain: f.to_string(),
             to_chain: t.to_string(),
+            collateral_chain: b.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
@@ -176,7 +186,8 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str) -> Instruction {
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
-            quote: quote_pda(miner, f, t),
+            miner_state: miner_pda(miner),
+            quote: quote_pda(miner, f, t, b),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -256,11 +267,16 @@ fn heartbeat_ix(validator: &Pubkey) -> Instruction {
     )
 }
 fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
+    open_backed_ix(router, miner, f, t, BACKING)
+}
+/// A bid naming the quote's backing — the attestation account rides along for anything but "sol".
+fn open_backed_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str, b: &str) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: f.to_string(),
             to_chain: t.to_string(),
+            collateral_chain: b.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -268,7 +284,8 @@ fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            quote: quote_pda(miner, f, t),
+            quote: quote_pda(miner, f, t, b),
+            attestation: (b != BACKING).then(|| attest_pda(miner, b)),
             pool: pool_pda(miner),
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
@@ -476,10 +493,11 @@ fn setup() -> (LiteSVM, Keypair, Vec<Keypair>, Keypair) {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post");
-    send(&mut svm, set_quote_ix(&miner.pubkey(), SPOKE_FROM, SPOKE_TO), &miner.pubkey(), &miner).expect("quote spoke");
-    send(&mut svm, set_quote_ix(&miner.pubkey(), HUB_FROM, HUB_TO), &miner.pubkey(), &miner).expect("quote hub");
+    // Activate BEFORE quoting: W2b's set_quote refuses a quote whose backing the miner isn't serving.
     send(&mut svm, activate_ix(&vals[0].pubkey(), &miner.pubkey(), SOL, None), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, activate_ix(&vals[1].pubkey(), &miner.pubkey(), SOL, None), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), SPOKE_FROM, SPOKE_TO), &miner.pubkey(), &miner).expect("quote spoke");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), HUB_FROM, HUB_TO), &miner.pubkey(), &miner).expect("quote hub");
 
     (svm, admin, vals, miner)
 }
@@ -996,7 +1014,7 @@ fn test_self_deactivate_drops_every_backing() {
 
     let ix = Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::Deactivate {}.data(),
+        &allways_swap_manager::instruction::Deactivate { backing: None }.data(),
         allways_swap_manager::accounts::Deactivate { miner: m, miner_state: miner_pda(&m) }
             .to_account_metas(None),
     );
@@ -1223,4 +1241,171 @@ fn test_migration_cranks_are_admin_only() {
     downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
     assert!(send(&mut svm, migrate_config_ix(&intruder.pubkey()), &intruder.pubkey(), &intruder).is_err());
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("admin may");
+}
+
+// --- W2b: quote-declared backing reaches the pool and the draw -------------------------------------
+
+/// Light the miner's TAO purse (heartbeat + attestation + activation quorum) and post a TAO-backed
+/// quote on the hub↔hub pair. `bond` is the attested effective balance.
+fn light_tao_purse(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, bond: u64) {
+    let m = miner.pubkey();
+    let attest_key = Some(attest_pda(&m, TAO));
+    beat_heartbeat(svm, vals);
+    attest(svm, vals, &m, bond, true, 1);
+    send(svm, activate_ix(&vals[0].pubkey(), &m, TAO, attest_key), &vals[0].pubkey(), &vals[0]).expect("t0");
+    send(svm, activate_ix(&vals[1].pubkey(), &m, TAO, attest_key), &vals[1].pubkey(), &vals[1]).expect("t1");
+    send(svm, set_quote_backed_ix(&m, HUB_FROM, HUB_TO, TAO), &m, miner).expect("tao-backed quote");
+}
+
+fn self_deactivate_ix(miner: &Pubkey, backing: Option<&str>) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::Deactivate { backing: backing.map(|b| b.to_string()) }
+            .data(),
+        allways_swap_manager::accounts::Deactivate { miner: *miner, miner_state: miner_pda(miner) }
+            .to_account_metas(None),
+    )
+}
+
+#[test]
+fn test_tao_backed_pool_entry_reads_the_tao_purse_not_the_local_vault() {
+    // The W2 flag closed: open_or_request used to floor on lamports unconditionally. A TAO-backed
+    // quote must be gated on the ATTESTED bond, and a bond under the TAO floor must not open a pool
+    // however much SOL the miner happens to hold.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_MIN_COLLATERAL_RAO);
+
+    // A slash lands: the attested bond drops under the TAO floor while the miner's SOL vault is
+    // untouched. The bid must die on the TAO purse, not pass on the lamports it still holds.
+    attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO - 1, true, 2);
+    let err = send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(
+        err.contains("InsufficientCollateral"),
+        "a bond below tao_min_collateral must not open a pool despite {COLLATERAL} lamports of SOL, got: {err}"
+    );
+    assert_eq!(miner_state(&svm, &m).collateral, COLLATERAL, "the local vault was never consulted");
+
+    // Bond restored to the floor and the same bid goes through.
+    attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO, true, 3);
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("tao-backed open at the floor");
+}
+
+#[test]
+fn test_tao_backed_pool_entry_needs_a_locked_bond_and_a_live_fuse() {
+    // Each gate on its own, all of them reached only because the quote declared "tao".
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    // Unlocked bond: the vault no longer holds it for us.
+    attest(&mut svm, &vals, &m, TAO_AMOUNT as u64, false, 2);
+    let err = send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(err.contains("BondNotLocked"), "unlocked bond must not open a pool, got: {err}");
+
+    // Re-locked, but the heartbeat has gone stale — the dead-man fuse shuts entry.
+    attest(&mut svm, &vals, &m, TAO_AMOUNT as u64, true, 3);
+    let stale_at = now_ts(&svm) + config_acct(&svm).attest_max_age_secs + 1;
+    set_clock(&mut svm, stale_at);
+    let err = send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(err.contains("AttestationStale"), "a stale heartbeat must fuse TAO entry off, got: {err}");
+
+    // Heartbeat restored → open succeeds.
+    beat_heartbeat(&mut svm, &vals);
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("open once the fuse is live again");
+}
+
+#[test]
+fn test_a_tao_only_miner_serves_tao_quotes_and_nothing_else() {
+    // D2's point: purses are independent. A miner with no SOL bit cannot open a SOL-backed pool even
+    // on a pair it quotes, and its TAO-backed pool opens fine.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+    // Drop the SOL purse, leaving the (already posted) sol-backed quotes standing behind a dark purse.
+    send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("drop sol purse");
+
+    let err = send(&mut svm, open_ix(&vals[0].pubkey(), &m, SPOKE_FROM, SPOKE_TO), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(err.contains("MinerNotActive"), "sol-backed pool with a dark SOL purse, got: {err}");
+
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("a TAO-only miner still serves its TAO-backed quote");
+}
+
+#[test]
+fn test_resolve_pool_pins_the_drawn_quotes_backing() {
+    // The W1 pin point, now fed by the quote instead of the "sol" constant — reached entirely through
+    // the public path (no hand-written reservation), which is what makes TAO swaps reachable at all.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    let now = now_ts(&svm);
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("open");
+    assert_eq!(
+        Pool::try_deserialize(&mut svm.get_account(&pool_pda(&m)).unwrap().data.as_slice()).unwrap().collateral_chain,
+        TAO,
+        "the pool pins the quote's backing at open"
+    );
+    set_clock(&mut svm, now + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &m);
+
+    let r = reservation_acct(&svm, &m);
+    assert_eq!(r.collateral_chain, TAO, "the draw copies the pool's backing into the Reservation");
+    assert_eq!(r.from_chain, HUB_FROM);
+    assert_eq!(r.to_chain, HUB_TO);
+}
+
+#[test]
+fn test_a_bid_cannot_join_a_pool_pinned_to_a_different_backing() {
+    // Two quotes, same direction, different guarantee — a late bidder must not be able to slide onto
+    // the other offer's contest.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("open tao-backed");
+    let err = send(&mut svm, open_backed_ix(&vals[1].pubkey(), &m, HUB_FROM, HUB_TO, SOL), &vals[1].pubkey(), &vals[1])
+        .unwrap_err();
+    assert!(err.contains("MinerBusyDifferentPair"), "backing mismatch must be refused, got: {err}");
+}
+
+#[test]
+fn test_partial_self_exit_drops_one_purse_and_only_sol_starts_the_cooldown() {
+    // The cooldown guards LOCAL collateral: dropping TAO leaves it unset (that exit is gated on the
+    // vault's unlock path), dropping SOL starts it.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+    assert_eq!(miner_state(&svm, &m).active_backings, BACKING_BIT_SOL | BACKING_BIT_TAO);
+
+    send(&mut svm, self_deactivate_ix(&m, Some(TAO)), &m, &miner).expect("tao exit");
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_SOL, "only the TAO bit dropped");
+    assert!(ms.active, "the miner still trades on SOL");
+    assert_eq!(ms.deactivation_at, 0, "a TAO exit must not start the local-collateral cooldown");
+
+    let at = now_ts(&svm);
+    send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("sol exit");
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, 0);
+    assert!(!ms.active);
+    assert_eq!(ms.deactivation_at, at, "dropping the SOL purse starts the cooldown");
+}
+
+#[test]
+fn test_partial_self_exit_of_a_dark_purse_is_refused() {
+    // Idempotence would silently re-stamp `deactivation_at` and slide the cooldown forward.
+    let (mut svm, _admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    let err = send(&mut svm, self_deactivate_ix(&m, Some(TAO)), &m, &miner).unwrap_err();
+    assert!(err.contains("MinerNotActive"), "dropping an already-dark purse, got: {err}");
 }

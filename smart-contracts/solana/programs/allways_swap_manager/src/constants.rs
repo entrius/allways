@@ -62,10 +62,10 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v12: W2 bond attestation —
-/// per-hub activation bitmask, attestation heartbeat fuse, TAO collateral floor.
-/// v11 = W1 split-collateral seam; v10 = A4 source-replay via freshness; v9 = A5 binding.
-pub const CONFIG_VERSION: u32 = 12;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v13: W2b quote-level backing —
+/// `collateral_chain` on MinerQuote (and in its seeds) + Pool, per-backing pool entry, partial exit.
+/// v12 = W2 bond attestation; v11 = W1 split-collateral seam; v10 = A4 source-replay via freshness.
+pub const CONFIG_VERSION: u32 = 13;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -114,6 +114,14 @@ pub const BACKING_CHAIN_TAO: &str = "tao";
 /// The legacy `active` bool is the OR of these bits; see `MinerState::set_backing`.
 pub const BACKING_BIT_SOL: u8 = 1 << 0;
 pub const BACKING_BIT_TAO: u8 = 1 << 1;
+
+/// Every known backing as `(bit, chain id)` — the one enumeration of the registry, for the rare code
+/// that must walk the whole mask rather than answer about one backing (a full self-exit emitting one
+/// event per purse). A new hub is a new row here and a new match arm in `backing.rs`; nothing else.
+pub const BACKINGS: [(u8, &str); 2] = [
+    (BACKING_BIT_SOL, BACKING_CHAIN_SOL),
+    (BACKING_BIT_TAO, BACKING_CHAIN_TAO),
+];
 
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value

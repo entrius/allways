@@ -66,7 +66,9 @@ pub struct SwapCompleted {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
     pub collateral_amount: u64,
-    /// Protocol fee taken from collateral into the treasury (lamports).
+    /// Absolute protocol fee for this swap, in the BACKING asset's smallest unit. For "sol" it is what
+    /// actually moved into the treasury (clamped to available collateral); for a backing that settles
+    /// elsewhere nothing moved here and this is what that chain's fee ledger owes.
     pub fee: u64,
     /// Direction + realized leg amounts + executed rate, for off-chain per-swap history (so indexers
     /// don't re-read the now-closed Swap). Feeds the realized volume/VWAP track record (A2).
@@ -145,6 +147,9 @@ pub struct QuoteSet {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// The quote's declared backing — part of its identity, not a detail: the same miner may stand two
+    /// quotes on one direction at different rates, and only this tells them apart in the log.
+    pub collateral_chain: String,
     /// Fixed-point rate = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
     pub liquidity: u128,
@@ -159,6 +164,8 @@ pub struct QuoteRemoved {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// Which of the direction's quotes was retracted (see `QuoteSet::collateral_chain`).
+    pub collateral_chain: String,
     /// Anti-flashing churn fee paid into the treasury on removal (lamports); 0 once the quote has
     /// stood past the decay window.
     pub remove_fee: u64,
@@ -229,6 +236,9 @@ pub struct PoolOpened {
     pub opener: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// The pinned quote's backing — the contest is for one offer, and which purse is on the hook is
+    /// part of that offer. `resolve_pool` copies it straight into the Reservation.
+    pub collateral_chain: String,
     pub closes_at: i64,
     pub seed_slot: u64,
 }

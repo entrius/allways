@@ -19,6 +19,8 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
@@ -67,8 +69,12 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
 fn resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
 }
-fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
-    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes(), b.as_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn stats_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
     Pubkey::find_program_address(&[b"stats", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
@@ -184,6 +190,7 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         &allways_swap_manager::instruction::SetQuote {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
@@ -192,7 +199,8 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            miner_state: miner_pda(miner),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -207,6 +215,7 @@ fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128)
         &allways_swap_manager::instruction::SetQuote {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
             miner_from_addr: from_addr.to_string(),
             miner_to_addr: to_addr.to_string(),
             rate,
@@ -215,7 +224,8 @@ fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128)
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            miner_state: miner_pda(miner),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -228,6 +238,7 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -235,7 +246,8 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            attestation: None,
             pool: pool_pda(miner),
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
@@ -454,9 +466,10 @@ fn setup_full(collateral: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair, u64)
     send(&mut svm, post_ix(&miner.pubkey(), collateral), &miner.pubkey(), &miner).expect("post");
     // The per-miner collateral vault is created by the deposit above; derive its rent reserve.
     let rent_reserve = collateral_vault_lamports(&svm, &miner.pubkey()) - collateral;
-    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+    // Activate BEFORE quoting: W2b's set_quote refuses a quote whose backing the miner isn't serving.
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
 
     // Reservation via the lottery, run *before* BASE_TS so each test still starts at BASE_TS with an
     // active reservation (reserved_until = setup_ts + TTL > BASE_TS) — the swap-time assertions are
@@ -540,9 +553,10 @@ fn test_finalize_rejected_below_overcollateralization() {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), under), &miner.pubkey(), &miner).expect("post");
-    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+    // Activate BEFORE quoting: W2b's set_quote refuses a quote whose backing the miner isn't serving.
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
 
     let user = Keypair::new().pubkey();
     // bid + draw succeed (no amount known yet)...
@@ -800,9 +814,9 @@ fn test_halt_blocks_new_entry_and_lifts_on_unhalt() {
     // Lift the halt → the same entry now succeeds.
     send(&mut svm, set_halted_ix(&admin.pubkey(), false), &admin.pubkey(), &admin).expect("unhalt");
     send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post after unhalt");
-    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
 
-    // Re-halt → activation entry is blocked too.
+    // Re-halt → activation entry is blocked too. (No quote needed: vote_activate never read one, and
+    // since W2b a quote could not exist before activation anyway.)
     send(&mut svm, set_halted_ix(&admin.pubkey(), true), &admin.pubkey(), &admin).expect("re-halt");
     assert!(
         send(&mut svm, vote_activate_ix(&v.pubkey(), &miner.pubkey()), &v.pubkey(), &v).is_err(),

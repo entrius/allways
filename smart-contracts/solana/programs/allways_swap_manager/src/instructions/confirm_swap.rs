@@ -113,24 +113,35 @@ pub fn handler(
         let to_chain = ctx.accounts.swap.to_chain.clone();
         let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
         let rate = ctx.accounts.swap.rate;
-        // Floor at 1 lamport so a sub-100-lamport swap can't complete fee-free (integer division
-        // would truncate 1% of dust to 0); apply_penalty still clamps to available collateral.
+        // Floor at 1 unit so a dust swap can't complete fee-free (integer division would truncate 1%
+        // of dust to 0). Denominated in the BACKING asset, like every other figure sized off
+        // `collateral_amount` — lamports for "sol", rao for "tao".
         let fee = (collateral_amount / FEE_DIVISOR).max(1);
         let min_collateral = ctx.accounts.config.min_collateral;
 
-        let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;
-        // Move the fee out of the miner's collateral vault into the subnet treasury (both are
-        // program-owned PDAs → direct lamport math). apply_penalty already shrank the ledger.
-        if actual_fee > 0 {
-            ctx.accounts.collateral_vault.to_account_info().sub_lamports(actual_fee)?;
-            ctx.accounts.treasury.to_account_info().add_lamports(actual_fee)?;
-            ctx.accounts.treasury.total = ctx
-                .accounts
-                .treasury
-                .total
-                .checked_add(actual_fee)
-                .ok_or(ErrorCode::Overflow)?;
-        }
+        // Only a locally-settled backing takes its fee here. For any other, the fee is a ledger entry
+        // on the bond vault (netted into the attestation at earn time, settled in a batch round), so
+        // Solana must move nothing — debiting the SOL vault by a rao figure would charge a TAO-backed
+        // miner real lamports at ~1000x the intended rate. The event below carries the absolute figure
+        // the fee relay needs, which is the whole Solana-side obligation.
+        let actual_fee = if crate::backing::settles_locally(&collateral_chain) {
+            let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;
+            // Move it out of the miner's collateral vault into the subnet treasury (both are
+            // program-owned PDAs → direct lamport math). apply_penalty already shrank the ledger.
+            if actual_fee > 0 {
+                ctx.accounts.collateral_vault.to_account_info().sub_lamports(actual_fee)?;
+                ctx.accounts.treasury.to_account_info().add_lamports(actual_fee)?;
+                ctx.accounts.treasury.total = ctx
+                    .accounts
+                    .treasury
+                    .total
+                    .checked_add(actual_fee)
+                    .ok_or(ErrorCode::Overflow)?;
+            }
+            actual_fee
+        } else {
+            fee
+        };
         ctx.accounts.miner_state.has_active_swap = false;
         ctx.accounts.miner_state.busy_until = 0;
         ctx.accounts.miner_state.successful_swaps =

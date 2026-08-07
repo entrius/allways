@@ -47,6 +47,19 @@ pub fn backing_bit(collateral_chain: &str) -> Result<u8> {
     }
 }
 
+/// Whether a quote may declare this backing for this pair, returning the backing's bit. Validity is
+/// "backing is a known hub AND backing ∈ legs" — the same two facts everywhere, which is what forces
+/// TAO-backing on a one-hub pair (tao↔btc) and leaves the per-quote choice on a hub↔hub pair (sol↔tao)
+/// without any function here knowing that either pair exists.
+pub fn declarable_bit(collateral_chain: &str, from_chain: &str, to_chain: &str) -> Result<u8> {
+    let bit = backing_bit(collateral_chain)?;
+    require!(
+        collateral_chain == from_chain || collateral_chain == to_chain,
+        ErrorCode::BackingNotInLegs
+    );
+    Ok(bit)
+}
+
 /// The purse a miner must hold to activate this backing, in that asset's own smallest unit — lamports
 /// for "sol", rao for "tao". Never converted through a rate; each hub carries its own floor.
 pub fn activation_floor(config: &Config, collateral_chain: &str) -> Result<u64> {
@@ -191,5 +204,19 @@ mod tests {
         assert_eq!(backing_bit("tao").unwrap(), BACKING_BIT_TAO);
         assert_ne!(BACKING_BIT_SOL, BACKING_BIT_TAO);
         assert!(backing_bit("btc").is_err());
+    }
+
+    #[test]
+    fn a_one_hub_pair_can_only_declare_its_hub() {
+        // tao↔btc: BTC is not a hub and SOL is not a leg, so "tao" is the only declarable backing.
+        assert_eq!(declarable_bit("tao", "tao", "btc").unwrap(), BACKING_BIT_TAO);
+        assert!(declarable_bit("sol", "tao", "btc").is_err()); // not a leg
+        assert!(declarable_bit("btc", "tao", "btc").is_err()); // a leg, but not a hub
+    }
+
+    #[test]
+    fn a_hub_to_hub_pair_can_declare_either_leg() {
+        assert_eq!(declarable_bit("sol", "sol", "tao").unwrap(), BACKING_BIT_SOL);
+        assert_eq!(declarable_bit("tao", "sol", "tao").unwrap(), BACKING_BIT_TAO);
     }
 }

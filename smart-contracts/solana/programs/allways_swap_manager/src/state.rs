@@ -320,11 +320,13 @@ pub struct Swap {
 // validator freshness check: a deposit must be mined after `Reservation.created_at`; an old (replayed)
 // deposit predates any later reservation. See SOLANA_VALIDATOR_OFFLOAD.md "Tx-hash replay protection".)
 
-/// A miner's standing on-chain quote for one pair-direction
-/// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain]`).
+/// A miner's standing on-chain quote for one pair-direction and one backing
+/// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain, collateral_chain]`).
 ///
-/// Replaces the off-chain Bittensor commitment string: one PDA per direction (the `(from_chain,
-/// to_chain)` ordering encodes direction, so no `counter_rate`). Permissionless to write
+/// Replaces the off-chain Bittensor commitment string: the `(from_chain, to_chain)` ordering encodes
+/// direction, so no `counter_rate`. The backing is in the seeds because it is part of the offer, not a
+/// property of the miner: a dual-purse miner posts the same hub↔hub direction twice, once per backing,
+/// at different rates (D2 — one market per pair, mixed by rate). Written by the owning miner
 /// (`set_quote`, overwrites in place); pools pin whatever's current, so staleness is the miner's
 /// problem. Closed + rent-refunded via `remove_quote`.
 #[account]
@@ -336,6 +338,11 @@ pub struct MinerQuote {
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub to_chain: String,
+    /// Chain whose asset backs any swap drawn from this quote ("sol" = the local vault). Validated at
+    /// `set_quote` as a hub backing that is one of the two legs, and carried through Pool → Reservation
+    /// → Swap; every collateral guard downstream reads it rather than the pair.
+    #[max_len(MAX_CHAIN_LEN)]
+    pub collateral_chain: String,
     /// Where the miner receives the source asset (on `from_chain`).
     #[max_len(MAX_ADDR_LEN)]
     pub miner_from_addr: String,
@@ -439,6 +446,11 @@ pub struct Pool {
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub to_chain: String,
+    /// The quote's declared backing, pinned at open beside the rate — it is what `resolve_pool` copies
+    /// into the Reservation, so the contest and the swap it produces can never disagree about which
+    /// purse is on the hook. Late bids must match it (a different backing is a different offer).
+    #[max_len(MAX_CHAIN_LEN)]
+    pub collateral_chain: String,
     #[max_len(MAX_ADDR_LEN)]
     pub miner_from_addr: String,
     #[max_len(MAX_ADDR_LEN)]

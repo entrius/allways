@@ -165,9 +165,10 @@ pub mod allways_swap_manager {
     pub fn vote_attest_heartbeat(ctx: Context<VoteAttestHeartbeat>) -> Result<()> {
         vote_attest_heartbeat::handler(ctx)
     }
-    /// Miner self-deactivation (no consensus).
-    pub fn deactivate(ctx: Context<Deactivate>) -> Result<()> {
-        deactivate::handler(ctx)
+    /// Miner self-deactivation (no consensus). `backing = Some(chain)` drops that purse only; `None`
+    /// drops every purse (the full exit).
+    pub fn deactivate(ctx: Context<Deactivate>, backing: Option<String>) -> Result<()> {
+        deactivate::handler(ctx, backing)
     }
 
     // --- Reservation lottery (two-phase: bid → draw → finalize) ---
@@ -178,8 +179,9 @@ pub mod allways_swap_manager {
         ctx: Context<OpenOrRequest>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
     ) -> Result<()> {
-        open_or_request::handler(ctx, from_chain, to_chain)
+        open_or_request::handler(ctx, from_chain, to_chain, collateral_chain)
     }
     /// Permissionless: after the window closes, run the stake-weighted draw and create the winner's
     /// UNFILLED reservation (pins router + miner quote; `reserved_until = 0`).
@@ -279,12 +281,15 @@ pub mod allways_swap_manager {
     }
 
     // --- On-chain miner quotes ---
-    /// Miner publishes/overwrites its standing quote for one pair-direction (the reverse is a
-    /// separate quote). Permissionless: the validator/UI filters to registered miners.
+    /// Miner publishes/overwrites its standing quote for one pair-direction and one backing (the
+    /// reverse direction, and the same direction on the other purse, are separate quotes). The backing
+    /// must be a hub on one of the legs and already activated for this miner.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_quote(
         ctx: Context<SetQuote>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
         miner_from_addr: String,
         miner_to_addr: String,
         rate: u128,
@@ -294,6 +299,7 @@ pub mod allways_swap_manager {
             ctx,
             from_chain,
             to_chain,
+            collateral_chain,
             miner_from_addr,
             miner_to_addr,
             rate,
@@ -305,8 +311,14 @@ pub mod allways_swap_manager {
         ctx: Context<RemoveQuote>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
     ) -> Result<()> {
-        remove_quote::handler(ctx, from_chain, to_chain)
+        remove_quote::handler(ctx, from_chain, to_chain, collateral_chain)
+    }
+    /// Permissionless: reap a quote stranded at the pre-W2b derivation, refunding its rent to the
+    /// miner that paid it. Cannot touch a live quote (see the handler's address proof).
+    pub fn close_legacy_quote(ctx: Context<CloseLegacyQuote>) -> Result<()> {
+        close_legacy_quote::handler(ctx)
     }
 
     // --- Identity binding ---

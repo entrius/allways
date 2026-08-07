@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod bind_hotkey;
+pub mod close_legacy_quote;
 pub mod close_stale_claim;
 pub mod close_unfilled_reservation;
 pub mod confirm_swap;
@@ -31,6 +32,7 @@ pub mod withdraw_treasury;
 // handlers are always called fully-qualified, e.g. `initialize::handler`.)
 pub use admin::*;
 pub use bind_hotkey::*;
+pub use close_legacy_quote::*;
 pub use close_stale_claim::*;
 pub use close_unfilled_reservation::*;
 pub use confirm_swap::*;
