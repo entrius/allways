@@ -76,15 +76,28 @@ pub struct SwapCompleted {
     pub to_amount: u128,
     /// Fixed-point executed rate (display_rate × RATE_PRECISION); matches the on-chain u128 (#495).
     pub rate: u128,
+    /// Backing chain this swap declared. `fee` above is the absolute protocol fee for the swap; the
+    /// pair (backing, fee) is the whole input the fee relay needs to credit the right ledger.
+    pub collateral_chain: String,
 }
 
+/// The timeout verdict. Self-contained by design — the slash relay must never reconstruct state, so
+/// every figure here is absolute and the backing says which chain applies it.
 #[event]
 pub struct SwapTimedOut {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
     pub collateral_amount: u64,
-    /// Collateral slashed and refunded to the user (lamports).
+    /// Collateral slashed locally and refunded to the user (lamports). 0 when the backing settles
+    /// off-chain — `penalty`/`reimbursement` are then the figures the backing chain owes.
     pub slash: u64,
+    /// Backing chain this swap declared ("sol" = settled atomically above).
+    pub collateral_chain: String,
+    /// Penalty owed, in the backing asset's smallest unit: 1.10× the swap size, pre-clamp (the purse
+    /// holding the bond does the clamping). Absolute, never a delta.
+    pub penalty: u64,
+    /// Share of `penalty` owed to the wronged user; the surplus (if any) is protocol revenue.
+    pub reimbursement: u64,
 }
 
 /// A validator slid a reservation/swap deadline forward (single-validator, no quorum). Carries the

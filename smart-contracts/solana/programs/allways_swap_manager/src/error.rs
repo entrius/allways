@@ -141,4 +141,10 @@ pub enum ErrorCode {
     // --- Chain-id canonicalization (appended: earlier codes are frozen — client.py maps them by number) ---
     #[msg("Chain ids must be lowercase")]
     ChainNotLowercase,
+
+    // --- W1: split-collateral backing seam ---
+    #[msg("This collateral chain has no purse on Solana yet")]
+    BackingNotSupported,
+    #[msg("The collateral chain is not one of the swap's legs")]
+    BackingNotInLegs,
 }

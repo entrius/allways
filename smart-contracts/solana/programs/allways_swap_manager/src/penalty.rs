@@ -4,6 +4,13 @@ use crate::error::ErrorCode;
 use crate::events::MinerDeactivated;
 use crate::state::MinerState;
 
+/// The share of `amount` a purse of `available` can actually cover. Split out of `apply_penalty` so a
+/// backing settled off-chain can size the same penalty without touching local collateral — there the
+/// purse isn't readable here, so the emitted figure is unclamped and the bond vault does the clamping.
+pub fn penalty_against(available: u64, amount: u64) -> u64 {
+    core::cmp::min(amount, available)
+}
+
 /// Deduct up to `amount` from the miner's collateral (clamped to available) and auto-deactivate the
 /// miner if the remainder falls below `min_collateral`. Returns the actual amount deducted.
 ///
@@ -17,7 +24,7 @@ pub fn apply_penalty(
     now: i64,
 ) -> Result<u64> {
     let current = miner_state.collateral;
-    let actual = core::cmp::min(amount, current);
+    let actual = penalty_against(current, amount);
     if actual == 0 {
         return Ok(0);
     }

@@ -1,3 +1,4 @@
+pub mod backing;
 pub mod constants;
 pub mod consensus;
 pub mod error;
@@ -86,6 +87,18 @@ pub mod allways_swap_manager {
     }
     pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
         admin::set_max_swap_amount(ctx, amount)
+    }
+    /// TAO-backed swap bounds, in rao (the lamport pair above is SOL-backed only).
+    pub fn set_tao_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_min_swap_amount(ctx, amount)
+    }
+    pub fn set_tao_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_max_swap_amount(ctx, amount)
+    }
+    /// How long a non-locally-backed timeout keeps the miner busy while the penalty settles on the
+    /// backing chain (busy-until-settled).
+    pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_settlement_grace(ctx, secs)
     }
     pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_reservation_ttl(ctx, secs)

@@ -56,10 +56,10 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v10: A4 source-replay via
-/// freshness — removed the permanent `TxMarker`, added `Reservation.created_at` as the source bound.
-/// v9 = A5 binding; v8 = scoring read-surface + #493 extensions; see git history for v2–v9.
-pub const CONFIG_VERSION: u32 = 10;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v11: W1 split-collateral seam
+/// — `collateral_chain` on Reservation/Swap, per-backing swap bounds, settlement grace.
+/// v10 = A4 source-replay via freshness; v9 = A5 binding; see git history for v2–v9.
+pub const CONFIG_VERSION: u32 = 11;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -88,11 +88,16 @@ pub const MAX_ADDR_LEN: usize = 80;
 pub const MAX_CHAIN_LEN: usize = 16;
 pub const MAX_TX_LEN: usize = 128;
 
-/// The collateral currency for the SOL-collateral module (this program). `finalize_reservation` binds
-/// `collateral_amount` to the leg denominated in this chain: `collateral_amount == (from_chain ==
-/// NUMERAIRE_CHAIN ? from_amount : to_amount)`. NOT a global "every swap must have a SOL leg" rule —
-/// it scopes the bind to SOL-collateralized swaps, so a future TAO-collateral module is an added branch.
+/// The default collateral currency: the backing every reservation is pinned to at the draw. The
+/// finalize bind then sizes `collateral_amount` against whichever leg the pinned backing names — a
+/// per-swap lookup, NOT a global "every swap must have a SOL leg" rule.
 pub const NUMERAIRE_CHAIN: &str = "sol";
+
+/// Backing (collateral) chain ids, lowercase like every other chain id at intake. "sol" is the local
+/// per-miner vault this program custodies; "tao" is the Bittensor bond vault, whose purse read lands
+/// in W2 — until then `backing::backing_purse` refuses it. A new hub is a new id, never a new branch.
+pub const BACKING_CHAIN_SOL: &str = NUMERAIRE_CHAIN;
+pub const BACKING_CHAIN_TAO: &str = "tao";
 
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value
@@ -235,6 +240,33 @@ pub const DEFAULT_FULFILLMENT_TIMEOUT_SECS: i64 = 600; // 10 min
 /// Canonical deploy value for `reservation_ttl_secs` — 10 min (mirrors ink!). Same model as the
 /// fulfillment timeout: a tight base, extended while the source tx confirms.
 pub const DEFAULT_RESERVATION_TTL_SECS: i64 = 600; // 10 min
+
+/// Initial TAO-backed swap-size bounds, in rao (`Config.tao_min/max_swap_amount`; 0 max = unbounded).
+/// Seeded at the validator floor rather than a guessed policy number: the TAO backing path is inert
+/// until W2, so the admin tunes these before the first TAO-backed quote can exist.
+pub const TAO_MIN_SWAP_AMOUNT_RAO: u64 = 1_000;
+pub const TAO_MAX_SWAP_AMOUNT_RAO: u64 = 0;
+
+// Same rules the setters enforce (validate::min_swap_amount / swap_bounds), checked at compile time so
+// the seed can't be a value a later setter would reject.
+const _: () = assert!(
+    TAO_MIN_SWAP_AMOUNT_RAO >= 1_000
+        && (TAO_MAX_SWAP_AMOUNT_RAO == 0 || TAO_MIN_SWAP_AMOUNT_RAO <= TAO_MAX_SWAP_AMOUNT_RAO),
+    "seed TAO swap bounds must satisfy the min-swap floor and be non-contradictory"
+);
+
+/// Initial `Config.settlement_grace_secs` — how long a non-locally-backed timeout keeps the miner busy
+/// while the penalty settles on the backing chain (verdict here, seizure there). Runtime-tunable within
+/// [MIN, MAX]; 15 min covers a relay round trip with headroom.
+pub const SETTLEMENT_GRACE_SECS: i64 = 900;
+pub const SETTLEMENT_GRACE_SECS_MIN: i64 = 60;
+pub const SETTLEMENT_GRACE_SECS_MAX: i64 = 7_200; // 2 h — a stuck relay must not hold a miner longer
+
+const _: () = assert!(
+    SETTLEMENT_GRACE_SECS >= SETTLEMENT_GRACE_SECS_MIN
+        && SETTLEMENT_GRACE_SECS <= SETTLEMENT_GRACE_SECS_MAX,
+    "SETTLEMENT_GRACE_SECS must be within [1 min, 2 h]"
+);
 
 /// Total seconds a reservation/swap deadline may be slid forward across all extensions, frozen into
 /// each at creation as `deadline + this`. Seeds `Config.max_total_extension_secs`; runtime-tunable

@@ -1,8 +1,7 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{
-    required_collateral, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, NUMERAIRE_CHAIN, RESV_SEED,
-};
+use crate::backing;
+use crate::constants::{required_collateral, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED};
 use crate::error::ErrorCode;
 use crate::events::ReservationFilled;
 use crate::state::{Config, MinerState, Reservation};
@@ -84,31 +83,38 @@ pub fn handler(
         ErrorCode::FinalizeWindowExpired
     );
 
-    // Swap-size bounds (moved from open_or_request — the amount is only known now).
+    // Everything below routes off the reservation's pinned backing — never off the pair (D4).
+    let backing = &ctx.accounts.reservation.collateral_chain;
+
+    // Swap-size bounds (moved from open_or_request — the amount is only known now), in the BACKING
+    // asset's own units: lamports for "sol", rao for "tao". Never converted through the rate.
+    let (min_swap, max_swap) = backing::swap_bounds(cfg, backing)?;
     require!(
-        cfg.min_swap_amount == 0 || collateral_amount >= cfg.min_swap_amount,
+        min_swap == 0 || collateral_amount >= min_swap,
         ErrorCode::AmountBelowMin
     );
     require!(
-        cfg.max_swap_amount == 0 || collateral_amount <= cfg.max_swap_amount,
+        max_swap == 0 || collateral_amount <= max_swap,
         ErrorCode::AmountAboveMax
     );
 
-    // SOL-collateral module: bind `collateral_amount` to the SOL leg. This is what closes the
-    // understated-collateral hole. NOT a global "sol leg required" rule — scoped to SOL-collateralized
-    // swaps so a future TAO-collateral module is an added branch, not an untangle.
-    let expected: u128 = if ctx.accounts.reservation.from_chain == NUMERAIRE_CHAIN {
-        from_amount
-    } else {
-        to_amount
-    };
+    // Bind `collateral_amount` to the leg denominated in the backing asset — the leg lookup that
+    // closes the understated-collateral hole for any backing, not just SOL.
+    let expected = backing::collateral_leg_amount(
+        backing,
+        &ctx.accounts.reservation.from_chain,
+        from_amount,
+        &ctx.accounts.reservation.to_chain,
+        to_amount,
+    )?;
     require!(collateral_amount as u128 == expected, ErrorCode::InvalidAmount);
 
-    // Over-collateralization gate: hold 1.10× THIS fill up front. Collateral only rises while busy
-    // (withdraw is locked), so passing here means vote_initiate's identical gate can't later strand a
-    // user who has already sent source funds.
+    // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front. Collateral only
+    // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate can't
+    // later strand a user who has already sent source funds.
+    let purse = backing::backing_purse(backing, &ctx.accounts.miner_state)?;
     require!(
-        ctx.accounts.miner_state.collateral >= required_collateral(collateral_amount),
+        purse >= required_collateral(collateral_amount),
         ErrorCode::InsufficientCollateral
     );
 

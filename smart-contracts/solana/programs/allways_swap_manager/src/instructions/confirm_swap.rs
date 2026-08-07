@@ -111,6 +111,7 @@ pub fn handler(
         let to_amount = ctx.accounts.swap.to_amount;
         let from_chain = ctx.accounts.swap.from_chain.clone();
         let to_chain = ctx.accounts.swap.to_chain.clone();
+        let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
         let rate = ctx.accounts.swap.rate;
         // Floor at 1 lamport so a sub-100-lamport swap can't complete fee-free (integer division
         // would truncate 1% of dust to 0); apply_penalty still clamps to available collateral.
@@ -172,6 +173,7 @@ pub fn handler(
             from_amount,
             to_amount,
             rate,
+            collateral_chain,
         });
     }
     Ok(())

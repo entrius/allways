@@ -57,12 +57,16 @@ fn test_initialize_creates_config() {
     let cfg_acct = svm.get_account(&config_pda).expect("config exists");
     let config = Config::try_deserialize(&mut cfg_acct.data.as_slice()).unwrap();
     assert_eq!(config.admin, admin_pk);
-    assert_eq!(config.version, 10);
+    assert_eq!(config.version, allways_swap_manager::constants::CONFIG_VERSION);
     assert_eq!(config.min_collateral, 1_000_000);
     assert_eq!(config.max_collateral, 500_000_000);
     assert_eq!(config.fulfillment_timeout_secs, 12_600);
     assert_eq!(config.consensus_threshold_percent, 66);
     assert!(config.validators.is_empty());
+    // Const-seeded W1 fields (no init args — the TAO path is inert until W2, then admin-tuned).
+    assert_eq!(config.tao_min_swap_amount, allways_swap_manager::constants::TAO_MIN_SWAP_AMOUNT_RAO);
+    assert_eq!(config.tao_max_swap_amount, allways_swap_manager::constants::TAO_MAX_SWAP_AMOUNT_RAO);
+    assert_eq!(config.settlement_grace_secs, allways_swap_manager::constants::SETTLEMENT_GRACE_SECS);
 
     let treasury_acct = svm.get_account(&treasury_pda).expect("treasury exists");
     let treasury = Treasury::try_deserialize(&mut treasury_acct.data.as_slice()).unwrap();

@@ -5,7 +5,8 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{
     FINALIZE_WINDOW_SECS_MAX, FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX,
-    MAX_TOTAL_EXTENSION_SECS_MIN, RESERVATION_FEE_LAMPORTS_MIN,
+    MAX_TOTAL_EXTENSION_SECS_MIN, RESERVATION_FEE_LAMPORTS_MIN, SETTLEMENT_GRACE_SECS_MAX,
+    SETTLEMENT_GRACE_SECS_MIN,
 };
 use crate::error::ErrorCode;
 
@@ -86,6 +87,16 @@ pub fn swap_bounds(min: u64, max: u64) -> Result<()> {
 /// Collateral bounds must not be contradictory (max 0 = no cap).
 pub fn collateral_bounds(min: u64, max: u64) -> Result<()> {
     require!(max == 0 || min <= max, ErrorCode::InvalidBounds);
+    Ok(())
+}
+
+/// Settlement grace for a non-locally-backed timeout, clamped to [1 min, 2 h]: long enough for a relay
+/// round trip, short enough that a stalled relay can't park a miner indefinitely.
+pub fn settlement_grace(secs: i64) -> Result<()> {
+    require!(
+        (SETTLEMENT_GRACE_SECS_MIN..=SETTLEMENT_GRACE_SECS_MAX).contains(&secs),
+        ErrorCode::InvalidAmount
+    );
     Ok(())
 }
 

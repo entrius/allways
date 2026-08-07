@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, MINER_SEED, POOL_SEED, RESV_SEED, SEED_SLOT_DELAY_SLOTS};
+use crate::constants::{
+    CONFIG_SEED, MINER_SEED, NUMERAIRE_CHAIN, POOL_SEED, RESV_SEED, SEED_SLOT_DELAY_SLOTS,
+};
 
 /// SlotHashes sysvar address (not re-exported by anchor's solana_program facade in this version).
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
@@ -198,6 +200,9 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.router = winner_router; // the ONLY signer allowed to finalize
     r.from_chain = from_chain; // pinned pair — the finalize collateral bind reads from_chain
     r.to_chain = to_chain;
+    // Backing pinned at the draw, immutable from here (finalize + claim only read it). Always the local
+    // SOL purse until quotes can declare a backing (D2); the guards already route off this field.
+    r.collateral_chain = NUMERAIRE_CHAIN.to_string();
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;

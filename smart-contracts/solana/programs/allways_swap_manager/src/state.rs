@@ -10,7 +10,8 @@ pub struct ValidatorInfo {
     pub weight: u64,
 }
 
-/// Singleton config PDA (`seeds = [CONFIG_SEED]`). All amounts in lamports, durations in seconds.
+/// Singleton config PDA (`seeds = [CONFIG_SEED]`). Amounts are in the named asset's smallest unit
+/// (lamports unless the field says otherwise), durations in seconds.
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
@@ -27,6 +28,14 @@ pub struct Config {
     /// Swap-size bounds on the collateral-backed (SOL) amount, in lamports. 0 = unbounded.
     pub min_swap_amount: u64,
     pub max_swap_amount: u64,
+    /// The same bounds for TAO-backed swaps, in rao. Selected by `collateral_chain` — bounds are always
+    /// compared in the backing asset's own units, never converted through the rate (that would smuggle
+    /// a price oracle into a guard). Each future hub adds its own pair here.
+    pub tao_min_swap_amount: u64,
+    pub tao_max_swap_amount: u64,
+    /// Seconds a miner stays busy after a non-locally-backed timeout, while the penalty settles on the
+    /// backing chain (busy-until-settled). Unused by the "sol" path, which settles atomically.
+    pub settlement_grace_secs: i64,
     /// How long a reservation holds a miner exclusive, in seconds.
     pub reservation_ttl_secs: i64,
     /// Quorum threshold, percent of the whitelisted validator set (e.g. 66).
@@ -149,8 +158,12 @@ pub struct Reservation {
     pub from_chain: String,
     #[max_len(MAX_CHAIN_LEN)]
     pub to_chain: String,
-    /// Collateral-backed swap size, in the collateral currency's smallest unit (SOL lamports today).
-    /// Bounded by Config min/max_swap_amount; must equal the collateral-currency leg (finalize bind).
+    /// Chain whose asset backs this swap ("sol" = the local vault). Pinned at the draw and copied to
+    /// the Swap; every collateral guard reads the leg + purse it names, never the pair (D4).
+    #[max_len(MAX_CHAIN_LEN)]
+    pub collateral_chain: String,
+    /// Collateral-backed swap size, in `collateral_chain`'s smallest unit. Bounded by that backing's
+    /// Config swap bounds; must equal the leg denominated in it (the finalize bind).
     pub collateral_amount: u64,
     /// Off-chain leg amounts in their own assets (u128 to cover wei-scale).
     pub from_amount: u128,
@@ -215,6 +228,10 @@ pub struct Swap {
     pub miner_to_addr: String,
     /// Canonical rate (see `MinerQuote::rate`); fixed-point = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
+    /// Backing chain, copied from the Reservation at claim and immutable thereafter (`Reservation::
+    /// collateral_chain`). `timeout_swap` reads it to know whether the penalty settles locally.
+    #[max_len(MAX_CHAIN_LEN)]
+    pub collateral_chain: String,
     /// Collateral-backed swap size, collateral-currency smallest unit (SOL lamports) — fee/slash basis.
     pub collateral_amount: u64,
     pub from_amount: u128,

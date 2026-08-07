@@ -89,6 +89,31 @@ pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()>
     Ok(())
 }
 
+// The TAO-backed pair of the two above, in rao. Same validators — the bounds rules are per-asset in
+// units only, never in policy — so neither backing can be tuned to a shape the other would reject.
+
+pub fn set_tao_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::min_swap_amount(amount)?;
+    crate::validate::swap_bounds(amount, ctx.accounts.config.tao_max_swap_amount)?;
+    ctx.accounts.config.tao_min_swap_amount = amount;
+    msg!("tao_min_swap_amount = {}", amount);
+    Ok(())
+}
+
+pub fn set_tao_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::swap_bounds(ctx.accounts.config.tao_min_swap_amount, amount)?;
+    ctx.accounts.config.tao_max_swap_amount = amount;
+    msg!("tao_max_swap_amount = {}", amount);
+    Ok(())
+}
+
+pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    crate::validate::settlement_grace(secs)?;
+    ctx.accounts.config.settlement_grace_secs = secs;
+    msg!("settlement_grace_secs = {}", secs);
+    Ok(())
+}
+
 pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     crate::validate::reservation_ttl(secs)?;
     ctx.accounts.config.reservation_ttl_secs = secs;

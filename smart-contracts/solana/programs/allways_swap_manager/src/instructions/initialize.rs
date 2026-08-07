@@ -2,7 +2,8 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{
     CONFIG_SEED, CONFIG_VERSION, FINALIZE_WINDOW_SECS, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS,
-    RESERVATION_FEE_LAMPORTS, TREASURY_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
+    RESERVATION_FEE_LAMPORTS, SETTLEMENT_GRACE_SECS, TAO_MAX_SWAP_AMOUNT_RAO,
+    TAO_MIN_SWAP_AMOUNT_RAO, TREASURY_SEED, WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
 use crate::state::{Config, Treasury};
 
@@ -72,6 +73,9 @@ pub fn handler(
     config.finalize_window_secs = FINALIZE_WINDOW_SECS;
     config.weights_update_min_interval_secs = WEIGHTS_UPDATE_MIN_INTERVAL_SECS;
     config.max_total_extension_secs = MAX_TOTAL_EXTENSION_SECS;
+    config.tao_min_swap_amount = TAO_MIN_SWAP_AMOUNT_RAO;
+    config.tao_max_swap_amount = TAO_MAX_SWAP_AMOUNT_RAO;
+    config.settlement_grace_secs = SETTLEMENT_GRACE_SECS;
     config.bump = ctx.bumps.config;
 
     let treasury = &mut ctx.accounts.treasury;

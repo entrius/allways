@@ -76,10 +76,14 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         // Self-dealing backstop (finalize_reservation is the primary guard; this also covers
         // reservations filled before that guard deployed).
         require!(ctx.accounts.swap.user != ctx.accounts.swap.miner, ErrorCode::SelfSwapNotAllowed);
-        // Obligation gate: miner must hold the over-collateralization requirement before being bound.
+        // Obligation gate: the miner must hold the over-collateralization requirement in the purse the
+        // swap pinned as its backing (same leg-lookup discipline as finalize) before being bound.
+        let purse = crate::backing::backing_purse(
+            &ctx.accounts.swap.collateral_chain,
+            &ctx.accounts.miner_state,
+        )?;
         require!(
-            ctx.accounts.miner_state.collateral
-                >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
+            purse >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
             ErrorCode::InsufficientCollateral
         );
     }
