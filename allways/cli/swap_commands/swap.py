@@ -426,6 +426,9 @@ def swap_now_command(
             fail('No miner can fund an executable swap for that amount within bounds.')
         cand, amts = best
 
+    # Deliverability screens — before the fee-charging entry AND before sending into a doomed swap.
+    _screen_deliverability(client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount)
+
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
     # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
@@ -595,6 +598,61 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     if not want_send:
         lines.append('  [dim]`alw swap now --send` does the send, the relay and the watch in one step.[/dim]')
     return lines
+
+
+def _gate_provider(chain: str, client, config):
+    """Read-only provider for deliverability screens (no send creds, no startup check).
+    None when it can't be built — the screens fail open; routed flows are re-gated by the
+    validator either way."""
+    from allways.assets import ASSET_REGISTRY
+
+    spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
+    if spec is None:
+        return None
+    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
+    try:
+        return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
+    except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
+        return None
+
+
+def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount):
+    """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
+
+    Self-represented flows have no validator to gate for them (F7), so mirror the
+    validator's reserve gates locally: the taker's receive address must be well-formed and
+    accept the dest asset, and the miner's receive address must accept the source funds
+    (T18). The source-address probe is a courtesy warning only — a frozen source just means
+    the deposit fails and the reservation lapses unclaimed."""
+    spoke = to_chain if from_chain == NUMERAIRE_CHAIN else from_chain
+    provider = _gate_provider(spoke, client, config)
+    if provider is None:
+        return
+    if spoke == to_chain:
+        # Format first — offline, and a malformed address can never be delivered to.
+        if not provider.chain.is_valid_address(receive_addr):
+            fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
+        if not provider.can_deliver_to(receive_addr, amts.to_amount):
+            fail(
+                f'  Your receive address cannot accept {to_chain.upper()} right now '
+                '(frozen or transfers paused). No funds moved.'
+            )
+        return
+    quote = client.get_quote(cand.miner, from_chain, to_chain)
+    miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
+    if miner_addr and (
+        not provider.chain.is_valid_address(miner_addr) or not provider.can_deliver_to(miner_addr, from_amount)
+    ):
+        fail(
+            f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
+            '— pick another miner (--miner). No funds moved.'
+        )
+    if user_from_addr and not provider.can_deliver_to(user_from_addr, from_amount):
+        console.print(
+            f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '
+            '(frozen?). If the deposit fails, the reservation lapses unclaimed.[/yellow]'
+        )
 
 
 def _source_provider(from_chain: str, client, config):

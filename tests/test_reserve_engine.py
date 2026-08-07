@@ -95,15 +95,76 @@ def test_open_happy_path_persists_routed_request():
     store.close()
 
 
+def _gate_asset(can_deliver, valid=lambda addr: True):
+    """Duck-typed asset for the reserve deliverability gates (can_deliver_to + chain format check)."""
+    return SimpleNamespace(can_deliver_to=can_deliver, chain=SimpleNamespace(is_valid_address=valid))
+
+
 def test_undeliverable_destination_rejects_before_any_bid():
     # B-lite reserve gate: a dest that provably refuses transfers bounces before funds move.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'btc': SimpleNamespace(can_deliver_to=lambda addr, amt: False)}
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: False)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
     assert 'rejects incoming transfers' in result.reason
     assert client.calls == []  # bounced before the on-chain bid
+
+
+def test_malformed_destination_address_rejects_before_any_bid():
+    # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: False)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'not-an-addr', 10**9)
+    assert not result.ok
+    assert 'not a valid btc address' in result.reason
+    assert client.calls == []
+
+
+def test_malformed_miner_receive_address_rejects():
+    client = FakeClient()
+    client.quote.miner_from_addr = 'minerSOLaddr'
+    validator = _validator(client)
+    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'minerSOLaddr')}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'miner receive address' in result.reason
+    assert client.calls == []
+
+
+def test_cased_chain_id_rejects_at_intake():
+    # F4: chain ids are lowercase everywhere — a cased id must bounce before it can derive
+    # a mismatched quote PDA (the program enforces the same at its own intake).
+    client = FakeClient()
+    validator = _validator(client)
+    result = reserve_on_behalf(validator, HOTKEY, 'SOL', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'lowercase' in result.reason
+    assert client.calls == []
+
+
+def test_miner_receive_address_screened_on_source_chain():
+    # T18: a miner quoting a rejecting/blacklisted receive address griefs takers into a
+    # burned entry fee — the reserve gate screens the SOURCE side too, before any bid.
+    client = FakeClient()
+    client.quote.miner_from_addr = 'minerSOLaddr'
+    validator = _validator(client)
+    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: addr != 'minerSOLaddr')}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'miner receive address' in result.reason
+    assert client.calls == []
+
+
+def test_miner_receive_address_clean_still_bids():
+    client = FakeClient()
+    client.quote.miner_from_addr = 'minerSOLaddr'
+    validator = _validator(client)
+    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert result.ok
+    assert client.calls == [('open_or_request', 'sol', 'btc')]
 
 
 def test_inactive_miner_rejects():
