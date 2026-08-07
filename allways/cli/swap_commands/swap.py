@@ -604,10 +604,9 @@ def _source_provider(from_chain: str, client, config):
     (→ manual fallback) if the provider can't be built with send credentials."""
     from allways.assets import ASSET_REGISTRY
 
-    entry = next((e for e in ASSET_REGISTRY if e[0] == from_chain), None)
-    if entry is None:
+    spec = next((s for s in ASSET_REGISTRY if s.chain_id == from_chain), None)
+    if spec is None:
         return None
-    _id, cls, kwarg_names = entry
 
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
     if from_chain == 'tao':
@@ -616,7 +615,7 @@ def _source_provider(from_chain: str, client, config):
         _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
         avail.update(subtensor=subtensor, wallet=wallet)
     try:
-        provider = cls(**{k: avail[k] for k in kwarg_names if k in avail})
+        provider = spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
         provider.check_connection(require_send=True)
     except Exception as e:  # noqa: BLE001 - missing creds (e.g. no BTC_PRIVATE_KEY) → manual fallback
         console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')

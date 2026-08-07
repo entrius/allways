@@ -1,6 +1,6 @@
 import base64
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 import bittensor as bt
 import requests
@@ -8,7 +8,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
-from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.solana.rpc import SolanaRpc, resolve_rpc_url
@@ -40,7 +40,8 @@ class Sol(Asset, Chain):
         self.rpc = SolanaRpc(self.rpc_url, timeout=timeout)
         self.keypair = solana_keypair
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_SOL
 
     def describe(self) -> str:
@@ -109,7 +110,7 @@ class Sol(Asset, Chain):
         sender = keys[0] if keys else ''  # fee payer / first signer == the transfer source
         return TransactionInfo(
             tx_hash=tx_hash,
-            confirmed=confirmations >= self.get_chain().min_confirmations,
+            confirmed=confirmations >= self.chain_def.min_confirmations,
             sender=sender,
             recipient=expected_recipient,
             amount=credit,
@@ -238,9 +239,7 @@ class Sol(Asset, Chain):
             bt.logging.error(f'{LOG_SOL} verify_from_proof failed: {e}')
             return False
 
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send ``amount`` lamports to ``to_address`` via SystemProgram transfer.
 
         Signs with the provider's own keypair (callers pass no key material). Returns

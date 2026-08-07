@@ -325,7 +325,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # confirms (source 'pending'->extend, 'ok'+fresh->attest). A 0-conf mempool tx has no block_time, so its
     # freshness is deferred too; only a mined tx is freshness-checked here (fast-fail a stale mined deposit).
     if tx_info.block_time is not None:
-        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
+        grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
         if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
             return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
 

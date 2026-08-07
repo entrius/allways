@@ -5,7 +5,7 @@ import bittensor as bt
 from bittensor import Keypair
 from bittensor.utils import is_valid_ss58_address, ss58_encode
 
-from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 
@@ -34,7 +34,8 @@ class Tao(Asset, Chain):
         # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_TAO
 
     def describe(self) -> str:
@@ -50,7 +51,7 @@ class Tao(Asset, Chain):
         except Exception as e:
             raise ConnectionError(f'Cannot reach Subtensor: {e}') from e
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Clear the block cache. Call at the start of each poll cycle."""
         self.block_cache.clear()
         self.block_hash_cache.clear()
@@ -446,7 +447,7 @@ class Tao(Asset, Chain):
 
                     return TransactionInfo(
                         tx_hash=tx_hash,
-                        confirmed=confs >= self.get_chain().min_confirmations,
+                        confirmed=confs >= self.chain_def.min_confirmations,
                         sender=settled_sender,
                         recipient=expected_recipient,
                         amount=settled_amount,
@@ -624,9 +625,7 @@ class Tao(Asset, Chain):
             bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
 
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send TAO via subtensor transfer. Amount is in rao."""
         if self.wallet is None:
             bt.logging.error('TAO send_amount called on a read-only Tao (no wallet)')

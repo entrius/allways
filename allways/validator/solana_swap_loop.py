@@ -165,7 +165,7 @@ class SolanaSwapLoop:
         would silently always-pass). Fresh iff block_time >= floor - grace; a per-chain GRACE (default 0)
         absorbs honest clock skew. Fails closed if block_time is missing."""
         provider = self.providers.get(chain)
-        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0) if provider else 0
+        grace = getattr(provider.chain_def, 'replay_grace_secs', 0) if provider else 0
         if not is_tx_fresh(info, floor_unix, grace):
             bt.logging.warning(
                 f'{label}: {chain} tx block_time {getattr(info, "block_time", None)} predates floor '
