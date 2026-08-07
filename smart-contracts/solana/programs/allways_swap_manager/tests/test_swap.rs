@@ -40,8 +40,8 @@ const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
 
 // reservation quote (must be consistent reserve→initiate)
 const FROM_ADDR: &str = "userBTCaddr";
-const FROM_CHAIN: &str = "BTC";
-const TO_CHAIN: &str = "SOL";
+const FROM_CHAIN: &str = "btc";
+const TO_CHAIN: &str = "sol";
 const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)

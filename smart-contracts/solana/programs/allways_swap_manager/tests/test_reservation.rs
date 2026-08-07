@@ -14,7 +14,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{FINALIZE_WINDOW_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
-    allways_swap_manager::state::{MinerState, Pool, Reservation, Treasury},
+    allways_swap_manager::state::{MinerQuote, MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
     solana_hash::Hash,
     solana_keypair::Keypair,
@@ -343,7 +343,7 @@ fn setup(min_swap: u64, max_swap: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypa
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), 10_000_000_000), &miner.pubkey(), &miner).expect("post");
-    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "SOL", MFROM, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "btc", "sol", MFROM, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
     (svm, admin, vals, miner)
@@ -355,11 +355,11 @@ fn test_open_pins_quote_and_charges_fee() {
     let _user = Keypair::new().pubkey();
     let t0 = treasury(&svm);
 
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
 
     let p = pool(&svm, &miner.pubkey());
-    assert_eq!(p.from_chain, "BTC");
-    assert_eq!(p.to_chain, "SOL");
+    assert_eq!(p.from_chain, "btc");
+    assert_eq!(p.to_chain, "sol");
     assert_eq!(p.miner_from_addr, MFROM, "pinned from MinerQuote");
     assert_eq!(p.miner_to_addr, MTO);
     assert_eq!(p.rate, RATE);
@@ -375,8 +375,8 @@ fn test_each_request_charges_fee() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let _user = Keypair::new().pubkey();
     let t0 = treasury(&svm);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
-    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[1].pubkey(), &vals[1]).expect("join");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]).expect("join");
     assert_eq!(treasury(&svm), t0 + 2 * RESERVATION_FEE_LAMPORTS, "both opener and joiner pay");
     assert_eq!(pool(&svm, &miner.pubkey()).requests.len(), 2);
 }
@@ -386,8 +386,8 @@ fn test_repeat_bid_is_idempotent() {
     // A bid carries only the router — no taker, no amounts. A repeat call from the same router while
     // the pool is open is an idempotent no-op (no AlreadyRequested reject, no duplicate entry).
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("repeat");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("repeat");
 
     let p = pool(&svm, &miner.pubkey());
     assert_eq!(p.requests.len(), 1, "repeat bid does not duplicate the router's seat");
@@ -398,10 +398,10 @@ fn test_repeat_bid_is_idempotent() {
 fn test_pair_mismatch_rejected() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     // Miner also quotes BTC→TAO so that quote account exists for the join attempt.
-    send(&mut svm, set_quote_ix(&miner.pubkey(), "BTC", "TAO", MFROM, "minerTAOaddr", 2_000_000_000_000_000_000), &miner.pubkey(), &miner).expect("quote2");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "btc", "tao", MFROM, "minerTAOaddr", 2_000_000_000_000_000_000), &miner.pubkey(), &miner).expect("quote2");
     let _user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open BTC/SOL");
-    let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "TAO"), &vals[1].pubkey(), &vals[1]);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open BTC/SOL");
+    let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "tao"), &vals[1].pubkey(), &vals[1]);
     assert!(mism.is_err(), "joining with a different pair than the pinned one must be rejected");
 }
 
@@ -409,7 +409,7 @@ fn test_pair_mismatch_rejected() {
 fn test_single_requester_resolve_then_finalize_creates_reservation() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
 
     // before close → cannot resolve
     let early = send(&mut svm, resolve_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]);
@@ -424,8 +424,8 @@ fn test_single_requester_resolve_then_finalize_creates_reservation() {
     assert_eq!(r.reserved_until, 0, "reservation is UNFILLED right after the draw");
     assert_eq!(r.router, vals[0].pubkey(), "seat winner pinned");
     assert_eq!(r.finalize_by, BASE_TS + POOL_WINDOW_SECS + 1 + FINALIZE_WINDOW_SECS, "finalize deadline set");
-    assert_eq!(r.from_chain, "BTC");
-    assert_eq!(r.to_chain, "SOL");
+    assert_eq!(r.from_chain, "btc");
+    assert_eq!(r.to_chain, "sol");
     assert_eq!(r.miner_from_addr, MFROM, "pinned miner quote carried into reservation");
     assert_eq!(r.miner_to_addr, MTO);
     assert_eq!(r.rate, RATE);
@@ -449,8 +449,8 @@ fn test_multi_requester_resolve_picks_one() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let u0 = Keypair::new().pubkey();
     let u1 = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
-    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[1].pubkey(), &vals[1]).expect("join");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]).expect("join");
 
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[2], &miner.pubkey()).expect("resolve");
@@ -475,9 +475,9 @@ fn test_resolve_empty_pool_fails() {
 fn test_join_after_close_fails() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let _user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    let late = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[1].pubkey(), &vals[1]);
+    let late = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]);
     assert!(late.is_err(), "joining after the window closed must fail (must resolve first)");
 }
 
@@ -487,7 +487,7 @@ fn test_amount_bounds_fire_at_finalize() {
     // succeed; finalize with an out-of-bounds collateral_amount is rejected, in-bounds succeeds.
     let (mut svm, _admin, vals, miner) = setup(1_000_000_000, 5_000_000_000);
     let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("bid");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
 
@@ -507,23 +507,58 @@ fn test_requires_active_miner() {
     let inactive = Keypair::new();
     svm.airdrop(&inactive.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&inactive.pubkey(), 1_000_000_000), &inactive.pubkey(), &inactive).expect("post");
-    send(&mut svm, set_quote_ix(&inactive.pubkey(), "BTC", "SOL", MFROM, MTO, RATE), &inactive.pubkey(), &inactive).expect("quote");
+    send(&mut svm, set_quote_ix(&inactive.pubkey(), "btc", "sol", MFROM, MTO, RATE), &inactive.pubkey(), &inactive).expect("quote");
     let _user = Keypair::new().pubkey();
-    let res = send(&mut svm, open_ix(&vals[0].pubkey(), &inactive.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]);
+    let res = send(&mut svm, open_ix(&vals[0].pubkey(), &inactive.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]);
     assert!(res.is_err(), "inactive miner cannot be pooled");
+}
+
+#[test]
+fn test_open_rejects_legacy_uppercase_quote() {
+    // A "SOL"-cased hub leg would dodge the byte-exact numeraire bind and size collateral against
+    // the spoke leg. Through the public path a mixed-case open dies earlier (its quote PDA cannot
+    // exist — set_quote guard), so plant a pre-guard "SOL"/"btc" quote directly and prove the
+    // open_or_request guard itself refuses it.
+    use anchor_lang::AccountSerialize;
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let (pda, bump) = Pubkey::find_program_address(
+        &[b"quote", miner.pubkey().as_ref(), "SOL".as_bytes(), "btc".as_bytes()],
+        &pid(),
+    );
+    let legacy = MinerQuote {
+        miner: miner.pubkey(),
+        from_chain: "SOL".into(),
+        to_chain: "btc".into(),
+        miner_from_addr: MFROM.into(),
+        miner_to_addr: MTO.into(),
+        rate: RATE,
+        liquidity: 0,
+        updated_at: BASE_TS,
+        bump,
+    };
+    let mut data = vec![];
+    legacy.try_serialize(&mut data).unwrap();
+    svm.set_account(
+        pda,
+        solana_account::Account { lamports: 10_000_000, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+    let err = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "SOL", "btc"), &vals[0].pubkey(), &vals[0])
+        .unwrap_err();
+    assert!(err.contains("ChainNotLowercase"), "intake guard must reject the legacy quote, got: {err}");
 }
 
 #[test]
 fn test_open_blocked_while_reserved() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     resolve_and_fill(&mut svm, &vals[0], &miner.pubkey(), &user, "u1", "uSOL", 2_000_000_000, 1);
     assert!(reservation(&svm, &miner.pubkey()).reserved_until > 0);
 
     // a new open is blocked while the reservation is active (filled)
-    let blocked = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[1].pubkey(), &vals[1]);
+    let blocked = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]);
     assert!(blocked.is_err(), "cannot open a new pool while a reservation is active");
 }
 
@@ -531,7 +566,7 @@ fn test_open_blocked_while_reserved() {
 fn test_open_pool_blocks_deactivate() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let _user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     assert_ne!(pool(&svm, &miner.pubkey()).opened_at, 0);
 
     // miner is busy the moment a pool opens (pre-resolve) — cannot self-deactivate
@@ -543,7 +578,7 @@ fn test_open_pool_blocks_deactivate() {
 fn test_reservation_blocks_deactivate_until_expiry() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     resolve_and_fill(&mut svm, &vals[0], &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 1);
     assert!(is_active(&svm, &miner.pubkey()));
@@ -608,7 +643,7 @@ fn test_finalize_requires_overcollateralization() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let user = Keypair::new().pubkey();
     assert_eq!(collateral(&svm, &miner.pubkey()), 10_000_000_000);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("bid");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
 
@@ -626,7 +661,7 @@ fn test_cannot_force_deactivate_while_pooled() {
     // is only for idle miners (preserves the busy ⟹ active invariant; user req / review #3).
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let _user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     let blocked = send(&mut svm, vote_deactivate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]);
     assert!(blocked.is_err(), "cannot force-deactivate a miner with an open pool");
     assert!(is_active(&svm, &miner.pubkey()), "miner stays active");
@@ -636,7 +671,7 @@ fn test_cannot_force_deactivate_while_pooled() {
 fn test_cannot_force_deactivate_while_reserved() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let _user = Keypair::new().pubkey();
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
     let blocked = send(&mut svm, vote_deactivate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
@@ -678,7 +713,7 @@ fn test_finalize_rejects_self_swap_and_default_user() {
     // M1: a miner naming ITSELF as taker would buy eligibility (successful_swaps) with wash swaps;
     // the default pubkey as taker would burn a timeout refund. Both rejected at the fill.
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("bid");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
 
@@ -701,9 +736,9 @@ fn test_repeat_bid_is_free() {
     // First bid pays the reservation fee; a same-router repeat bid in the same window is free.
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let t0 = treasury(&svm);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "first entry pays the fee");
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("repeat");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("repeat");
     assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "in-window repeat bid is free (no extra fee)");
 }
 
@@ -711,9 +746,9 @@ fn test_repeat_bid_is_free() {
 fn test_bid_after_window_close_fails() {
     // Once the window closes, no further bids (must resolve first).
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("open");
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
-    let late = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"), &vals[0].pubkey(), &vals[0]);
+    let late = send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]);
     assert!(late.is_err(), "cannot bid after the window closed");
 }
 
@@ -723,7 +758,7 @@ fn test_bid_after_window_close_fails() {
 fn open_and_close(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair) {
     send(
         svm,
-        open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"),
+        open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -739,7 +774,7 @@ fn test_open_does_not_pin_seed_slot() {
     let _user = Keypair::new().pubkey();
     send(
         &mut svm,
-        open_ix(&vals[0].pubkey(), &miner.pubkey(), "BTC", "SOL"),
+        open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -870,7 +905,7 @@ fn close_unfilled_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
 /// Bid + arm/resolve a single-bidder pool, leaving an UNFILLED reservation whose router is `vals[0]`.
 /// Clock left at BASE_TS + POOL_WINDOW_SECS + 1.
 fn bid_and_draw(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey) {
-    send(svm, open_ix(&vals[0].pubkey(), miner, "BTC", "SOL"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    send(svm, open_ix(&vals[0].pubkey(), miner, "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("bid");
     set_clock(svm, BASE_TS + POOL_WINDOW_SECS + 1);
     arm_and_resolve(svm, &vals[0], miner).expect("resolve");
 }
@@ -898,7 +933,7 @@ fn test_open_blocked_during_pending_finalize_window() {
     assert_ne!(reservation(&svm, &miner.pubkey()).finalize_by, 0, "finalize window armed");
     let e = send(
         &mut svm,
-        open_ix(&vals[1].pubkey(), &miner.pubkey(), "BTC", "SOL"),
+        open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"),
         &vals[1].pubkey(),
         &vals[1],
     );
@@ -943,8 +978,8 @@ fn test_collateral_bind_rejects_mismatch_spoke_to_sol() {
 #[test]
 fn test_collateral_bind_rejects_mismatch_sol_to_spoke() {
     // sol→btc: sol is the SOURCE (numeraire) leg, so collateral_amount must == from_amount.
-    // NB: the bind is case-sensitive on NUMERAIRE_CHAIN == "sol" (lowercase, as the real system uses);
-    // this test uses lowercase chain ids so `from_chain == NUMERAIRE_CHAIN` holds.
+    // The bind compares from_chain == NUMERAIRE_CHAIN byte-exactly; intake rejects non-lowercase
+    // chain ids (ChainNotLowercase), so lowercase is the only casing that can reach this point.
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     send(&mut svm, set_quote_ix(&miner.pubkey(), "sol", "btc", MTO, MFROM, RATE), &miner.pubkey(), &miner).expect("sol->btc quote");
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "sol", "btc"), &vals[0].pubkey(), &vals[0]).expect("bid");
