@@ -149,11 +149,13 @@ class Validator(BaseValidatorNeuron):
 
         # Separate subtensor + chain providers for the axon handlers (thread safety).
         # axon_lock serialises every call on axon_subtensor's websocket so two handler
-        # threads can't both land in recv. The miner-activate / swap-confirm handlers
-        # read registration + source chains off these; scoring bounds come off Solana.
+        # threads can't both land in recv. The TAO provider gets its own dedicated
+        # connection instead of sharing that websocket: a TAO source verify can scan
+        # blocks for seconds, so holding axon_lock across it would stall every other
+        # handler, and running it unlocked would race the locked reads' recv (#456).
         self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_assets = create_assets(subtensor=self.axon_subtensor, solana_rpc_url=solana_rpc_url)
+        self.axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon

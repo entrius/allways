@@ -150,6 +150,13 @@ class Bitcoin(Asset, Chain):
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
 
+    def normalize_address(self, address: str) -> str:
+        """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
+        if not isinstance(address, str):
+            return address
+        lowered = address.lower()
+        return lowered if detect_address_type(lowered) in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2TR) else address
+
     def can_send_from(self, address: str) -> bool:
         """True iff BTC_PRIVATE_KEY derives ``address`` (any of its p2wpkh / p2sh-p2wpkh / p2pkh
         forms) — i.e. this WIF can broadcast the source deposit from the pinned sender."""
@@ -164,7 +171,11 @@ class Bitcoin(Asset, Chain):
             net = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
             pub = EmbitPrivateKey.from_wif(wif).get_public_key()
             seg = p2wpkh(pub)
-            return address in {seg.address(net), p2sh(seg).address(net), p2pkh(pub).address(net)}
+            return self.normalize_address(address) in {
+                seg.address(net),
+                p2sh(seg).address(net),
+                p2pkh(pub).address(net),
+            }
         except Exception:
             return False
 
@@ -204,7 +215,7 @@ class Bitcoin(Asset, Chain):
         15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
         tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
         confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
-        tip_height = self.cached_block_height()
+        tip_height = self.chain.cached_block_height()
         if tip_height is None:
             return 0
         return max(0, tip_height - block_number + 1)
@@ -442,6 +453,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         key: WIF private key string. If None, falls back to get_wif (BTC_PRIVATE_KEY).
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.error('Taproot (P2TR) addresses are not yet supported for message signing')
@@ -470,6 +482,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         No RPC dependency — pure cryptographic verification.
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.warning('Taproot (P2TR) addresses are not yet supported for message verification')

@@ -12,6 +12,10 @@ class _Boom:
 
 
 class _Ok:
+    @property
+    def chain(self):
+        return self
+
     def check_connection(self, require_send=True):
         pass
 

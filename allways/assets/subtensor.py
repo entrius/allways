@@ -21,9 +21,6 @@ class Tao(Asset, Chain):
     clear error if they attempt to send.
     """
 
-    # RPCs run on the shared substrate websocket — callers serialise via axon_lock.
-    uses_substrate = True
-
     # Balances pallet index and transfer call indices on Subtensor
     _BALANCES_PALLET = 5
     _TRANSFER_CALLS = {0: 'transfer_allow_death', 3: 'transfer_keep_alive', 7: 'transfer_all'}
@@ -548,7 +545,7 @@ class Tao(Asset, Chain):
         else None. The TAO sibling of the BTC/SOL deposit scanners: a hash-finder only — the
         seam's confirm re-verifies everything by hash, so a miss here just means the manual
         rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
-        head = self.get_current_block_height()
+        head = self.chain.get_current_block_height()
         if head is None:
             return None
         key = (from_addr, to_addr, int(amount))

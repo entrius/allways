@@ -1,7 +1,6 @@
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import bittensor as bt
 
@@ -33,16 +32,17 @@ class Asset(ABC):
     `.chain` returns itself. The registry row stays a `ChainDefinition` in chains.py —
     the wire says chain; in code an id resolves to an Asset.
 
+    Seam rule: asset-side code asks chain questions through ``self.chain``; chain
+    members calling each other keep plain ``self`` (they move together on a split).
+
     Adding a new asset:
     1. Add its ChainDefinition to chains.py
     2. Implement this interface (or reuse a family class, e.g. an ERC-20)
     3. Register it in ASSET_REGISTRY; add {ENV_PREFIX}_* vars to .env
     """
 
-    # True if this provider's RPCs hit the shared substrate websocket, so
-    # callers must serialise them under axon_lock. HTTP-backed providers leave
-    # this False and stay lock-free.
-    uses_substrate: bool = False
+    # Non-fused assets (tokens on a multi-asset chain) set this at construction.
+    _chain: Optional[Chain] = None
 
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
@@ -50,21 +50,18 @@ class Asset(ABC):
     @property
     def chain(self) -> Chain:
         """The network this asset lives on. Fused single-asset classes are their own chain."""
+        if self._chain is not None:
+            return self._chain
         if isinstance(self, Chain):
             return self
-        raise NotImplementedError(f'{type(self).__name__} must bind a Chain')
+        raise NotImplementedError(f'{type(self).__name__} must bind a Chain (set self._chain)')
 
     def describe(self) -> str:
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.get_chain().name
 
-    def normalize_address(self, address: str) -> str:
-        """Canonical comparison form for this chain's addresses (identity by default).
-
-        Chains whose address encoding is case-insensitive (ETH hex / EIP-55 checksum casing)
-        override this so equality checks never fail on casing alone. Comparison only — never
-        feed the normalized form back on-chain or into display."""
-        return address
+    def clear_cache(self) -> None:
+        """Reset per-asset scratch caches at the start of a validator pass. No-op by default."""
 
     def can_send_from(self, address: str) -> bool:
         """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``
@@ -134,6 +131,11 @@ class Asset(ABC):
         Rejections are logged once in the base so observability for the defense
         is in one place instead of duplicated at every call site.
         """
+        # Canonicalize expecteds once here so every fetcher compares in canonical form.
+        chain = self.chain
+        expected_recipient = chain.normalize_address(expected_recipient)
+        expected_sender = chain.normalize_address(expected_sender) if expected_sender else expected_sender
+
         tx_info = self.fetch_matching_tx(
             tx_hash=tx_hash,
             expected_recipient=expected_recipient,
@@ -151,7 +153,7 @@ class Asset(ABC):
             )
             return None
 
-        if expected_sender and self.normalize_address(tx_info.sender) != self.normalize_address(expected_sender):
+        if expected_sender and chain.normalize_address(tx_info.sender) != expected_sender:
             bt.logging.warning(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
                 f'(expected {expected_sender}, got {tx_info.sender!r})'
@@ -161,7 +163,7 @@ class Asset(ABC):
         # A self-transfer (sender == recipient) is never a real swap leg: the
         # paying and receiving parties are always distinct. Rejecting it blocks
         # same-wallet A->A volume fakes; A->B self-flow is bounded economically.
-        if tx_info.sender and self.normalize_address(tx_info.sender) == self.normalize_address(expected_recipient):
+        if tx_info.sender and chain.normalize_address(tx_info.sender) == expected_recipient:
             bt.logging.warning(
                 f'verify_transaction: self-transfer on tx {tx_hash[:16]}... '
                 f'(sender == recipient {expected_recipient}) — rejecting'
@@ -170,42 +172,8 @@ class Asset(ABC):
 
         return tx_info
 
-    # A cached tip is reused for at most this long. The validator clears it each forward pass (one
-    # getSlot/pass); this TTL is the safety net for callers that never clear (e.g. the miner), so the
-    # tip can never freeze — it self-refreshes at least this often. Slightly longer than a subtensor
-    # block so a validator pass stays on one fetch.
-    _TIP_TTL_SECONDS = 15.0
-
-    def cached_block_height(self) -> Optional[int]:
-        """Chain tip, cached so per-tx confirmation math shares one lookup instead of one per leg.
-
-        The validator clears this each pass (``clear_pass_tip``) → one ``getSlot`` per pass. The TTL
-        caps staleness for callers that never clear (the miner), so the tip can never freeze. A start-
-        of-pass/slightly-stale tip biases confirmations low — conservative, never a false confirm. A
-        failed fetch (None) is not cached, so it retries."""
-        tip = getattr(self, '_pass_tip', None)
-        if tip is not None and time.monotonic() - getattr(self, '_pass_tip_ts', 0.0) < self._TIP_TTL_SECONDS:
-            return tip
-        tip = self.get_current_block_height()
-        if tip is not None:
-            self._pass_tip = tip
-            self._pass_tip_ts = time.monotonic()
-        return tip
-
-    def clear_pass_tip(self) -> None:
-        """Expire the cached tip — the validator calls this once per pass for a fresh start-of-pass tip."""
-        self._pass_tip = None
-
-    @abstractmethod
-    def get_current_block_height(self) -> Optional[int]:
-        """Chain tip block height. None on transient backend failure."""
-        ...
-
     @abstractmethod
     def get_balance(self, address: str) -> int: ...
-
-    @abstractmethod
-    def is_valid_address(self, address: str) -> bool: ...
 
     def can_deliver_to(self, address: str, amount: int) -> bool:
         """Reserve-time gate: False only on positive evidence the destination cannot receive."""
@@ -214,16 +182,6 @@ class Asset(ABC):
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: True only on positive evidence delivery was refusable since ``since_unix``."""
         return False
-
-    @abstractmethod
-    def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
-        """Sign a source proof message with the given key. Returns hex signature."""
-        ...
-
-    @abstractmethod
-    def verify_from_proof(self, address: str, message: str, signature: str) -> bool:
-        """Verify a source proof signature from the given address."""
-        ...
 
     @abstractmethod
     def send_amount(

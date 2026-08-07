@@ -50,7 +50,7 @@ def rpc_tag(base: str) -> str:
     return parts[-2] if len(parts) >= 2 else host
 
 
-class EvmCoin(Asset, Chain):
+class Ether(Asset, Chain):
     """Ethereum chain provider: eth-account + public JSON-RPC (no local node required).
 
     Plain EOA value transfers only, by design: a swap leg is verified off the transaction's
@@ -219,10 +219,10 @@ class EvmCoin(Asset, Chain):
             bt.logging.debug(f'{LOG_ETH} tx {tx_hash[:16]}... not found')
             return None
 
-        to = self.normalize_address(tx.get('to') or '')  # null for contract creation
-        sender = self.normalize_address(tx.get('from') or '')
+        to = self.chain.normalize_address(tx.get('to') or '')  # null for contract creation
+        sender = self.chain.normalize_address(tx.get('from') or '')
         amount = int(tx.get('value') or '0x0', 16)
-        if to != self.normalize_address(expected_recipient) or amount < expected_amount:
+        if to != self.chain.normalize_address(expected_recipient) or amount < expected_amount:
             bt.logging.warning(
                 f'{LOG_ETH} tx {tx_hash[:16]}... does not pay {expected_recipient} >= {expected_amount} wei '
                 f'(to={tx.get("to")}, value={amount})'
@@ -251,7 +251,7 @@ class EvmCoin(Asset, Chain):
         if cached is not None and tx_block_hash and cached['block_hash'] == tx_block_hash:
             block_number = cached['block_number']
             block_time = cached['block_time']
-            tip = self.cached_block_height()
+            tip = self.chain.cached_block_height()
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
             is_confirmed = confirmations >= self.get_chain().min_confirmations
         else:
@@ -266,7 +266,7 @@ class EvmCoin(Asset, Chain):
                 return None
 
             block_number = int(receipt['blockNumber'], 16)
-            tip = self.cached_block_height()
+            tip = self.chain.cached_block_height()
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
             is_confirmed = confirmations >= self.get_chain().min_confirmations
 
@@ -346,7 +346,7 @@ class EvmCoin(Asset, Chain):
 
     def can_send_from(self, address: str) -> bool:
         acct = self._account()
-        return acct is not None and self.normalize_address(acct.address) == self.normalize_address(address)
+        return acct is not None and self.chain.normalize_address(acct.address) == self.chain.normalize_address(address)
 
     def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
         """EIP-191 personal_sign over ``message``. key: hex private key; None → ETH_PRIVATE_KEY."""
@@ -390,11 +390,11 @@ class EvmCoin(Asset, Chain):
         if acct is None:
             self._send_error('ETH_PRIVATE_KEY not set or unusable')
             return None
-        if from_address and self.normalize_address(acct.address) != self.normalize_address(from_address):
+        if from_address and self.chain.normalize_address(acct.address) != self.chain.normalize_address(from_address):
             self._send_error(f'ETH key derives {acct.address} but committed address is {from_address} — key mismatch')
             return None
 
-        head = self.get_current_block_height()
+        head = self.chain.get_current_block_height()
         if head is None:
             self._send_error('cannot read the chain head to scope send dedup — not sending')
             return None
@@ -402,7 +402,7 @@ class EvmCoin(Asset, Chain):
         try:
             # A prior own broadcast to this dest blocks a fresh send unless provably absent
             # from every endpoint — probing by hash sees the mempool; never risk paying twice.
-            want = (self.normalize_address(to_address), int(amount))
+            want = (self.chain.normalize_address(to_address), int(amount))
             try:
                 prior = self._prior_broadcast(want, head)
             except Exception as e:
@@ -545,11 +545,12 @@ class EvmCoin(Asset, Chain):
         else None. A hash-finder only — the seam's confirm re-verifies everything by hash, so a
         miss just means the manual rescue paths. Mined blocks only (plain JSON-RPC exposes no
         mempool filter), so it lags a broadcast by up to one block."""
-        head = self.get_current_block_height()
+        head = self.chain.get_current_block_height()
         if head is None:
             return None
-        want_from = self.normalize_address(from_addr)
-        want_to = self.normalize_address(to_addr)
+        norm = self.chain.normalize_address
+        want_from = norm(from_addr)
+        want_to = norm(to_addr)
         key = (want_from, want_to, int(amount))
         floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
         last = self.scan_cursors.get(key, floor)
@@ -561,9 +562,9 @@ class EvmCoin(Asset, Chain):
                 self._set_cursor(key, block_num - 1)
                 return None
             for tx in (block or {}).get('transactions', []):
-                if self.normalize_address(tx.get('from') or '') != want_from:
+                if norm(tx.get('from') or '') != want_from:
                     continue
-                if self.normalize_address(tx.get('to') or '') != want_to:
+                if norm(tx.get('to') or '') != want_to:
                     continue
                 if int(tx.get('value') or '0x0', 16) < int(amount):
                     continue
