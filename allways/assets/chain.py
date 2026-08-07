@@ -12,7 +12,8 @@ class Chain(ABC):
     config-driven Chain instance per network instead of a class per chain.
 
     Everything here is a fact of the network, shared by every asset on it: the tip,
-    the address format, the ownership-proof signature scheme, the transport.
+    the address format, the ownership-proof signature scheme. Transport (sessions,
+    RPC ladders) moves here when the first split lands.
     """
 
     # A cached tip is reused for at most this long. The validator clears it each forward pass (one

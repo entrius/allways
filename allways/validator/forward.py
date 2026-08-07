@@ -98,12 +98,8 @@ async def forward(self: Validator) -> None:
 
 def clear_provider_caches(self: Validator) -> None:
     for provider in self.assets.values():
-        try:
-            provider.clear_cache()
-            provider.chain.clear_pass_tip()  # reset the per-pass hoisted chain tip (one getSlot/pass, not per-leg)
-        except Exception as e:
-            # One broken asset must not leave every other chain serving stale tips.
-            bt.logging.warning(f'{type(provider).__name__}: cache clear failed: {e}')
+        provider.clear_cache()
+        provider.chain.clear_pass_tip()  # reset the per-pass hoisted chain tip (one getSlot/pass, not per-leg)
 
 
 def ingest_solana_events(self: Validator) -> None:

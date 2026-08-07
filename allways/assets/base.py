@@ -32,6 +32,9 @@ class Asset(ABC):
     `.chain` returns itself. The registry row stays a `ChainDefinition` in chains.py —
     the wire says chain; in code an id resolves to an Asset.
 
+    Seam rule: asset-side code asks chain questions through ``self.chain``; chain
+    members calling each other keep plain ``self`` (they move together on a split).
+
     Adding a new asset:
     1. Add its ChainDefinition to chains.py
     2. Implement this interface (or reuse a family class, e.g. an ERC-20)
@@ -128,6 +131,11 @@ class Asset(ABC):
         Rejections are logged once in the base so observability for the defense
         is in one place instead of duplicated at every call site.
         """
+        # Canonicalize expecteds once here so every fetcher compares in canonical form.
+        chain = self.chain
+        expected_recipient = chain.normalize_address(expected_recipient)
+        expected_sender = chain.normalize_address(expected_sender) if expected_sender else expected_sender
+
         tx_info = self.fetch_matching_tx(
             tx_hash=tx_hash,
             expected_recipient=expected_recipient,
@@ -145,8 +153,7 @@ class Asset(ABC):
             )
             return None
 
-        chain = self.chain
-        if expected_sender and chain.normalize_address(tx_info.sender) != chain.normalize_address(expected_sender):
+        if expected_sender and chain.normalize_address(tx_info.sender) != expected_sender:
             bt.logging.warning(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
                 f'(expected {expected_sender}, got {tx_info.sender!r})'
@@ -156,7 +163,7 @@ class Asset(ABC):
         # A self-transfer (sender == recipient) is never a real swap leg: the
         # paying and receiving parties are always distinct. Rejecting it blocks
         # same-wallet A->A volume fakes; A->B self-flow is bounded economically.
-        if tx_info.sender and chain.normalize_address(tx_info.sender) == chain.normalize_address(expected_recipient):
+        if tx_info.sender and chain.normalize_address(tx_info.sender) == expected_recipient:
             bt.logging.warning(
                 f'verify_transaction: self-transfer on tx {tx_hash[:16]}... '
                 f'(sender == recipient {expected_recipient}) — rejecting'

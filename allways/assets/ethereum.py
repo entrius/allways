@@ -548,8 +548,9 @@ class Ether(Asset, Chain):
         head = self.chain.get_current_block_height()
         if head is None:
             return None
-        want_from = self.chain.normalize_address(from_addr)
-        want_to = self.chain.normalize_address(to_addr)
+        norm = self.chain.normalize_address
+        want_from = norm(from_addr)
+        want_to = norm(to_addr)
         key = (want_from, want_to, int(amount))
         floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
         last = self.scan_cursors.get(key, floor)
@@ -561,9 +562,9 @@ class Ether(Asset, Chain):
                 self._set_cursor(key, block_num - 1)
                 return None
             for tx in (block or {}).get('transactions', []):
-                if self.chain.normalize_address(tx.get('from') or '') != want_from:
+                if norm(tx.get('from') or '') != want_from:
                     continue
-                if self.chain.normalize_address(tx.get('to') or '') != want_to:
+                if norm(tx.get('to') or '') != want_to:
                     continue
                 if int(tx.get('value') or '0x0', 16) < int(amount):
                     continue
