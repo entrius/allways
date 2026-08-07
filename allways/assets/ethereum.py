@@ -3,6 +3,7 @@ from typing import Optional
 
 import bittensor as bt
 from eth_account import Account
+from eth_utils import to_checksum_address
 
 from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import ETHEREUM, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
@@ -221,7 +222,10 @@ class Ether(EvmAsset, EvmChain):
                 {
                     'chainId': self.chain.chain_id,
                     'nonce': nonce,
-                    'to': to_address,
+                    # eth-account refuses a non-checksummed `to`, but an ALL-LOWERCASE committed
+                    # dest is legal (EIP-55 is optional) — checksum here or the send crashes and
+                    # the miner rides to a slash on an address it could never pay.
+                    'to': to_checksum_address(to_address),
                     'value': amount,
                     'gas': gas,
                     'maxFeePerGas': max_fee,

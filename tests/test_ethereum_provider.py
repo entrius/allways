@@ -512,6 +512,13 @@ class TestSendResilience:
         # After `provider`, whose fixture delenvs the key.
         monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
 
+    def test_all_lowercase_committed_dest_still_sends(self, provider):
+        # An all-lowercase dest is legal (EIP-55 is optional) and passes is_valid_address, but
+        # eth-account refuses a non-checksummed `to` — the sign path checksums it, or the miner
+        # could never pay this dest and would ride to a slash.
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'ee' * 32))
+        assert provider.send_amount(RECIPIENT.lower(), 10**15) is not None
+
     def test_null_broadcast_response_still_returns_the_local_hash(self, provider):
         # The hash is computed locally from the signed tx — a quirky 'result: null' from the
         # broadcast must never become a blank hash in the miner's persisted send record.
