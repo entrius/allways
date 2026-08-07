@@ -19,6 +19,7 @@ Sig64 = _Raw(64)
 # 8-byte account discriminators (IDL `accounts[].discriminator`).
 DISCRIMINATORS = {
     'Binding': bytes([148, 194, 179, 54, 81, 210, 85, 178]),
+    'BondAttestation': bytes([131, 10, 27, 174, 69, 97, 217, 188]),
     'CollateralVault': bytes([19, 189, 95, 155, 100, 9, 159, 145]),
     'Config': bytes([155, 12, 170, 224, 30, 250, 204, 130]),
     'HotkeyBinding': bytes([225, 14, 96, 246, 60, 210, 97, 210]),
@@ -60,12 +61,27 @@ Treasury = CStruct('total' / U64, 'bump' / U8)
 MinerState = CStruct(
     'miner' / Pubkey32,
     'collateral' / U64,
+    # `active` is the OR view of `active_backings` (W2 per-hub activation); `settling_until` is the
+    # entry lock a non-"sol" timeout sets beside the `busy_until` exit lock.
     'active' / Bool,
+    'active_backings' / U8,
     'has_active_swap' / Bool,
     'busy_until' / I64,
+    'settling_until' / I64,
     'deactivation_at' / I64,
     'successful_swaps' / U32,
     'failed_swaps' / U32,
+    'bump' / U8,
+)
+
+# W2 — the quorum's assertion about a bond this program can't read (one per miner per backing chain).
+BondAttestation = CStruct(
+    'miner' / Pubkey32,
+    'chain' / String,
+    'effective_balance' / U64,
+    'locked' / Bool,
+    'epoch' / U64,
+    'attested_at' / I64,
     'bump' / U8,
 )
 
@@ -172,7 +188,11 @@ Config = CStruct(
     # TAO-backed bounds (rao) + the busy-until-settled grace — W1 split-collateral seam.
     'tao_min_swap_amount' / U64,
     'tao_max_swap_amount' / U64,
+    # W2 — the TAO activation floor (rao) and the dead-man fuse's two fields.
+    'tao_min_collateral' / U64,
     'settlement_grace_secs' / I64,
+    'last_attest_heartbeat' / I64,
+    'attest_max_age_secs' / I64,
     'reservation_ttl_secs' / I64,
     'consensus_threshold_percent' / U8,
     'validators' / Vec(ValidatorInfo),
@@ -190,6 +210,7 @@ Config = CStruct(
 # fields (hotkey, hotkey_sig, claimed_swap_key, bound_hash) intentionally stay raw bytes.
 ACCOUNT_PUBKEY_FIELDS = {
     'Binding': ['miner'],
+    'BondAttestation': ['miner'],
     'HotkeyBinding': ['miner'],
     'Config': ['admin'],
     'MinerState': ['miner'],
@@ -207,12 +228,15 @@ ACCOUNT_PUBKEY_FIELDS = {
 # Emitted via Anchor self-CPI and surfaced in tx logs as base64 `Program data:` lines. Field order/types
 # mirror events.rs / the IDL exactly. swap_key + hotkey stay raw bytes (see EVENT_PUBKEY_FIELDS).
 EVENT_DISCRIMINATORS = {
+    'AttestHeartbeat': bytes([66, 230, 199, 211, 232, 136, 138, 139]),
+    'BondAttested': bytes([65, 162, 178, 67, 21, 45, 162, 255]),
     'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
+    'MinerBackingChanged': bytes([158, 37, 88, 4, 80, 187, 116, 110]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
     'PoolDrawArmed': bytes([56, 138, 178, 84, 109, 162, 248, 202]),
     'PoolOpened': bytes([44, 53, 197, 215, 31, 61, 56, 170]),
@@ -235,12 +259,29 @@ EVENT_DISCRIMINATORS = {
 }
 
 EVENT_LAYOUTS = {
+    'AttestHeartbeat': CStruct('at' / I64),
+    'BondAttested': CStruct(
+        'miner' / Pubkey32,
+        'chain' / String,
+        'effective_balance' / U64,
+        'locked' / Bool,
+        'epoch' / U64,
+        'attested_at' / I64,
+    ),
     'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
+    # Per-purse detail; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
+    'MinerBackingChanged': CStruct(
+        'miner' / Pubkey32,
+        'backing' / String,
+        'enabled' / Bool,
+        'active_backings' / U8,
+        'at' / I64,
+    ),
     'MinerDeactivated': CStruct('miner' / Pubkey32, 'at' / I64),
     'PoolOpened': CStruct(
         'miner' / Pubkey32,
@@ -324,12 +365,15 @@ EVENT_LAYOUTS = {
 
 # Pubkey fields per event (decoded bytes -> solders Pubkey by the client). swap_key/hotkey stay raw bytes.
 EVENT_PUBKEY_FIELDS = {
+    'AttestHeartbeat': [],
+    'BondAttested': ['miner'],
     'CollateralPosted': ['miner'],
     'CollateralWithdrawn': ['miner'],
     'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
     'MinerActivated': ['miner'],
+    'MinerBackingChanged': ['miner'],
     'MinerDeactivated': ['miner'],
     'PoolDrawArmed': ['miner'],
     'PoolOpened': ['miner', 'opener'],
@@ -443,6 +487,14 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'to_amount' / U128,
 )
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
+# W2 — vote_activate / vote_deactivate now name the purse they act on.
+IX_BACKING_ARGS = CStruct('backing' / String)
+IX_SET_ATTESTATION_ARGS = CStruct(
+    'chain' / String,
+    'effective_balance' / U64,
+    'locked' / Bool,
+    'epoch' / U64,
+)
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
@@ -452,6 +504,7 @@ IX_BOOL_ARGS = CStruct('value' / Bool)  # set_halted
 # name -> CStruct for the generic reader.
 ACCOUNT_LAYOUTS = {
     'Binding': Binding,
+    'BondAttestation': BondAttestation,
     'CollateralVault': CollateralVault,
     'Config': Config,
     'HotkeyBinding': HotkeyBinding,

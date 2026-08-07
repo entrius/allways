@@ -52,6 +52,38 @@ def test_decode_quote_set_roundtrip():
     assert f.rate == 345 * 10**18 and f.updated_at == 1_700_000_000
 
 
+def test_decode_bond_attested_roundtrip():
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'BondAttested',
+        {
+            'miner': bytes(miner),
+            'chain': 'tao',
+            'effective_balance': 3_300_000_000,
+            'locked': True,
+            'epoch': 4,
+            'attested_at': 1_700_000_000,
+        },
+    )
+    name, f = decode_event(raw)
+    assert name == 'BondAttested'
+    assert f.miner == miner and f.chain == 'tao'
+    assert f.effective_balance == 3_300_000_000 and f.locked is True and f.epoch == 4
+
+
+def test_decode_miner_backing_changed_roundtrip():
+    # The per-purse event; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'MinerBackingChanged',
+        {'miner': bytes(miner), 'backing': 'tao', 'enabled': False, 'active_backings': 1, 'at': 42},
+    )
+    name, f = decode_event(raw)
+    assert name == 'MinerBackingChanged'
+    assert f.miner == miner and f.backing == 'tao'
+    assert f.enabled is False and f.active_backings == 1
+
+
 def test_decode_swap_completed_roundtrip():
     miner = Keypair().pubkey()
     raw = _encode(

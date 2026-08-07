@@ -309,6 +309,13 @@ class AllwaysSolanaClient:
     def _ix(self, name: str, arg_bytes: bytes, metas: List[AccountMeta]) -> Instruction:
         return Instruction(self.program_id, layouts.IX_DISCRIMINATORS[name] + arg_bytes, metas)
 
+    def _attestation_meta(self, miner: Pubkey, backing: str) -> Pubkey:
+        """Address for the optional BondAttestation account. Anchor encodes an absent optional account
+        as the program id, which is what a "sol" backing wants — it reads the local collateral vault."""
+        if backing == 'sol':
+            return self.program_id
+        return pdas.bond_attestation_pda(miner, backing, self.program_id)
+
     # ---------- bootstrap (admin) ----------
     def initialize(
         self,
@@ -518,8 +525,10 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('submit_swap_claim', args, metas)])
 
-    def vote_initiate(self, swap_key: bytes, miner) -> str:
-        """Vote to attest a PendingAttestation swap; on quorum it transitions to Active."""
+    def vote_initiate(self, swap_key: bytes, miner, backing: str = 'sol') -> str:
+        """Vote to attest a PendingAttestation swap; on quorum it transitions to Active.
+        `backing` must be the swap's pinned `collateral_chain` — it selects the purse the obligation
+        gate reads (and hence which BondAttestation account travels with the vote)."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
         metas = [
@@ -530,6 +539,7 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
             AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, m, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(self._attestation_meta(m, backing), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
@@ -589,8 +599,11 @@ class AllwaysSolanaClient:
         args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
         return self._send([self._ix('close_stale_claim', args, metas)])
 
-    def vote_activate(self, miner) -> str:
-        """Vote to activate a miner; on quorum its MinerState flips active=true."""
+    def vote_activate(self, miner, backing: str = 'sol') -> str:
+        """Vote to activate ONE of a miner's backing purses; on quorum its bit is set and the
+        MinerState `active` OR view follows. An off-chain backing also needs its BondAttestation
+        account passed — "sol" reads the local collateral vault and passes the program id instead
+        (Anchor's None for an optional account)."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
         metas = [
@@ -599,13 +612,16 @@ class AllwaysSolanaClient:
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.vote_round_pda(pdas.REQ_ACTIVATE, m, self.program_id), False, True),
+            AccountMeta(self._attestation_meta(m, backing), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        return self._send([self._ix('vote_activate', b'', metas)])
+        args = layouts.IX_BACKING_ARGS.build({'backing': backing})
+        return self._send([self._ix('vote_activate', args, metas)])
 
-    def vote_deactivate(self, miner) -> str:
-        """Vote to force-deactivate an idle active miner; on quorum active flips false.
-        The contract rejects busy miners (in-flight swap / unexpired busy_until)."""
+    def vote_deactivate(self, miner, backing: str = 'sol') -> str:
+        """Vote to force-deactivate ONE of an idle miner's backing purses; on quorum its bit clears.
+        The contract rejects busy miners (in-flight swap / unexpired busy_until) — those guards are
+        global, since one-swap-at-a-time spans purses."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
         metas = [
@@ -616,7 +632,8 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.vote_round_pda(pdas.REQ_DEACTIVATE, m, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        return self._send([self._ix('vote_deactivate', b'', metas)])
+        args = layouts.IX_BACKING_ARGS.build({'backing': backing})
+        return self._send([self._ix('vote_deactivate', args, metas)])
 
     def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
         """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.
@@ -704,9 +721,11 @@ class AllwaysSolanaClient:
         collateral_amount: int,
         from_amount: int,
         to_amount: int,
+        backing: str = 'sol',
     ) -> str:
         """Fill the reservation this client's keypair won at the draw (signer must == reservation.router).
-        Names the taker + amounts, running the swap-size bounds + collateral gate + the collateral bind."""
+        Names the taker + amounts, running the swap-size bounds + collateral gate + the collateral bind.
+        `backing` must be the reservation's pinned `collateral_chain` (still always "sol" until W2b)."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
         args = layouts.IX_FINALIZE_RESERVATION_ARGS.build(
@@ -725,6 +744,7 @@ class AllwaysSolanaClient:
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),  # mut: finalize writes busy_until
             AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+            AccountMeta(self._attestation_meta(m, backing), False, False),
         ]
         return self._send([self._ix('finalize_reservation', args, metas)])
 

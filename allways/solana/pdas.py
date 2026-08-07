@@ -5,6 +5,8 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
   vote          : [b"vote", [req_type], target]  (weights round: target = the 32-byte snapshot hash)
   swap          : [b"swap", swap_key]   (swap_key = keccak(from_tx_hash), 32 bytes)
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
+  attest        : [b"attest", miner, chain_id]
+  attest round  : [b"vote", [REQ_SET_ATTESTATION], miner, chain_id]  (composite target)
 """
 
 from typing import Optional
@@ -20,6 +22,12 @@ REQ_DEACTIVATE = 5
 REQ_CONFIRM = 6
 REQ_TIMEOUT = 7
 REQ_SET_WEIGHTS = 8
+REQ_SET_ATTESTATION = 9
+REQ_ATTEST_HEARTBEAT = 10
+
+# Per-backing activation bits on MinerState.active_backings (constants.rs).
+BACKING_BIT_SOL = 1 << 0
+BACKING_BIT_TAO = 1 << 1
 
 
 def _pk_bytes(p) -> bytes:
@@ -57,6 +65,18 @@ def binding_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
 
 def hotkey_binding_pda(hotkey: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
     return _derive([b'hkbind', bytes(hotkey)], program_id)
+
+
+def bond_attestation_pda(miner, chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    return _derive([b'attest', _pk_bytes(miner), chain.encode()], program_id)
+
+
+def attestation_round_pda(miner, chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The reusable per-(miner, backing chain) attestation round — a composite target, so it can't go
+    through `vote_round_pda` (which takes a single 32-byte one)."""
+    return _derive(
+        [b'vote', bytes([REQ_SET_ATTESTATION]), _pk_bytes(miner), chain.encode()], program_id
+    )
 
 
 def reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:

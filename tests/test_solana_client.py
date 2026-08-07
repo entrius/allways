@@ -34,8 +34,10 @@ def test_minerstate_roundtrip():
         'miner': bytes(range(32)),
         'collateral': 5_000_000_000,
         'active': True,
+        'active_backings': 1,
         'has_active_swap': False,
         'busy_until': 1_700_000_500,
+        'settling_until': 0,
         'deactivation_at': 0,
         'successful_swaps': 3,
         'failed_swaps': 1,
@@ -43,6 +45,7 @@ def test_minerstate_roundtrip():
     }
     p = _roundtrip(layouts.MinerState, v)
     assert p.collateral == v['collateral'] and p.active is True and p.successful_swaps == 3
+    assert p.active_backings == 1 and p.settling_until == 0
 
 
 def test_reservation_roundtrip_u128_rate_and_strings():
@@ -124,7 +127,7 @@ def test_pool_roundtrip_vec_of_request():
 def test_config_roundtrip_vec_of_validatorinfo():
     v = {
         'admin': bytes(32),
-        'version': 11,
+        'version': 12,
         'min_collateral': 1,
         'max_collateral': 2,
         'fulfillment_timeout_secs': 100,
@@ -132,7 +135,10 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'max_swap_amount': 0,
         'tao_min_swap_amount': 1_000,
         'tao_max_swap_amount': 0,
+        'tao_min_collateral': 100_000_000,
         'settlement_grace_secs': 900,
+        'last_attest_heartbeat': 0,
+        'attest_max_age_secs': 86_400,
         'reservation_ttl_secs': 1800,
         'consensus_threshold_percent': 66,
         'validators': [{'key': bytes(range(32)), 'weight': 7}],
@@ -146,7 +152,22 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'bump': 1,
     }
     p = _roundtrip(layouts.Config, v)
-    assert p.version == 11 and len(p.validators) == 1 and p.validators[0].weight == 7
+    assert p.version == 12 and len(p.validators) == 1 and p.validators[0].weight == 7
+
+
+def test_bond_attestation_roundtrip():
+    v = {
+        'miner': bytes(range(32)),
+        'chain': 'tao',
+        'effective_balance': 3_300_000_000,
+        'locked': True,
+        'epoch': 4,
+        'attested_at': 1_700_000_000,
+        'bump': 253,
+    }
+    p = _roundtrip(layouts.BondAttestation, v)
+    assert p.chain == 'tao' and p.locked is True and p.epoch == 4
+    assert p.effective_balance == v['effective_balance']
 
 
 def test_pda_derivation():
@@ -157,3 +178,7 @@ def test_pda_derivation():
     assert isinstance(pdas.vote_round_pda(pdas.REQ_INITIATE, miner), Pubkey)
     # global weights round (no target)
     assert isinstance(pdas.vote_round_pda(pdas.REQ_SET_WEIGHTS), Pubkey)
+    # W2: attestation PDAs are per (miner, backing chain) — the chain is part of the seed, so two
+    # backings never collide, and the round shares the same composite target.
+    assert pdas.bond_attestation_pda(miner, 'tao') != pdas.bond_attestation_pda(miner, 'eth')
+    assert isinstance(pdas.attestation_round_pda(miner, 'tao'), Pubkey)
