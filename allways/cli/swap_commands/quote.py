@@ -10,7 +10,7 @@ import click
 from rich.table import Table
 from rich.text import Text
 
-from allways.chains import SUPPORTED_CHAINS, get_chain
+from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
     console,
@@ -81,7 +81,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
 
     from_amount = to_smallest_units(amount, from_chain)
-    to_dec = get_chain(to_chain).decimals
+    to_dec = get_chain_def(to_chain).decimals
 
     book = load_miner_book(client, with_reservation=False)
     candidates = []

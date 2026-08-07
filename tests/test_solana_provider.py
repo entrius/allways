@@ -238,7 +238,7 @@ class TestSend:
 
 def test_chain_metadata():
     p = provider_with(FakeRpc())
-    chain = p.get_chain()
+    chain = p.chain_def
     assert chain is CHAIN_SOL
     assert chain.id == 'sol' and chain.native_unit == 'lamport' and chain.decimals == 9
     assert chain.min_onchain_amount == 890880  # rent-exempt floor (0-data System account)

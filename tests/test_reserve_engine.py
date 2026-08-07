@@ -420,7 +420,8 @@ class _FakeProvider:
             raise ProviderUnreachableError('down')
         return self._tx
 
-    def get_chain(self):
+    @property
+    def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self._grace)
 
 

@@ -9,23 +9,23 @@ from allways.chains import (
     EXTENSION_BUCKET_SECONDS,
     canonical_pair,
     compute_extension_target_secs,
-    get_chain,
+    get_chain_def,
 )
 
 
 class TestGetChain:
     def test_btc(self):
-        assert get_chain('btc') is CHAIN_BTC
+        assert get_chain_def('btc') is CHAIN_BTC
 
     def test_tao(self):
-        assert get_chain('tao') is CHAIN_TAO
+        assert get_chain_def('tao') is CHAIN_TAO
 
     def test_eth(self):
-        assert get_chain('eth') is CHAIN_ETH
+        assert get_chain_def('eth') is CHAIN_ETH
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
-            get_chain('doge')
+            get_chain_def('doge')
 
 
 class TestCanonicalPair:

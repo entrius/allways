@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from allways.chains import get_chain
+from allways.chains import get_chain_def
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
 from allways.utils.rate import (
     apply_fee_deduction,
@@ -386,7 +386,7 @@ class TestIsExecutableRate:
         """Symmetric out of SOL: 1e-10 TAO/SOL → inverse 1e10 overshoots on the SOL leg."""
         assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
 
-    DUST = get_chain('btc').min_onchain_amount  # smallest fundable BTC source
+    DUST = get_chain_def('btc').min_onchain_amount  # smallest fundable BTC source
 
     def test_sub_dust_boundary_rate_rejected(self):
         """At max_swap/10, the only in-bounds source is 1 sat — below the BTC

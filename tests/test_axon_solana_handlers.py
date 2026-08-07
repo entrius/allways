@@ -64,7 +64,8 @@ class FakeProvider:
         self.tx_info = tx_info
         self.grace = grace
 
-    def get_chain(self):
+    @property
+    def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
 
     def verify_transaction(self, **kw):

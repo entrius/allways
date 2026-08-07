@@ -21,7 +21,8 @@ class FakeProvider(Asset, Chain):
     def __init__(self, tx: TransactionInfo):
         self._tx = tx
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_TAO
 
     def check_connection(self, **kwargs) -> None: ...

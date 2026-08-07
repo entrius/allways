@@ -10,7 +10,7 @@ from bitcoin_message_tool.bmt import sign_message, verify_message
 from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
-from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_BTC, ChainDefinition
 
@@ -143,7 +143,8 @@ class Bitcoin(Asset, Chain):
         self.last_send_error = msg
         bt.logging.error(msg)
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_BTC
 
     def describe(self) -> str:
@@ -240,7 +241,7 @@ class Bitcoin(Asset, Chain):
             if confirmed and block_number:
                 confirmations = self.api_calc_confirmations(block_number)
 
-            min_confs = self.get_chain().min_confirmations
+            min_confs = self.chain_def.min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
 
             if is_confirmed:
@@ -504,7 +505,7 @@ class Bitcoin(Asset, Chain):
         amount: int,
         from_address: Optional[str] = None,
         fee_rate_override: Optional[int] = None,
-    ) -> Optional[Tuple[str, int]]:
+    ) -> SendResult:
         """Send BTC via embit + Blockstream API (no full node required). Amount in satoshis.
 
         Uses BTC_PRIVATE_KEY env var (WIF format). Supports all address types:
@@ -646,8 +647,12 @@ class Bitcoin(Asset, Chain):
             self._send_error(f'embit send failed: {type(e).__name__}: {e}')
             return None
 
-    def resolve_sender_utxos(self, from_address, type_to_script):
-        """Match from_address to address type and fetch UTXOs, or probe all types."""
+    def resolve_sender_utxos(
+        self, from_address: Optional[str], type_to_script: dict
+    ) -> Optional[Tuple[bytes, str, list, str]]:
+        """(script, address, utxos, address_type) for the funding address, or None.
+
+        Matches ``from_address`` to its address type when given, else probes all types."""
         if from_address:
             detected = detect_address_type(from_address)
             if detected not in type_to_script:
@@ -683,7 +688,9 @@ class Bitcoin(Asset, Chain):
         self._send_error('No UTXOs found for any address type')
         return None
 
-    def select_utxos(self, utxos, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None):
+    def select_utxos(
+        self, utxos: list, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None
+    ) -> Optional[Tuple[list, int, int]]:
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
@@ -769,9 +776,7 @@ class Bitcoin(Asset, Chain):
                 time.sleep(3)
         return BTC_MIN_FEE_RATE
 
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send BTC via embit + Esplora. Returns (tx_hash, block_number) or None.
 
         Signing credentials come from ``BTC_PRIVATE_KEY``, not from the caller.

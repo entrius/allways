@@ -70,9 +70,9 @@ def test_send_margin_does_not_scale_with_confirmation_depth():
     """The margin covers relaying the claim on-chain, not waiting for confirmations. It must therefore
     fit inside a freshly-won reservation (ttl 480s, minus the ~60-80s pool draw) for EVERY chain —
     including BTC, whose 2 x 600s confirmation wait alone exceeds the whole TTL."""
-    from allways.chains import get_chain
+    from allways.chains import get_chain_def
 
-    btc = get_chain('btc')
+    btc = get_chain_def('btc')
     assert btc.min_confirmations * btc.seconds_per_block > _SEND_MARGIN_SECS
     assert _SEND_MARGIN_SECS < 480 - 80  # clears a fresh reservation post-draw, on any source chain
 

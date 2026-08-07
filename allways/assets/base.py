@@ -12,14 +12,19 @@ class ProviderUnreachableError(Exception):
     """Raised when a chain provider cannot reach its backend during verification."""
 
 
+# What ``send_amount`` resolves to: (tx_hash, block_number) on success — block_number is 0 when
+# the chain reports inclusion asynchronously — or None when the send was refused/failed.
+SendResult = Optional[Tuple[str, int]]
+
+
 @dataclass
 class TransactionInfo:
     tx_hash: str
-    confirmed: bool
-    sender: str
+    confirmed: bool  # True once the tx has the chain's min_confirmations
+    sender: str  # provable payer (first input / from / Transfer-log party); '' = unprovable
     recipient: str
-    amount: int  # Smallest unit (satoshis / rao)
-    block_number: Optional[int] = None
+    amount: int  # Smallest unit (satoshis / rao / wei / µUSDC)
+    block_number: Optional[int] = None  # None while in the mempool
     confirmations: int = 0
     block_time: Optional[int] = None  # Block's mined time, unix seconds (replay-freshness floor; B2)
 
@@ -44,8 +49,13 @@ class Asset(ABC):
     # Non-fused assets (tokens on a multi-asset chain) set this at construction.
     _chain: Optional[Chain] = None
 
+    @property
     @abstractmethod
-    def get_chain(self) -> ChainDefinition: ...
+    def chain_def(self) -> ChainDefinition:
+        """This asset's registry row (chains.py): wire id, decimals, confirmations, env prefix.
+
+        ``chain_def`` is the asset's static registry FACTS (``chains.get_chain_def(id)`` reaches
+        the same row from a wire id); ``chain`` is the live network OBJECT it talks through."""
 
     @property
     def chain(self) -> Chain:
@@ -58,7 +68,7 @@ class Asset(ABC):
 
     def describe(self) -> str:
         """One-line summary of the backend/API this provider talks to, for startup logs."""
-        return self.get_chain().name
+        return self.chain_def.name
 
     def clear_cache(self) -> None:
         """Reset per-asset scratch caches at the start of a validator pass. No-op by default."""
@@ -149,7 +159,7 @@ class Asset(ABC):
         if require_confirmed and not tx_info.confirmed:
             bt.logging.debug(
                 f'verify_transaction: tx {tx_hash[:16]}... not yet confirmed '
-                f'({tx_info.confirmations}/{self.get_chain().min_confirmations})'
+                f'({tx_info.confirmations}/{self.chain_def.min_confirmations})'
             )
             return None
 
@@ -184,9 +194,7 @@ class Asset(ABC):
         return False
 
     @abstractmethod
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send funds to an address. Returns (tx_hash, block_number) or None.
 
         Providers own their own signing credentials — TAO uses the ``bt.Wallet``

@@ -74,7 +74,8 @@ class RecordingProvider:
             raise ProviderUnreachableError('down')
         return self.refuses
 
-    def get_chain(self):
+    @property
+    def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
 
     def verify_transaction(self, tx_hash, expected_recipient, expected_amount, block_hint=0, expected_sender=None):

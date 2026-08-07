@@ -11,7 +11,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_ETH, ChainDefinition
 
@@ -100,7 +100,8 @@ class Ether(Asset, Chain):
         self.last_send_error = msg
         bt.logging.error(msg)
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_ETH
 
     def describe(self) -> str:
@@ -253,7 +254,7 @@ class Ether(Asset, Chain):
             block_time = cached['block_time']
             tip = self.chain.cached_block_height()
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
-            is_confirmed = confirmations >= self.get_chain().min_confirmations
+            is_confirmed = confirmations >= self.chain_def.min_confirmations
         else:
             try:
                 receipt = self.eth_rpc('eth_getTransactionReceipt', [tx_hash])
@@ -268,7 +269,7 @@ class Ether(Asset, Chain):
             block_number = int(receipt['blockNumber'], 16)
             tip = self.chain.cached_block_height()
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
-            is_confirmed = confirmations >= self.get_chain().min_confirmations
+            is_confirmed = confirmations >= self.chain_def.min_confirmations
 
             # The freshness gate fails closed on a missing block_time, so an unreadable
             # timestamp must be 'unknown' (raise), never a verdict — same as the receipt above.
@@ -376,9 +377,7 @@ class Ether(Asset, Chain):
 
     # --- Sending ---
 
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send ETH via a type-2 (EIP-1559) transfer signed with ETH_PRIVATE_KEY. Amount in wei.
 
         ``from_address`` (the miner's committed address) must match the key — validators
@@ -527,7 +526,7 @@ class Ether(Asset, Chain):
         either side. Raises when the chain view is unavailable (caller defers)."""
         tip = int(self.eth_rpc('eth_blockNumber', []), 16)
         # Probe depth clamped to what non-archive public nodes serve (~128 blocks).
-        span = min(120, max(0, int(time.time()) - int(since_unix)) // self.get_chain().seconds_per_block)
+        span = min(120, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         probes = ['latest'] + [hex(max(0, tip - span // d)) for d in (1, 2)]
         return any((self.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
