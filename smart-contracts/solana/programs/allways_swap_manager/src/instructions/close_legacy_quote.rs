@@ -46,10 +46,14 @@ pub struct CloseLegacyQuote<'info> {
 
 pub fn handler(ctx: Context<CloseLegacyQuote>) -> Result<()> {
     let info = ctx.accounts.quote.to_account_info();
+    // Everything here checks against the address this program is ACTUALLY running at, not the
+    // compiled-in `crate::ID`: the two differ on any deployment that isn't the canonical one (dev
+    // clusters, forks), and an ownership proof that only holds for one address isn't a proof.
+    let program_id = ctx.program_id;
     let legacy = {
         let data = info.try_borrow_data()?;
         require!(
-            info.owner == &crate::ID && data.len() >= 8,
+            info.owner == program_id && data.len() >= 8,
             ErrorCode::InvalidAccountForMigration
         );
         require!(
@@ -70,7 +74,7 @@ pub fn handler(ctx: Context<CloseLegacyQuote>) -> Result<()> {
             legacy.from_chain.as_bytes(),
             legacy.to_chain.as_bytes(),
         ],
-        &crate::ID,
+        program_id,
     );
     require!(
         legacy_addr == info.key(),
