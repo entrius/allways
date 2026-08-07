@@ -406,6 +406,14 @@ class TestSendGuards:
         assert SEL_TRANSFER.removeprefix('0x') in sent['raw']
         assert RECIPIENT.lower().removeprefix('0x') in sent['raw']
 
+    def test_lowercase_contract_override_still_sends(self, provider, monkeypatch):
+        # eth-account refuses a non-checksummed `to`; the sign path checksums it, so a
+        # lowercase ARBUSDC_TOKEN_CONTRACT (env repoint, e2e fake) must not brick sends.
+        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        provider.token_contract = provider.token_contract.lower()
+        rpc_stub(provider, self._send_responses())
+        assert provider.send_amount(RECIPIENT, AMOUNT, from_address=TEST_ADDR) is not None
+
     def test_prior_broadcast_reused_not_resent(self, provider, monkeypatch):
         monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
         prior_tx = '0x' + 'aa' * 32

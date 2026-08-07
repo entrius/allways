@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 import bittensor as bt
 from eth_account import Account
-from eth_utils import keccak
+from eth_utils import keccak, to_checksum_address
 
 from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
@@ -365,7 +365,9 @@ class Erc20(EvmAsset):
                 {
                     'chainId': self.chain.chain_id,
                     'nonce': nonce,
-                    'to': self.token_contract,
+                    # eth-account refuses a non-checksummed `to` — a lowercase contract override
+                    # (env repoint, e2e fake) must not brick every send.
+                    'to': to_checksum_address(self.token_contract),
                     'value': 0,
                     'data': '0x' + calldata,
                     'gas': gas,
