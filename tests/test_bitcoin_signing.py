@@ -145,6 +145,16 @@ class TestBitcoinSignFromProof:
         assert signature != ''
         assert provider.verify_from_proof(addr, TEST_MESSAGE, signature)
 
+    def test_uppercase_bech32_signs_and_verifies(self):
+        """BIP-173: uppercase bech32 (QR form) is the same address — sign and verify must accept it."""
+        provider = make_lightweight_provider()
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
+
+        signature = provider.sign_from_proof(addr.upper(), TEST_MESSAGE, key=TEST_WIF)
+
+        assert signature != ''
+        assert provider.verify_from_proof(addr.upper(), TEST_MESSAGE, signature)
+
     def test_p2tr_address_rejected(self):
         """P2TR isn't supported for BIP-137 signing — must return '' cleanly."""
         provider = make_lightweight_provider()
@@ -373,3 +383,14 @@ class TestNormalizeAddress:
         btc = Bitcoin()
         legacy = '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'
         assert btc.normalize_address(legacy) == legacy
+
+    def test_non_string_passes_through(self):
+        assert Bitcoin().normalize_address(None) is None
+
+
+class TestCanSendFromCase:
+    def test_uppercase_bech32_matches_derived_address(self):
+        provider = make_lightweight_provider()
+        addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
+        with patch.dict(os.environ, {'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
+            assert provider.can_send_from(addr.upper())

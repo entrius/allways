@@ -152,6 +152,8 @@ class Bitcoin(Asset, Chain):
 
     def normalize_address(self, address: str) -> str:
         """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
+        if not isinstance(address, str):
+            return address
         lowered = address.lower()
         return lowered if detect_address_type(lowered) in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2TR) else address
 
@@ -169,7 +171,11 @@ class Bitcoin(Asset, Chain):
             net = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
             pub = EmbitPrivateKey.from_wif(wif).get_public_key()
             seg = p2wpkh(pub)
-            return address in {seg.address(net), p2sh(seg).address(net), p2pkh(pub).address(net)}
+            return self.normalize_address(address) in {
+                seg.address(net),
+                p2sh(seg).address(net),
+                p2pkh(pub).address(net),
+            }
         except Exception:
             return False
 
@@ -447,6 +453,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         key: WIF private key string. If None, falls back to get_wif (BTC_PRIVATE_KEY).
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.error('Taproot (P2TR) addresses are not yet supported for message signing')
@@ -475,6 +482,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         No RPC dependency — pure cryptographic verification.
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.warning('Taproot (P2TR) addresses are not yet supported for message verification')
