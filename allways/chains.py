@@ -104,11 +104,9 @@ CHAIN_ARBUSDC = ChainDefinition(
     # math) — both far inside the 600s default program grace, so no grace-table arm.
     seconds_per_block=1,
     min_confirmations=90,
-    # F1 pin — DO NOT raise until the is_executable_rate orientation fix lands: the gate
-    # consumes the canonical arbusdc-per-SOL rate as if it were SOL-per-arbusdc on the
-    # arbusdc->sol side, so a real dust floor can demand a source above max_swap and
-    # silently burn the direction's pool. ERC-20 transfers have no protocol minimum, so
-    # 1 is also honest.
+    # ERC-20 transfers have no protocol minimum, so 1 is the honest floor. (The old
+    # F1 orientation defect that made this value load-bearing is fixed in utils/rate.py;
+    # raising it to an economic floor is now safe if ever wanted.)
     min_onchain_amount=1,
     # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (Arbitrum
     # timestamps are non-decreasing, but monotonicity says nothing about hub-spoke skew).
