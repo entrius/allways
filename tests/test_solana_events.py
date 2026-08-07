@@ -39,6 +39,7 @@ def test_decode_quote_set_roundtrip():
             'miner': bytes(miner),
             'from_chain': 'btc',
             'to_chain': 'tao',
+            'collateral_chain': 'tao',
             'rate': 345 * 10**18,
             'liquidity': 1_000,
             'updated_at': 1_700_000_000,
@@ -49,6 +50,7 @@ def test_decode_quote_set_roundtrip():
     assert name == 'QuoteSet'
     assert f.miner == miner  # converted to Pubkey
     assert f.from_chain == 'btc' and f.to_chain == 'tao'
+    assert f.collateral_chain == 'tao', 'the backing tells two quotes on one direction apart'
     assert f.rate == 345 * 10**18 and f.updated_at == 1_700_000_000
 
 

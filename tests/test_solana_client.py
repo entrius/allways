@@ -111,6 +111,7 @@ def test_pool_roundtrip_vec_of_request():
         'miner': bytes(32),
         'from_chain': 'BTC',
         'to_chain': 'SOL',
+        'collateral_chain': 'SOL',
         'miner_from_addr': 'm1',
         'miner_to_addr': 'm2',
         'rate': 1_000_000_000_000_000_000,

@@ -1,7 +1,8 @@
 """PDA derivation for the allways_swap_manager program.
 
 Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
-  quote / stats : [seed, miner, from_chain, to_chain]
+  quote         : [b"quote", miner, from_chain, to_chain, collateral_chain]
+  stats         : [b"stats", miner, from_chain, to_chain]
   vote          : [b"vote", [req_type], target]  (weights round: target = the 32-byte snapshot hash)
   swap          : [b"swap", swap_key]   (swap_key = keccak(from_tx_hash), 32 bytes)
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
@@ -28,6 +29,11 @@ REQ_ATTEST_HEARTBEAT = 10
 # Per-backing activation bits on MinerState.active_backings (constants.rs).
 BACKING_BIT_SOL = 1 << 0
 BACKING_BIT_TAO = 1 << 1
+
+# Backing (collateral) chain ids and their bits — the registry `backing.rs` matches on.
+BACKING_CHAIN_SOL = 'sol'
+BACKING_CHAIN_TAO = 'tao'
+BACKING_BITS = {BACKING_CHAIN_SOL: BACKING_BIT_SOL, BACKING_CHAIN_TAO: BACKING_BIT_TAO}
 
 
 def _pk_bytes(p) -> bytes:
@@ -91,7 +97,24 @@ def swap_pda(swap_key: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
     return _derive([b'swap', bytes(swap_key)], program_id)
 
 
-def quote_pda(miner, from_chain: str, to_chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+def quote_pda(
+    miner,
+    from_chain: str,
+    to_chain: str,
+    backing: str = BACKING_CHAIN_SOL,
+    program_id: Optional[Pubkey] = None,
+) -> Pubkey:
+    """One quote per (miner, direction, BACKING) — the backing is in the seeds so a dual-purse miner
+    can stand two offers on the same hub<->hub direction at different rates (W2b/D2)."""
+    return _derive(
+        [b'quote', _pk_bytes(miner), from_chain.encode(), to_chain.encode(), backing.encode()],
+        program_id,
+    )
+
+
+def legacy_quote_pda(miner, from_chain: str, to_chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The pre-W2b four-seed derivation. Only `close_legacy_quote` still needs it — every quote written
+    at this address was orphaned by the seed change and holds rent nobody can otherwise reclaim."""
     return _derive([b'quote', _pk_bytes(miner), from_chain.encode(), to_chain.encode()], program_id)
 
 

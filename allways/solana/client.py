@@ -227,8 +227,25 @@ class AllwaysSolanaClient:
     def get_swap(self, swap_key: bytes):
         return self._get('Swap', pdas.swap_pda(swap_key, self.program_id))
 
-    def get_quote(self, miner, from_chain: str, to_chain: str):
-        return self._get('MinerQuote', pdas.quote_pda(miner, from_chain, to_chain, self.program_id))
+    def get_quote(self, miner, from_chain: str, to_chain: str, backing: str = 'sol'):
+        """One quote — a direction AND a backing. Use `get_quotes_for_direction` when you want every
+        offer a miner stands on a direction (a dual-purse miner may stand two, at different rates)."""
+        return self._get('MinerQuote', pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id))
+
+    def get_quotes_for_direction(self, miner, from_chain: str, to_chain: str) -> List[object]:
+        """Every backing this miner quotes on the direction, cheapest read first: two point lookups
+        beat a getProgramAccounts scan while the backing registry is this small."""
+        out = []
+        for backing in pdas.BACKING_BITS:
+            q = self.get_quote(miner, from_chain, to_chain, backing)
+            if q is not None:
+                out.append(q)
+        return out
+
+    def get_bond_attestation(self, miner, chain: str = 'tao'):
+        """The quorum's assertion about a bond this program can't read. `effective_balance` is already
+        net of accrued fees and voted slashes — it is NOT the vault's gross counter."""
+        return self._get('BondAttestation', pdas.bond_attestation_pda(miner, chain, self.program_id))
 
     def get_direction_stats(self, miner, from_chain: str, to_chain: str):
         return self._get('MinerDirectionStats', pdas.stats_pda(miner, from_chain, to_chain, self.program_id))
@@ -389,6 +406,23 @@ class AllwaysSolanaClient:
     def set_min_swap_amount(self, amount: int) -> str:
         return self._admin_config('set_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
 
+    # W1/W2 split-collateral levers. The TAO amounts are RAO, not lamports — they are compared against
+    # the TAO leg in its own units and never converted through the rate.
+    def set_tao_min_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_tao_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_tao_max_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_tao_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_tao_min_collateral(self, amount: int) -> str:
+        return self._admin_config('set_tao_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_settlement_grace(self, secs: int) -> str:
+        return self._admin_config('set_settlement_grace', layouts.IX_I64_ARGS.build({'value': secs}))
+
+    def set_attest_max_age(self, secs: int) -> str:
+        return self._admin_config('set_attest_max_age', layouts.IX_I64_ARGS.build({'value': secs}))
+
     def set_max_swap_amount(self, amount: int) -> str:
         return self._admin_config('set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
 
@@ -442,13 +476,24 @@ class AllwaysSolanaClient:
         return self._send([self._ix('bind_hotkey', bytes(hotkey) + bytes(hotkey_sig), metas)])
 
     def set_quote(
-        self, from_chain: str, to_chain: str, miner_from_addr: str, miner_to_addr: str, rate: int, liquidity: int
+        self,
+        from_chain: str,
+        to_chain: str,
+        miner_from_addr: str,
+        miner_to_addr: str,
+        rate: int,
+        liquidity: int,
+        backing: str = 'sol',
     ) -> str:
+        """Publish a standing quote for one direction AND one backing. The contract requires `backing`
+        to be a hub on one of the legs and to be a purse this miner has already activated, so posting
+        a quote now follows activation instead of preceding it."""
         miner = self.keypair.pubkey()
         args = layouts.IX_SET_QUOTE_ARGS.build(
             {
                 'from_chain': from_chain,
                 'to_chain': to_chain,
+                'collateral_chain': backing,
                 'miner_from_addr': miner_from_addr,
                 'miner_to_addr': miner_to_addr,
                 'rate': rate,
@@ -457,7 +502,8 @@ class AllwaysSolanaClient:
         )
         metas = [
             AccountMeta(miner, True, True),
-            AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, self.program_id), False, True),
+            AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, False),
+            AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id), False, True),
             AccountMeta(pdas.treasury_pda(self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
@@ -484,27 +530,43 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('withdraw_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}), metas)])
 
-    def remove_quote(self, from_chain: str, to_chain: str) -> str:
-        """Miner retracts one quote-direction; the PDA closes (rent → miner) minus a churn fee → treasury."""
+    def remove_quote(self, from_chain: str, to_chain: str, backing: str = 'sol') -> str:
+        """Miner retracts ONE quote — a direction plus a backing; its sibling on the other purse (if
+        any) stands. The PDA closes (rent → miner) minus a churn fee → treasury."""
         miner = self.keypair.pubkey()
-        args = layouts.IX_REMOVE_QUOTE_ARGS.build({'from_chain': from_chain, 'to_chain': to_chain})
+        args = layouts.IX_REMOVE_QUOTE_ARGS.build(
+            {'from_chain': from_chain, 'to_chain': to_chain, 'collateral_chain': backing}
+        )
         metas = [
             AccountMeta(miner, True, True),
-            AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, self.program_id), False, True),
+            AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id), False, True),
             AccountMeta(pdas.treasury_pda(self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('remove_quote', args, metas)])
 
-    def deactivate(self) -> str:
-        """Miner self-deactivation (no consensus). Guarded on-chain: must be active, no in-flight swap,
-        past `busy_until`."""
+    def close_legacy_quote(self, miner, from_chain: str, to_chain: str) -> str:
+        """Permissionless: reap a quote stranded at the pre-W2b four-seed derivation. Rent goes to the
+        stored miner, not the caller — the crank exists so that rent isn't lost, not as a bounty."""
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(m, False, True),
+            AccountMeta(pdas.legacy_quote_pda(m, from_chain, to_chain, self.program_id), False, True),
+        ]
+        return self._send([self._ix('close_legacy_quote', b'', metas)])
+
+    def deactivate(self, backing: Optional[str] = None) -> str:
+        """Miner self-deactivation (no consensus). `backing=None` is the full exit (every purse);
+        naming one drops only that purse and leaves the rest trading. Guarded on-chain: must be active,
+        no in-flight swap, past `busy_until` — those guards are global either way."""
         miner = self.keypair.pubkey()
         metas = [
             AccountMeta(miner, True, False),
             AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, True),
         ]
-        return self._send([self._ix('deactivate', b'', metas)])
+        args = layouts.IX_OPT_BACKING_ARGS.build(backing)
+        return self._send([self._ix('deactivate', args, metas)])
 
     # ---------- swap lifecycle (B2: validator votes + the claim relay) ----------
     def submit_swap_claim(self, miner, swap_key: bytes, from_tx_hash: str, from_tx_block: int) -> str:
@@ -635,6 +697,46 @@ class AllwaysSolanaClient:
         args = layouts.IX_BACKING_ARGS.build({'backing': backing})
         return self._send([self._ix('vote_deactivate', args, metas)])
 
+    def vote_set_attestation(
+        self, miner, chain: str, effective_balance: int, locked: bool, epoch: int
+    ) -> str:
+        """Vote a miner's EFFECTIVE bond on one backing chain; written on quorum. `effective_balance`
+        must already be net of accrued fees and voted-but-unapplied slashes — the guards above it do no
+        further discounting. The full payload is hash-bound, so divergent readings conflict rather than
+        co-count. The W3 relayer will drive this; until then it is called by tests and ops tooling."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.bond_attestation_pda(m, chain, self.program_id), False, True),
+            AccountMeta(pdas.attestation_round_pda(m, chain, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_SET_ATTESTATION_ARGS.build(
+            {'chain': chain, 'effective_balance': effective_balance, 'locked': locked, 'epoch': epoch}
+        )
+        return self._send([self._ix('vote_set_attestation', args, metas)])
+
+    def vote_attest_heartbeat(self) -> str:
+        """Bump the global attestation heartbeat; on quorum it advances to the chain's clock. While it
+        is stale, entry into any non-locally-backed swap is fused off."""
+        validator = self.keypair.pubkey()
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, True),
+            AccountMeta(
+                pdas.vote_round_pda(
+                    pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.program_id), self.program_id
+                ),
+                False,
+                True,
+            ),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        return self._send([self._ix('vote_attest_heartbeat', b'', metas)])
+
     def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
         """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.
         The round PDA is keyed by the snapshot hash, so competing proposals coexist instead of blocking."""
@@ -692,19 +794,25 @@ class AllwaysSolanaClient:
         return self._send([self._ix('extend_reservation', args, metas)])
 
     # ---------- swap intake (Phase 9: reservation-lottery pool) ----------
-    def open_or_request(self, miner, from_chain: str, to_chain: str) -> str:
-        """BID into (or open) a miner's reservation pool for a pair. Signer/payer = this client's keypair
-        (the router); pays the flat reservation fee. A bid carries NO taker and NO amounts — the seat
-        winner names those in `finalize_reservation`."""
+    def open_or_request(self, miner, from_chain: str, to_chain: str, backing: str = 'sol') -> str:
+        """BID into (or open) a miner's reservation pool for ONE of its quotes. Signer/payer = this
+        client's keypair (the router); pays the flat reservation fee. A bid carries NO taker and NO
+        amounts — the seat winner names those in `finalize_reservation`.
+
+        `backing` selects which of the miner's quotes on this direction is being bid on, and hence
+        which purse the entry gate reads. A late bid must match the backing the pool already pinned."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
-        args = layouts.IX_OPEN_OR_REQUEST_ARGS.build({'from_chain': from_chain, 'to_chain': to_chain})
+        args = layouts.IX_OPEN_OR_REQUEST_ARGS.build(
+            {'from_chain': from_chain, 'to_chain': to_chain, 'collateral_chain': backing}
+        )
         metas = [
             AccountMeta(router, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
-            AccountMeta(pdas.quote_pda(m, from_chain, to_chain, self.program_id), False, False),
+            AccountMeta(pdas.quote_pda(m, from_chain, to_chain, backing, self.program_id), False, False),
+            AccountMeta(self._attestation_meta(m, backing), False, False),
             AccountMeta(pdas.pool_pda(m, self.program_id), False, True),
             AccountMeta(pdas.treasury_pda(self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),

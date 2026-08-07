@@ -56,13 +56,17 @@ def test_open_or_request_ix(client):
     client.open_or_request(miner, 'sol', 'btc')
     ix = _ix(client)
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['open_or_request']
-    assert ix.data[8:] == layouts.IX_OPEN_OR_REQUEST_ARGS.build({'from_chain': 'sol', 'to_chain': 'btc'})
+    assert ix.data[8:] == layouts.IX_OPEN_OR_REQUEST_ARGS.build(
+        {'from_chain': 'sol', 'to_chain': 'btc', 'collateral_chain': 'sol'}
+    )
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.quote_pda(miner, 'sol', 'btc', PID), False, False),
+        (pdas.quote_pda(miner, 'sol', 'btc', 'sol', PID), False, False),
+        # "sol" reads the local vault, so the optional attestation slot carries the program id.
+        (PID, False, False),
         (pdas.pool_pda(miner, PID), False, True),
         (pdas.treasury_pda(PID), False, True),
         (pdas.reservation_pda(miner, PID), False, True),

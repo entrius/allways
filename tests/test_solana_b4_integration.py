@@ -117,16 +117,18 @@ def test_b4_miner_and_admin_builders_on_localnet(env):
     _airdrop(miner.pubkey(), 10)
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
     mclient.post_collateral(5_000_000)
-    mclient.set_quote('btc', 'tao', 'minerBTC', 'minerTAO', 400 * RATE_PRECISION, 1_000)
     hk = _hotkey()
     mclient.bind_hotkey(bytes.fromhex(hk.public_key.hex()), hk.sign(bytes(miner.pubkey())))
     validators[0].vote_activate(miner.pubkey())
     validators[1].vote_activate(miner.pubkey())  # quorum → active
+    # Quoting follows activation (W2b): a quote names the purse that answers for it. btc<->sol is the
+    # SOL-backed pair here — btc<->tao would need an activated TAO purse, which is W3's relay.
+    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', 400 * RATE_PRECISION, 1_000)
 
     ms = mclient.get_miner_state(miner.pubkey())
     assert ms is not None and ms.active is True and ms.collateral == 5_000_000
     assert mclient.get_binding(miner.pubkey()) is not None
-    assert mclient.get_quote(miner.pubkey(), 'btc', 'tao') is not None
+    assert mclient.get_quote(miner.pubkey(), 'btc', 'sol') is not None
 
     # ── SwapPoller against live getProgramAccounts: no Active swaps without Phase-9 → ([], []) ──
     poller = SwapPoller(mclient, miner.pubkey())
@@ -139,8 +141,8 @@ def test_b4_miner_and_admin_builders_on_localnet(env):
         mclient.mark_fulfilled(swap_key=bytes([7] * 32), to_tx_hash='deadbeef', to_tx_block=1)
 
     # ── quote retract closes the MinerQuote PDA ──
-    mclient.remove_quote('btc', 'tao')
-    assert mclient.get_quote(miner.pubkey(), 'btc', 'tao') is None
+    mclient.remove_quote('btc', 'sol')
+    assert mclient.get_quote(miner.pubkey(), 'btc', 'sol') is None
 
     # ── miner self-deactivate flips MinerState.active ──
     mclient.deactivate()

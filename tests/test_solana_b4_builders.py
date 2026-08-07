@@ -70,29 +70,41 @@ def test_b4_discriminators_match_anchor_global_formula():
 
 
 def test_remove_quote(client):
-    client.remove_quote('btc', 'tao')
+    # btc<->tao has exactly one hub leg, so "tao" is the only backing this direction can carry.
+    client.remove_quote('btc', 'tao', backing='tao')
     ix = _ix(client)
     miner = client.keypair.pubkey()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['remove_quote']
-    assert _body(ix) == layouts.IX_REMOVE_QUOTE_ARGS.build({'from_chain': 'btc', 'to_chain': 'tao'})
+    assert _body(ix) == layouts.IX_REMOVE_QUOTE_ARGS.build(
+        {'from_chain': 'btc', 'to_chain': 'tao', 'collateral_chain': 'tao'}
+    )
     assert _metas(ix) == [
         (miner, True, True),
-        (pdas.quote_pda(miner, 'btc', 'tao', PID), False, True),
+        (pdas.quote_pda(miner, 'btc', 'tao', 'tao', PID), False, True),
         (pdas.treasury_pda(PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
 
 
 def test_deactivate(client):
+    # Full exit: borsh tags the absent Option as a single 0x00 byte.
     client.deactivate()
     ix = _ix(client)
     miner = client.keypair.pubkey()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['deactivate']
-    assert _body(ix) == b''  # no args
+    assert _body(ix) == b'\x00'
     assert _metas(ix) == [
         (miner, True, False),
         (pdas.miner_state_pda(miner, PID), False, True),
     ]
+
+
+def test_deactivate_one_backing(client):
+    # Partial exit — the same accounts, the purse named in the args.
+    client.deactivate(backing='tao')
+    ix = _ix(client)
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['deactivate']
+    assert _body(ix) == layouts.IX_OPT_BACKING_ARGS.build('tao')
 
 
 def test_withdraw_treasury(client):

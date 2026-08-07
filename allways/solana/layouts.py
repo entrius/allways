@@ -9,8 +9,12 @@ Fixed byte arrays ([u8;32]/[u8;64], incl. pubkeys) decode to Python `bytes` via 
 client converts pubkey fields to solders Pubkey when mapping to dataclasses.
 """
 
-from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, String, Vec
+from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, Option, String, Vec
 from construct import Bytes as _Raw
+
+# `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
+# bump is one edit on each side rather than a literal buried in a test.
+CONFIG_VERSION = 13
 
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
@@ -99,6 +103,8 @@ MinerQuote = CStruct(
     'miner' / Pubkey32,
     'from_chain' / String,
     'to_chain' / String,
+    # W2b — the declared backing; also the 5th PDA seed, so two quotes can stand on one direction.
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -160,6 +166,8 @@ Pool = CStruct(
     'miner' / Pubkey32,
     'from_chain' / String,
     'to_chain' / String,
+    # Pinned from the quote at open; resolve_pool copies it into the Reservation.
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -288,16 +296,24 @@ EVENT_LAYOUTS = {
         'opener' / Pubkey32,
         'from_chain' / String,
         'to_chain' / String,
+        'collateral_chain' / String,
         'closes_at' / I64,
         'seed_slot' / U64,
     ),
     'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64),
     'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8),
-    'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
+    'QuoteRemoved': CStruct(
+        'miner' / Pubkey32,
+        'from_chain' / String,
+        'to_chain' / String,
+        'collateral_chain' / String,
+        'remove_fee' / U64,
+    ),
     'QuoteSet': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
         'to_chain' / String,
+        'collateral_chain' / String,
         'rate' / U128,
         'liquidity' / U128,
         'updated_at' / I64,
@@ -441,6 +457,20 @@ IX_DISCRIMINATORS = {
     'set_finalize_window': bytes([84, 242, 160, 48, 107, 111, 170, 241]),  # IX_I64_ARGS
     # Stake-weight consensus vote — full vector index-aligned to Config.validators.
     'vote_set_weights': bytes([4, 215, 218, 143, 103, 219, 125, 6]),
+    # W2 — bond attestation + the dead-man heartbeat.
+    'vote_set_attestation': bytes([14, 69, 181, 205, 39, 28, 39, 227]),
+    'vote_attest_heartbeat': bytes([185, 84, 69, 54, 219, 168, 179, 220]),  # no args (empty body)
+    # W1/W2 admin setters (IX_AMOUNT_ARGS u64 / IX_I64_ARGS i64), unreachable from the CLI until W2b.
+    'set_tao_min_swap_amount': bytes([130, 16, 219, 134, 175, 148, 90, 215]),
+    'set_tao_max_swap_amount': bytes([95, 86, 247, 165, 68, 131, 85, 197]),
+    'set_tao_min_collateral': bytes([154, 196, 157, 5, 232, 196, 250, 217]),
+    'set_settlement_grace': bytes([151, 0, 169, 67, 242, 17, 56, 40]),
+    'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),
+    # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
+    'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
+    # v3 upgrade cranks (no args each; run migrate_config first).
+    'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
+    'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -454,6 +484,7 @@ IX_INITIALIZE_ARGS = CStruct(
 IX_SET_QUOTE_ARGS = CStruct(
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -471,12 +502,13 @@ IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64)
 IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
-IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String)
+IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String, 'collateral_chain' / String)
 # Phase 9 — two-phase reservation. A bid is just the pair (resolve_pool / close_unfilled_reservation
 # take no args). The seat winner names the fill in finalize_reservation. Order = handler param order.
 IX_OPEN_OR_REQUEST_ARGS = CStruct(
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
 )
 IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'user' / Pubkey32,
@@ -489,6 +521,8 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
 # W2 — vote_activate / vote_deactivate now name the purse they act on.
 IX_BACKING_ARGS = CStruct('backing' / String)
+# W2b — `deactivate` takes an Option<String>: borsh tags None as 0x00 and Some(s) as 0x01 + string.
+IX_OPT_BACKING_ARGS = Option(String)
 IX_SET_ATTESTATION_ARGS = CStruct(
     'chain' / String,
     'effective_balance' / U64,
