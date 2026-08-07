@@ -15,11 +15,6 @@ class Chain(ABC):
     the address format, the ownership-proof signature scheme, the transport.
     """
 
-    # True if this chain's RPCs hit the shared substrate websocket, so
-    # callers must serialise them under axon_lock. HTTP-backed chains leave
-    # this False and stay lock-free.
-    uses_substrate: bool = False
-
     # A cached tip is reused for at most this long. The validator clears it each forward pass (one
     # getSlot/pass); this TTL is the safety net for callers that never clear (e.g. the miner), so the
     # tip can never freeze — it self-refreshes at least this often. Slightly longer than a subtensor
