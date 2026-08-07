@@ -57,7 +57,7 @@ class Asset(ABC):
         Three chain-ish names, three meanings — keep them straight:
         ``chain_def`` (this property) = the asset's static registry FACTS;
         ``chain`` = the live network OBJECT the asset talks through (`Chain`);
-        ``chains.get_chain(id)`` = registry LOOKUP from a wire id."""
+        ``chains.get_chain_def(id)`` = registry LOOKUP from a wire id."""
 
     @property
     def chain(self) -> Chain:

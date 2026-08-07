@@ -15,7 +15,7 @@ from typing import List, NamedTuple, Optional
 
 import click
 
-from allways.chains import SUPPORTED_CHAINS, get_chain
+from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
     discover_validators,
@@ -188,7 +188,7 @@ MINER_RATE_WARN_FRACTION = 0.5
 
 
 def _net_receive(to_amount: int, to_chain: str) -> float:
-    return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
 
 
 def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap):
@@ -210,7 +210,7 @@ def _pick_intake(viable, from_chain, to_chain):
     if not sys.stdin.isatty():
         fail('Bare --miner needs a terminal; pass --miner <pubkey> when scripting.')
     ranked = sorted(viable, key=lambda p: p[1].to_amount, reverse=True)
-    sol_decimals = get_chain(NUMERAIRE_CHAIN).decimals
+    sol_decimals = get_chain_def(NUMERAIRE_CHAIN).decimals
     console.print(f'\n  Miners quoting {from_chain.upper()}->{to_chain.upper()} (best first):')
     for i, (c, amts) in enumerate(ranked, 1):
         rate_disp = directional_rate(from_chain, to_chain, c.rate_display)
@@ -456,7 +456,7 @@ def swap_now_command(
         f'{to_chain.upper()}/{from_chain.upper()}{pinned_note})\n'
     )
     if contention.is_open and not resuming:
-        fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain(NUMERAIRE_CHAIN).decimals
+        fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain_def(NUMERAIRE_CHAIN).decimals
         if contention.weighted_rivals > 0:
             hopeless = '' if routed else ', so a self-represented taker is very unlikely to win this draw'
             console.print(
@@ -541,7 +541,7 @@ def swap_now_command(
             pool_window,
             drawn=existing if resume_drawn else None,
         )
-    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
@@ -660,7 +660,7 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
         )
         return False
 
-    amount_disp = int(resv.from_amount) / 10 ** get_chain(from_chain).decimals
+    amount_disp = int(resv.from_amount) / 10 ** get_chain_def(from_chain).decimals
     to_addr = resv.miner_from_addr
     wallet_label = {
         'sol': 'Solana keypair',

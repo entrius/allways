@@ -4,7 +4,7 @@ import math
 from decimal import Decimal
 from typing import TYPE_CHECKING, Tuple
 
-from allways.chains import canonical_pair, get_chain
+from allways.chains import canonical_pair, get_chain_def
 from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, RATE_SIG_FIGS
 
 if TYPE_CHECKING:
@@ -140,8 +140,8 @@ def expected_swap_amounts(swap: 'SolanaSwap', fee_divisor: int) -> Tuple[int, in
         swap.from_amount,
         swap.rate,
         is_reverse,
-        get_chain(canon_to).decimals,
-        get_chain(canon_from).decimals,
+        get_chain_def(canon_to).decimals,
+        get_chain_def(canon_from).decimals,
     )
     if to_amount == 0:
         return 0, 0
@@ -193,8 +193,8 @@ def is_executable_rate(
     def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
         # For a "src → sol" direction at ``forward_rate`` (sol per src), is there an src amount that is
         # fundable on-chain (>= the chain's min_onchain_amount) whose SOL leg lands in bounds?
-        src = get_chain(src_chain)
-        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
+        src = get_chain_def(src_chain)
+        decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = forward_rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             # rate × decimal_factor overflowed → smallest positive integer source already maps above max.
@@ -240,10 +240,10 @@ def min_executable_sol_leg(
     if not is_executable_rate(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports):
         return 0
     if from_chain == NUMERAIRE_CHAIN:
-        return max(get_chain(NUMERAIRE_CHAIN).min_onchain_amount, max(0, min_swap_lamports))
+        return max(get_chain_def(NUMERAIRE_CHAIN).min_onchain_amount, max(0, min_swap_lamports))
     if to_chain == NUMERAIRE_CHAIN:
-        src = get_chain(from_chain)
-        decimal_factor = 10 ** (get_chain(NUMERAIRE_CHAIN).decimals - src.decimals)
+        src = get_chain_def(from_chain)
+        decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
         denom = rate * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0

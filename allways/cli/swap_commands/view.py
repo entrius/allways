@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 from solders.pubkey import Pubkey
 
-from allways.chains import SUPPORTED_CHAINS, get_chain
+from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
@@ -355,8 +355,8 @@ def view_active_swaps(status_filter, as_json):
 
 
 def _render_swap_detail(s):
-    to_dec = get_chain(s.to_chain).decimals
-    from_dec = get_chain(s.from_chain).decimals
+    to_dec = get_chain_def(s.to_chain).decimals
+    from_dec = get_chain_def(s.from_chain).decimals
     console.print(f'\n[bold]Swap {s.key_hex[:16]}[/bold]\n')
     console.print(f'  Status:      [bold]{s.status}[/bold]')
     console.print(f'  Pair:        {s.from_chain.upper()} → {s.to_chain.upper()}')
@@ -567,8 +567,8 @@ def view_reservation(miner_pk, as_json):
     now = int(time.time())
     remaining = max(0, int(resv.reserved_until) - now)
     claimed = bytes(resv.claimed_swap_key) != ZERO_SWAP_KEY
-    to_dec = get_chain(resv.to_chain).decimals
-    from_dec = get_chain(resv.from_chain).decimals
+    to_dec = get_chain_def(resv.to_chain).decimals
+    from_dec = get_chain_def(resv.from_chain).decimals
 
     if as_json:
         print_json(

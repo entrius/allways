@@ -96,8 +96,10 @@ SUPPORTED_CHAINS = {
 }
 
 
-def get_chain(chain_id: str) -> ChainDefinition:
-    """Lookup chain by ID. Raises KeyError if unsupported."""
+def get_chain_def(chain_id: str) -> ChainDefinition:
+    """Registry lookup: wire id → its ChainDefinition. Raises KeyError if unsupported.
+
+    Same facts as ``Asset.chain_def``, reached from an id instead of an asset."""
     return SUPPORTED_CHAINS[chain_id]
 
 
@@ -129,7 +131,7 @@ def compute_extension_target_secs(chain_id: str, confirmations: int, now_unix: i
     Covers the leg's remaining confirmations plus a padding buffer, bucket-rounded (in seconds) so
     validators converge, then clamped to the contract ceiling (``max_extend_at``).
     """
-    chain = get_chain(chain_id)
+    chain = get_chain_def(chain_id)
     remaining = max(0, chain.min_confirmations - confirmations)
     target = now_unix + remaining * chain.seconds_per_block + EXTENSION_PADDING_SECONDS
     target = math.ceil(target / EXTENSION_BUCKET_SECONDS) * EXTENSION_BUCKET_SECONDS
