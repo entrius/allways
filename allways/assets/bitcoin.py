@@ -204,7 +204,7 @@ class Bitcoin(Asset, Chain):
         15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
         tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
         confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
-        tip_height = self.cached_block_height()
+        tip_height = self.chain.cached_block_height()
         if tip_height is None:
             return 0
         return max(0, tip_height - block_number + 1)

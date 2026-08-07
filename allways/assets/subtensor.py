@@ -548,7 +548,7 @@ class Tao(Asset, Chain):
         else None. The TAO sibling of the BTC/SOL deposit scanners: a hash-finder only — the
         seam's confirm re-verifies everything by hash, so a miss here just means the manual
         rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
-        head = self.get_current_block_height()
+        head = self.chain.get_current_block_height()
         if head is None:
             return None
         key = (from_addr, to_addr, int(amount))

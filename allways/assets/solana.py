@@ -182,7 +182,7 @@ class Sol(Asset, Chain):
         of one each — the getSlot count drops from per-leg to per-pass."""
         if slot is None:
             return 0
-        tip = self.cached_block_height()
+        tip = self.chain.cached_block_height()
         if tip is None:
             return 0
         return max(0, tip - int(slot) + 1)
