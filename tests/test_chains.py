@@ -1,12 +1,16 @@
 """Tests for allways.chains — chain registry, canonical pairing, and the seconds-based extension target."""
 
+import re
+
 import pytest
 
 from allways.chains import (
+    CHAIN_ARBUSDC,
     CHAIN_BTC,
     CHAIN_ETH,
     CHAIN_TAO,
     EXTENSION_BUCKET_SECONDS,
+    SUPPORTED_CHAINS,
     canonical_pair,
     compute_extension_target_secs,
     get_chain_def,
@@ -23,9 +27,27 @@ class TestGetChain:
     def test_eth(self):
         assert get_chain_def('eth') is CHAIN_ETH
 
+    def test_arbusdc(self):
+        assert get_chain_def('arbusdc') is CHAIN_ARBUSDC
+
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
             get_chain_def('doge')
+
+    def test_ids_are_lowercase_and_fit_the_wire(self):
+        """Every registry id must be lowercase (the program rejects cased ids at intake, PDAs
+        and the grace table key off exact strings) AND <=10 chars (every chain column across
+        the DB is VARCHAR(10) — an 11-16 char id passes on-chain then errors on insert)."""
+        for chain_id, chain in SUPPORTED_CHAINS.items():
+            assert re.fullmatch(r'[a-z0-9]{1,10}', chain_id), chain_id
+            assert chain.id == chain_id
+
+    def test_layered_fields_default_none_for_native_assets(self):
+        for chain_id in ('btc', 'tao', 'sol', 'eth'):
+            assert get_chain_def(chain_id).host_chain is None
+            assert get_chain_def(chain_id).asset_locator is None
+        assert CHAIN_ARBUSDC.host_chain == 'arbitrum'
+        assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
 
 
 class TestCanonicalPair:
@@ -98,6 +120,10 @@ class TestComputeExtensionTargetSecs:
     def test_eth_remaining_confs(self):
         # ETH needs 32 confs, 12s each: remaining=32, raw = 10000 + 384 + 120 = 10504, bucket up to 10800.
         assert compute_extension_target_secs('eth', 0, self.NOW, self.CEILING) == 10_800
+
+    def test_arbusdc_remaining_confs(self):
+        # arbusdc needs 90 confs, 1s each: remaining=90, raw = 10000 + 90 + 120 = 10210, bucket up to 10800.
+        assert compute_extension_target_secs('arbusdc', 0, self.NOW, self.CEILING) == 10_800
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):

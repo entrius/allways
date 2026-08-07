@@ -131,6 +131,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
 
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._poll_drawn', return_value=drawn),
@@ -315,6 +316,7 @@ def _run_resume(existing, poll_resv):
     ]
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch(
@@ -438,3 +440,103 @@ def test_deadline_notice_never_shows_negative_runway():
     now = 1_700_000_000
     body = ' '.join(_deadline_lines(now - 50, want_send=False, now=now))
     assert '0s' in body and '-50' not in body
+
+
+# ─── Pre-reserve deliverability screens (F7/T18 — the CLI mirror of the validator gate) ───
+
+
+class _Gate:
+    def __init__(self, reject=(), malformed=()):
+        self.reject = set(reject)
+        self.checked = []
+        self.chain = types.SimpleNamespace(is_valid_address=lambda addr: addr not in set(malformed))
+
+    def can_deliver_to(self, addr, amount):
+        self.checked.append(addr)
+        return addr not in self.reject
+
+
+def _screen(gate, from_chain, to_chain, client=None):
+    from allways.cli.swap_commands.swap import _screen_deliverability
+
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='150')
+    with patch('allways.cli.swap_commands.swap._gate_provider', return_value=gate):
+        _screen_deliverability(client or MagicMock(), {}, cand, from_chain, to_chain, 'recvaddr', 'useraddr', 10**6)
+    return gate
+
+
+def test_screen_blocks_undeliverable_receive_address():
+    # F7: self-represented takers have no validator to bounce a blacklisted dest for them.
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _screen(_Gate(reject={'recvaddr'}), 'sol', 'arbusdc')
+
+
+def test_screen_blocks_rejecting_miner_receive_address():
+    # T18 mirror: don't bid (and burn the entry fee) toward a miner whose receive address rejects.
+    import pytest
+
+    client = MagicMock()
+    client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
+    with pytest.raises(SystemExit):
+        _screen(_Gate(reject={'mineraddr'}), 'arbusdc', 'sol', client)
+
+
+def test_screen_only_warns_on_frozen_source_address():
+    # F13c courtesy: a frozen SOURCE is benign (deposit fails, reservation lapses) — warn, never block.
+    client = MagicMock()
+    client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
+    gate = _screen(_Gate(reject={'useraddr'}), 'arbusdc', 'sol', client)
+    assert 'useraddr' in gate.checked
+
+
+def test_screen_fails_open_without_a_provider():
+    _screen(None, 'sol', 'arbusdc')  # no provider buildable → no screen, no crash
+
+
+def test_screen_blocks_malformed_receive_address():
+    # F4: format is screened before any RPC-backed gate — offline and always authoritative.
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _screen(_Gate(malformed={'recvaddr'}), 'sol', 'arbusdc')
+
+
+def test_screen_blocks_malformed_miner_receive_address():
+    import pytest
+
+    client = MagicMock()
+    client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
+    with pytest.raises(SystemExit):
+        _screen(_Gate(malformed={'mineraddr'}), 'arbusdc', 'sol', client)
+
+
+def test_screen_rejection_aborts_swap_now_before_any_bid():
+    # Placement guard: the screen fires inside `swap now` BEFORE the resume/bid machinery —
+    # a doomed dest aborts the flow with no bid placed and no reservation touched.
+    from click.testing import CliRunner
+
+    from allways.cli.swap_commands.swap import swap_now_command
+
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    client = MagicMock()
+    client.keypair.pubkey.return_value = user
+    client.get_config.return_value = types.SimpleNamespace(
+        min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
+    )
+    amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
+    with (
+        patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=_Gate(reject={'userBTCaddr'})),
+        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
+        patch('allways.cli.swap_commands.swap._save_pending'),
+    ):
+        result = CliRunner().invoke(swap_now_command, argv)
+    assert result.exit_code != 0
+    assert 'cannot accept' in result.output
+    client.open_or_request.assert_not_called()
+    client.get_reservation.assert_not_called()

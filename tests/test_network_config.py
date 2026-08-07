@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 from allways.cli.swap_commands.helpers import (
+    ARBUSDC_NETWORKS,
     BTC_NETWORKS,
     ENV_BUNDLES,
     ETH_NETWORKS,
     SOLANA_NETWORKS,
+    apply_arbusdc_network_env,
     apply_btc_network_env,
     apply_eth_network_env,
     load_cli_keypair,
@@ -83,10 +85,19 @@ def test_api_key_composes_onto_network_name(monkeypatch):
 def test_env_bundles_cover_all_chains():
     for name in ('testnet', 'mainnet'):
         b = ENV_BUNDLES[name]
-        assert set(b) == {'network', 'solana-network', 'btc-network', 'eth-network', 'netuid', 'router'}
+        assert set(b) == {
+            'network',
+            'solana-network',
+            'btc-network',
+            'eth-network',
+            'arbusdc-network',
+            'netuid',
+            'router',
+        }
         assert b['solana-network'] in SOLANA_NETWORKS
         assert b['btc-network'] in BTC_NETWORKS
         assert b['eth-network'] in ETH_NETWORKS
+        assert b['arbusdc-network'] in ARBUSDC_NETWORKS
 
 
 def test_btc_shim_sets_env_when_unset(monkeypatch):
@@ -119,6 +130,22 @@ def test_eth_shim_respects_real_env(monkeypatch):
     import os
 
     assert os.environ['ETH_NETWORK'] == 'mainnet'  # explicit env wins
+
+
+def test_arbusdc_shim_sets_env_when_unset(monkeypatch):
+    monkeypatch.delenv('ARBUSDC_NETWORK', raising=False)
+    apply_arbusdc_network_env({'arbusdc-network': 'sepolia'})
+    import os
+
+    assert os.environ.get('ARBUSDC_NETWORK') == 'sepolia'
+
+
+def test_arbusdc_shim_respects_real_env(monkeypatch):
+    monkeypatch.setenv('ARBUSDC_NETWORK', 'mainnet')
+    apply_arbusdc_network_env({'arbusdc-network': 'sepolia'})
+    import os
+
+    assert os.environ['ARBUSDC_NETWORK'] == 'mainnet'  # explicit env wins
 
 
 def test_keypair_env_wins_over_config(monkeypatch):

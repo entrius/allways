@@ -38,7 +38,9 @@ SOLANA_NETWORKS = {
 BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
 # Names the ETH provider (ETH_NETWORK env) accepts; endpoints default to public JSON-RPC per network.
 ETH_NETWORKS = ('mainnet', 'sepolia')
-# One-liner env bundle: `alw config set env testnet|mainnet` sets all three chains' networks + netuid
+# Names the arbusdc provider (ARBUSDC_NETWORK env) accepts; sepolia = Arbitrum Sepolia.
+ARBUSDC_NETWORKS = ('mainnet', 'sepolia')
+# One-liner env bundle: `alw config set env testnet|mainnet` sets every chain's network + netuid
 # + the default router. Testnet routes through the Ventura Labs validator; mainnet self-represents
 # (no routing validator live yet). `alw config set router <ss58>` opts into routing on mainnet.
 ENV_BUNDLES = {
@@ -47,6 +49,7 @@ ENV_BUNDLES = {
         'solana-network': 'devnet',
         'btc-network': 'testnet4',
         'eth-network': 'sepolia',
+        'arbusdc-network': 'sepolia',
         'netuid': '19',
         'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
     },
@@ -55,6 +58,7 @@ ENV_BUNDLES = {
         'solana-network': 'mainnet',
         'btc-network': 'mainnet',
         'eth-network': 'mainnet',
+        'arbusdc-network': 'mainnet',
         'netuid': '7',
         # No routing validator on mainnet yet — bid self-represented until one ships a routing
         # product. Explicit '' (not omitted) so re-running `env mainnet` CLEARS a stale router.
@@ -116,6 +120,13 @@ def apply_eth_network_env(config: dict) -> None:
     A real ETH_NETWORK env wins (explicit override); otherwise the configured name is applied."""
     if not os.environ.get('ETH_NETWORK') and config.get('eth-network'):
         os.environ['ETH_NETWORK'] = config['eth-network']
+
+
+def apply_arbusdc_network_env(config: dict) -> None:
+    """Feed arbusdc-network config into the arbusdc provider, which reads ARBUSDC_NETWORK from the
+    env. A real ARBUSDC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
+    if not os.environ.get('ARBUSDC_NETWORK') and config.get('arbusdc-network'):
+        os.environ['ARBUSDC_NETWORK'] = config['arbusdc-network']
 
 
 # Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().

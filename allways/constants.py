@@ -68,7 +68,7 @@ REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILAB
 # uniformly as 'dest per 1 hub'. SOL by construction (the contract lives on Solana: collateral, fee, and the
 # collateral_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
 NUMERAIRE_CHAIN = 'sol'
-LAUNCH_SPOKES = ('btc', 'tao', 'eth')  # chains paired against the hub; add a chain here to launch its pair
+LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc')  # chains paired against the hub; add a chain here to launch its pair
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.90

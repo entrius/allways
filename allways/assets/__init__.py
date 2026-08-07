@@ -5,6 +5,7 @@ import bittensor as bt
 from allways.assets.base import Asset, SendResult, TransactionInfo
 from allways.assets.bitcoin import Bitcoin
 from allways.assets.chain import Chain
+from allways.assets.erc20 import ArbUsdc, Erc20
 from allways.assets.ethereum import Ether
 from allways.assets.solana import Sol
 from allways.assets.subtensor import Tao
@@ -19,6 +20,8 @@ __all__ = [
     'Tao',
     'Sol',
     'Ether',
+    'Erc20',
+    'ArbUsdc',
     'create_assets',
 ]
 
@@ -37,6 +40,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('tao', Tao, ('subtensor', 'wallet')),
     AssetSpec('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
     AssetSpec('eth', Ether, ()),
+    AssetSpec('arbusdc', ArbUsdc, ()),
 )
 
 

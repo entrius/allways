@@ -26,6 +26,12 @@ class ChainDefinition:
     # Default 0 (at-or-after the floor; only a tx that predates it is a replay). Absorbs honest miner
     # clock skew; MUST stay well under reservation_ttl_secs — the replay window is exactly this wide (B2).
     replay_grace_secs: int = 0
+    # Layered-asset fields: the wire id stays flat, the layering lives here. None for
+    # assets that are their own network (btc/tao/sol/eth).
+    host_chain: str | None = None  # network whose txs carry this asset (assets/evm.py EVM_NETWORKS key)
+    # Canonical MAINNET contract of a hosted asset. Testnet deployments + env overrides
+    # resolve in the provider (assets/erc20.py) — each address lives exactly once.
+    asset_locator: str | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -88,11 +94,36 @@ CHAIN_ETH = ChainDefinition(
     replay_grace_secs=0,
 )
 
+CHAIN_ARBUSDC = ChainDefinition(
+    id='arbusdc',
+    name='USDC (Arbitrum)',
+    native_unit='µUSDC',
+    decimals=6,
+    env_prefix='ARBUSDC',
+    # ~4 blocks/s real; 1s is the integer floor. 90 confs ≈ 25s real (~90s in extension
+    # math) — both far inside the 600s default program grace, so no grace-table arm.
+    seconds_per_block=1,
+    min_confirmations=90,
+    # F1 pin — DO NOT raise until the is_executable_rate orientation fix lands: the gate
+    # consumes the canonical arbusdc-per-SOL rate as if it were SOL-per-arbusdc on the
+    # arbusdc->sol side, so a real dust floor can demand a source above max_swap and
+    # silently burn the direction's pool. ERC-20 transfers have no protocol minimum, so
+    # 1 is also honest.
+    min_onchain_amount=1,
+    # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (Arbitrum
+    # timestamps are non-decreasing, but monotonicity says nothing about hub-spoke skew).
+    replay_grace_secs=60,
+    host_chain='arbitrum',
+    # Circle-verified native USDC on Arbitrum One (developers.circle.com, 2026-08-07).
+    asset_locator='0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
     'sol': CHAIN_SOL,
     'eth': CHAIN_ETH,
+    'arbusdc': CHAIN_ARBUSDC,
 }
 
 
