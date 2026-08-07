@@ -66,6 +66,7 @@ pub fn handler(
         ErrorCode::StringTooLong
     );
     require!(from_chain != to_chain, ErrorCode::SameChain);
+    crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
 
     // Floor to RATE_SIG_FIGS significant figures before it is stored OR emitted, so the pinned swap
     // rate, the off-chain crown ranking, and the indexer/UI all read the same canonical value. A

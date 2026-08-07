@@ -80,8 +80,8 @@ CHAIN_ETH = ChainDefinition(
     # ~1 beacon epoch. True finality is 2 epochs (~64 blocks); post-merge reorgs deeper than
     # 2 blocks are vanishingly rare, so 32 buys near-finality without doubling the leg time.
     min_confirmations=32,
-    # No protocol dust floor on ETH; economic floor ≈ a few × the 21k-gas transfer fee, so a
-    # leg can never be worth less than the gas it burns (5e13 wei = 0.00005 ETH).
+    # Rate sanity floor, not an economic guarantee: 0.00005 ETH covers a 21k-gas transfer
+    # fee only below ~2.4 gwei — miners price real gas into their quotes.
     min_onchain_amount=50_000_000_000_000,
     # Timestamps must strictly exceed the parent's, so a mined deposit can never stamp
     # earlier than a reservation created before it — no BTC-style median-time lag.

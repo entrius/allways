@@ -32,8 +32,8 @@ const COLLATERAL: u64 = 10_000_000_000;
 const SOL_AMOUNT: u64 = 2_000_000_000;
 
 const FROM_ADDR: &str = "userBTCaddr";
-const FROM_CHAIN: &str = "BTC";
-const TO_CHAIN: &str = "SOL";
+const FROM_CHAIN: &str = "btc";
+const TO_CHAIN: &str = "sol";
 const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)

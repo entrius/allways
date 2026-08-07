@@ -95,6 +95,17 @@ def test_open_happy_path_persists_routed_request():
     store.close()
 
 
+def test_undeliverable_destination_rejects_before_any_bid():
+    # B-lite reserve gate: a dest that provably refuses transfers bounces before funds move.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_assets = {'btc': SimpleNamespace(can_deliver_to=lambda addr, amt: False)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'rejects incoming transfers' in result.reason
+    assert client.calls == []  # bounced before the on-chain bid
+
+
 def test_inactive_miner_rejects():
     r, store = _reserve(FakeClient(active=False))
     assert not r.ok and 'not active' in r.reason
@@ -370,7 +381,7 @@ def test_malformed_swap_key_raises_value_error(tmp_path):
 # confirms (the crank defers voting until confirmations accrue); fast-fails without a claim on absent/mismatch
 # (None) or a stale MINED deposit, so the short reservation TTL frees the miner.
 import allways.validator.reserve_engine as rc  # noqa: E402
-from allways.chain_providers.base import ProviderUnreachableError, TransactionInfo  # noqa: E402
+from allways.assets.base import ProviderUnreachableError, TransactionInfo  # noqa: E402
 from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
 
 CONFIRM_CREATED_AT = 1000
@@ -444,9 +455,7 @@ def _tx(*, confirmed, block_time, confirmations=0):
 def _confirm(reservation, tx_info, *, unreachable=False):
     client = _ConfirmClient(reservation)
     provider = _FakeProvider(tx_info, unreachable=unreachable)
-    validator = SimpleNamespace(
-        solana_client=client, axon_chain_providers={'btc': provider}, axon_lock=threading.RLock()
-    )
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
     return confirm_deposit(validator, HOTKEY, 'srctxhash'), client
 
 
@@ -533,7 +542,7 @@ def test_confirm_measures_runway_after_the_source_rpc(monkeypatch):
 
     validator = SimpleNamespace(
         solana_client=client,
-        axon_chain_providers={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
+        axon_assets={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
         axon_lock=threading.RLock(),
     )
     monkeypatch.setattr(rc.time, 'time', lambda: clock['t'])
@@ -565,9 +574,7 @@ def test_confirm_claims_even_if_the_extension_fails():
     client = _ConfirmClient(_near_expiry(20))
     client.extend_raises = True
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(
-        solana_client=client, axon_chain_providers={'btc': provider}, axon_lock=threading.RLock()
-    )
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
 
@@ -604,7 +611,7 @@ def _scan_validator(tmp_path, reservation, provider):
 
     client = StatusClient(reservation=reservation)
     validator, store = _status_validator(tmp_path, client)
-    validator.axon_chain_providers = {'btc': provider} if provider else {}
+    validator.axon_assets = {'btc': provider} if provider else {}
     return scan_deposit, validator, store
 
 
@@ -620,7 +627,7 @@ def test_scan_deposit_finds_hash_for_live_unclaimed_reservation(tmp_path):
 def test_scan_deposit_none_when_provider_cannot_scan(tmp_path):
     # A provider without find_recent_outgoing (hypothetical new chain) degrades to manual/wallet paths.
     scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), object())
-    validator.axon_chain_providers = {'btc': object()}
+    validator.axon_assets = {'btc': object()}
     assert scan_deposit(validator, HOTKEY) is None
     store.close()
 

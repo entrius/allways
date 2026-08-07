@@ -17,7 +17,7 @@ from typing import Dict, Optional, Set, Tuple
 import bittensor as bt
 
 from allways import dev_signal
-from allways.chain_providers.base import ChainProvider, ProviderUnreachableError
+from allways.assets.base import Asset, ProviderUnreachableError
 from allways.constants import FEE_DIVISOR, MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
 from allways.solana.client import SolanaClientError, SolanaSwap
 from allways.utils.logging import log_on_change
@@ -54,13 +54,13 @@ class SwapFulfiller:
     def __init__(
         self,
         solana_client,
-        chain_providers: Dict[str, ChainProvider],
+        assets: Dict[str, Asset],
         sent_cache_path: Optional[Path] = None,
         my_addresses: Optional[Dict[str, str]] = None,
         fee_divisor: int = FEE_DIVISOR,
     ):
         self.client = solana_client
-        self.providers = chain_providers
+        self.providers = assets
         self.fee_divisor = fee_divisor
         # Chain → miner's own deposit/fulfillment address, populated at startup from this miner's own
         # quotes and refreshed by the miner loop when a new quote is posted. Shared dict so the miner

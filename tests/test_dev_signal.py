@@ -67,7 +67,7 @@ class TestWithholdDestFault:
         monkeypatch.setenv('ALLWAYS_DEV_FAULTS', str(flags))
         monkeypatch.setenv('ALLWAYS_DEV_SIGNAL', str(out))
         provider = MagicMock()
-        f = SwapFulfiller(solana_client=MagicMock(), chain_providers={'tao': provider})
+        f = SwapFulfiller(solana_client=MagicMock(), assets={'tao': provider})
         assert f.send_dest_funds(make_swap(), 341_550_000) is None
         provider.send_amount.assert_not_called()
         refuse = json.loads(out.read_text())
@@ -77,5 +77,5 @@ class TestWithholdDestFault:
         monkeypatch.delenv('ALLWAYS_DEV_FAULTS', raising=False)
         provider = MagicMock()
         provider.send_amount.return_value = ('txhash', 7)
-        f = SwapFulfiller(solana_client=MagicMock(), chain_providers={'tao': provider})
+        f = SwapFulfiller(solana_client=MagicMock(), assets={'tao': provider})
         assert f.send_dest_funds(make_swap(), 341_550_000) == ('txhash', 7)

@@ -7,7 +7,7 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 
 from types import SimpleNamespace
 
-from allways.chain_providers.base import ProviderUnreachableError
+from allways.assets.base import ProviderUnreachableError
 from allways.solana.client import benign_marker, swap_key_from_tx_hash
 from allways.validator.solana_swap_loop import (
     _BENIGN_RESOLVE_MARKERS,
@@ -66,7 +66,13 @@ class RecordingProvider:
         self.block_time = block_time
         self.grace = grace
         self.confirmations = confirmations
+        self.refuses = False
         self.calls = []
+
+    def delivery_refused(self, address, since_unix):
+        if self.refuses == 'unreachable':
+            raise ProviderUnreachableError('down')
+        return self.refuses
 
     def get_chain(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
@@ -153,6 +159,25 @@ def test_fulfilled_overdue_absent_dest_times_out():
     loop, providers = loop_with(result=True)
     providers['sol'].result = None  # dest tx absent
     assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.TIMEOUT
+
+
+def test_fulfilled_overdue_refusing_dest_waits_no_slash():
+    # B-lite slash gate: positive evidence the dest can't receive (code seen in window) → never slash.
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = True
+    assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+
+
+def test_fulfilled_overdue_refusal_check_down_defers():
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = 'unreachable'
+    assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+
+
+def test_active_overdue_refusing_dest_waits_no_slash():
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = True
+    assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
 
 
 def test_fulfilled_overdue_but_verifiable_still_confirms():

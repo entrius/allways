@@ -31,7 +31,7 @@ def at_now(monkeypatch):
 
 
 def make_fulfiller(**kw) -> SwapFulfiller:
-    return SwapFulfiller(solana_client=MagicMock(), chain_providers={}, **kw)
+    return SwapFulfiller(solana_client=MagicMock(), assets={}, **kw)
 
 
 def make_swap(

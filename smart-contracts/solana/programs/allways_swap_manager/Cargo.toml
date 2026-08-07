@@ -26,6 +26,7 @@ solana-keccak-hasher = "3.1.0"
 
 [dev-dependencies]
 litesvm = "0.10.0"
+solana-account = "3.0.0"
 # SlotHashes: seeded into LiteSVM so resolve_pool's draw runs against the canonical sysvar layout
 # rather than a test-only fallback seed.
 solana-sysvar = "3.1.1"

@@ -23,7 +23,7 @@ import bittensor as bt  # noqa: E402
 import wandb  # noqa: E402
 
 from allways import __version__  # noqa: E402
-from allways.chain_providers import create_chain_providers  # noqa: E402
+from allways.assets import create_assets  # noqa: E402
 from allways.constants import (  # noqa: E402
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
@@ -77,7 +77,7 @@ class Validator(BaseValidatorNeuron):
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
-        self.chain_providers = create_chain_providers(
+        self.assets = create_assets(
             check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
         )
         self.fee_divisor = FEE_DIVISOR
@@ -116,7 +116,7 @@ class Validator(BaseValidatorNeuron):
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         warn_if_unbound(self.solana_client)
         self.solana_swap_loop = SolanaSwapLoop(
-            self.solana_client, self.chain_providers, fee_divisor=self.fee_divisor, read_only=solana_read_only
+            self.solana_client, self.assets, fee_divisor=self.fee_divisor, read_only=solana_read_only
         )
         # Crown-time state is sourced entirely from Solana program events (B3.6):
         # `event_ingest` polls the program's signature stream each forward step,
@@ -153,7 +153,7 @@ class Validator(BaseValidatorNeuron):
         # read registration + source chains off these; scoring bounds come off Solana.
         self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_chain_providers = create_chain_providers(subtensor=self.axon_subtensor, solana_rpc_url=solana_rpc_url)
+        self.axon_assets = create_assets(subtensor=self.axon_subtensor, solana_rpc_url=solana_rpc_url)
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon
@@ -199,7 +199,7 @@ class Validator(BaseValidatorNeuron):
     def reconnect_and_propagate(self):
         """Rebuild the main subtensor and update components that hold it."""
         self.reconnect_subtensor()
-        tao_provider = self.chain_providers.get('tao')
+        tao_provider = self.assets.get('tao')
         if tao_provider and hasattr(tao_provider, 'subtensor'):
             tao_provider.subtensor = self.subtensor
 

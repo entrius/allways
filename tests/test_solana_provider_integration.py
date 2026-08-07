@@ -1,6 +1,6 @@
 """Integration: verify a REAL SOL transfer on a local solana-test-validator (B7).
 
-Spins up a throwaway validator, funds a sender, sends lamports via SolanaProvider.send_amount (a
+Spins up a throwaway validator, funds a sender, sends lamports via Sol.send_amount (a
 SystemProgram transfer), then proves the provider reads it back: amount match, sender attribution,
 and the on-chain blockTime (the replay-freshness floor). No swap-manager program needed — the SOL
 swap leg is a peer-to-peer transfer, verified like a BTC deposit.
@@ -16,7 +16,7 @@ import time
 import pytest
 from solders.keypair import Keypair
 
-from allways.chain_providers.solana import SolanaProvider
+from allways.assets.solana import Sol
 from allways.solana.rpc import SolanaRpc
 
 pytestmark = pytest.mark.integration
@@ -64,8 +64,8 @@ def test_send_then_verify_real_transfer(validator):
     recipient = Keypair()
     _fund(str(sender.pubkey()))
 
-    sender_provider = SolanaProvider(solana_rpc_url=RPC, solana_keypair=sender)
-    reader = SolanaProvider(solana_rpc_url=RPC)  # read-only, no keypair
+    sender_provider = Sol(solana_rpc_url=RPC, solana_keypair=sender)
+    reader = Sol(solana_rpc_url=RPC)  # read-only, no keypair
 
     # Connection check (read-only path).
     reader.check_connection(require_send=False)

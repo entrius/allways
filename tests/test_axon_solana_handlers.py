@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
-from allways.chain_providers.base import TransactionInfo
+from allways.assets.base import TransactionInfo
 from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse
 from allways.validator import axon_handlers
@@ -78,7 +78,7 @@ def make_validator(solana_client, provider=None):
         axon_lock=threading.RLock(),
         config=SimpleNamespace(netuid=1),
         metagraph=SimpleNamespace(hotkeys=[HOTKEY]),
-        axon_chain_providers={'btc': provider} if provider else {},
+        axon_assets={'btc': provider} if provider else {},
     )
 
 

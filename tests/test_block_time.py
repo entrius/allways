@@ -11,9 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 from bittensor.utils import ss58_encode
 
-from allways.chain_providers.base import ProviderUnreachableError, TransactionInfo
-from allways.chain_providers.bitcoin import BitcoinProvider
-from allways.chain_providers.subtensor import SubtensorProvider
+from allways.assets.base import ProviderUnreachableError, TransactionInfo
+from allways.assets.bitcoin import Bitcoin
+from allways.assets.subtensor import Tao
 
 BLOCK_TIME = 1_700_000_123
 
@@ -40,7 +40,7 @@ def test_transaction_info_defaults_block_time_none():
 
 def test_btc_api_surfaces_block_time(monkeypatch):
     monkeypatch.setenv('BTC_MODE', 'lightweight')
-    p = BitcoinProvider()
+    p = Bitcoin()
 
     tx_json = {
         'status': {
@@ -70,7 +70,7 @@ def test_btc_api_surfaces_block_time(monkeypatch):
 
 
 def test_subtensor_get_block_time_millis_to_seconds():
-    p = SubtensorProvider.__new__(SubtensorProvider)  # skip __init__ (no real subtensor needed)
+    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
     substrate = MagicMock()
     substrate.get_block_hash.return_value = '0xabc'
     substrate.query.return_value = SimpleNamespace(value=BLOCK_TIME * 1000)  # pallet returns millis
@@ -81,7 +81,7 @@ def test_subtensor_get_block_time_millis_to_seconds():
 
 
 def test_subtensor_get_block_time_none_on_error():
-    p = SubtensorProvider.__new__(SubtensorProvider)
+    p = Tao.__new__(Tao)
     substrate = MagicMock()
     substrate.get_block_hash.side_effect = RuntimeError('rpc down')
     p.subtensor = SimpleNamespace(substrate=substrate)
@@ -93,7 +93,7 @@ def test_subtensor_get_block_time_none_on_error():
 
 
 def _scan_provider(head, blocks):
-    p = SubtensorProvider.__new__(SubtensorProvider)  # skip __init__ (no real subtensor needed)
+    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
     p.subtensor = MagicMock()
     p.subtensor.get_current_block.return_value = head
     p.block_cache = {}
@@ -179,8 +179,8 @@ def test_tao_scanner_bounds_first_scan_to_lookback():
     seen = []
     p.get_block = lambda n: seen.append(n) or None
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-    assert len(seen) == SubtensorProvider.SCAN_LOOKBACK_BLOCKS
-    assert seen[0] == 1000 - SubtensorProvider.SCAN_LOOKBACK_BLOCKS + 1
+    assert len(seen) == Tao.SCAN_LOOKBACK_BLOCKS
+    assert seen[0] == 1000 - Tao.SCAN_LOOKBACK_BLOCKS + 1
 
 
 def test_tao_scanner_none_when_head_unreachable():
@@ -256,8 +256,8 @@ def test_settled_credit_sums_multiple_credits_from_one_extrinsic():
 )
 def test_transfer_event_shapes_are_all_understood(record):
     """scalecodec emits several shapes across runtime versions; all must decode identically."""
-    assert SubtensorProvider._event_extrinsic_idx(record) == 0
-    assert SubtensorProvider._transfer_from_event(record) == ('A', 'B', 7)
+    assert Tao._event_extrinsic_idx(record) == 0
+    assert Tao._transfer_from_event(record) == ('A', 'B', 7)
 
 
 def test_non_transfer_events_are_not_read_as_transfers():
@@ -276,15 +276,12 @@ def test_non_transfer_events_are_not_read_as_transfers():
             },
         },
     ):
-        assert (
-            SubtensorProvider._transfer_from_event(record) is None
-            or SubtensorProvider._event_extrinsic_idx(record) is None
-        )
+        assert Tao._transfer_from_event(record) is None or Tao._event_extrinsic_idx(record) is None
 
 
 def test_events_unavailable_raises_rather_than_reading_as_absent():
     """Fail closed as 'unknown', not 'no transfer' — the latter is slash-eligible upstream."""
-    p = SubtensorProvider.__new__(SubtensorProvider)
+    p = Tao.__new__(Tao)
     p.events_cache = {}
     p.subtensor = SimpleNamespace(substrate=SimpleNamespace(get_events=MagicMock(side_effect=RuntimeError('rpc down'))))
     with pytest.raises(ProviderUnreachableError):
@@ -312,7 +309,7 @@ def test_raw_extrinsic_sender_is_read_past_the_multiaddress_variant_byte():
         + dest
         + _compact(5_000)  # Balances.transfer_keep_alive
     )
-    parsed = SubtensorProvider.parse_raw_extrinsic((_compact(len(body)) + body).hex())
+    parsed = Tao.parse_raw_extrinsic((_compact(len(body)) + body).hex())
     assert parsed is not None
     assert parsed['sender'] == ss58_encode(sender, ss58_format=42)
     assert parsed['dest'] == ss58_encode(dest, ss58_format=42)
@@ -322,10 +319,10 @@ def test_raw_extrinsic_sender_is_read_past_the_multiaddress_variant_byte():
 def test_raw_extrinsic_rejects_non_id_multiaddress_rather_than_shifting():
     """A non-Id signer variant has no bare AccountId to read, so it must fail closed."""
     body = bytes([0x84, 0x01]) + bytes(range(32)) + bytes([0x01]) + b'\x11' * 64 + bytes([0x00] * 3)
-    assert SubtensorProvider.parse_raw_extrinsic((_compact(len(body)) + body).hex()) is None
+    assert Tao.parse_raw_extrinsic((_compact(len(body)) + body).hex()) is None
 
 
 def test_match_transfer_still_matches_by_hash_through_shared_decode():
     ext = {'extrinsic_hash': '0xabc', 'dest': 'minerTAO', 'amount': 7, 'sender': 'userTAO'}
-    assert SubtensorProvider.match_transfer(ext, '0xabc', True) == ('minerTAO', 7, 'userTAO')
-    assert SubtensorProvider.match_transfer(ext, '0xother', True) is None
+    assert Tao.match_transfer(ext, '0xabc', True) == ('minerTAO', 7, 'userTAO')
+    assert Tao.match_transfer(ext, '0xother', True) is None

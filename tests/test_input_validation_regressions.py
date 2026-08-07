@@ -9,7 +9,7 @@
 
 import bittensor as bt
 
-from allways.chain_providers.subtensor import SubtensorProvider
+from allways.assets.subtensor import Tao
 from allways.validator.reserve_engine import confirm_deposit
 
 
@@ -17,7 +17,7 @@ def test_is_valid_address_verifies_checksum_not_just_shape():
     # PR #312: is_valid_address must verify the SS58 checksum. A genuinely-valid key passes; a 48-char
     # base58 string with a corrupted payload/checksum fails. Generate the valid address so the test
     # stays correct across bittensor SS58-format changes.
-    p = SubtensorProvider.__new__(SubtensorProvider)  # no live subtensor needed for pure validation
+    p = Tao.__new__(Tao)  # no live subtensor needed for pure validation
     valid = bt.Keypair.create_from_uri('//RegressionTest').ss58_address
     assert p.is_valid_address(valid) is True, 'a genuinely valid SS58 must pass'
 

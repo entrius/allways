@@ -17,7 +17,7 @@ import bittensor as bt
 from solders.pubkey import Pubkey
 
 from allways import dev_signal
-from allways.chain_providers.base import ProviderUnreachableError
+from allways.assets.base import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
@@ -109,12 +109,12 @@ class SolanaSwapLoop:
     def __init__(
         self,
         solana_client: Any,
-        chain_providers: Dict[str, Any],
+        assets: Dict[str, Any],
         fee_divisor: int = 100,
         read_only: bool = False,
     ):
         self.client = solana_client
-        self.providers = chain_providers
+        self.providers = assets
         self.fee_divisor = fee_divisor
         self.read_only = read_only
         self.reject_warned: Set[str] = set()  # dedupe rate-reject warnings, one per swap key
@@ -173,6 +173,17 @@ class SolanaSwapLoop:
             )
             return False
         return True
+
+    def _dest_refuses(self, swap: Any) -> bool:
+        """Evidence the dest can't receive (or the check is unavailable) — either way, never slash on it."""
+        provider = self.providers.get(swap.to_chain)
+        if provider is None:
+            return False
+        try:
+            return provider.delivery_refused(swap.user_to_addr, int(swap.initiated_at))
+        except Exception as e:
+            bt.logging.warning(f'{self._label(swap)}: delivery_refused check failed ({e}) — deferring, not slashing')
+            return True
 
     def _get_reservation(self, miner: Any) -> Any:
         try:
@@ -252,11 +263,11 @@ class SolanaSwapLoop:
         why = (
             f'src={s_status} dst={d_status} [{_confs(swap.to_chain, d_info)}] timeout_in={int(swap.timeout_at) - now}s'
         )
-        return (
-            SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
-            if overdue
-            else SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
-        )
+        if not overdue:
+            return SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
+        if self._dest_refuses(swap):
+            return SwapAction(SwapDecision.WAIT, reason=f'{why} + overdue but dest refuses delivery — not slashing')
+        return SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
 
     def _reject_logged(self, swap: Any, expected_to: int) -> None:
         """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
@@ -334,6 +345,8 @@ class SolanaSwapLoop:
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
             # Never extend: no mark_fulfilled = no broadcast evidence, so an overdue Active is slash-eligible.
+            if overdue and self._dest_refuses(swap):
+                return SwapAction(SwapDecision.WAIT, reason='overdue but dest refuses delivery — not slashing')
             return SwapAction(
                 SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
                 reason='overdue, miner never fulfilled — slashing' if overdue else 'awaiting miner mark_fulfilled',

@@ -1,4 +1,4 @@
-"""Tests for BIP-137 message signing and verification in BitcoinProvider."""
+"""Tests for BIP-137 message signing and verification in Bitcoin."""
 
 import os
 from types import SimpleNamespace
@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
-from allways.chain_providers.bitcoin import (
+from allways.assets.bitcoin import (
     ADDR_TYPE_P2PKH,
     ADDR_TYPE_P2SH_P2WPKH,
     ADDR_TYPE_P2TR,
     ADDR_TYPE_P2WPKH,
-    BitcoinProvider,
+    Bitcoin,
     detect_address_type,
     to_mainnet_address,
 )
@@ -103,18 +103,18 @@ class TestBIP137SignVerify:
         assert valid
 
 
-def make_lightweight_provider() -> BitcoinProvider:
-    """Construct a BitcoinProvider in lightweight mode for sign/verify tests.
+def make_lightweight_provider() -> Bitcoin:
+    """Construct a Bitcoin in lightweight mode for sign/verify tests.
 
     Lightweight mode doesn't hit a node for sign/verify — it's pure
     cryptographic work. BTC_MODE and BTC_PRIVATE_KEY are set via env patch.
     """
     with patch.dict(os.environ, {'BTC_MODE': 'lightweight', 'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
-        return BitcoinProvider()
+        return Bitcoin()
 
 
-class TestBitcoinProviderSignFromProof:
-    """Direct coverage of BitcoinProvider.sign_from_proof — the wrapper our
+class TestBitcoinSignFromProof:
+    """Direct coverage of Bitcoin.sign_from_proof — the wrapper our
     validator/CLI actually invoke, not the underlying library."""
 
     def test_p2wpkh_address_produces_valid_signature(self):
@@ -163,7 +163,7 @@ class TestBitcoinProviderSignFromProof:
         """Lightweight mode + no key arg + no BTC_PRIVATE_KEY env → empty sig."""
         with patch.dict(os.environ, {'BTC_MODE': 'lightweight'}, clear=False):
             os.environ.pop('BTC_PRIVATE_KEY', None)
-            provider = BitcoinProvider()
+            provider = Bitcoin()
             addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
 
             signature = provider.sign_from_proof(addr, TEST_MESSAGE, key=None)
@@ -182,8 +182,8 @@ class TestBitcoinProviderSignFromProof:
         assert signature != ''
 
 
-class TestBitcoinProviderVerifyFromProof:
-    """Direct coverage of BitcoinProvider.verify_from_proof."""
+class TestBitcoinVerifyFromProof:
+    """Direct coverage of Bitcoin.verify_from_proof."""
 
     def test_valid_signature_verifies(self):
         provider = make_lightweight_provider()

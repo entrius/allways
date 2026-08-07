@@ -2,37 +2,40 @@ from typing import Dict, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
-from allways.chain_providers.base import ChainProvider, TransactionInfo
-from allways.chain_providers.bitcoin import BitcoinProvider
-from allways.chain_providers.ethereum import EthereumProvider
-from allways.chain_providers.solana import SolanaProvider
-from allways.chain_providers.subtensor import SubtensorProvider
+from allways.assets.base import Asset, TransactionInfo
+from allways.assets.bitcoin import Bitcoin
+from allways.assets.chain import Chain
+from allways.assets.ethereum import EvmCoin
+from allways.assets.solana import Sol
+from allways.assets.subtensor import Tao
 
 __all__ = [
-    'ChainProvider',
+    'Asset',
+    'Chain',
     'TransactionInfo',
-    'BitcoinProvider',
-    'SubtensorProvider',
-    'SolanaProvider',
-    'EthereumProvider',
-    'create_chain_providers',
+    'Bitcoin',
+    'Tao',
+    'Sol',
+    'EvmCoin',
+    'create_assets',
 ]
 
-# Registry: (chain_id, provider_class, kwarg names to forward)
-PROVIDER_REGISTRY: Tuple[Tuple[str, Type[ChainProvider], Tuple[str, ...]], ...] = (
-    ('btc', BitcoinProvider, ()),
-    ('tao', SubtensorProvider, ('subtensor', 'wallet')),
-    ('sol', SolanaProvider, ('solana_rpc_url', 'solana_keypair')),
-    ('eth', EthereumProvider, ()),
+# Registry: (chain_id, asset class, kwarg names to forward). The wire id is a "chain"
+# (program strings, DB columns, /chains); in code it resolves to an Asset.
+ASSET_REGISTRY: Tuple[Tuple[str, Type[Asset], Tuple[str, ...]], ...] = (
+    ('btc', Bitcoin, ()),
+    ('tao', Tao, ('subtensor', 'wallet')),
+    ('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
+    ('eth', EvmCoin, ()),
 )
 
 
-def create_chain_providers(
+def create_assets(
     check: bool = False,
     require_send: bool = True,
     required_chains: Optional[Set[str]] = None,
     **kwargs,
-) -> Dict[str, ChainProvider]:
+) -> Dict[str, Asset]:
     """Initialize all available chain providers.
 
     Args:
@@ -47,11 +50,11 @@ def create_chain_providers(
                          chains required (validators verify every chain).
 
     Keyword arguments are forwarded to providers that need them.
-    e.g. create_chain_providers(subtensor=subtensor)
+    e.g. create_assets(subtensor=subtensor)
     """
-    providers: Dict[str, ChainProvider] = {}
+    providers: Dict[str, Asset] = {}
 
-    for chain_id, cls, kwarg_names in PROVIDER_REGISTRY:
+    for chain_id, cls, kwarg_names in ASSET_REGISTRY:
         required = required_chains is None or chain_id in required_chains
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}

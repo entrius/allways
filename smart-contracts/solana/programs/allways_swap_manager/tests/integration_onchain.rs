@@ -62,8 +62,8 @@ const TEST_POOL_WINDOW_SECS: i64 = 3;
 const FROM_ADDR: &str = "userBTCaddr";
 // Fixed taker pinned by the lottery (the Swap's user/payout come from the reservation, not the claim).
 const PINNED_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
-const FROM_CHAIN: &str = "BTC";
-const TO_CHAIN: &str = "SOL";
+const FROM_CHAIN: &str = "btc";
+const TO_CHAIN: &str = "sol";
 const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
@@ -973,14 +973,14 @@ fn onchain_set_quote_creates_pda() {
     let rpc = rpc();
     let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
 
-    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", RATE), &miner.pubkey(), &miner)
+    send(&rpc, set_quote_ix(&miner.pubkey(), "btc", "sol", RATE), &miner.pubkey(), &miner)
         .expect("set_quote");
 
-    let a = rpc.get_account(&quote_pda(&miner.pubkey(), "BTC", "SOL")).expect("quote account");
+    let a = rpc.get_account(&quote_pda(&miner.pubkey(), "btc", "sol")).expect("quote account");
     let q = MinerQuote::try_deserialize(&mut a.data.as_slice()).unwrap();
     assert_eq!(q.miner, miner.pubkey());
-    assert_eq!(q.from_chain, "BTC");
-    assert_eq!(q.to_chain, "SOL");
+    assert_eq!(q.from_chain, "btc");
+    assert_eq!(q.to_chain, "sol");
     assert_eq!(q.rate, RATE);
     assert!(q.updated_at > 0, "updated_at set from on-chain clock");
 }
@@ -992,11 +992,11 @@ fn onchain_remove_quote_closes_pda() {
     let rpc = rpc();
     let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
 
-    send(&rpc, set_quote_ix(&miner.pubkey(), "BTC", "SOL", RATE), &miner.pubkey(), &miner).expect("set");
-    assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote exists after set");
+    send(&rpc, set_quote_ix(&miner.pubkey(), "btc", "sol", RATE), &miner.pubkey(), &miner).expect("set");
+    assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol")), "quote exists after set");
 
-    send(&rpc, remove_quote_ix(&miner.pubkey(), "BTC", "SOL"), &miner.pubkey(), &miner).expect("remove");
-    assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "BTC", "SOL")), "quote closed after remove");
+    send(&rpc, remove_quote_ix(&miner.pubkey(), "btc", "sol"), &miner.pubkey(), &miner).expect("remove");
+    assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol")), "quote closed after remove");
 }
 
 #[test]
