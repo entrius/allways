@@ -20,6 +20,8 @@ class Chain(ABC):
     # tip can never freeze — it self-refreshes at least this often. Slightly longer than a subtensor
     # block so a validator pass stays on one fetch.
     _TIP_TTL_SECONDS = 15.0
+    _pass_tip: Optional[int] = None
+    _pass_tip_ts: float = 0.0
 
     @abstractmethod
     def get_current_block_height(self) -> Optional[int]:
@@ -33,9 +35,8 @@ class Chain(ABC):
         caps staleness for callers that never clear (the miner), so the tip can never freeze. A start-
         of-pass/slightly-stale tip biases confirmations low — conservative, never a false confirm. A
         failed fetch (None) is not cached, so it retries."""
-        tip = getattr(self, '_pass_tip', None)
-        if tip is not None and time.monotonic() - getattr(self, '_pass_tip_ts', 0.0) < self._TIP_TTL_SECONDS:
-            return tip
+        if self._pass_tip is not None and time.monotonic() - self._pass_tip_ts < self._TIP_TTL_SECONDS:
+            return self._pass_tip
         tip = self.get_current_block_height()
         if tip is not None:
             self._pass_tip = tip

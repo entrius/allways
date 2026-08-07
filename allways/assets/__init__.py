@@ -59,6 +59,7 @@ def create_assets(
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
             provider = cls(**provider_kwargs)
+            provider.chain  # a missing Chain binding fails here at boot, not mid-pass
             if check:
                 provider.check_connection(require_send=require_send)
             providers[chain_id] = provider

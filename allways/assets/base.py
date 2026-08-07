@@ -38,19 +38,27 @@ class Asset(ABC):
     3. Register it in ASSET_REGISTRY; add {ENV_PREFIX}_* vars to .env
     """
 
+    # Non-fused assets (tokens on a multi-asset chain) set this at construction.
+    _chain: Optional[Chain] = None
+
     @abstractmethod
     def get_chain(self) -> ChainDefinition: ...
 
     @property
     def chain(self) -> Chain:
         """The network this asset lives on. Fused single-asset classes are their own chain."""
+        if self._chain is not None:
+            return self._chain
         if isinstance(self, Chain):
             return self
-        raise NotImplementedError(f'{type(self).__name__} must bind a Chain')
+        raise NotImplementedError(f'{type(self).__name__} must bind a Chain (set self._chain)')
 
     def describe(self) -> str:
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.get_chain().name
+
+    def clear_cache(self) -> None:
+        """Reset per-asset scratch caches at the start of a validator pass. No-op by default."""
 
     def can_send_from(self, address: str) -> bool:
         """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``
