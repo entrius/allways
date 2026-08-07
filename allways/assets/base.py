@@ -54,10 +54,8 @@ class Asset(ABC):
     def chain_def(self) -> ChainDefinition:
         """This asset's registry row (chains.py): wire id, decimals, confirmations, env prefix.
 
-        Three chain-ish names, three meanings — keep them straight:
-        ``chain_def`` (this property) = the asset's static registry FACTS;
-        ``chain`` = the live network OBJECT the asset talks through (`Chain`);
-        ``chains.get_chain_def(id)`` = registry LOOKUP from a wire id."""
+        ``chain_def`` is the asset's static registry FACTS (``chains.get_chain_def(id)`` reaches
+        the same row from a wire id); ``chain`` is the live network OBJECT it talks through."""
 
     @property
     def chain(self) -> Chain:

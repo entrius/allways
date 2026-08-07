@@ -2,7 +2,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import bittensor as bt
@@ -10,9 +10,6 @@ import requests
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
-
-if TYPE_CHECKING:
-    from eth_account.signers.local import LocalAccount
 
 from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
@@ -338,7 +335,7 @@ class Ether(Asset, Chain):
             return True
         return is_checksum_address(address)
 
-    def _account(self, key: Optional[Any] = None) -> Optional['LocalAccount']:
+    def _account(self, key: Optional[Any] = None):
         raw = key if isinstance(key, str) and key else os.environ.get('ETH_PRIVATE_KEY')
         if not raw:
             return None
