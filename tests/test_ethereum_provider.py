@@ -1,4 +1,4 @@
-"""EvmCoin unit tests — all offline (RPC layer mocked, signing is pure crypto).
+"""Ether unit tests — all offline (RPC layer mocked, signing is pure crypto).
 
 Covers the ETH-specific hazards: EIP-55 casing at every comparison boundary, inclusion≠settlement
 (reverted txs carry intact to/value fields), receipt-unavailable must read as 'unknown' not
@@ -10,7 +10,7 @@ from typing import Optional
 import pytest
 
 from allways.assets.base import ProviderUnreachableError
-from allways.assets.ethereum import EvmCoin
+from allways.assets.ethereum import Ether
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -25,7 +25,7 @@ def provider(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return EvmCoin()
+    return Ether()
 
 
 def rpc_stub(provider, responses: dict):
@@ -427,12 +427,12 @@ class TestNetworkGuard:
         # A typo ('seplia') silently becoming mainnet would pay real ETH against test swaps.
         monkeypatch.setenv('ETH_NETWORK', 'seplia')
         with pytest.raises(ValueError, match='ETH_NETWORK'):
-            EvmCoin()
+            Ether()
 
     def test_unset_defaults_to_mainnet(self, monkeypatch):
         monkeypatch.delenv('ETH_NETWORK', raising=False)
         monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        assert EvmCoin().network == 'mainnet'
+        assert Ether().network == 'mainnet'
 
 
 class TestAbsenceQuorum:

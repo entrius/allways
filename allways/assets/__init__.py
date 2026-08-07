@@ -5,7 +5,7 @@ import bittensor as bt
 from allways.assets.base import Asset, TransactionInfo
 from allways.assets.bitcoin import Bitcoin
 from allways.assets.chain import Chain
-from allways.assets.ethereum import EvmCoin
+from allways.assets.ethereum import Ether
 from allways.assets.solana import Sol
 from allways.assets.subtensor import Tao
 
@@ -16,7 +16,7 @@ __all__ = [
     'Bitcoin',
     'Tao',
     'Sol',
-    'EvmCoin',
+    'Ether',
     'create_assets',
 ]
 
@@ -26,7 +26,7 @@ ASSET_REGISTRY: Tuple[Tuple[str, Type[Asset], Tuple[str, ...]], ...] = (
     ('btc', Bitcoin, ()),
     ('tao', Tao, ('subtensor', 'wallet')),
     ('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
-    ('eth', EvmCoin, ()),
+    ('eth', Ether, ()),
 )
 
 

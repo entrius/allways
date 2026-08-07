@@ -50,7 +50,7 @@ def rpc_tag(base: str) -> str:
     return parts[-2] if len(parts) >= 2 else host
 
 
-class EvmCoin(Asset, Chain):
+class Ether(Asset, Chain):
     """Ethereum chain provider: eth-account + public JSON-RPC (no local node required).
 
     Plain EOA value transfers only, by design: a swap leg is verified off the transaction's

@@ -462,7 +462,7 @@ def sign_or_prompt_external(
     Returns an empty string when no valid signature is obtained.
     """
     try:
-        signature = provider.sign_from_proof(address, message, key)
+        signature = provider.chain.sign_from_proof(address, message, key)
     except Exception as e:
         bt.logging.warning(f'Internal signing failed ({type(e).__name__}): {e}')
         signature = ''
@@ -487,7 +487,7 @@ def sign_or_prompt_external(
         return ''
 
     try:
-        verified = provider.verify_from_proof(address, message, pasted)
+        verified = provider.chain.verify_from_proof(address, message, pasted)
     except Exception as e:
         console.print(f'[red]Signature verification errored: {e}[/red]')
         return ''
