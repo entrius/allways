@@ -56,10 +56,16 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v11: W1 split-collateral seam
-/// — `collateral_chain` on Reservation/Swap, per-backing swap bounds, settlement grace.
-/// v10 = A4 source-replay via freshness; v9 = A5 binding; see git history for v2–v9.
-pub const CONFIG_VERSION: u32 = 11;
+/// PDA seed prefix for a miner's bond attestation on one backing chain
+/// (`seeds = [ATTEST_SEED, miner_pubkey, chain_id]`). One per (miner, hub) — the quorum's assertion
+/// about a bond this program cannot read.
+#[constant]
+pub const ATTEST_SEED: &[u8] = b"attest";
+
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v12: W2 bond attestation —
+/// per-hub activation bitmask, attestation heartbeat fuse, TAO collateral floor.
+/// v11 = W1 split-collateral seam; v10 = A4 source-replay via freshness; v9 = A5 binding.
+pub const CONFIG_VERSION: u32 = 12;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -75,6 +81,10 @@ pub const REQ_CONFIRM: u8 = 6;
 pub const REQ_TIMEOUT: u8 = 7;
 /// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
+/// Per-(miner, backing chain) round writing a `BondAttestation`.
+pub const REQ_SET_ATTESTATION: u8 = 9;
+/// Global round bumping `Config.last_attest_heartbeat` (the dead-man fuse's liveness signal).
+pub const REQ_ATTEST_HEARTBEAT: u8 = 10;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
 /// each) ahead, so the seed slot never lands in the window of the leader who included the arming tx.
@@ -98,6 +108,12 @@ pub const NUMERAIRE_CHAIN: &str = "sol";
 /// in W2 — until then `backing::backing_purse` refuses it. A new hub is a new id, never a new branch.
 pub const BACKING_CHAIN_SOL: &str = NUMERAIRE_CHAIN;
 pub const BACKING_CHAIN_TAO: &str = "tao";
+
+/// One bit per backing in `MinerState.active_backings` — a miner activates each purse separately, so a
+/// deficient bond disables only its own quotes. 8 hubs before a program upgrade (realistic ceiling ~4).
+/// The legacy `active` bool is the OR of these bits; see `MinerState::set_backing`.
+pub const BACKING_BIT_SOL: u8 = 1 << 0;
+pub const BACKING_BIT_TAO: u8 = 1 << 1;
 
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value
@@ -266,6 +282,23 @@ const _: () = assert!(
     SETTLEMENT_GRACE_SECS >= SETTLEMENT_GRACE_SECS_MIN
         && SETTLEMENT_GRACE_SECS <= SETTLEMENT_GRACE_SECS_MAX,
     "SETTLEMENT_GRACE_SECS must be within [1 min, 2 h]"
+);
+
+/// Initial `Config.tao_min_collateral` — the attested effective bond (rao) a miner must hold to
+/// activate its TAO backing, the rao twin of the lamport `min_collateral`. 0.1 TAO is a conservative
+/// non-zero seed, NOT a policy number: the admin sets the real floor before the first TAO-backed quote.
+pub const TAO_MIN_COLLATERAL_RAO: u64 = 100_000_000;
+
+/// Initial `Config.attest_max_age_secs` — the dead-man fuse: TAO-backed entry (finalize/initiate) is
+/// refused once the global attestation heartbeat is older than this. A circuit breaker, not a cadence,
+/// so it sits at ≥2× the 12–24 h heartbeat interval. Runtime-tunable within [MIN, MAX].
+pub const ATTEST_MAX_AGE_SECS: i64 = 86_400; // 24 h
+pub const ATTEST_MAX_AGE_SECS_MIN: i64 = 3_600; // 1 h — below one heartbeat interval it fuses constantly
+pub const ATTEST_MAX_AGE_SECS_MAX: i64 = 172_800; // 48 h — past this it stops being a circuit breaker
+
+const _: () = assert!(
+    ATTEST_MAX_AGE_SECS >= ATTEST_MAX_AGE_SECS_MIN && ATTEST_MAX_AGE_SECS <= ATTEST_MAX_AGE_SECS_MAX,
+    "ATTEST_MAX_AGE_SECS must be within [1 h, 48 h]"
 );
 
 /// Total seconds a reservation/swap deadline may be slid forward across all extensions, frozen into

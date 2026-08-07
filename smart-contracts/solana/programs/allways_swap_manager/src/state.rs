@@ -33,9 +33,18 @@ pub struct Config {
     /// a price oracle into a guard). Each future hub adds its own pair here.
     pub tao_min_swap_amount: u64,
     pub tao_max_swap_amount: u64,
+    /// Attested effective bond (rao) needed to activate the TAO backing — the rao twin of
+    /// `min_collateral`. Each future hub adds its own floor here.
+    pub tao_min_collateral: u64,
     /// Seconds a miner stays busy after a non-locally-backed timeout, while the penalty settles on the
     /// backing chain (busy-until-settled). Unused by the "sol" path, which settles atomically.
     pub settlement_grace_secs: i64,
+    /// Unix timestamp of the last `vote_attest_heartbeat` quorum (0 = never). Liveness is a GLOBAL
+    /// question, so the fuse reads this one value rather than each attestation's own age — a quiet
+    /// miner's old-but-correct attestation is not staleness.
+    pub last_attest_heartbeat: i64,
+    /// How stale the heartbeat may get before non-locally-backed entry (finalize/initiate) is refused.
+    pub attest_max_age_secs: i64,
     /// How long a reservation holds a miner exclusive, in seconds.
     pub reservation_ttl_secs: i64,
     /// Quorum threshold, percent of the whitelisted validator set (e.g. 66).
@@ -96,13 +105,21 @@ pub struct MinerState {
     pub miner: Pubkey,
     /// Collateral credited to this miner (lamports). Backed 1:1 by lamports in the miner's collateral vault.
     pub collateral: u64,
-    /// Whether the miner is active (set via consensus).
+    /// Whether the miner is active on ANY backing — the OR view of `active_backings`, kept so every
+    /// pre-W2 read site works unchanged. Never written on its own; see `set_backing`/`clear_backings`.
     pub active: bool,
+    /// Per-backing activation bitmask (`BACKING_BIT_*`). A deficient purse disables only its own
+    /// quotes, not the miner (D2).
+    pub active_backings: u8,
     /// Whether the miner currently has an in-flight swap.
     pub has_active_swap: bool,
     /// Unix ts the miner is busy until (open pool, held reservation, or in-flight swap). Self-clearing
     /// (`now >= busy_until` = free); the non-bypassable busy lock for deactivate/withdraw_collateral.
     pub busy_until: i64,
+    /// Unix ts a non-locally-settled penalty is still settling on the backing chain (0 = clear). The
+    /// ENTRY lock, read only by finalize/vote_initiate — `busy_until` is the exit lock and entry paths
+    /// never read it, so the two must stay separate fields.
+    pub settling_until: i64,
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
     /// Lifetime swaps completed (confirm_swap quorum). Monotonic. Off-chain emissions warm-up gate:
@@ -111,6 +128,53 @@ pub struct MinerState {
     /// Lifetime swaps failed (timeout_swap quorum). Monotonic, never resets. Off-chain strike-out gate:
     /// `failed_swaps > 2` => no emissions (recover by re-registering).
     pub failed_swaps: u32,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+impl MinerState {
+    /// Set or clear one backing's bit. `active` is re-derived here and nowhere else, so the OR-view
+    /// invariant (`active == (active_backings != 0)`) has no path to drift. Returns the new OR view.
+    pub fn set_backing(&mut self, bit: u8, on: bool) -> bool {
+        if on {
+            self.active_backings |= bit;
+        } else {
+            self.active_backings &= !bit;
+        }
+        self.active = self.active_backings != 0;
+        self.active
+    }
+
+    /// Drop every backing at once — the miner leaves entirely (self-deactivate, penalty auto-deactivation).
+    pub fn clear_backings(&mut self) {
+        self.active_backings = 0;
+        self.active = false;
+    }
+}
+
+/// A miner's bond on one backing chain, as asserted by validator quorum
+/// (`seeds = [ATTEST_SEED, miner, chain_id]`). This program cannot read the vault holding the bond, so
+/// the quorum writes down what it read — the guards then work off a single agreed snapshot instead of
+/// N private reads that would never agree.
+#[account]
+#[derive(InitSpace)]
+pub struct BondAttestation {
+    /// The miner this bond belongs to (== seed; stored for `getProgramAccounts` convenience).
+    pub miner: Pubkey,
+    /// Backing chain id (== seed), e.g. "tao".
+    #[max_len(MAX_CHAIN_LEN)]
+    pub chain: String,
+    /// EFFECTIVE bond in the backing asset's smallest unit (rao for "tao") = vault gross − accrued fees
+    /// − voted-but-unapplied slash verdicts. Debited at verdict time, so it deliberately leads the vault
+    /// pessimistically — that is what keeps the 1.1× guards arithmetically true.
+    pub effective_balance: u64,
+    /// Whether the bond is locked on the backing chain. An unlocked bond backs nothing.
+    pub locked: bool,
+    /// The vault's monotonic lock epoch. A write at an older epoch is refused, so a stale round can
+    /// never restore a lock state the vault has already moved past.
+    pub epoch: u64,
+    /// Quorum timestamp. Observability only — never a guard input (the fuse reads the global heartbeat).
+    pub attested_at: i64,
     /// Stored PDA bump.
     pub bump: u8,
 }

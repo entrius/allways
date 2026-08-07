@@ -165,13 +165,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner.as_ref()),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -262,6 +263,7 @@ fn finalize_ix(
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            attestation: None,
         }
         .to_account_metas(None),
     )
@@ -300,6 +302,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
             swap: swap_pda(&key),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -642,7 +645,8 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     .expect_err("tao leg below the rao floor");
     assert!(err.contains("AmountBelowMin"), "rao bounds applied to a tao backing: {err}");
 
-    // Lower the rao floor and the same fill clears bounds — failing later, at the missing purse.
+    // Lower the rao floor and the same fill clears bounds — failing later, at the W2 entry fuse (this
+    // setup never beat a heartbeat), which proves bounds were the only thing standing in the way.
     send(
         &mut svm,
         admin_ix(&admin.pubkey(), allways_swap_manager::instruction::SetTaoMinSwapAmount { amount: 1_000 }.data()),
@@ -656,8 +660,8 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
         &vals[0].pubkey(),
         &vals[0],
     )
-    .expect_err("no tao purse until W2");
-    assert!(err.contains("BackingNotSupported"), "bounds cleared, purse did not: {err}");
+    .expect_err("the fuse still guards the tao purse");
+    assert!(err.contains("AttestationStale"), "bounds cleared, the fuse did not: {err}");
 }
 
 #[test]
@@ -691,14 +695,14 @@ fn test_collateral_binds_to_the_backing_leg_on_either_side_of_the_pair() {
 
 #[test]
 fn test_unsupported_backing_is_refused_at_finalize_and_at_initiate() {
-    // Until W2 lands the bond attestation there is no purse to check a non-"sol" backing against, so
-    // both collateral gates refuse it outright rather than falling through to the local vault.
+    // A chain with no purse (no local vault, no attestation) is refused outright rather than falling
+    // through to the local vault. "btc" is on both legs here, so only the purse lookup can reject it.
     let (mut svm, _admin, vals, miner) = setup();
-    draw(&mut svm, &vals[0], &miner.pubkey(), HUB_FROM, HUB_TO);
-    set_reservation_backing(&mut svm, &miner.pubkey(), "tao");
+    draw(&mut svm, &vals[0], &miner.pubkey(), SPOKE_FROM, SPOKE_TO);
+    set_reservation_backing(&mut svm, &miner.pubkey(), "btc");
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, OTHER_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -709,7 +713,7 @@ fn test_unsupported_backing_is_refused_at_finalize_and_at_initiate() {
     let (mut svm, _admin, vals, miner) = setup();
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
-    set_swap_backing(&mut svm, &swap_key("srctx1"), "tao");
+    set_swap_backing(&mut svm, &swap_key("srctx1"), "btc");
     let err = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0])
         .expect_err("initiate must refuse an unsupported backing");
     assert!(err.contains("BackingNotSupported"), "{err}");

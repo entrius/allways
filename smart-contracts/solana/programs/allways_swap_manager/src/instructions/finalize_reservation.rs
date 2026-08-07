@@ -1,10 +1,12 @@
 use anchor_lang::prelude::*;
 
 use crate::backing;
-use crate::constants::{required_collateral, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED};
+use crate::constants::{
+    required_collateral, ATTEST_SEED, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::ReservationFilled;
-use crate::state::{Config, MinerState, Reservation};
+use crate::state::{BondAttestation, Config, MinerState, Reservation};
 
 /// The seat winner (`reservation.router`) fills the reservation it won at the draw: names the taker +
 /// amounts and sets `reserved_until`, making the reservation live (sendable/claimable). Only the router
@@ -36,6 +38,14 @@ pub struct FinalizeReservation<'info> {
         constraint = reservation.router == router.key() @ ErrorCode::NoReservation,
     )]
     pub reservation: Account<'info, Reservation>,
+
+    /// The bond attestation for the reservation's pinned backing — required for any backing but "sol",
+    /// which reads the local vault ledger instead. Seeds bind it to (this miner, that backing).
+    #[account(
+        seeds = [ATTEST_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump,
+    )]
+    pub attestation: Option<Account<'info, BondAttestation>>,
 }
 
 pub fn handler(
@@ -109,10 +119,19 @@ pub fn handler(
     )?;
     require!(collateral_amount as u128 == expected, ErrorCode::InvalidAmount);
 
+    // Entry fuse for a backing that settles elsewhere: the relay must be provably alive (or the purse
+    // read below is trusting a snapshot nobody is refreshing), and the miner must not still owe a
+    // penalty on that chain. Both are no-ops for "sol", which settles inside `timeout_swap`.
+    backing::check_entry_gates(cfg, &ctx.accounts.miner_state, backing, now)?;
+
     // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front. Collateral only
     // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate can't
     // later strand a user who has already sent source funds.
-    let purse = backing::backing_purse(backing, &ctx.accounts.miner_state)?;
+    let purse = backing::backing_purse(
+        backing,
+        &ctx.accounts.miner_state,
+        ctx.accounts.attestation.as_deref(),
+    )?;
     require!(
         purse >= required_collateral(collateral_amount),
         ErrorCode::InsufficientCollateral

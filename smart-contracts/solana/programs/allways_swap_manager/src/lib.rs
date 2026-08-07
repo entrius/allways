@@ -100,6 +100,14 @@ pub mod allways_swap_manager {
     pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_settlement_grace(ctx, secs)
     }
+    /// Attested bond floor for activating the TAO backing, in rao.
+    pub fn set_tao_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_min_collateral(ctx, amount)
+    }
+    /// How stale the global attestation heartbeat may get before non-local backings fuse off at entry.
+    pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_attest_max_age(ctx, secs)
+    }
     pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_reservation_ttl(ctx, secs)
     }
@@ -130,14 +138,32 @@ pub mod allways_swap_manager {
         vote_set_weights::handler(ctx, weights, round_key)
     }
 
-    // --- Miner activation consensus ---
-    /// A validator votes to activate a miner (active on quorum).
-    pub fn vote_activate(ctx: Context<VoteActivate>) -> Result<()> {
-        vote_activate::handler(ctx)
+    // --- Miner activation consensus (per backing purse) ---
+    /// A validator votes to activate one of a miner's backings ("sol" | "tao"); its bit is set on quorum.
+    pub fn vote_activate(ctx: Context<VoteActivate>, backing: String) -> Result<()> {
+        vote_activate::handler(ctx, backing)
     }
-    /// A validator votes to force-deactivate a miner (deactivated on quorum).
-    pub fn vote_deactivate(ctx: Context<VoteDeactivate>) -> Result<()> {
-        vote_deactivate::handler(ctx)
+    /// A validator votes to force-deactivate one of a miner's backings; its bit is cleared on quorum.
+    pub fn vote_deactivate(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
+        vote_deactivate::handler(ctx, backing)
+    }
+
+    // --- Bond attestation (the collateral mirror for backings this program can't read) ---
+    /// A validator attests a miner's effective bond on one backing chain; written on quorum. The full
+    /// payload is hash-bound, so divergent attestations conflict instead of co-counting.
+    pub fn vote_set_attestation(
+        ctx: Context<VoteSetAttestation>,
+        chain: String,
+        effective_balance: u64,
+        locked: bool,
+        epoch: u64,
+    ) -> Result<()> {
+        vote_set_attestation::handler(ctx, chain, effective_balance, locked, epoch)
+    }
+    /// A validator bumps the global attestation heartbeat; on quorum it advances to the chain's clock.
+    /// While it is stale, entry into any non-locally-backed swap is fused off.
+    pub fn vote_attest_heartbeat(ctx: Context<VoteAttestHeartbeat>) -> Result<()> {
+        vote_attest_heartbeat::handler(ctx)
     }
     /// Miner self-deactivation (no consensus).
     pub fn deactivate(ctx: Context<Deactivate>) -> Result<()> {
@@ -292,5 +318,16 @@ pub mod allways_swap_manager {
         hotkey_sig: [u8; 64],
     ) -> Result<()> {
         bind_hotkey::handler(ctx, hotkey, hotkey_sig)
+    }
+
+    // --- v3 upgrade cranks (admin, idempotent; run migrate_config first) ---
+    /// Rewrite the v10 Config into the v12 layout, seeding the W1+W2 fields with their defaults.
+    pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
+        migrate::migrate_config(ctx)
+    }
+    /// Rewrite one v10 MinerState into the v12 layout, carrying the legacy `active` bool into the SOL
+    /// activation bit.
+    pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
+        migrate::migrate_miner_state(ctx)
     }
 }

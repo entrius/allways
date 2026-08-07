@@ -147,4 +147,20 @@ pub enum ErrorCode {
     BackingNotSupported,
     #[msg("The collateral chain is not one of the swap's legs")]
     BackingNotInLegs,
+
+    // --- W2: bond attestation + per-hub activation ---
+    #[msg("This collateral chain settles locally and takes no bond attestation")]
+    BackingSettlesLocally,
+    #[msg("No bond attestation exists for this miner on this backing chain")]
+    AttestationMissing,
+    #[msg("The attested bond is not locked on its backing chain")]
+    BondNotLocked,
+    #[msg("Attestation epoch is older than the one already stored")]
+    AttestationEpochStale,
+    #[msg("The global attestation heartbeat is stale; non-local backings are fused off")]
+    AttestationStale,
+    #[msg("Miner is still settling a penalty on its backing chain")]
+    MinerSettling,
+    #[msg("Account is owned by another program or is not the expected account type")]
+    InvalidAccountForMigration,
 }

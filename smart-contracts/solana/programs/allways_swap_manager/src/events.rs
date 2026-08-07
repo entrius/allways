@@ -190,6 +190,37 @@ pub struct MinerDeactivated {
     pub at: i64,
 }
 
+/// One backing's activation bit flipped (W2). Emitted on EVERY `vote_activate`/`vote_deactivate`
+/// quorum, whereas MinerActivated/MinerDeactivated fire only when the OR view itself changes — so an
+/// event-driven scorer replaying `active` from those two stays exactly as correct as before.
+#[event]
+pub struct MinerBackingChanged {
+    pub miner: Pubkey,
+    pub backing: String,
+    /// The bit's new state; `active_backings` is the whole mask after this change.
+    pub enabled: bool,
+    pub active_backings: u8,
+    pub at: i64,
+}
+
+/// A bond attestation was written by quorum. Absolute figures per the post-total convention — the
+/// reconciler diffs these against the vault without re-reading Solana state.
+#[event]
+pub struct BondAttested {
+    pub miner: Pubkey,
+    pub chain: String,
+    pub effective_balance: u64,
+    pub locked: bool,
+    pub epoch: u64,
+    pub attested_at: i64,
+}
+
+/// The global attestation heartbeat advanced (the dead-man fuse's liveness signal).
+#[event]
+pub struct AttestHeartbeat {
+    pub at: i64,
+}
+
 // --- Phase 9: reservation lottery (pool keyed per miner) ---
 
 #[event]

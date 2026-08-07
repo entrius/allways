@@ -1,10 +1,12 @@
 use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED};
+use crate::constants::{
+    ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
-use crate::state::{Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
+use crate::state::{BondAttestation, Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
 /// quorum, promote the swap to `Active` — where the miner's obligation (`timeout_at`) begins. All terms
@@ -51,6 +53,13 @@ pub struct VoteInitiate<'info> {
     )]
     pub swap: Box<Account<'info, Swap>>,
 
+    /// The bond attestation for the swap's pinned backing — required for any backing but "sol".
+    #[account(
+        seeds = [ATTEST_SEED, miner.key().as_ref(), swap.collateral_chain.as_bytes()],
+        bump,
+    )]
+    pub attestation: Option<Box<Account<'info, BondAttestation>>>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -76,11 +85,20 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         // Self-dealing backstop (finalize_reservation is the primary guard; this also covers
         // reservations filled before that guard deployed).
         require!(ctx.accounts.swap.user != ctx.accounts.swap.miner, ErrorCode::SelfSwapNotAllowed);
+        // Re-check the entry fuse: the heartbeat can go stale, or a penalty can land, between the fill
+        // and the attestation — and this is the last gate before the miner is obligated.
+        crate::backing::check_entry_gates(
+            &ctx.accounts.config,
+            &ctx.accounts.miner_state,
+            &ctx.accounts.swap.collateral_chain,
+            now,
+        )?;
         // Obligation gate: the miner must hold the over-collateralization requirement in the purse the
         // swap pinned as its backing (same leg-lookup discipline as finalize) before being bound.
         let purse = crate::backing::backing_purse(
             &ctx.accounts.swap.collateral_chain,
             &ctx.accounts.miner_state,
+            ctx.accounts.attestation.as_deref().map(|a| &**a),
         )?;
         require!(
             purse >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),

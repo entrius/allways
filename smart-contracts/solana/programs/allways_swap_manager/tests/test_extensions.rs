@@ -146,13 +146,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner.as_ref()),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -220,6 +221,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            attestation: None,
         }
         .to_account_metas(None),
     )
@@ -275,6 +277,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             reservation: resv_pda(miner),
             vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
             swap: swap_pda(&key),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

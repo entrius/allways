@@ -107,6 +107,23 @@ pub fn set_tao_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result
     Ok(())
 }
 
+/// Attested bond floor for activating the TAO backing, in rao — the twin of `set_min_collateral`.
+pub fn set_tao_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::remote_min_collateral(amount)?;
+    ctx.accounts.config.tao_min_collateral = amount;
+    msg!("tao_min_collateral = {}", amount);
+    Ok(())
+}
+
+/// Dead-man fuse: how stale the global attestation heartbeat may get before non-local backings are
+/// refused at entry. Sized off the heartbeat cadence, not the swap lifecycle.
+pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+    crate::validate::attest_max_age(secs)?;
+    ctx.accounts.config.attest_max_age_secs = secs;
+    msg!("attest_max_age_secs = {}", secs);
+    Ok(())
+}
+
 pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     crate::validate::settlement_grace(secs)?;
     ctx.accounts.config.settlement_grace_secs = secs;

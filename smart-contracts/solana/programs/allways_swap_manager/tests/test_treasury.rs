@@ -132,8 +132,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
 
     let activate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
-            &allways_swap_manager::instruction::VoteActivate {}.data(),
-            allways_swap_manager::accounts::VoteActivate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(0, miner.pubkey().as_ref()), system_program: SYS }.to_account_metas(None),
+            &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
+            allways_swap_manager::accounts::VoteActivate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(0, miner.pubkey().as_ref()), attestation: None, system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("activate");
     };
     activate(&mut svm, &vals[0]);
@@ -164,7 +164,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128 }.data(),
-        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()) }.to_account_metas(None),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("finalize");
 
     let key = skey("tx1");
@@ -176,7 +176,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     let initiate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
             &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
-            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, miner.pubkey().as_ref()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
+            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, miner.pubkey().as_ref()), swap: swap_pda(&key), attestation: None, system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("initiate");
     };
     initiate(&mut svm, &vals[0]);

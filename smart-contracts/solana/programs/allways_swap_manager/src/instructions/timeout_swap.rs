@@ -108,9 +108,11 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
             slash
         } else {
             // Busy-until-settled: freeing the miner now would let a new swap open against a bond that
-            // still owes this penalty. The grace holds it until the backing chain applies the verdict.
-            ctx.accounts.miner_state.busy_until =
-                now.saturating_add(ctx.accounts.config.settlement_grace_secs);
+            // still owes this penalty. Two locks, because they gate opposite doors — `busy_until` blocks
+            // the exit (deactivate/withdraw), `settling_until` blocks new entries (finalize/initiate).
+            let settled_at = now.saturating_add(ctx.accounts.config.settlement_grace_secs);
+            ctx.accounts.miner_state.busy_until = settled_at;
+            ctx.accounts.miner_state.settling_until = settled_at;
             0
         };
         ctx.accounts.miner_state.has_active_swap = false;

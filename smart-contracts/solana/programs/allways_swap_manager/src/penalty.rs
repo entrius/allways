@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 
+use crate::constants::{BACKING_BIT_SOL, BACKING_CHAIN_SOL};
 use crate::error::ErrorCode;
-use crate::events::MinerDeactivated;
+use crate::events::{MinerBackingChanged, MinerDeactivated};
 use crate::state::MinerState;
 
 /// The share of `amount` a purse of `available` can actually cover. Split out of `apply_penalty` so a
@@ -30,13 +31,24 @@ pub fn apply_penalty(
     }
     miner_state.collateral = current.checked_sub(actual).ok_or(ErrorCode::Overflow)?;
 
-    if miner_state.collateral < min_collateral && miner_state.active {
-        miner_state.active = false;
-        miner_state.deactivation_at = now;
-        // Without this emit the scorer — which rebuilds the active set purely from
-        // MinerActivated/MinerDeactivated events — keeps paying crown to a miner the chain
-        // already considers inactive, until some later vote event happens to fire.
-        emit!(MinerDeactivated { miner: miner_state.miner, at: now });
+    // Only the SOL purse went deficient, so only its bit drops (D2: a deficient purse disables its own
+    // quotes, not the miner). A miner still bonded on another hub keeps trading there.
+    if miner_state.collateral < min_collateral && miner_state.active_backings & BACKING_BIT_SOL != 0 {
+        let still_active = miner_state.set_backing(BACKING_BIT_SOL, false);
+        emit!(MinerBackingChanged {
+            miner: miner_state.miner,
+            backing: BACKING_CHAIN_SOL.to_string(),
+            enabled: false,
+            active_backings: miner_state.active_backings,
+            at: now,
+        });
+        if !still_active {
+            miner_state.deactivation_at = now;
+            // Without this emit the scorer — which rebuilds the active set purely from
+            // MinerActivated/MinerDeactivated events — keeps paying crown to a miner the chain
+            // already considers inactive, until some later vote event happens to fire.
+            emit!(MinerDeactivated { miner: miner_state.miner, at: now });
+        }
     }
     Ok(actual)
 }

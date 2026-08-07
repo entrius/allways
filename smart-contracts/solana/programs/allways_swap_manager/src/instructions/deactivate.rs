@@ -29,7 +29,9 @@ pub fn handler(ctx: Context<Deactivate>) -> Result<()> {
     require!(!ms.has_active_swap, ErrorCode::MinerHasActiveSwap);
     require!(now >= ms.busy_until, ErrorCode::MinerBusy);
 
-    ms.active = false;
+    // A miner leaving takes every purse with it — this is the exit door, not a per-backing sweep
+    // (that's `vote_deactivate`), and `active` must never survive as true over a cleared mask.
+    ms.clear_backings();
     ms.deactivation_at = now;
     emit!(MinerDeactivated { miner: ctx.accounts.miner.key(), at: now });
     msg!("miner self-deactivated: {}", ctx.accounts.miner.key());

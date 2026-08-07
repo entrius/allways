@@ -1,14 +1,17 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::{record_vote, request_hash, reset_round};
+use crate::backing;
+use crate::consensus::{backing_request_hash, record_vote, reset_round};
 use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_DEACTIVATE, VOTE_SEED};
 use crate::error::ErrorCode;
-use crate::events::MinerDeactivated;
+use crate::events::{MinerBackingChanged, MinerDeactivated};
 use crate::state::{Config, MinerState, VoteRound};
 
-/// A validator votes to force-deactivate a miner. On quorum the miner is deactivated and
-/// the post-deactivation cooldown clock starts. Guard: miner currently active.
+/// A validator votes to force-deactivate ONE of a miner's backings (the #616 floor sweep, per purse).
+/// On quorum that bit is cleared; the miner keeps trading on any backing still lit. The busy guards stay
+/// GLOBAL — one swap at a time spans purses, so a miner mid-commitment is off limits on every backing.
 #[derive(Accounts)]
+#[instruction(backing: String)]
 pub struct VoteDeactivate<'info> {
     #[account(mut)]
     pub validator: Signer<'info>,
@@ -39,9 +42,13 @@ pub struct VoteDeactivate<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<VoteDeactivate>) -> Result<()> {
+pub fn handler(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
-    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
+    let bit = backing::backing_bit(&backing)?;
+    require!(
+        ctx.accounts.miner_state.active_backings & bit != 0,
+        ErrorCode::MinerNotActive
+    );
     // Only an idle miner can be deactivated — never one mid-commitment (open pool / held reservation /
     // in-flight swap). Mirrors self-`deactivate` and keeps the "busy ⟹ active" invariant that
     // open_or_request + resolve_pool rely on (review #3 / user req).
@@ -49,7 +56,7 @@ pub fn handler(ctx: Context<VoteDeactivate>) -> Result<()> {
     require!(now >= ctx.accounts.miner_state.busy_until, ErrorCode::MinerBusy);
 
     let miner_key = ctx.accounts.miner.key();
-    let bound = request_hash(REQ_DEACTIVATE, &miner_key);
+    let bound = backing_request_hash(REQ_DEACTIVATE, &miner_key, &backing);
     let validator = ctx.accounts.validator.key();
     let bump = ctx.bumps.vote_round;
 
@@ -63,10 +70,21 @@ pub fn handler(ctx: Context<VoteDeactivate>) -> Result<()> {
     )?;
 
     if quorum {
-        ctx.accounts.miner_state.active = false;
-        ctx.accounts.miner_state.deactivation_at = now;
+        let active = ctx.accounts.miner_state.set_backing(bit, false);
         reset_round(&mut ctx.accounts.vote_round);
-        emit!(MinerDeactivated { miner: miner_key, at: now });
+        emit!(MinerBackingChanged {
+            miner: miner_key,
+            backing,
+            enabled: false,
+            active_backings: ctx.accounts.miner_state.active_backings,
+            at: now,
+        });
+        // The withdrawal cooldown starts only when the LAST purse goes dark — a miner still trading on
+        // another backing has not left, and MinerDeactivated must not claim it has.
+        if !active {
+            ctx.accounts.miner_state.deactivation_at = now;
+            emit!(MinerDeactivated { miner: miner_key, at: now });
+        }
         msg!("miner deactivated via consensus: {}", miner_key);
     }
     Ok(())
