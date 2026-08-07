@@ -16,6 +16,7 @@ from allways.cli.swap_commands.collateral import collateral_group
 from allways.cli.swap_commands.miner_commands import miner_group
 from allways.cli.swap_commands.pair import post_pair
 from allways.constants import RATE_PRECISION
+from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
 
 
 def _config(**over):
@@ -31,8 +32,11 @@ def _config(**over):
 
 
 def _state(**over):
+    # `active_backings` is the per-purse mask; `active` is its OR view. Default: both purses lit, so
+    # a fixture only has to think about backings when the test is about backings.
     base = dict(
         active=False,
+        active_backings=BACKING_BIT_SOL | BACKING_BIT_TAO,
         has_active_swap=False,
         busy_until=0,
         deactivation_at=0,
@@ -101,7 +105,7 @@ def test_deactivate_calls_self_deactivate():
         with patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)):
             res = CliRunner().invoke(miner_group, ['deactivate'])
     assert res.exit_code == 0, res.output
-    c.deactivate.assert_called_once_with()
+    c.deactivate.assert_called_once_with(backing=None)
 
 
 def test_bind_hotkey_signs_and_binds():
@@ -152,6 +156,8 @@ def test_post_pair_calls_set_quote_with_scaled_rate():
     assert first[4] == int(345 * RATE_PRECISION)
     # forward direction keeps src addr on from-leg, dst addr on to-leg
     assert (first[0], first[1], first[2], first[3]) == ('btc', 'tao', 'bc1qsrc', '5dst')
+    # btc<->tao has exactly one hub leg, so the backing is inferred silently — no --backing needed.
+    assert c.set_quote.call_args_list[0].kwargs['backing'] == 'tao'
 
 
 def test_post_pair_directional_counter_rate_posts_canonical():

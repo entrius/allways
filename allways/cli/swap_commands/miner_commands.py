@@ -9,6 +9,7 @@ from rich.table import Table
 from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    backing_label,
     console,
     fail,
     from_lamports,
@@ -18,8 +19,15 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
+from allways.constants import TAO_TO_RAO
 from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
+from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_BITS
 from allways.utils.rate import directional_rate
+
+
+def _purse_state(lit: bool) -> str:
+    """Purses are activated independently, so each one says whether it is serving (D2)."""
+    return '  [green](serving)[/green]' if lit else '  [dim](not serving)[/dim]'
 
 
 @click.group('miner', cls=StyledGroup)
@@ -54,19 +62,44 @@ def miner_status(pubkey: str):
     is_active = bool(ms and ms.active)
     has_active_swap = bool(ms and ms.has_active_swap)
     min_required = config.min_collateral if config is not None else 0
+    mask = int(getattr(ms, 'active_backings', 0) or 0) if ms is not None else 0
 
     table = Table(title='Collateral & Status', show_header=True)
     table.add_column('Field', style='cyan')
     table.add_column('Value', style='green')
 
-    table.add_row('Collateral', f'{from_lamports(collateral_lamports):.4f} SOL')
+    sol_lit = bool(mask & BACKING_BIT_SOL)
+    table.add_row('SOL purse', f'{from_lamports(collateral_lamports):.4f} SOL' + _purse_state(sol_lit))
     table.add_row('Min Required', f'{from_lamports(min_required):.4f} SOL')
+
+    # The TAO purse is NOT readable from Solana — what's shown is the quorum's attestation, which is
+    # already net of accrued fees and voted slashes. Say so: an operator comparing it to `alw vault
+    # status` (which prints the vault's GROSS counter) must know why the two differ.
+    tao_bit = bool(mask & BACKING_BIT_TAO)
+    att = None
+    if tao_bit or ms is not None:
+        try:
+            att = client.get_bond_attestation(target, 'tao')
+        except SolanaClientError:
+            att = None
+    if att is not None or tao_bit:
+        bond = f'{int(att.effective_balance) / TAO_TO_RAO:.9f} TAO' if att is not None else '(no attestation)'
+        table.add_row('TAO purse (effective)', bond + _purse_state(tao_bit))
+        if config is not None:
+            table.add_row('Min Required (TAO)', f'{int(config.tao_min_collateral) / TAO_TO_RAO:.9f} TAO')
+
     table.add_row('Status', '[green]Active[/green]' if is_active else '[red]Inactive[/red]')
     table.add_row('Has Active Swap', '[yellow]Yes[/yellow]' if has_active_swap else '[dim]No[/dim]')
     if ms is not None:
         table.add_row('Successful / Failed', f'{ms.successful_swaps} / {ms.failed_swaps}')
 
     console.print(table)
+    if att is not None:
+        console.print(
+            '[dim]TAO purse is the validators\' attested EFFECTIVE bond — vault gross minus accrued'
+            ' fees and voted slashes.\nIt is deliberately lower than `alw vault status`, which prints'
+            ' the vault\'s gross counter.[/dim]'
+        )
     console.print()
 
     # Section 2: Posted Quotes (on-chain MinerQuote PDAs)
@@ -82,7 +115,8 @@ def miner_status(pubkey: str):
         for q in quotes:
             src_up, dst_up = q.from_chain.upper(), q.to_chain.upper()
             rd = directional_rate(q.from_chain, q.to_chain, rate_display_from_fixed(q.rate))
-            console.print(f'  {src_up} → {dst_up}: [green]{rd} {dst_up}/{src_up}[/green]')
+            label = backing_label(getattr(q, 'collateral_chain', None))
+            console.print(f'  {src_up} → {dst_up} [cyan]{label}[/cyan]: [green]{rd} {dst_up}/{src_up}[/green]')
             console.print(f'    receive on {src_up}: [dim]{q.miner_from_addr}[/dim]')
             console.print(f'    send on {dst_up}:    [dim]{q.miner_to_addr}[/dim]')
     else:
@@ -226,8 +260,10 @@ def miner_activate():
         # Translator couldn't pin down a single cause — fall back to the prerequisites checklist.
         console.print('[dim]Prerequisites for activation:[/dim]')
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
-        console.print('[dim]  - Trading pair posted (alw miner post)[/dim]')
-        console.print('[dim]  - Collateral deposited >= 0.1 TAO (alw collateral deposit)[/dim]')
+        console.print('[dim]  - Collateral posted (alw collateral deposit) — activation gates on the'
+                      ' purse, not on quotes[/dim]')
+        console.print('[dim]  - Quotes come AFTER activation: alw miner post/quotes needs the purse'
+                      ' already serving[/dim]')
         console.print('[dim]Run `alw miner status` to see which are missing.[/dim]')
     elif accepted > 0:
         console.print('[dim]Votes submitted but quorum not yet reached. Check status with: alw miner status[/dim]')
@@ -235,26 +271,44 @@ def miner_activate():
 
 
 @miner_group.command('deactivate')
-def miner_deactivate():
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Leave one purse only (sol|tao), keeping the rest trading. Default: leave every purse.',
+)
+def miner_deactivate(backing: str):
     """Deactivate miner directly on the program (permissionless self-deactivate).
 
-    [dim]Calls deactivate() — no validator needed. After deactivation you must wait
-    2 * fulfillment_timeout before withdrawing collateral.[/dim]
+    [dim]Calls deactivate() — no validator needed. Without --backing this is the full exit: every
+    purse goes dark. With --backing only that purse stops serving; your quotes on the others keep
+    trading. The SOL withdrawal cooldown (2 * fulfillment_timeout) starts when the SOL purse drops —
+    a TAO-side exit is gated on the vault's own unlock path instead.[/dim]
 
     [dim]Examples:
-        $ alw miner deactivate[/dim]
+        $ alw miner deactivate
+        $ alw miner deactivate --backing tao[/dim]
     """
     _, client = get_solana_cli_context()
     pubkey = client.keypair.pubkey()
 
     console.print(f'\n[bold]Miner Deactivate: {str(pubkey)[:16]}...[/bold]\n')
 
-    # Pre-flight: the program guards deactivate() on no-active-swap + past busy_until.
+    if backing is not None:
+        backing = backing.lower()
+        if backing not in BACKING_BITS:
+            fail(f'--backing must be one of: {", ".join(BACKING_BITS)} (got "{backing}")')
+
+    # Pre-flight: the program guards deactivate() on no-active-swap + past busy_until (both global —
+    # one swap at a time spans purses).
     try:
         now = int(time.time())
         ms = client.get_miner_state(pubkey)
         if ms is None or not ms.active:
             console.print('[yellow]Miner is not active.[/yellow]\n')
+            return
+        if backing is not None and not int(ms.active_backings) & BACKING_BITS[backing]:
+            console.print(f'[yellow]Your {backing.upper()} purse is already not serving.[/yellow]\n')
             return
         if ms.has_active_swap:
             console.print('[dim]Wait for it to complete or time out, then try again.[/dim]')
@@ -267,12 +321,18 @@ def miner_deactivate():
 
     try:
         with loading('Submitting transaction...'):
-            sig = client.deactivate()
-        console.print(f'[green]Deactivated successfully[/green] (sig: {sig[:16]}...)')
+            sig = client.deactivate(backing=backing)
+        what = f'{backing.upper()} purse deactivated' if backing else 'Deactivated successfully'
+        console.print(f'[green]{what}[/green] (sig: {sig[:16]}...)')
         config = client.get_config()
-        if config is not None:
+        if config is not None and backing != 'tao':
             cooldown = config.fulfillment_timeout_secs * 2
             console.print(f'[dim]Collateral withdrawal available after {cooldown}s (~{cooldown // 60} min)[/dim]\n')
+        elif backing == 'tao':
+            console.print(
+                '[dim]Your SOL purse keeps trading. Unlocking the TAO bond is a separate,'
+                ' validator-quorumed step on the vault (`alw vault status`).[/dim]\n'
+            )
     except SolanaClientError as e:
         fail(f'Failed to deactivate: {e}')
 

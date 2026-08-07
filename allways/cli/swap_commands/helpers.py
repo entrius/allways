@@ -16,6 +16,7 @@ from rich.text import Text
 
 from allways.classes import SwapStatus
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.solana import pdas
 from allways.solana.client import SolanaClientError
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
 
@@ -688,3 +689,74 @@ def get_cli_context(
     else:
         config['netuid'] = int(config['netuid'])
     return config, wallet, subtensor, None
+
+
+# ─── Quote backing (W2b / D2) ────────────────────────────────────────────────
+# A quote declares which purse answers for it. Which backings a given quote MAY declare is fixed by
+# the pair (hub-capable AND one of the legs); which the miner may declare is fixed by its own
+# activation mask. The intersection is what these helpers resolve.
+
+BACKING_LABELS = {'sol': 'sol-backed', 'tao': 'tao-backed'}
+
+
+def backing_label(backing: Optional[str]) -> str:
+    """How a quote's backing reads in a listing. An unknown id is shown verbatim rather than hidden —
+    a quote the CLI doesn't recognize is exactly the thing an operator needs to see."""
+    if not backing:
+        return 'unbacked'
+    return BACKING_LABELS.get(backing, f'{backing}-backed')
+
+
+def declarable_backings(from_chain: str, to_chain: str) -> List[str]:
+    """Backings this pair could carry — hub-capable legs only. One entry on a spoke pair (sol<->btc,
+    tao<->btc), two on a hub<->hub pair (sol<->tao), none on a pair with no hub leg."""
+    return [b for b in pdas.BACKING_BITS if b in (from_chain, to_chain)]
+
+
+def resolve_quote_backing(miner_state, from_chain: str, to_chain: str, explicit: Optional[str] = None) -> str:
+    """Which backing a `set_quote` should declare, per the D2 ergonomics.
+
+    Infers SILENTLY when exactly one of the miner's purses qualifies (the common case), and HARD-ERRORS
+    naming --backing when both do. It never breaks the tie from market state: the backing changes the
+    guarantee a taker gets, so a scripted `alw miner post` must mean the same thing every time it runs.
+    """
+    pair = declarable_backings(from_chain, to_chain)
+    if not pair:
+        fail(
+            f'{from_chain}->{to_chain} has no hub leg, so no purse can back it. '
+            f'One leg must be a collateral chain ({", ".join(pdas.BACKING_BITS)}).'
+        )
+    mask = int(getattr(miner_state, 'active_backings', 0) or 0) if miner_state is not None else 0
+    active = [b for b in pair if mask & pdas.BACKING_BITS[b]]
+
+    if explicit is not None:
+        explicit = explicit.lower()
+        if explicit not in pdas.BACKING_BITS:
+            fail(f'--backing must be one of: {", ".join(pdas.BACKING_BITS)} (got "{explicit}")')
+        if explicit not in pair:
+            fail(
+                f'--backing {explicit} is not a leg of {from_chain}->{to_chain}. '
+                f'This pair can be backed by: {", ".join(pair)}.'
+            )
+        if explicit not in active:
+            fail(
+                f'Your {explicit.upper()} purse is not active, so it cannot back a quote. '
+                f'Activate it first (`alw miner activate`), then post.'
+            )
+        return explicit
+
+    if not active:
+        fail(
+            f'No active purse can back {from_chain}->{to_chain}. '
+            f'This pair needs one of: {", ".join(pair)} — activate that purse first '
+            f'(`alw miner activate`), then post.'
+        )
+    if len(active) > 1:
+        fail(
+            f'{from_chain}->{to_chain} can be backed by either of your active purses '
+            f'({", ".join(active)}), so the choice is yours to make: pass --backing '
+            f'<{"|".join(active)}>. The backing sets the failure guarantee a taker gets '
+            f'(SOL = instant SOL refund; TAO = TAO reimbursement, shortly after timeout), '
+            f'so it is never inferred from market depth.'
+        )
+    return active[0]

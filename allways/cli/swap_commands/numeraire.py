@@ -20,12 +20,15 @@ import click
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
+    backing_label,
     console,
     fail,
     get_cli_context,
     get_solana_cli_context,
     loading,
     quote_update_fee_lamports,
+    resolve_quote_backing,
+    safe_read,
 )
 from allways.cli.swap_commands.pair import write_rate_posted_flag
 from allways.constants import LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
@@ -95,9 +98,15 @@ def _example() -> str:
 @click.command('quotes', cls=StyledCommand)
 @quote_options
 @click.option('--spread', 'spread_bps', type=int, default=0, help='Symmetric margin in bps (0 = mid).')
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Collateral purse backing these quotes (sol|tao). Inferred when only one of yours qualifies.',
+)
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', 'yes', is_flag=True, help='Skip confirmation.')
-def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
+def quotes_command(spread_bps, backing, dry_run, yes, **spoke_opts):
     """Publish every hub pair from one price per chain (the 'X per 1 SOL' convention).
 
     One --<spoke>-price + --<spoke>-address pair per launch spoke; give as many or as few as you
@@ -129,13 +138,22 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
 
     specs = derive_sol_numeraire_quotes(sol_address, chain_specs, spread_bps)
 
+    # Every pair here is hub<->spoke through the numeraire, so each resolves independently: sol<->tao
+    # is the one that can go either way and will demand --backing from a dual-purse miner.
+    miner_state = safe_read(lambda: client.get_miner_state(miner), what='read miner state')
+    backings = {
+        (sp.from_chain, sp.to_chain): resolve_quote_backing(miner_state, sp.from_chain, sp.to_chain, backing)
+        for sp in specs
+    }
+
     # Show each direction's current rate + the churn fee this update will incur (per-direction,
     # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
     hub = NUMERAIRE_CHAIN.upper()
     console.print(f'\n[bold]{hub}-numéraire quotes[/bold]  [dim](X per 1 {hub})[/dim]\n')
     total_fee = 0
     for sp in specs:
-        cur = client.get_quote(miner, sp.from_chain, sp.to_chain)
+        b = backings[(sp.from_chain, sp.to_chain)]
+        cur = client.get_quote(miner, sp.from_chain, sp.to_chain, b)
         if cur is None:
             note = '[dim]new — free[/dim]'
         else:
@@ -151,7 +169,10 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
             else:
                 note = f'[dim]free (was {was:g})[/dim]'
         disp = quantize_rate_display(sp.rate)  # mirror the on-chain floor so preview == stored
-        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{disp:g}[/green]   {note}')
+        console.print(
+            f'  {sp.from_chain.upper()} → {sp.to_chain.upper()} [cyan]{backing_label(b)}[/cyan]: '
+            f'[green]{disp:g}[/green]   {note}'
+        )
 
     if total_fee:
         console.print(
@@ -177,6 +198,7 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
                     sp.to_addr,
                     quantize_rate_fixed(int(sp.rate * RATE_PRECISION)),
                     0,
+                    backing=backings[(sp.from_chain, sp.to_chain)],
                 )
             posted += 1
         except SolanaClientError as e:

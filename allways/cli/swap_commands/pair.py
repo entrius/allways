@@ -8,12 +8,15 @@ from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
+    backing_label,
     console,
     fail,
     get_cli_context,
     get_solana_cli_context,
     loading,
     quote_update_fee_lamports,
+    resolve_quote_backing,
+    safe_read,
 )
 from allways.constants import RATE_PRECISION
 from allways.solana.client import SolanaClientError
@@ -85,6 +88,12 @@ def prompt_rates(canon_from: str, canon_to: str) -> tuple:
 @click.argument('dst_addr', required=False, default=None, type=str)
 @click.argument('rate', required=False, default=None, type=FINITE_FLOAT)
 @click.argument('counter_rate', required=False, default=None, type=FINITE_FLOAT)
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Collateral purse backing these quotes (sol|tao). Inferred when only one of yours qualifies.',
+)
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 def post_pair(
@@ -94,6 +103,7 @@ def post_pair(
     dst_addr: str | None,
     rate: float | None,
     counter_rate: float | None,
+    backing: str | None,
     yes: bool,
     dry_run: bool,
 ):
@@ -192,6 +202,11 @@ def post_pair(
     _, wallet, _, _ = get_cli_context(need_client=False)
     _, client = get_solana_cli_context()
 
+    # Both directions of a pair share the same legs, so they share the same declarable backings — one
+    # resolution covers the whole call.
+    miner_state = safe_read(lambda: client.get_miner_state(client.keypair.pubkey()), what='read miner state')
+    backing = resolve_quote_backing(miner_state, src_chain, dst_chain, backing)
+
     src_up, dst_up = src_chain.upper(), dst_chain.upper()
     src_name, dst_name = SUPPORTED_CHAINS[src_chain].name, SUPPORTED_CHAINS[dst_chain].name
 
@@ -209,6 +224,8 @@ def post_pair(
         console.print(f'  {dst_up} → {src_up}: [green]1 {dst_up} = {rev_disp} {src_up}[/green]{same}')
     else:
         console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
+    console.print(f'  Backing:    [cyan]{backing_label(backing)}[/cyan] '
+                  f'[dim](the purse that answers if you fail to deliver)[/dim]')
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
     # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
@@ -218,7 +235,7 @@ def post_pair(
     to_post = ([(src_chain, dst_chain)] if rate > 0 else []) + ([(dst_chain, src_chain)] if counter_rate > 0 else [])
     total_fee = 0
     for from_c, to_c in to_post:
-        cur = client.get_quote(miner, from_c, to_c)
+        cur = client.get_quote(miner, from_c, to_c, backing)
         if cur is not None:
             total_fee += quote_update_fee_lamports(now - int(cur.updated_at))
     if total_fee:
@@ -253,6 +270,7 @@ def post_pair(
                     to_addr,
                     quantize_rate_fixed(int(r * RATE_PRECISION)),
                     DEFAULT_QUOTE_LIQUIDITY,
+                    backing=backing,
                 )
             posted += 1
         except SolanaClientError as e:
@@ -260,7 +278,7 @@ def post_pair(
 
     if not posted:
         fail('No quotes were published.')
-    console.print(f'[green]Published {posted} quote direction(s)![/green]')
+    console.print(f'[green]Published {posted} {backing_label(backing)} quote direction(s)![/green]')
     write_rate_posted_flag(wallet.hotkey.ss58_address)
 
 

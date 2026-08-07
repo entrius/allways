@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
     STATUS_SORT_ORDER,
     STATUS_STYLES,
     ZERO_SWAP_KEY,
+    backing_label,
     console,
     fail,
     from_lamports,
@@ -175,7 +176,8 @@ def view_miners(full, sort_by, status_filter, min_capacity, search, as_json):
         for j, q in enumerate(e.quotes):
             if j:
                 dirs.append('\n')
-            dirs.append(f'{_quote_dir(q)} @ {_rate(q)}')
+            dirs.append(f'{_quote_dir(q)} @ {_rate(q)} ')
+            dirs.append(backing_label(getattr(q, 'collateral_chain', None)), style='dim cyan')
             if full:
                 dirs.append(f'  ({q.miner_from_addr}→{q.miner_to_addr})', style='dim')
         table.add_row(
@@ -257,6 +259,8 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
                     'from': q.from_chain,
                     'to': q.to_chain,
                     'rate': _rate(q),
+                    # Which purse answers a failed swap — the guarantee attached to this offer.
+                    'backing': getattr(q, 'collateral_chain', None),
                     'collateral_sol': from_lamports(e.collateral),
                     'status': status,
                     'miner_from_addr': q.miner_from_addr,
@@ -273,6 +277,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
 
     table = Table(title=f'Posted Rates ({len(rows)})', show_header=True)
     table.add_column('Direction', style='cyan')
+    table.add_column('Backing', style='cyan')
     table.add_column('Rate (to/from)', style='green', justify='right')
     table.add_column('Miner', style='white')
     table.add_column('Collateral', style='green', justify='right')
@@ -282,6 +287,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
     for e, q, status in rows:
         cells = [
             _quote_dir(q),
+            backing_label(getattr(q, 'collateral_chain', None)),
             _rate(q),
             _short(e.pubkey_str, full),
             f'{from_lamports(e.collateral):.4f} SOL',
