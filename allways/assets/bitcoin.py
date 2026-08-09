@@ -10,7 +10,7 @@ from bitcoin_message_tool.bmt import sign_message, verify_message
 from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
-from allways.assets.base import Asset, ProviderUnreachableError, TransactionInfo
+from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_BTC, ChainDefinition
 
@@ -143,12 +143,20 @@ class Bitcoin(Asset, Chain):
         self.last_send_error = msg
         bt.logging.error(msg)
 
-    def get_chain(self) -> ChainDefinition:
+    @property
+    def chain_def(self) -> ChainDefinition:
         return CHAIN_BTC
 
     def describe(self) -> str:
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
+
+    def normalize_address(self, address: str) -> str:
+        """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
+        if not isinstance(address, str):
+            return address
+        lowered = address.lower()
+        return lowered if detect_address_type(lowered) in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2TR) else address
 
     def can_send_from(self, address: str) -> bool:
         """True iff BTC_PRIVATE_KEY derives ``address`` (any of its p2wpkh / p2sh-p2wpkh / p2pkh
@@ -164,7 +172,11 @@ class Bitcoin(Asset, Chain):
             net = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
             pub = EmbitPrivateKey.from_wif(wif).get_public_key()
             seg = p2wpkh(pub)
-            return address in {seg.address(net), p2sh(seg).address(net), p2pkh(pub).address(net)}
+            return self.normalize_address(address) in {
+                seg.address(net),
+                p2sh(seg).address(net),
+                p2pkh(pub).address(net),
+            }
         except Exception:
             return False
 
@@ -204,7 +216,7 @@ class Bitcoin(Asset, Chain):
         15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
         tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
         confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
-        tip_height = self.cached_block_height()
+        tip_height = self.chain.cached_block_height()
         if tip_height is None:
             return 0
         return max(0, tip_height - block_number + 1)
@@ -229,7 +241,7 @@ class Bitcoin(Asset, Chain):
             if confirmed and block_number:
                 confirmations = self.api_calc_confirmations(block_number)
 
-            min_confs = self.get_chain().min_confirmations
+            min_confs = self.chain_def.min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
 
             if is_confirmed:
@@ -442,6 +454,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         key: WIF private key string. If None, falls back to get_wif (BTC_PRIVATE_KEY).
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.error('Taproot (P2TR) addresses are not yet supported for message signing')
@@ -470,6 +483,7 @@ class Bitcoin(Asset, Chain):
         Supports P2PKH, P2WPKH, and P2SH-P2WPKH addresses via BIP-137.
         No RPC dependency — pure cryptographic verification.
         """
+        address = self.normalize_address(address)
         addr_type = detect_address_type(address)
         if addr_type == ADDR_TYPE_P2TR:
             bt.logging.warning('Taproot (P2TR) addresses are not yet supported for message verification')
@@ -491,7 +505,7 @@ class Bitcoin(Asset, Chain):
         amount: int,
         from_address: Optional[str] = None,
         fee_rate_override: Optional[int] = None,
-    ) -> Optional[Tuple[str, int]]:
+    ) -> SendResult:
         """Send BTC via embit + Blockstream API (no full node required). Amount in satoshis.
 
         Uses BTC_PRIVATE_KEY env var (WIF format). Supports all address types:
@@ -633,8 +647,12 @@ class Bitcoin(Asset, Chain):
             self._send_error(f'embit send failed: {type(e).__name__}: {e}')
             return None
 
-    def resolve_sender_utxos(self, from_address, type_to_script):
-        """Match from_address to address type and fetch UTXOs, or probe all types."""
+    def resolve_sender_utxos(
+        self, from_address: Optional[str], type_to_script: dict
+    ) -> Optional[Tuple[bytes, str, list, str]]:
+        """(script, address, utxos, address_type) for the funding address, or None.
+
+        Matches ``from_address`` to its address type when given, else probes all types."""
         if from_address:
             detected = detect_address_type(from_address)
             if detected not in type_to_script:
@@ -670,7 +688,9 @@ class Bitcoin(Asset, Chain):
         self._send_error('No UTXOs found for any address type')
         return None
 
-    def select_utxos(self, utxos, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None):
+    def select_utxos(
+        self, utxos: list, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None
+    ) -> Optional[Tuple[list, int, int]]:
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
@@ -756,9 +776,7 @@ class Bitcoin(Asset, Chain):
                 time.sleep(3)
         return BTC_MIN_FEE_RATE
 
-    def send_amount(
-        self, to_address: str, amount: int, from_address: Optional[str] = None
-    ) -> Optional[Tuple[str, int]]:
+    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
         """Send BTC via embit + Esplora. Returns (tx_hash, block_number) or None.
 
         Signing credentials come from ``BTC_PRIVATE_KEY``, not from the caller.

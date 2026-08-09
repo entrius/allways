@@ -1,32 +1,46 @@
-from typing import Dict, Optional, Set, Tuple, Type
+from typing import Dict, NamedTuple, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
-from allways.assets.base import Asset, TransactionInfo
+from allways.assets.base import Asset, SendResult, TransactionInfo
 from allways.assets.bitcoin import Bitcoin
 from allways.assets.chain import Chain
-from allways.assets.ethereum import EvmCoin
+from allways.assets.erc20 import ArbUsdc, Erc20
+from allways.assets.ethereum import Ether
 from allways.assets.solana import Sol
 from allways.assets.subtensor import Tao
 
 __all__ = [
     'Asset',
+    'AssetSpec',
     'Chain',
+    'SendResult',
     'TransactionInfo',
     'Bitcoin',
     'Tao',
     'Sol',
-    'EvmCoin',
+    'Ether',
+    'Erc20',
+    'ArbUsdc',
     'create_assets',
 ]
 
-# Registry: (chain_id, asset class, kwarg names to forward). The wire id is a "chain"
-# (program strings, DB columns, /chains); in code it resolves to an Asset.
-ASSET_REGISTRY: Tuple[Tuple[str, Type[Asset], Tuple[str, ...]], ...] = (
-    ('btc', Bitcoin, ()),
-    ('tao', Tao, ('subtensor', 'wallet')),
-    ('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
-    ('eth', EvmCoin, ()),
+
+class AssetSpec(NamedTuple):
+    """One registry row. The wire id is a "chain" (program strings, DB columns, /chains);
+    in code it resolves to an Asset built as ``cls(**forwarded create_assets kwargs)``."""
+
+    chain_id: str
+    cls: Type[Asset]
+    kwarg_names: Tuple[str, ...]  # create_assets kwargs this asset's constructor takes
+
+
+ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
+    AssetSpec('btc', Bitcoin, ()),
+    AssetSpec('tao', Tao, ('subtensor', 'wallet')),
+    AssetSpec('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
+    AssetSpec('eth', Ether, ()),
+    AssetSpec('arbusdc', ArbUsdc, ()),
 )
 
 
@@ -59,6 +73,7 @@ def create_assets(
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
             provider = cls(**provider_kwargs)
+            provider.chain  # a missing Chain binding fails here at boot, not mid-pass
             if check:
                 provider.check_connection(require_send=require_send)
             providers[chain_id] = provider

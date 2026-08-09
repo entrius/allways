@@ -18,7 +18,7 @@ from solders.pubkey import Pubkey
 
 from allways import dev_signal
 from allways.assets.base import ProviderUnreachableError
-from allways.chains import compute_extension_target_secs, get_chain
+from allways.chains import compute_extension_target_secs, get_chain_def
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
@@ -84,7 +84,7 @@ def _status_name(swap: Any) -> str:
 def _confs(chain_id: str, info: Any) -> str:
     """Confirmation progress of a leg, e.g. '1/2 confs'. Unmined or absent legs read 0."""
     have = int(getattr(info, 'confirmations', 0) or 0)
-    return f'{have}/{get_chain(chain_id).min_confirmations} confs'
+    return f'{have}/{get_chain_def(chain_id).min_confirmations} confs'
 
 
 def _swap_key_hex(key: Any) -> str:
@@ -165,7 +165,7 @@ class SolanaSwapLoop:
         would silently always-pass). Fresh iff block_time >= floor - grace; a per-chain GRACE (default 0)
         absorbs honest clock skew. Fails closed if block_time is missing."""
         provider = self.providers.get(chain)
-        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0) if provider else 0
+        grace = getattr(provider.chain_def, 'replay_grace_secs', 0) if provider else 0
         if not is_tx_fresh(info, floor_unix, grace):
             bt.logging.warning(
                 f'{label}: {chain} tx block_time {getattr(info, "block_time", None)} predates floor '

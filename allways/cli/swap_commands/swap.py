@@ -15,7 +15,7 @@ from typing import List, NamedTuple, Optional
 
 import click
 
-from allways.chains import SUPPORTED_CHAINS, get_chain
+from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
     discover_validators,
@@ -188,7 +188,7 @@ MINER_RATE_WARN_FRACTION = 0.5
 
 
 def _net_receive(to_amount: int, to_chain: str) -> float:
-    return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
 
 
 def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap):
@@ -210,7 +210,7 @@ def _pick_intake(viable, from_chain, to_chain):
     if not sys.stdin.isatty():
         fail('Bare --miner needs a terminal; pass --miner <pubkey> when scripting.')
     ranked = sorted(viable, key=lambda p: p[1].to_amount, reverse=True)
-    sol_decimals = get_chain(NUMERAIRE_CHAIN).decimals
+    sol_decimals = get_chain_def(NUMERAIRE_CHAIN).decimals
     console.print(f'\n  Miners quoting {from_chain.upper()}->{to_chain.upper()} (best first):')
     for i, (c, amts) in enumerate(ranked, 1):
         rate_disp = directional_rate(from_chain, to_chain, c.rate_display)
@@ -426,6 +426,9 @@ def swap_now_command(
             fail('No miner can fund an executable swap for that amount within bounds.')
         cand, amts = best
 
+    # Deliverability screens — before the fee-charging entry AND before sending into a doomed swap.
+    _screen_deliverability(client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount)
+
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
     # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
@@ -456,7 +459,7 @@ def swap_now_command(
         f'{to_chain.upper()}/{from_chain.upper()}{pinned_note})\n'
     )
     if contention.is_open and not resuming:
-        fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain(NUMERAIRE_CHAIN).decimals
+        fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain_def(NUMERAIRE_CHAIN).decimals
         if contention.weighted_rivals > 0:
             hopeless = '' if routed else ', so a self-represented taker is very unlikely to win this draw'
             console.print(
@@ -543,7 +546,7 @@ def swap_now_command(
             drawn=existing if resume_drawn else None,
             backing=cand.backing,
         )
-    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain(to_chain).decimals
+    recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
@@ -599,6 +602,61 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     return lines
 
 
+def _gate_provider(chain: str, client, config):
+    """Read-only provider for deliverability screens (no send creds, no startup check).
+    None when it can't be built — the screens fail open; routed flows are re-gated by the
+    validator either way."""
+    from allways.assets import ASSET_REGISTRY
+
+    spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
+    if spec is None:
+        return None
+    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
+    try:
+        return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
+    except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
+        return None
+
+
+def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount):
+    """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
+
+    Self-represented flows have no validator to gate for them (F7), so mirror the
+    validator's reserve gates locally: the taker's receive address must be well-formed and
+    accept the dest asset, and the miner's receive address must accept the source funds
+    (T18). The source-address probe is a courtesy warning only — a frozen source just means
+    the deposit fails and the reservation lapses unclaimed."""
+    spoke = to_chain if from_chain == NUMERAIRE_CHAIN else from_chain
+    provider = _gate_provider(spoke, client, config)
+    if provider is None:
+        return
+    if spoke == to_chain:
+        # Format first — offline, and a malformed address can never be delivered to.
+        if not provider.chain.is_valid_address(receive_addr):
+            fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
+        if not provider.can_deliver_to(receive_addr, amts.to_amount):
+            fail(
+                f'  Your receive address cannot accept {to_chain.upper()} right now '
+                '(frozen or transfers paused). No funds moved.'
+            )
+        return
+    quote = client.get_quote(cand.miner, from_chain, to_chain)
+    miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
+    if miner_addr and (
+        not provider.chain.is_valid_address(miner_addr) or not provider.can_deliver_to(miner_addr, from_amount)
+    ):
+        fail(
+            f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
+            '— pick another miner (--miner). No funds moved.'
+        )
+    if user_from_addr and not provider.can_deliver_to(user_from_addr, from_amount):
+        console.print(
+            f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '
+            '(frozen?). If the deposit fails, the reservation lapses unclaimed.[/yellow]'
+        )
+
+
 def _source_provider(from_chain: str, client, config):
     """Build ONLY the source chain's provider with this CLI's own signing creds (solana keypair /
     bt wallet / BTC WIF), from the same registry the neurons use — so a new spoke chain works with
@@ -606,10 +664,9 @@ def _source_provider(from_chain: str, client, config):
     (→ manual fallback) if the provider can't be built with send credentials."""
     from allways.assets import ASSET_REGISTRY
 
-    entry = next((e for e in ASSET_REGISTRY if e[0] == from_chain), None)
-    if entry is None:
+    spec = next((s for s in ASSET_REGISTRY if s.chain_id == from_chain), None)
+    if spec is None:
         return None
-    _id, cls, kwarg_names = entry
 
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
     if from_chain == 'tao':
@@ -618,7 +675,7 @@ def _source_provider(from_chain: str, client, config):
         _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
         avail.update(subtensor=subtensor, wallet=wallet)
     try:
-        provider = cls(**{k: avail[k] for k in kwarg_names if k in avail})
+        provider = spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
         provider.check_connection(require_send=True)
     except Exception as e:  # noqa: BLE001 - missing creds (e.g. no BTC_PRIVATE_KEY) → manual fallback
         console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')
@@ -663,7 +720,7 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
         )
         return False
 
-    amount_disp = int(resv.from_amount) / 10 ** get_chain(from_chain).decimals
+    amount_disp = int(resv.from_amount) / 10 ** get_chain_def(from_chain).decimals
     to_addr = resv.miner_from_addr
     wallet_label = {
         'sol': 'Solana keypair',

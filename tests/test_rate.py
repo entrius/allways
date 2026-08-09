@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from allways.chains import get_chain
+from allways.chains import get_chain_def
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
 from allways.utils.rate import (
     apply_fee_deduction,
@@ -18,6 +18,8 @@ from allways.utils.rate import (
 TAO_DEC = 9
 BTC_DEC = 8
 ETH_DEC = 18
+SOL_DEC = 9
+USDC_DEC = 6
 
 
 class TestBtcToTao:
@@ -132,6 +134,33 @@ class TestFutureEth:
         tao_rao = calculate_to_amount(source_wei, '2000', is_reverse=False, to_decimals=TAO_DEC, from_decimals=ETH_DEC)
         back_wei = calculate_to_amount(tao_rao, '2000', is_reverse=True, to_decimals=TAO_DEC, from_decimals=ETH_DEC)
         assert back_wei == source_wei
+
+
+class TestSolArbusdc:
+    """sol ↔ arbusdc: the first spoke with FEWER decimals than the hub (6 vs 9) whose
+    canonical dest is the spoke — decimal_diff = 6 - 9 = -3, integer-exact both branches."""
+
+    def test_sol_to_arbusdc(self):
+        # 1 SOL @ 150 USDC/SOL → 150 USDC
+        result = calculate_to_amount(10**SOL_DEC, '150', is_reverse=False, to_decimals=USDC_DEC, from_decimals=SOL_DEC)
+        assert result == 150 * 10**USDC_DEC
+
+    def test_arbusdc_to_sol(self):
+        # 150 USDC @ 150 USDC/SOL → 1 SOL
+        source = 150 * 10**USDC_DEC
+        result = calculate_to_amount(source, '150', is_reverse=True, to_decimals=USDC_DEC, from_decimals=SOL_DEC)
+        assert result == 10**SOL_DEC
+
+    def test_round_trip_exact(self):
+        source = 10**SOL_DEC
+        usdc = calculate_to_amount(source, '150', is_reverse=False, to_decimals=USDC_DEC, from_decimals=SOL_DEC)
+        back = calculate_to_amount(usdc, '150', is_reverse=True, to_decimals=USDC_DEC, from_decimals=SOL_DEC)
+        assert back == source
+
+    def test_single_microusdc_granularity(self):
+        # 1 µUSDC @ 150 USDC/SOL → 1000/150 lamports, floored: the coarsest step of the pair.
+        result = calculate_to_amount(1, '150', is_reverse=True, to_decimals=USDC_DEC, from_decimals=SOL_DEC)
+        assert result == 6
 
 
 class TestEdgeCases:
@@ -386,7 +415,7 @@ class TestIsExecutableRate:
         """Symmetric out of SOL: 1e-10 TAO/SOL → inverse 1e10 overshoots on the SOL leg."""
         assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
 
-    DUST = get_chain('btc').min_onchain_amount  # smallest fundable BTC source
+    DUST = get_chain_def('btc').min_onchain_amount  # smallest fundable BTC source
 
     def test_sub_dust_boundary_rate_rejected(self):
         """At max_swap/10, the only in-bounds source is 1 sat — below the BTC
@@ -417,6 +446,17 @@ class TestIsExecutableRate:
         source maps in-bounds — just executable."""
         rate = (10 * self.DUST) / self.MAX
         assert is_executable_rate(rate, 'sol', 'btc', self.MIN, self.MAX) is True
+
+    def test_arbusdc_rates_executable_at_unit_floor(self):
+        """F1 regression guard — arbusdc must stay routable BOTH ways while its
+        min_onchain_amount stays pinned at 1. The gate consumes the canonical USDC-per-SOL
+        rate as if it were SOL-per-USDC on the arbusdc→sol side (the PR-E orientation
+        defect), so a real dust floor (e.g. 0.01 USDC = 10_000) pushes the implied minimum
+        source above max_swap and silently burns the direction's pool. If this test fails
+        because the floor was raised: revert the floor — it is load-bearing until PR-E."""
+        assert get_chain_def('arbusdc').min_onchain_amount == 1
+        assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
     def test_sol_to_btc_sentinel_unset_bounds_still_permissive(self):
         """Unset bounds disable the gate in both directions — keeps the

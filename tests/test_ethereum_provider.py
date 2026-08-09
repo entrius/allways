@@ -1,4 +1,4 @@
-"""EvmCoin unit tests — all offline (RPC layer mocked, signing is pure crypto).
+"""Ether unit tests — all offline (RPC layer mocked, signing is pure crypto).
 
 Covers the ETH-specific hazards: EIP-55 casing at every comparison boundary, inclusion≠settlement
 (reverted txs carry intact to/value fields), receipt-unavailable must read as 'unknown' not
@@ -10,7 +10,7 @@ from typing import Optional
 import pytest
 
 from allways.assets.base import ProviderUnreachableError
-from allways.assets.ethereum import EvmCoin
+from allways.assets.ethereum import Ether
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -25,7 +25,7 @@ def provider(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return EvmCoin()
+    return Ether()
 
 
 def rpc_stub(provider, responses: dict):
@@ -427,12 +427,12 @@ class TestNetworkGuard:
         # A typo ('seplia') silently becoming mainnet would pay real ETH against test swaps.
         monkeypatch.setenv('ETH_NETWORK', 'seplia')
         with pytest.raises(ValueError, match='ETH_NETWORK'):
-            EvmCoin()
+            Ether()
 
     def test_unset_defaults_to_mainnet(self, monkeypatch):
         monkeypatch.delenv('ETH_NETWORK', raising=False)
         monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        assert EvmCoin().network == 'mainnet'
+        assert Ether().network == 'mainnet'
 
 
 class TestAbsenceQuorum:
@@ -511,6 +511,13 @@ class TestSendResilience:
     def _key(self, provider, monkeypatch):
         # After `provider`, whose fixture delenvs the key.
         monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
+
+    def test_all_lowercase_committed_dest_still_sends(self, provider):
+        # An all-lowercase dest is legal (EIP-55 is optional) and passes is_valid_address, but
+        # eth-account refuses a non-checksummed `to` — the sign path checksums it, or the miner
+        # could never pay this dest and would ride to a slash.
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'ee' * 32))
+        assert provider.send_amount(RECIPIENT.lower(), 10**15) is not None
 
     def test_null_broadcast_response_still_returns_the_local_hash(self, provider):
         # The hash is computed locally from the signed tx — a quirky 'result: null' from the

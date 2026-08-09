@@ -14,6 +14,7 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.base import ProviderUnreachableError
+from allways.chains import SUPPORTED_CHAINS
 from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
@@ -73,6 +74,11 @@ def reserve_on_behalf(
     pool is open (so joiners stay rate-consistent for D1) else the miner's live quote (which the
     contract pins at open). Validates eligibility + bounds before paying the fee.
     """
+    # Chain ids are lowercase everywhere (the program enforces it at intake); reject a
+    # cased/unknown id here too so it can't derive a mismatched quote PDA or pool first.
+    if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
+        return ReserveResult(False, f'unsupported chain pair {from_chain}->{to_chain} (chain ids are lowercase)')
+
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
@@ -83,6 +89,7 @@ def reserve_on_behalf(
         return ReserveResult(False, 'miner is not active')
 
     now = int(time.time())
+    quote = None
     pool = client.get_pool(miner_pk)
     joining = (
         pool is not None
@@ -116,11 +123,27 @@ def reserve_on_behalf(
     if not ok:
         return ReserveResult(False, reason)
 
-    # Deliverability gate — BEFORE any funds move: a dest that provably refuses transfers
-    # (e.g. a reverting contract wallet) must bounce here, not strand a paid swap later.
-    provider = getattr(validator, 'axon_assets', {}).get(to_chain)
-    if provider is not None and not provider.can_deliver_to(user_to_addr, amts.to_amount):
-        return ReserveResult(False, 'destination address rejects incoming transfers')
+    # Deliverability gates — BEFORE any funds move: a dest that can't take delivery (malformed
+    # address, or one that provably refuses transfers) must bounce here, not strand a paid swap
+    # later. Format first: it's offline and a malformed address can never be delivered to.
+    providers = getattr(validator, 'axon_assets', {})
+    provider = providers.get(to_chain)
+    if provider is not None:
+        if not provider.chain.is_valid_address(user_to_addr):
+            return ReserveResult(False, f'destination is not a valid {to_chain} address')
+        if not provider.can_deliver_to(user_to_addr, amts.to_amount):
+            return ReserveResult(False, 'destination address rejects incoming transfers')
+    # Same gate, source side (T18): the miner's receive address must accept the user's funds —
+    # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
+    src_provider = providers.get(from_chain)
+    if src_provider is not None:
+        miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain)
+        miner_from_addr = getattr(miner_quote, 'miner_from_addr', '') if miner_quote else ''
+        if miner_from_addr and (
+            not src_provider.chain.is_valid_address(miner_from_addr)
+            or not src_provider.can_deliver_to(miner_from_addr, from_amount)
+        ):
+            return ReserveResult(False, 'miner receive address cannot accept the source funds')
 
     try:
         user_pk = Pubkey.from_string(user_pubkey)
@@ -325,7 +348,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # confirms (source 'pending'->extend, 'ok'+fresh->attest). A 0-conf mempool tx has no block_time, so its
     # freshness is deferred too; only a mined tx is freshness-checked here (fast-fail a stale mined deposit).
     if tx_info.block_time is not None:
-        grace = getattr(provider.get_chain(), 'replay_grace_secs', 0)
+        grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
         if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
             return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
 

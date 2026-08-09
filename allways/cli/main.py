@@ -53,11 +53,13 @@ load_dotenv(Path.home() / '.allways' / '.env', override=False)
 from allways.cli.help import StyledAliasGroup, StyledGroup  # noqa: E402
 from allways.cli.swap_commands.helpers import (  # noqa: E402
     ALLWAYS_DIR,
+    ARBUSDC_NETWORKS,
     BTC_NETWORKS,
     CONFIG_FILE,
     ENV_BUNDLES,
     ETH_NETWORKS,
     SOLANA_NETWORKS,
+    apply_arbusdc_network_env,
     apply_btc_network_env,
     apply_eth_network_env,
     apply_global_flags,
@@ -67,9 +69,10 @@ from allways.cli.swap_commands.helpers import (  # noqa: E402
 )
 from allways.constants import NETUID_FINNEY  # noqa: E402
 
-# Feed configured chain networks into the providers (which read {BTC,ETH}_NETWORK from env; a real env wins).
+# Feed configured chain networks into the providers (which read {BTC,ETH,ARBUSDC}_NETWORK from env; a real env wins).
 apply_btc_network_env(get_effective_config())
 apply_eth_network_env(get_effective_config())
+apply_arbusdc_network_env(get_effective_config())
 
 # Restore original argv now that bittensor has been imported
 _sys.argv = _saved_argv
@@ -163,6 +166,7 @@ def _effective_settings(config: dict) -> list:
 
     btc_env = os.environ.get('BTC_NETWORK')
     eth_env = os.environ.get('ETH_NETWORK')
+    arbusdc_env = os.environ.get('ARBUSDC_NETWORK')
     return [
         row('network', default='finney'),
         row('netuid', default=NETUID_FINNEY),
@@ -180,6 +184,11 @@ def _effective_settings(config: dict) -> list:
             'eth-network',
             config.get('eth-network') or eth_env or 'mainnet',
             'config' if config.get('eth-network') else 'env' if eth_env else 'default',
+        ),
+        (
+            'arbusdc-network',
+            config.get('arbusdc-network') or arbusdc_env or 'mainnet',
+            'config' if config.get('arbusdc-network') else 'env' if arbusdc_env else 'default',
         ),
         row('router'),
         ('program-id', program_id, program_src),
@@ -218,6 +227,7 @@ VALID_CONFIG_KEYS = (
     'solana-keypair',
     'btc-network',
     'eth-network',
+    'arbusdc-network',
     'router',
     'env',
 )
@@ -230,7 +240,7 @@ def config_set(key: str, value: str):
     """Set a configuration value.
 
     [dim]Valid keys:
-        env                 One-liner bundle: sets network + solana-network + btc-network + eth-network + netuid + router
+        env                 One-liner bundle: sets every chain's network + netuid + router
         wallet              Bittensor wallet name
         hotkey              Bittensor hotkey name
         network             Bittensor network name (test/finney/local) or ws:// endpoint
@@ -240,6 +250,7 @@ def config_set(key: str, value: str):
         solana-keypair      Path to the Solana keypair that signs miner/admin ops (SOLANA_KEYPAIR_PATH env wins)
         btc-network         Bitcoin network name (mainnet/testnet4/testnet/signet)
         eth-network         Ethereum network name (mainnet/sepolia)
+        arbusdc-network     Arbitrum USDC network name (mainnet/sepolia)
         router              Validator hotkey (ss58) to route reservations through; "" = self-represent
         program-id          Solana program ID (miner/admin commands)[/dim]
 
@@ -248,10 +259,11 @@ def config_set(key: str, value: str):
         network:        finney | test | local | ws://...
         solana-network: devnet | mainnet | localnet   (or set a custom solana-rpc URL)
         btc-network:    mainnet | testnet4 | testnet | signet
-        eth-network:    mainnet | sepolia[/dim]
+        eth-network:    mainnet | sepolia
+        arbusdc-network: mainnet | sepolia (Arbitrum Sepolia)[/dim]
 
     [dim]Examples:
-        $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + eth sepolia + netuid 19
+        $ alw config set env testnet          # bittensor test + solana devnet + btc testnet4 + eth/arbusdc sepolia + netuid 19
         $ alw config set wallet alice
         $ alw config set solana-network devnet
         $ alw config set solana-keypair ~/.config/solana/dev.json
@@ -266,7 +278,7 @@ def config_set(key: str, value: str):
         except json.JSONDecodeError:
             console.print('[yellow]Warning: Existing config was invalid, starting fresh[/yellow]')
 
-    # env bundle: expand one name into all three chains' networks + netuid in a single write.
+    # env bundle: expand one name into every chain's network + netuid in a single write.
     if key == 'env':
         bundle = ENV_BUNDLES.get(value)
         if not bundle:
@@ -288,6 +300,9 @@ def config_set(key: str, value: str):
         return
     if key == 'eth-network' and value not in ETH_NETWORKS:
         console.print(f'[red]Unknown eth-network {value!r}; expected {list(ETH_NETWORKS)}.[/red]')
+        return
+    if key == 'arbusdc-network' and value not in ARBUSDC_NETWORKS:
+        console.print(f'[red]Unknown arbusdc-network {value!r}; expected {list(ARBUSDC_NETWORKS)}.[/red]')
         return
 
     # Validate the keypair at set time and echo its pubkey, so a typo'd path or wrong file
