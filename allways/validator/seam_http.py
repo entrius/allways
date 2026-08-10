@@ -11,6 +11,8 @@ publishing no port.
 import json
 import os
 import threading
+import time
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -26,8 +28,40 @@ from allways.validator.reserve_engine import (
 
 SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
 
+# The offering polls /status and /deposit-scan per active swap on a tight loop, and its
+# list view reconciles every live row per poll — so identical reads arrive from many tabs and
+# many rows at once, each costing uncached getAccountInfo. Sustained hard enough that earns the
+# validator an RPC 429, and a validator that cannot read the chain cannot verify a swap: the
+# miner holding the reservation is the one who eats the timeout. A chatty consumer must not be
+# able to price the validator out of its own RPC budget.
+#
+# Sized to the consumer's fastest poll, not longer: past that the TTL — not the caller's
+# cadence — sets how fast a stage transition surfaces, buying no extra dedup (a burst of tabs
+# and reconciled rows lands within ~1s) at the cost of latency on every transition. Cadence is
+# the lever for fewer reads; this one only collapses simultaneous ones.
+SEAM_READ_TTL_SECS = 3.0
+
+
+def _ttl_bucket() -> int:
+    """Cache key component that rolls every TTL — a new bucket is a miss, old ones age out of
+    the LRU. Far shorter than any transition the offering reacts to (reservations live minutes,
+    dest legs need tens of seconds of confirmations), so a read this stale changes no decision."""
+    return int(time.monotonic() / SEAM_READ_TTL_SECS)
+
 
 def _make_handler(validator, secret: str):
+    # Memos are per server, closing over this validator rather than keying on it: the validator
+    # is not required to be hashable, and no module-level table pins it alive. lru_cache does not
+    # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
+    # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
+    @lru_cache(maxsize=512)
+    def cached_status(miner_hotkey: str, swap_key: str, _bucket: int):
+        return swap_status(validator, miner_hotkey, swap_key)
+
+    @lru_cache(maxsize=512)
+    def cached_deposit_scan(miner_hotkey: str, _bucket: int):
+        return scan_deposit(validator, miner_hotkey)
+
     class SeamHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # silence default stderr access log
             pass
@@ -67,10 +101,12 @@ def _make_handler(validator, secret: str):
                     # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
                     # swap directly — the only route to post-attestation stages, since vote_initiate
                     # consumes the reservation at quorum.
-                    return self._send(200, swap_status(validator, q['miner_hotkey'], q.get('swap_key', '')).__dict__)
+                    status = cached_status(q['miner_hotkey'], q.get('swap_key', ''), _ttl_bucket())
+                    return self._send(200, status.__dict__)
                 if url.path == '/deposit-scan':
                     # Hash-finder for the offering's deposit watcher — /confirm stays the verifier.
-                    return self._send(200, {'tx_hash': scan_deposit(validator, q['miner_hotkey'])})
+                    tx_hash = cached_deposit_scan(q['miner_hotkey'], _ttl_bucket())
+                    return self._send(200, {'tx_hash': tx_hash})
                 if url.path == '/health':
                     return self._send(200, {'ok': True})
             except (KeyError, ValueError) as e:
