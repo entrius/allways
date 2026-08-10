@@ -23,18 +23,22 @@ from allways.vault import codec
 
 def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
     """Persist a ``SwapTimedOut`` verdict as an obligation. The payee comes from the snapshot the
-    swap loop took while the swap was live — the event doesn't carry it and the Swap PDA is gone."""
+    swap loop took while the swap was live; failing that, from the verdict itself (W3.1), which is
+    what lets a validator relay a swap it never saw."""
     swap_key = bytes(fields['swap_key']).hex()
     miner = str(fields['miner'])
     snapshot = relay.store.get_relay_swap(swap_key)
     user_addr = _payable(snapshot['user_addr']) if snapshot else ''
     if not user_addr:
-        # This validator never saw the swap live (fresh state DB, or down for its whole life), so
-        # it cannot name the payee. The obligation is still recorded: it keeps netting off the
-        # bond and blocks this miner's initiates until a peer's quorum applies the seizure.
+        # No snapshot (fresh state DB, or down for the swap's whole life): the event names the payee
+        # itself, so history alone is enough to discharge this. Older verdicts predate the field and
+        # still land payee-less — recorded anyway, to keep netting and to block the miner's initiates.
+        payee = str(fields.get('payee') or '')
+        user_addr = _payable(payee) if payee else ''
+    if not user_addr:
         bt.logging.error(
-            f'relay: no reimbursement address snapshot for swap {swap_key[:16]} — this validator '
-            'cannot relay its slash; peers that saw the swap live must carry the quorum'
+            f'relay: no reimbursement address for swap {swap_key[:16]} — this validator cannot '
+            'relay its slash; peers that saw the swap live must carry the quorum'
         )
     relay.store.record_relay_slash(
         swap_key,

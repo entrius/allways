@@ -181,7 +181,7 @@ def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
     return relay
 
 
-def _timeout_event(swap_key=SWAP, miner=MINER, penalty=22 * RAO, reimbursement=22 * RAO, chain='tao'):
+def _timeout_event(swap_key=SWAP, miner=MINER, penalty=22 * RAO, reimbursement=22 * RAO, chain='tao', payee=''):
     return SimpleNamespace(
         name='SwapTimedOut',
         block_time=NOW,
@@ -193,6 +193,7 @@ def _timeout_event(swap_key=SWAP, miner=MINER, penalty=22 * RAO, reimbursement=2
             'collateral_chain': chain,
             'penalty': penalty,
             'reimbursement': reimbursement,
+            'payee': payee,
         },
     )
 
@@ -368,11 +369,43 @@ def test_an_unreadable_marker_is_never_treated_as_permission_to_slash_again():
     assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
 
 
-def test_a_verdict_with_no_payee_snapshot_is_recorded_but_not_relayed():
-    # This validator never saw the swap live, so it cannot name the reimbursement target. The row
-    # still exists: it keeps netting and keeps blocking initiates until a peer's quorum lands.
+def test_a_verdict_with_neither_snapshot_nor_payee_is_recorded_but_not_relayed():
+    # No snapshot and a payee-less verdict (a swap that timed out before W3.1) leaves nobody to pay.
+    # The row still exists: it keeps netting and keeps blocking initiates until a peer's quorum lands.
     relay = _relay()
     relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+    assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
+    assert len(relay.store.open_relay_slashes('tao')) == 1
+
+
+def test_a_verdict_for_an_unseen_swap_is_relayed_from_the_payee_in_the_event():
+    # W3.1, the blind-spot closure: this validator has no snapshot — fresh state DB, or down for the
+    # swap's whole life — and relays it anyway, because the verdict names who is owed.
+    relay = _relay()
+    assert relay.store.get_relay_swap(SWAP) is None
+    relay.ingest_events([_timeout_event(payee=USER_TAO)])
+    relay.step(NOW)
+
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[2:] == (SWAP, 22 * RAO, USER_TAO, 22 * RAO), 'the event tuple, verbatim'
+    assert relay.store.open_relay_slashes('tao') == []
+
+
+def test_the_snapshot_stays_the_fast_path_when_both_name_a_payee():
+    # The snapshot is read from the swap while it was live; the event is the fallback, not an
+    # override. Same value in practice — this pins which one is authoritative if they ever differ.
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW)
+    relay.ingest_events([_timeout_event(payee=HOTKEY2)])
+    assert relay.store.open_relay_slashes('tao')[0]['user_addr'] == USER_TAO
+
+
+def test_a_malformed_payee_in_the_event_is_refused_like_any_other():
+    # The program never validated the user's backing-chain address, and putting it in the event
+    # changed nothing about that — an unpayable one must not reach the vault.
+    relay = _relay()
+    relay.ingest_events([_timeout_event(payee='not-an-ss58')])
     relay.step(NOW)
     assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
     assert len(relay.store.open_relay_slashes('tao')) == 1
