@@ -15,12 +15,48 @@ from allways.solana.rpc import SolanaRpc, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
-# Accounts these programs own are readonly-enforced: the runtime rejects any lamport change,
-# so a transfer to one ALWAYS fails (ReadonlyLamportChange). Covers every builtin (System,
-# Vote, Stake, ComputeBudget, the loaders) and every sysvar. Deployed BPF programs are owned
-# by a loader instead and receive SOL fine — executability is not the test, ownership is.
-READONLY_OWNERS = frozenset(
+# Solana's reserved account keys: the runtime demotes these to read-only in EVERY transaction, so
+# a transfer to one always fails (ReadonlyLamportChange) and no miner could ever deliver to it.
+# Mirrors agave-reserved-account-keys' RESERVED_ACCOUNTS verbatim (v3.1.14, includes the pending
+# feature-gated entries — never a legitimate destination either way). The set is consensus-critical
+# and append-only, so a stale copy under-blocks but never over-blocks; re-sync when agave adds a key.
+# Not derivable from account ownership: post-Core-BPF, Stake/Config/AddressLookupTable are owned by
+# the upgradeable loader, StakeConfig has no account at all, and the SPL Token program is executable
+# yet receives SOL fine. Membership is the only sound test, and it needs no RPC.
+RESERVED_ACCOUNTS = frozenset(
     {
+        # builtin programs
+        'AddressLookupTab1e1111111111111111111111111',
+        'BPFLoader1111111111111111111111111111111111',
+        'BPFLoader2111111111111111111111111111111111',
+        'BPFLoaderUpgradeab1e11111111111111111111111',
+        'ComputeBudget111111111111111111111111111111',
+        'Config1111111111111111111111111111111111111',
+        'Ed25519SigVerify111111111111111111111111111',
+        'Feature111111111111111111111111111111111111',
+        'KeccakSecp256k11111111111111111111111111111',
+        'LoaderV411111111111111111111111111111111111',
+        'Secp256r1SigVerify1111111111111111111111111',
+        'Stake11111111111111111111111111111111111111',
+        'StakeConfig11111111111111111111111111111111',
+        'Vote111111111111111111111111111111111111111',
+        'ZkE1Gama1Proof11111111111111111111111111111',
+        'ZkTokenProof1111111111111111111111111111111',
+        '11111111111111111111111111111111',
+        # sysvars
+        'Sysvar1nstructions1111111111111111111111111',
+        'SysvarC1ock11111111111111111111111111111111',
+        'SysvarEpochRewards1111111111111111111111111',
+        'SysvarEpochSchedu1e111111111111111111111111',
+        'SysvarFees111111111111111111111111111111111',
+        'SysvarLastRestartS1ot1111111111111111111111',
+        'SysvarRecentB1ockHashes11111111111111111111',
+        'SysvarRent111111111111111111111111111111111',
+        'SysvarRewards111111111111111111111111111111',
+        'SysvarS1otHashes111111111111111111111111111',
+        'SysvarS1otHistory11111111111111111111111111',
+        'SysvarStakeHistory1111111111111111111111111',
+        # other
         'NativeLoader1111111111111111111111111111111',
         'Sysvar1111111111111111111111111111111111111',
     }
@@ -215,24 +251,15 @@ class Sol(Asset, Chain):
             bt.logging.error(f'SOL get_balance failed for {address}: {e}')
             return 0
 
-    def _is_readonly_account(self, address: str) -> bool:
-        """Whether the runtime forbids crediting ``address`` (ownership is immutable, so one
-        read at latest is definitive — no historical sampling, unlike the EVM code probe)."""
-        return self.rpc.get_account_owner(address) in READONLY_OWNERS
-
     def can_deliver_to(self, address: str, amount: int) -> bool:
-        """Reserve-time gate. Fails open — only a positive readonly-owner read blocks a reservation."""
-        try:
-            return not self._is_readonly_account(address)
-        except Exception as e:
-            bt.logging.warning(f'{LOG_SOL} owner probe failed for {address}: {e} — allowing')
-            return True
+        """Reserve-time gate: bounce a reserved-key destination before any funds move."""
+        return address not in RESERVED_ACCOUNTS
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
-        """Slash gate: a builtin/sysvar destination is undeliverable by construction — the runtime
-        rejects the lamport credit outright, so the miner could never have paid. Raises when the
-        chain view is unavailable (caller defers rather than slashing on a blind spot)."""
-        return self._is_readonly_account(address)
+        """Slash gate: a reserved-key destination is undeliverable by construction — the runtime
+        rejects the lamport credit outright, so the miner could never have paid. Offline and
+        exact, so unlike the EVM probes there is no RPC to fail and no window to sample."""
+        return address in RESERVED_ACCOUNTS
 
     def is_valid_address(self, address: str) -> bool:
         """Validate a base58 ed25519 pubkey (32 bytes) without RPC."""

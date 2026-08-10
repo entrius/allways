@@ -10,7 +10,7 @@ import requests
 from solders.keypair import Keypair
 
 from allways.assets.base import ProviderUnreachableError
-from allways.assets.solana import Sol
+from allways.assets.solana import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
 
 
@@ -159,52 +159,58 @@ class TestAddressValidity:
 
 
 class TestDeliveryGates:
-    """Builtin/sysvar destinations are readonly-enforced: the runtime rejects the lamport credit,
-    so an honest miner can never deliver and must never be slashed for it. Verified against LiteSVM
-    (2026-08-10): System Program and every sysvar fail with ReadonlyLamportChange; the SPL Token
-    Program — executable, but loader-owned — receives SOL fine, so ownership is the test."""
+    """Solana's reserved account keys are read-only in every transaction, so a transfer to one
+    always fails and an honest miner must never be slashed for missing it. Verified against LiteSVM
+    (2026-08-10): all 31 reserved keys reject the credit; the incinerator and ordinary/PDA/program
+    addresses accept it. Ownership is NOT the test — Stake/Config/AddressLookupTable are owned by
+    the upgradeable loader, StakeConfig has no account, and the SPL Token program is executable
+    yet fundable."""
 
-    SYSTEM_PROGRAM = '11111111111111111111111111111111'
-    CLOCK_SYSVAR = 'SysvarC1ock11111111111111111111111111111111'
+    # One per shape the account-owner heuristic got wrong, plus the obvious burn target.
+    RESERVED = [
+        '11111111111111111111111111111111',  # System Program — owner NativeLoader
+        'SysvarC1ock11111111111111111111111111111111',  # sysvar — owner Sysvar
+        'StakeConfig11111111111111111111111111111111',  # no account exists at all
+        'Stake11111111111111111111111111111111111111',  # Core BPF: owner is the upgradeable loader
+        'Config1111111111111111111111111111111111111',  # ditto
+        'AddressLookupTab1e1111111111111111111111111',  # ditto
+        'Feature111111111111111111111111111111111111',  # no account exists
+    ]
+    DELIVERABLE = [
+        '1nc1nerator11111111111111111111111111111111',  # deliberately not reserved — a burn must land
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # executable, loader-owned, receives SOL fine
+    ]
 
-    def owner_rpc(self, owner):
-        rpc = FakeRpc()
-        rpc.get_account_owner = lambda pubkey, commitment='confirmed': owner
-        return rpc
+    @pytest.mark.parametrize('address', RESERVED)
+    def test_reserved_key_blocks_reservation_and_exempts_slash(self, address):
+        p = provider_with(FakeRpc())
+        assert p.can_deliver_to(address, 10**9) is False
+        assert p.delivery_refused(address, 0) is True
 
-    def failing_rpc(self):
-        rpc = FakeRpc()
+    @pytest.mark.parametrize('address', DELIVERABLE)
+    def test_fundable_special_addresses_pass(self, address):
+        p = provider_with(FakeRpc())
+        assert p.can_deliver_to(address, 10**9) is True
+        assert p.delivery_refused(address, 0) is False
 
-        def boom(pubkey, commitment='confirmed'):
-            raise requests.ConnectionError('down')
+    def test_ordinary_wallet_passes(self):
+        p = provider_with(FakeRpc())
+        addr = str(Keypair().pubkey())
+        assert p.can_deliver_to(addr, 10**9) is True
+        assert p.delivery_refused(addr, 0) is False
 
-        rpc.get_account_owner = boom
-        return rpc
+    def test_gates_need_no_rpc(self):
+        """Offline by construction — a dead RPC can neither block a reservation nor defer a slash."""
+        p = provider_with(FakeRpc(raise_conn=True))
+        assert p.can_deliver_to(self.RESERVED[0], 10**9) is False
+        assert p.delivery_refused(self.RESERVED[0], 0) is True
 
-    @pytest.mark.parametrize(
-        'owner', ['NativeLoader1111111111111111111111111111111', 'Sysvar1111111111111111111111111111111111111']
-    )
-    def test_readonly_owner_blocks_reservation_and_exempts_slash(self, owner):
-        p = provider_with(self.owner_rpc(owner))
-        assert p.can_deliver_to(self.SYSTEM_PROGRAM, 10**9) is False
-        assert p.delivery_refused(self.SYSTEM_PROGRAM, 0) is True
-
-    @pytest.mark.parametrize(
-        'owner', ['11111111111111111111111111111111', 'BPFLoader2111111111111111111111111111111111', None]
-    )
-    def test_ordinary_and_deployed_program_dests_pass(self, owner):
-        """System-owned wallets and loader-owned (executable) programs both take a credit."""
-        p = provider_with(self.owner_rpc(owner))
-        assert p.can_deliver_to(str(Keypair().pubkey()), 10**9) is True
-        assert p.delivery_refused(str(Keypair().pubkey()), 0) is False
-
-    def test_reserve_gate_fails_open_on_rpc_trouble(self):
-        assert provider_with(self.failing_rpc()).can_deliver_to(self.CLOCK_SYSVAR, 10**9) is True
-
-    def test_slash_gate_raises_on_rpc_trouble(self):
-        """A blind chain view must defer the slash, never falsify one — the caller catches and WAITs."""
-        with pytest.raises(requests.ConnectionError):
-            provider_with(self.failing_rpc()).delivery_refused(self.CLOCK_SYSVAR, 0)
+    def test_reserved_set_matches_agave(self):
+        """Guards against a typo silently un-blocking a key: agave v3.1.14 lists exactly 31."""
+        assert len(RESERVED_ACCOUNTS) == 31
+        assert all(32 <= len(a) <= 44 for a in RESERVED_ACCOUNTS)
+        p = provider_with(FakeRpc())
+        assert all(p.is_valid_address(a) for a in RESERVED_ACCOUNTS)
 
 
 class TestProofRoundtrip:
