@@ -151,6 +151,7 @@ pub fn check_entry_gates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::ATTEST_MAX_AGE_SECS;
 
     fn miner_with(collateral: u64) -> MinerState {
         MinerState {
@@ -164,6 +165,35 @@ mod tests {
             deactivation_at: 0,
             successful_swaps: 0,
             failed_swaps: 0,
+            bump: 255,
+        }
+    }
+
+    fn config_with(last_attest_heartbeat: i64, attest_max_age_secs: i64) -> Config {
+        Config {
+            admin: Pubkey::default(),
+            version: 0,
+            min_collateral: 0,
+            max_collateral: 0,
+            fulfillment_timeout_secs: 0,
+            min_swap_amount: 0,
+            max_swap_amount: 0,
+            tao_min_swap_amount: 0,
+            tao_max_swap_amount: 0,
+            tao_min_collateral: 0,
+            settlement_grace_secs: 0,
+            last_attest_heartbeat,
+            attest_max_age_secs,
+            reservation_ttl_secs: 0,
+            consensus_threshold_percent: 100,
+            validators: vec![],
+            last_weights_update: 0,
+            halted: false,
+            reservation_fee_lamports: 0,
+            pool_window_secs: 0,
+            finalize_window_secs: 0,
+            weights_update_min_interval_secs: 0,
+            max_total_extension_secs: 0,
             bump: 255,
         }
     }
@@ -239,6 +269,44 @@ mod tests {
         assert_eq!(backing_bit("tao").unwrap(), BACKING_BIT_TAO);
         assert_ne!(BACKING_BIT_SOL, BACKING_BIT_TAO);
         assert!(backing_bit("btc").is_err());
+    }
+
+    // A plausible wall-clock `now`. The zero-heartbeat case is only stale because a real unix
+    // timestamp dwarfs any max age — at `now` near the epoch a never-set heartbeat reads as fresh.
+    const NOW: i64 = 1_760_000_000;
+
+    #[test]
+    fn a_deployment_that_has_never_heard_from_a_relayer_is_fused_shut() {
+        // heartbeat 0 is not "no opinion", it is stale — TAO entry stays shut until the relay fleet
+        // proves it is alive. The migration leaves it at 0 precisely so the door starts closed.
+        assert!(require_fresh_heartbeat(&config_with(0, ATTEST_MAX_AGE_SECS), NOW).is_err());
+    }
+
+    #[test]
+    fn the_fuse_trips_the_second_the_heartbeat_ages_past_its_limit() {
+        // Exactly at the limit is still alive; one second more is not. Unreachable end-to-end —
+        // `validate::attest_max_age` floors the age at an hour — so this is where it gets proven.
+        let cfg = config_with(1_000, 3_600);
+        assert!(require_fresh_heartbeat(&cfg, 4_600).is_ok());
+        assert!(require_fresh_heartbeat(&cfg, 4_601).is_err());
+    }
+
+    #[test]
+    fn a_dead_fuse_gates_tao_entry_and_leaves_sol_alone() {
+        // D6 in one assertion: a stale heartbeat is a TAO-entry gate, not a subnet-wide halt.
+        let dead = config_with(0, ATTEST_MAX_AGE_SECS);
+        assert!(check_entry_gates(&dead, &miner_with(7), "sol", NOW).is_ok());
+        assert!(check_entry_gates(&dead, &miner_with(7), "tao", NOW).is_err());
+    }
+
+    #[test]
+    fn a_live_fuse_still_will_not_let_a_settling_miner_take_new_work() {
+        // The two gates are independent: proving the relay alive must not also clear busy-until-settled.
+        let cfg = config_with(1_000, ATTEST_MAX_AGE_SECS);
+        let mut settling = miner_with(7);
+        settling.settling_until = 2_000;
+        assert!(check_entry_gates(&cfg, &settling, "tao", 1_999).is_err());
+        assert!(check_entry_gates(&cfg, &settling, "tao", 2_000).is_ok());
     }
 
     #[test]
