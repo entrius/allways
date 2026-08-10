@@ -114,7 +114,10 @@ def test_an_unrecognised_topic_is_not_guessed_at(meta):
 
 
 class _Sub:
-    """Substrate stand-in: `runtime_call` returns whatever payload the test parks on it."""
+    """Substrate stand-in: `runtime_call` returns whatever payload the test parks on it.
+
+    Payloads come back in the SAME two shapes a real node produces — hex string for a blob that
+    isn't valid UTF-8, the decoded characters for one that is (see `_return_bytes`)."""
 
     def __init__(self, payload=None, raise_on_read=False):
         self.payload = payload
@@ -124,7 +127,14 @@ class _Sub:
     def runtime_call(self, *_a, **_kw):
         if self.raise_on_read:
             raise RuntimeError('ContractResult decode failed')
-        return {'result': {'Ok': {'data': '0x' + self.payload.hex()}}}
+        return {'result': {'Ok': {'data': _as_node_shape(self.payload)}}}
+
+
+def _as_node_shape(payload: bytes) -> str:
+    try:
+        return payload.decode('utf-8')
+    except UnicodeDecodeError:
+        return '0x' + payload.hex()
 
 
 def _client(meta, payload=None, raise_on_read=False):
@@ -134,6 +144,24 @@ def _client(meta, payload=None, raise_on_read=False):
 def test_lock_state_decodes_the_locked_flag_and_the_epoch(meta):
     c = _client(meta, b'\x00' + b'\x01' + (7).to_bytes(8, 'little'))  # Ok(()) prefix + (true, 7)
     assert c.get_lock_state(BOB) == (True, 7)
+
+
+def test_a_read_decodes_whichever_shape_the_node_returns_it_in(meta):
+    # The node hands a SCALE `Bytes` back as hex only when it isn't valid UTF-8; when it is, the
+    # characters arrive decoded. Which shape a query lands in therefore depends on its own VALUE,
+    # and the readings that matter most sit in the second one: a freshly locked bond (epoch 1), a
+    # zero balance, and both arms of `is_slashed`. Reading those as "unknown" leaves the relayer
+    # unable to attest, slash or unlock anything against a real vault.
+    assert _as_node_shape(b'\x00\x01' + (1).to_bytes(8, 'little')) == '\x00\x01\x01' + '\x00' * 7
+    assert _client(meta, b'\x00\x01' + (1).to_bytes(8, 'little')).get_lock_state(BOB) == (True, 1)
+    assert _client(meta, b'\x00' + bytes(8)).get_collateral(BOB) == 0
+    assert _client(meta, b'\x00' + bytes(8)).get_settled_total(BOB) == 0
+    assert _client(meta, b'\x00\x01').is_slashed(bytes(32)) is True
+    assert _client(meta, b'\x00\x00').is_slashed(bytes(32)) is False
+    # ...and the hex shape still decodes, so the fix is additive.
+    big = (10_000_000).to_bytes(8, 'little')
+    assert _as_node_shape(b'\x00' + big).startswith('0x')
+    assert _client(meta, b'\x00' + big).get_collateral(BOB) == 10_000_000
 
 
 def test_an_undecodable_read_is_unknown_not_zero(meta):

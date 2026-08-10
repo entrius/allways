@@ -171,9 +171,7 @@ class BondVaultClient:
                 },
             )
             v = res.value if hasattr(res, 'value') else res
-            payload = v['result']['Ok']['data']
-            raw = bytes.fromhex(payload[2:]) if isinstance(payload, str) else bytes(payload)
-            return codec.unwrap_lang_error(raw)
+            return codec.unwrap_lang_error(_return_bytes(v['result']['Ok']['data']))
         except Exception:
             return None
 
@@ -352,6 +350,17 @@ class BondVaultClient:
             topics = [str(t) for t in (attrs.get('topics') or [])]
             out.append((topics, raw))
         return out
+
+
+def _return_bytes(payload) -> bytes:
+    """The dry-run's return blob, whatever shape the node's codec handed it back in.
+
+    A SCALE `Bytes` decodes to a hex STRING when the payload isn't valid UTF-8 and to the
+    utf-8-decoded characters when it is — so the same query answers in two shapes depending on
+    its own value, and small/zero numbers land in the second one."""
+    if isinstance(payload, str):
+        return bytes.fromhex(payload[2:]) if payload.startswith('0x') else payload.encode('utf-8')
+    return bytes(payload)
 
 
 def bt_debug(message: str) -> None:
