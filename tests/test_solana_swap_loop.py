@@ -632,3 +632,68 @@ def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():
     client = Raced([make_pool(miner='raced'), make_pool(miner='mine')])
     loop = SolanaSwapLoop(client, {}, fee_divisor=100)
     assert loop.resolve_pools_once(now=500) == ['mine']  # loser not counted, sweep unbroken
+
+
+# ─── W3: the off-chain half of busy-until-settled ───────────────────────────────────────────────
+
+
+class _Relay:
+    """Just the two hooks the loop calls into the bond relay through."""
+
+    def __init__(self, owes=False):
+        self.owes = owes
+        self.seen = []
+
+    def observe_swap(self, swap):
+        self.seen.append(swap)
+
+    def has_pending_debit(self, miner):
+        return self.owes
+
+
+def _loop_with_relay(relay, backing='tao'):
+    swap = make_swap(status='PendingAttestation')
+    swap.collateral_chain = backing
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
+    client = SimpleNamespace(
+        get_swaps=lambda: [(f'pda', swap)],
+        get_reservation=lambda miner: make_reservation(),
+    )
+    return SolanaSwapLoop(client, providers, fee_divisor=100, relay=relay), swap
+
+
+def test_an_unapplied_vault_debit_blocks_the_miners_next_initiate():
+    # The contract's settlement grace covers the common case; this covers the tail where the relay
+    # is slower than the grace, and the seconds-wide window right after the verdict.
+    loop, swap = _loop_with_relay(_Relay(owes=True))
+    assert loop.decide(swap, now=1500).decision == SwapDecision.WAIT
+
+
+def test_a_settled_miner_attests_normally():
+    loop, swap = _loop_with_relay(_Relay(owes=False))
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_a_locally_backed_swap_never_consults_the_relay():
+    # SOL settles atomically inside timeout_swap, so there is no pending debit to wait on — and a
+    # SOL-only deployment must not pay for split collateral existing.
+    relay = _Relay(owes=True)
+    loop, swap = _loop_with_relay(relay, backing='sol')
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_the_loop_shows_the_relay_every_live_swap_it_walks():
+    # The only window in which the vote_slash payee is readable: the Swap PDA closes at the verdict.
+    relay = _Relay()
+    loop, swap = _loop_with_relay(relay)
+    loop.read_only = True
+    loop.run_once(now=1500)
+    assert relay.seen == [swap]
+
+
+def test_a_loop_with_no_relay_configured_decides_exactly_as_before():
+    swap = make_swap(status='PendingAttestation')
+    swap.collateral_chain = 'tao'
+    loop, _ = loop_with()
+    assert loop.relay is None
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST

@@ -112,11 +112,16 @@ class SolanaSwapLoop:
         assets: Dict[str, Any],
         fee_divisor: int = 100,
         read_only: bool = False,
+        relay: Any = None,
     ):
         self.client = solana_client
         self.providers = assets
         self.fee_divisor = fee_divisor
         self.read_only = read_only
+        # The W3 bond relay, when a vault is configured. The loop is its eyes on two things it
+        # cannot get anywhere else: the reimbursement address of a live off-chain-backed swap
+        # (the Swap PDA closes at the verdict), and the moment to refuse an initiate.
+        self.relay = relay
         self.reject_warned: Set[str] = set()  # dedupe rate-reject warnings, one per swap key
 
     def expected_user_receives(self, swap: Any) -> int:
@@ -334,7 +339,20 @@ class SolanaSwapLoop:
         # Source freshness: deposit must be mined after the reservation was created (replay defense).
         if not self._is_fresh(info, int(reservation.created_at), swap.from_chain, self._label(swap)):
             return SwapAction(SwapDecision.WAIT, reason='source deposit stale/replayed — never attest')
+        if self._owes_settlement(swap):
+            return SwapAction(SwapDecision.WAIT, reason='miner owes an unapplied vault debit — refusing to attest')
         return SwapAction(SwapDecision.ATTEST, reason='source verified + fresh')
+
+    def _owes_settlement(self, swap: Any) -> bool:
+        """Busy-until-settled, off-chain half: a miner with a slash verdict still unapplied on its
+        bond gets no new off-chain-backed swap from us. The contract's `settling_until` grace
+        covers the common case; this covers the tail where the relay is slower than the grace."""
+        if self.relay is None:
+            return False
+        backing = str(getattr(swap, 'collateral_chain', '') or '').lower()
+        if not backing or backing == 'sol':
+            return False
+        return self.relay.has_pending_debit(str(swap.miner))
 
     def decide(self, swap: Any, now: int) -> SwapAction:
         """Per-status decision (+extension target where applicable). Verifies legs where needed; reads
@@ -466,6 +484,8 @@ class SolanaSwapLoop:
             # views (carrying swap_key) pass through.
             swap = acct if hasattr(acct, 'swap_key') else swap_from_solana(acct)
             key = _swap_key_hex(swap.swap_key)
+            if self.relay is not None:
+                self.relay.observe_swap(swap)
             try:
                 action = self.decide(swap, now)
             except Exception as e:  # one bad swap must not break the pass

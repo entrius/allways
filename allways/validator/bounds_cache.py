@@ -39,6 +39,11 @@ class SolanaConfigCache:
             self._cfg_at = now
         return self._cfg
 
+    def config(self) -> Any:
+        """The whole cached ``Config`` — for readers that need fields without a named accessor
+        (the bond relay's heartbeat freshness check)."""
+        return self._fresh_config()
+
     def min_swap_amount(self) -> int:
         return int(self._fresh_config().min_swap_amount)
 
