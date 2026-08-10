@@ -7,6 +7,7 @@ from allways.assets.bitcoin import Bitcoin
 from allways.assets.chain import Chain
 from allways.assets.erc20 import ArbUsdc, Erc20
 from allways.assets.ethereum import Ether
+from allways.assets.evm_coin import EvmCoin
 from allways.assets.solana import Sol
 from allways.assets.subtensor import Tao
 
@@ -19,6 +20,7 @@ __all__ = [
     'Bitcoin',
     'Tao',
     'Sol',
+    'EvmCoin',
     'Ether',
     'Erc20',
     'ArbUsdc',

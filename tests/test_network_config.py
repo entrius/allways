@@ -11,16 +11,15 @@ from pathlib import Path
 
 import pytest
 
+from allways.chains import SUPPORTED_CHAINS
 from allways.cli.swap_commands.helpers import (
-    ARBUSDC_NETWORKS,
-    BTC_NETWORKS,
+    CHAIN_NETWORK_KEYS,
     ENV_BUNDLES,
-    ETH_NETWORKS,
+    NAME_SELECTED_CHAINS,
     SOLANA_NETWORKS,
-    apply_arbusdc_network_env,
-    apply_btc_network_env,
-    apply_eth_network_env,
+    apply_chain_network_env,
     load_cli_keypair,
+    network_key,
     resolve_solana_keypair_path,
     resolve_solana_rpc,
 )
@@ -82,70 +81,47 @@ def test_api_key_composes_onto_network_name(monkeypatch):
     assert resolve_solana_rpc({'solana-network': 'devnet'}) == SOLANA_NETWORKS['devnet'] + '?api-key=k1'
 
 
+def test_name_selected_chains_are_the_registry_rows_that_declare_networks():
+    assert set(NAME_SELECTED_CHAINS) == {c for c in SUPPORTED_CHAINS.values() if c.networks}
+    assert CHAIN_NETWORK_KEYS == tuple(f'{c.id}-network' for c in NAME_SELECTED_CHAINS)
+    # Every declared network list starts at mainnet — the bundles and `alw config` default to it.
+    assert all(c.networks[0] == 'mainnet' for c in NAME_SELECTED_CHAINS)
+
+
 def test_env_bundles_cover_all_chains():
     for name in ('testnet', 'mainnet'):
         b = ENV_BUNDLES[name]
-        assert set(b) == {
-            'network',
-            'solana-network',
-            'btc-network',
-            'eth-network',
-            'arbusdc-network',
-            'netuid',
-            'router',
-        }
+        assert set(b) == {'network', 'solana-network', 'netuid', 'router', *CHAIN_NETWORK_KEYS}
         assert b['solana-network'] in SOLANA_NETWORKS
-        assert b['btc-network'] in BTC_NETWORKS
-        assert b['eth-network'] in ETH_NETWORKS
-        assert b['arbusdc-network'] in ARBUSDC_NETWORKS
+        for chain in NAME_SELECTED_CHAINS:
+            assert b[network_key(chain)] in chain.networks
 
 
-def test_btc_shim_sets_env_when_unset(monkeypatch):
-    monkeypatch.delenv('BTC_NETWORK', raising=False)
-    apply_btc_network_env({'btc-network': 'testnet4'})
+def test_mainnet_bundle_picks_mainnet_and_testnet_bundle_never_does():
+    for chain in NAME_SELECTED_CHAINS:
+        assert ENV_BUNDLES['mainnet'][network_key(chain)] == 'mainnet'
+        # A spoke with a testnet must not be left on mainnet by `env testnet` (real funds
+        # against test swaps); one declaring mainnet only is the sole honest exception.
+        assert ENV_BUNDLES['testnet'][network_key(chain)] != 'mainnet' or len(chain.networks) == 1
+
+
+@pytest.mark.parametrize('chain', NAME_SELECTED_CHAINS, ids=lambda c: c.id)
+def test_chain_shim_sets_env_when_unset(monkeypatch, chain):
     import os
 
-    assert os.environ.get('BTC_NETWORK') == 'testnet4'
+    monkeypatch.delenv(f'{chain.env_prefix}_NETWORK', raising=False)
+    testnet = chain.networks[-1]
+    apply_chain_network_env({network_key(chain): testnet})
+    assert os.environ.get(f'{chain.env_prefix}_NETWORK') == testnet
 
 
-def test_btc_shim_respects_real_env(monkeypatch):
-    monkeypatch.setenv('BTC_NETWORK', 'mainnet')
-    apply_btc_network_env({'btc-network': 'testnet4'})
+@pytest.mark.parametrize('chain', NAME_SELECTED_CHAINS, ids=lambda c: c.id)
+def test_chain_shim_respects_real_env(monkeypatch, chain):
     import os
 
-    assert os.environ['BTC_NETWORK'] == 'mainnet'  # explicit env wins
-
-
-def test_eth_shim_sets_env_when_unset(monkeypatch):
-    monkeypatch.delenv('ETH_NETWORK', raising=False)
-    apply_eth_network_env({'eth-network': 'sepolia'})
-    import os
-
-    assert os.environ.get('ETH_NETWORK') == 'sepolia'
-
-
-def test_eth_shim_respects_real_env(monkeypatch):
-    monkeypatch.setenv('ETH_NETWORK', 'mainnet')
-    apply_eth_network_env({'eth-network': 'sepolia'})
-    import os
-
-    assert os.environ['ETH_NETWORK'] == 'mainnet'  # explicit env wins
-
-
-def test_arbusdc_shim_sets_env_when_unset(monkeypatch):
-    monkeypatch.delenv('ARBUSDC_NETWORK', raising=False)
-    apply_arbusdc_network_env({'arbusdc-network': 'sepolia'})
-    import os
-
-    assert os.environ.get('ARBUSDC_NETWORK') == 'sepolia'
-
-
-def test_arbusdc_shim_respects_real_env(monkeypatch):
-    monkeypatch.setenv('ARBUSDC_NETWORK', 'mainnet')
-    apply_arbusdc_network_env({'arbusdc-network': 'sepolia'})
-    import os
-
-    assert os.environ['ARBUSDC_NETWORK'] == 'mainnet'  # explicit env wins
+    monkeypatch.setenv(f'{chain.env_prefix}_NETWORK', 'mainnet')
+    apply_chain_network_env({network_key(chain): chain.networks[-1]})
+    assert os.environ[f'{chain.env_prefix}_NETWORK'] == 'mainnet'  # explicit env wins
 
 
 def test_keypair_env_wins_over_config(monkeypatch):

@@ -17,6 +17,13 @@ class ChainDefinition:
     native_unit: str  # Smallest unit name (e.g. 'satoshi')
     decimals: int  # Precision (e.g. 8 for BTC, 9 for TAO)
     env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_NETWORK)
+    # Network names the provider accepts in {env_prefix}_NETWORK; [0] is the default (mainnet).
+    # Empty = the network isn't picked by name (sol/tao resolve by RPC URL / bittensor network).
+    networks: tuple[str, ...] = ()
+    # Which of ``networks`` the `alw config set env testnet` bundle selects. Named, not
+    # positional: a chain can offer several testnets (BTC has three) and only one is the
+    # supported one, so the choice must survive reordering the list.
+    testnet_network: str = ''
     seconds_per_block: int = 12  # Average block time on this chain
     min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
     # Smallest amount that can actually exist/move on-chain, in native units
@@ -41,6 +48,8 @@ CHAIN_BTC = ChainDefinition(
     native_unit='satoshi',
     decimals=8,
     env_prefix='BTC',
+    networks=('mainnet', 'testnet', 'testnet4', 'signet'),
+    testnet_network='testnet4',
     seconds_per_block=600,
     min_confirmations=2,
     # 1000 sat, not the bare 546 P2PKH dust line: margin vs higher dustrelayfee / wallet quirks, and a tighter executable-rate ceiling.
@@ -82,6 +91,8 @@ CHAIN_ETH = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='ETH',
+    networks=('mainnet', 'sepolia'),
+    testnet_network='sepolia',
     seconds_per_block=12,
     # ~1 beacon epoch. True finality is 2 epochs (~64 blocks); post-merge reorgs deeper than
     # 2 blocks are vanishingly rare, so 32 buys near-finality without doubling the leg time.
@@ -100,6 +111,8 @@ CHAIN_ARBUSDC = ChainDefinition(
     native_unit='µUSDC',
     decimals=6,
     env_prefix='ARBUSDC',
+    networks=('mainnet', 'sepolia'),  # sepolia = Arbitrum Sepolia
+    testnet_network='sepolia',
     # ~4 blocks/s real; 1s is the integer floor. 90 confs ≈ 25s real (~90s in extension
     # math) — both far inside the 600s default program grace, so no grace-table arm.
     seconds_per_block=1,
