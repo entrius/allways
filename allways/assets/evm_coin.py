@@ -14,6 +14,14 @@ TRANSFER_GAS = 21_000
 # spend against a hostile contract; the slash gate exempts code-bearing dests anyway.
 MAX_TRANSFER_GAS = 100_000
 ZERO_ADDRESS = '0x' + '00' * 20
+# Hard ceiling on the deposit scanner's block walk, independent of block time: the walk costs one
+# RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
+# calls per pass (HyperEVM's public RPC allows 100/min). Never binds on ~12s chains (25 blocks).
+MAX_WALK_BLOCKS = 32
+# Hard ceiling on the deposit scanner's block walk, independent of block time: the walk costs one
+# RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
+# calls per pass (HyperEVM's public RPC allows 100/min). Never binds on ~12s chains (25 blocks).
+MAX_WALK_BLOCKS = 32
 
 
 class EvmCoin(EvmAsset, EvmChain):
@@ -317,7 +325,7 @@ class EvmCoin(EvmAsset, EvmChain):
         want_from = norm(from_addr)
         want_to = norm(to_addr)
         key = (want_from, want_to, int(amount))
-        floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
+        floor = max(head - min(self.SCAN_LOOKBACK_BLOCKS, MAX_WALK_BLOCKS), 0)
         last = self.scan_cursors.get(key, floor)
         for block_num in range(max(last, floor) + 1, head + 1):
             try:

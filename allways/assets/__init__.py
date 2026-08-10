@@ -8,6 +8,7 @@ from allways.assets.chain import Chain
 from allways.assets.erc20 import ArbUsdc, Erc20
 from allways.assets.ethereum import Ether
 from allways.assets.evm_coin import EvmCoin
+from allways.assets.hyperliquid import Hype
 from allways.assets.solana import Sol
 from allways.assets.subtensor import Tao
 
@@ -22,6 +23,7 @@ __all__ = [
     'Sol',
     'EvmCoin',
     'Ether',
+    'Hype',
     'Erc20',
     'ArbUsdc',
     'create_assets',
@@ -43,6 +45,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('sol', Sol, ('solana_rpc_url', 'solana_keypair')),
     AssetSpec('eth', Ether, ()),
     AssetSpec('arbusdc', ArbUsdc, ()),
+    AssetSpec('hype', Hype, ()),
 )
 
 

@@ -82,9 +82,19 @@ ARBITRUM = EvmNetwork(
         'sepolia': ('https://arbitrum-sepolia-rpc.publicnode.com', 'https://arbitrum-sepolia.drpc.org'),
     },
 )
+HYPERLIQUID = EvmNetwork(
+    label='Hyperliquid',
+    chain_ids={'mainnet': 999, 'testnet': 998},
+    rpc_urls={
+        # The official gateways are rate-limited to 100 req/min per IP — fine as the keyless
+        # default, but operators should point {PREFIX}_RPC_URLS at a keyed endpoint.
+        'mainnet': ('https://rpc.hyperliquid.xyz/evm', 'https://hyperliquid.drpc.org'),
+        'testnet': ('https://rpc.hyperliquid-testnet.xyz/evm', 'https://hyperliquid-testnet.drpc.org'),
+    },
+)
 
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
-EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM}
+EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM, 'hyperliquid': HYPERLIQUID}
 
 
 class EvmChain(Chain):

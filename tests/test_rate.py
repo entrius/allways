@@ -402,6 +402,15 @@ class TestIsExecutableRate:
         """1e-20 ETH/SOL: 1 wei maps to 1e11 lamports — above max_swap; unroutable."""
         assert is_executable_rate(1e-20, 'eth', 'sol', self.MIN, self.MAX) is False
 
+    def test_sane_hype_rates_executable(self):
+        # ~0.2 SOL per HYPE, canonical 'HYPE per 1 SOL' — same 18 decimals as ETH but twice
+        # the on-chain floor, which is the input this gate actually reads.
+        assert is_executable_rate(5.0, 'hype', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(5.0, 'sol', 'hype', self.MIN, self.MAX) is True
+
+    def test_absurd_hype_rate_unexecutable(self):
+        assert is_executable_rate(1e-20, 'hype', 'sol', self.MIN, self.MAX) is False
+
     def test_sane_tao_sol_rates_executable(self):
         """tao↔sol: both 9-decimal, decimal_factor 1. ~2 TAO per SOL routes."""
         assert is_executable_rate(2.0, 'tao', 'sol', self.MIN, self.MAX) is True
