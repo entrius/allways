@@ -95,6 +95,22 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         let penalty = crate::constants::required_collateral(collateral_amount);
         let settles_here = crate::backing::settles_locally(&collateral_chain);
 
+        // Whom the backing chain owes, read off the Swap while it is still open (it closes below and
+        // the addresses live nowhere else after that) — so a validator that never saw this swap live
+        // can still relay the seizure. Empty here: that refund already reached `swap.user`.
+        let payee = if settles_here {
+            String::new()
+        } else {
+            let s = &ctx.accounts.swap;
+            crate::backing::collateral_leg_user_addr(
+                &collateral_chain,
+                &s.from_chain,
+                &s.user_from_addr,
+                &s.to_chain,
+                &s.user_to_addr,
+            )
+        };
+
         // The refund is a policy step, deliberately separable from the verdict above: a locally-backed
         // swap settles here and now (apply_penalty still clamps to available collateral as a safety
         // net); any other backing gets the verdict only, and the seizure is a quorum on its own chain.
@@ -138,6 +154,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
             collateral_chain,
             penalty,
             reimbursement,
+            payee,
         });
     }
     Ok(())

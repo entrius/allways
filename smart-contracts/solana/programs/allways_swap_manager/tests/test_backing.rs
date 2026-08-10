@@ -539,6 +539,7 @@ fn test_sol_backed_timeout_still_slashes_refunds_and_frees() {
     assert_eq!(ev.penalty, penalty, "absolute penalty figure");
     assert_eq!(ev.reimbursement, penalty, "all of it reached the user");
     assert_eq!(ev.collateral_amount, SOL_AMOUNT);
+    assert!(ev.payee.is_empty(), "settled here ⇒ no off-chain payee; the refund went to swap.user");
 }
 
 #[test]
@@ -585,6 +586,36 @@ fn test_non_sol_backed_timeout_is_verdict_only_and_holds_the_miner() {
     assert_eq!(ev.slash, 0, "nothing moved on Solana");
     assert_eq!(ev.penalty, penalty);
     assert_eq!(ev.reimbursement, penalty, "the wronged user is owed the whole penalty");
+    // This fixture's backing was written onto a btc→sol swap, so there is no TAO leg to name a payee
+    // from — the lookup degrades to empty instead of erroring. The real pairing is the next test.
+    assert!(ev.payee.is_empty(), "no backing leg ⇒ no payee, and no revert");
+}
+
+#[test]
+fn test_the_verdict_names_the_payee_on_the_backing_chain() {
+    // W3.1: the reimbursement target travels IN the event, so a validator that never saw the swap
+    // live can still relay the seizure. sol→tao backed by TAO ⇒ the user's destination-side address.
+    let (mut svm, _admin, vals, miner) = setup();
+    draw(&mut svm, &vals[0], &miner.pubkey(), HUB_FROM, HUB_TO);
+    send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, SOL_AMOUNT as u128, TAO_AMOUNT),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("finalize the hub pair");
+    let initiated_at = now_ts(&svm);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    set_swap_backing(&mut svm, &swap_key("srctx1"), "tao");
+
+    set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
+    let logs = send_meta(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
+
+    let ev = timed_out_event(&logs);
+    assert_eq!(ev.collateral_chain, "tao");
+    assert_eq!(ev.payee, "userDstAddr", "TAO is the destination leg, so its address is the payee");
+    assert_eq!(ev.reimbursement, required_collateral(SOL_AMOUNT), "figures unchanged by W3.1");
 }
 
 #[test]

@@ -28,6 +28,25 @@ pub fn collateral_leg_amount(
     }
 }
 
+/// The user's own address on the backing chain — whom a penalty settled there is owed to. Same leg
+/// lookup as `collateral_leg_amount`, but total: a timeout is terminal, so a backing that is somehow
+/// not a leg (finalize already rejects that) yields no payee rather than an error that wedges it.
+pub fn collateral_leg_user_addr(
+    collateral_chain: &str,
+    from_chain: &str,
+    user_from_addr: &str,
+    to_chain: &str,
+    user_to_addr: &str,
+) -> String {
+    if collateral_chain == from_chain {
+        user_from_addr.to_string()
+    } else if collateral_chain == to_chain {
+        user_to_addr.to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Swap-size bounds for a backing, in that asset's own smallest unit (0 max = unbounded).
 pub fn swap_bounds(config: &Config, collateral_chain: &str) -> Result<(u64, u64)> {
     match collateral_chain {
@@ -169,6 +188,22 @@ mod tests {
         // A TAO-backed leg is found by exactly the same lookup — the reason a TAO hub costs no diff.
         assert_eq!(collateral_leg_amount("tao", "tao", 7, "btc", 11).unwrap(), 7);
         assert_eq!(collateral_leg_amount("tao", "btc", 7, "tao", 11).unwrap(), 11);
+    }
+
+    #[test]
+    fn the_payee_is_the_user_address_on_the_backing_leg() {
+        // Same lookup, same both-sides symmetry as the amount: tao→btc pays the source-side address,
+        // btc→tao the destination one. Nothing here knows either pair exists.
+        assert_eq!(collateral_leg_user_addr("tao", "tao", "u_src", "btc", "u_dst"), "u_src");
+        assert_eq!(collateral_leg_user_addr("tao", "btc", "u_src", "tao", "u_dst"), "u_dst");
+        assert_eq!(collateral_leg_user_addr("sol", "sol", "u_src", "tao", "u_dst"), "u_src");
+    }
+
+    #[test]
+    fn a_payee_lookup_off_the_legs_is_empty_rather_than_an_error() {
+        // Unreachable live (finalize rejects a backing that is not a leg), and it must stay unable to
+        // fail: this feeds a terminal timeout, where an error would strand the swap forever.
+        assert_eq!(collateral_leg_user_addr("tao", "btc", "u_src", "eth", "u_dst"), "");
     }
 
     #[test]

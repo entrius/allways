@@ -100,6 +100,10 @@ pub struct SwapTimedOut {
     pub penalty: u64,
     /// Share of `penalty` owed to the wronged user; the surplus (if any) is protocol revenue.
     pub reimbursement: u64,
+    /// Who the backing chain owes `reimbursement`: the user's own address on `collateral_chain`, so
+    /// the seizure can be relayed from this event alone. Empty when the backing settles locally —
+    /// that refund already moved, to `Swap::user`.
+    pub payee: String,
 }
 
 /// A validator slid a reservation/swap deadline forward (single-validator, no quorum). Carries the
