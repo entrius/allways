@@ -109,6 +109,51 @@ def test_decode_swap_completed_roundtrip():
     assert f.to_amount == 345_000_000 and f.from_amount == 100_000
 
 
+def test_decode_swap_timed_out_roundtrip():
+    # The slash relay's whole input: absolute figures plus the payee they are owed to. `payee` is the
+    # last field — appended in W3.1, so a stale decoder truncates rather than mis-reads the figures.
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'SwapTimedOut',
+        {
+            'swap_key': bytes(range(32)),
+            'miner': bytes(miner),
+            'collateral_amount': 3_000_000_000,
+            'slash': 0,
+            'collateral_chain': 'tao',
+            'penalty': 3_300_000_000,
+            'reimbursement': 3_300_000_000,
+            'payee': '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
+        },
+    )
+    name, f = decode_event(raw)
+    assert name == 'SwapTimedOut'
+    assert f.miner == miner and bytes(f.swap_key) == bytes(range(32))
+    assert f.collateral_chain == 'tao' and f.slash == 0
+    assert f.penalty == 3_300_000_000 and f.reimbursement == 3_300_000_000
+    assert f.payee == '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty'
+
+
+def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
+    # A "sol" verdict already paid the user on Solana; the empty string is the on-the-wire shape of
+    # "nothing is owed elsewhere", and it must decode as a value, not a missing field.
+    raw = _encode(
+        'SwapTimedOut',
+        {
+            'swap_key': bytes(range(32)),
+            'miner': bytes(Keypair().pubkey()),
+            'collateral_amount': 2_000_000_000,
+            'slash': 2_200_000_000,
+            'collateral_chain': 'sol',
+            'penalty': 2_200_000_000,
+            'reimbursement': 2_200_000_000,
+            'payee': '',
+        },
+    )
+    _, f = decode_event(raw)
+    assert f.payee == '' and f.slash == 2_200_000_000
+
+
 def test_decode_miner_activated_and_collateral():
     miner = Keypair().pubkey()
     name, f = decode_event(_encode('MinerActivated', {'miner': bytes(miner), 'at': 1_700_000_111}))

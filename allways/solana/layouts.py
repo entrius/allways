@@ -364,7 +364,8 @@ EVENT_LAYOUTS = {
         'initiated_at' / I64,
     ),
     # `slash` is what moved on Solana (0 for a non-"sol" backing); `penalty`/`reimbursement` are the
-    # absolute figures the backing chain owes — the slash relay's inputs.
+    # absolute figures the backing chain owes and `payee` is whom it owes them to (empty for "sol",
+    # which settled here) — together, the slash relay's whole input.
     'SwapTimedOut': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
@@ -373,6 +374,7 @@ EVENT_LAYOUTS = {
         'collateral_chain' / String,
         'penalty' / U64,
         'reimbursement' / U64,
+        'payee' / String,
     ),
     'SwapTimeoutExtended': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'validator' / Pubkey32, 'timeout_at' / I64),
     'TreasuryWithdrawn': CStruct('recipient' / Pubkey32, 'amount' / U64, 'total' / U64),
