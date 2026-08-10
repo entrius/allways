@@ -11,7 +11,6 @@ from typing import Optional
 import pytest
 
 from allways.assets.base import ProviderUnreachableError
-from allways.assets.evm import EvmRpcError
 from allways.assets.erc20 import (
     SEL_BALANCE_OF,
     SEL_IS_BLACKLISTED,
@@ -20,6 +19,7 @@ from allways.assets.erc20 import (
     TRANSFER_TOPIC0,
     ArbUsdc,
 )
+from allways.assets.evm import EvmRpcError
 from allways.chains import CHAIN_ARBUSDC
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
