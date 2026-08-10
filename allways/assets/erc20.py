@@ -412,7 +412,7 @@ class Erc20(EvmAsset):
         try:
             est = int(self.chain.eth_rpc('eth_estimateGas', [params]), 16)
         except Exception as e:
-            return None if 'revert' in str(e).lower() else DEFAULT_TOKEN_TRANSFER_GAS
+            return None if getattr(e, 'is_execution_revert', False) else DEFAULT_TOKEN_TRANSFER_GAS
         gas = est + est // 5
         return None if gas > MAX_TOKEN_TRANSFER_GAS else gas
 
