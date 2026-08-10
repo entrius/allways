@@ -37,6 +37,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
 )
 from allways.cli.swap_commands.swap_intake import (
+    bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
     rate_display_from_fixed,
@@ -191,7 +192,7 @@ def _net_receive(to_amount: int, to_chain: str) -> float:
     return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
 
 
-def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap):
+def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds=None):
     """Resolve an explicit --miner pubkey against the same gates auto-select uses. Hard-fails with
     the specific reason — never silently falls back to another miner."""
     chosen = next((p for p in viable if str(p[0].miner) == miner_opt), None)
@@ -200,8 +201,9 @@ def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amou
     cand = next((c for c in candidates if str(c.miner) == miner_opt), None)
     if cand is None:
         fail(f'Miner {miner_opt[:8]}… is not active or not quoting {from_chain}->{to_chain}.')
-    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
-    _, reason = swap_viable(amts.collateral_amount, cand.collateral, min_swap, max_swap)
+    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
+    lo, hi = (bounds or {}).get(cand.backing, (min_swap, max_swap))
+    _, reason = swap_viable(amts.collateral_amount, cand.collateral, lo, hi, cand.backing)
     fail(f'Miner {miner_opt[:8]}… cannot take this swap: {reason or "rate not executable"}.')
 
 
@@ -394,8 +396,8 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
 
     cfg = client.get_config()
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    bounds = bounds_from_config(cfg) if cfg else {}
+    min_swap, max_swap = bounds.get(NUMERAIRE_CHAIN, (0, 0))
     pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
     finalize_window = int(getattr(cfg, 'finalize_window_secs', 150)) if cfg else 150
 
@@ -404,7 +406,7 @@ def swap_now_command(
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
     if miner_opt:
-        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if not viable:
             fail('No miner can fund an executable swap for that amount within bounds.')
         best_to = max(p[1].to_amount for p in viable)
@@ -412,7 +414,7 @@ def swap_now_command(
             cand, amts = _pick_intake(viable, from_chain, to_chain)
         else:
             cand, amts = _named_intake(
-                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap
+                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds
             )
         if amts.to_amount < best_to * (1 - MINER_RATE_WARN_FRACTION):
             pct = (1 - amts.to_amount / best_to) * 100
@@ -421,7 +423,7 @@ def swap_now_command(
                 f'(~{_net_receive(best_to, to_chain):.8g} {to_chain.upper()}).'
             )
     else:
-        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if best is None:
             fail('No miner can fund an executable swap for that amount within bounds.')
         cand, amts = best
@@ -634,14 +636,14 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
         # Format first — offline, and a malformed address can never be delivered to.
         if not provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
         if not provider.can_deliver_to(receive_addr, amts.to_amount):
             fail(
                 f'  Your receive address cannot accept {to_chain.upper()} right now '
                 '(frozen or transfers paused). No funds moved.'
             )
         return
-    quote = client.get_quote(cand.miner, from_chain, to_chain)
+    quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
     if miner_addr and (
         not provider.chain.is_valid_address(miner_addr) or not provider.can_deliver_to(miner_addr, from_amount)
@@ -880,7 +882,9 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
+    fill = compute_intake_amounts(
+        from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing
+    )
     try:
         client.finalize_reservation(
             miner,
@@ -890,6 +894,7 @@ def _reserve_self_represented(
             fill.collateral_amount,
             fill.from_amount,
             fill.to_amount,
+            backing,
         )
     except Exception as e:
         reason = contract_reject_reason(e)

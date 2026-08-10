@@ -257,6 +257,10 @@ class _TwoQuoteClient:
         self.state_reads += 1
         return SimpleNamespace(active=True, collateral=10**11)
 
+    def get_bond_attestation(self, miner, chain='tao'):
+        # The quorum's assertion about the TAO purse — locked, and deep enough to back the offer.
+        return SimpleNamespace(effective_balance=10**11, locked=True, epoch=1)
+
 
 def test_candidate_miners_surfaces_both_offers_with_their_backings():
     from allways.cli.swap_commands.swap_intake import candidate_miners
@@ -297,3 +301,122 @@ def test_the_quote_preview_states_each_backings_guarantee():
     assert 'instant' in GUARANTEE['sol'].lower()
     assert 'tao' in GUARANTEE['tao'].lower() and 'timeout' in GUARANTEE['tao'].lower()
     assert set(GUARANTEE) == {'sol', 'tao'}, 'every backing needs stated copy before it can trade'
+
+
+# --- W3 bid routing: the reserve engine bids the market, not a purse ------------------------------
+
+
+class _RoutingClient:
+    """A miner standing both offers on sol->tao, with a purse behind each."""
+
+    def __init__(self, sol_rate=10 * 10**18, tao_rate=11 * 10**18, tao_purse=10**11, tao_locked=True):
+        self.quotes = {
+            'sol': SimpleNamespace(
+                miner='m1', from_chain='sol', to_chain='tao', rate=sol_rate,
+                collateral_chain='sol', miner_from_addr='',
+            ),
+            'tao': SimpleNamespace(
+                miner='m1', from_chain='sol', to_chain='tao', rate=tao_rate,
+                collateral_chain='tao', miner_from_addr='',
+            ),
+        }
+        self.tao_purse = tao_purse
+        self.tao_locked = tao_locked
+        self.bids = []
+
+    def get_quotes_for_direction(self, miner, from_chain, to_chain):
+        return list(self.quotes.values())
+
+    def get_quote(self, miner, from_chain, to_chain, backing='sol'):
+        return self.quotes.get(backing)
+
+    def get_miner_state(self, miner):
+        return SimpleNamespace(active=True, has_active_swap=False, collateral=10**11)
+
+    def get_bond_attestation(self, miner, chain='tao'):
+        return SimpleNamespace(effective_balance=self.tao_purse, locked=self.tao_locked, epoch=1)
+
+    def get_config(self):
+        return SimpleNamespace(
+            min_swap_amount=0, max_swap_amount=0, tao_min_swap_amount=0, tao_max_swap_amount=0
+        )
+
+    def get_pool(self, miner):
+        return None
+
+
+def _pick(client, from_amount=10**9):
+    from allways.validator.reserve_engine import _best_offer
+    from allways.cli.swap_commands.swap_intake import bounds_from_config
+
+    state = client.get_miner_state('m1')
+    bounds = bounds_from_config(client.get_config())
+    return _best_offer(client, 'm1', state, 'sol', 'tao', from_amount, bounds)
+
+
+def test_the_engine_bids_the_best_rate_regardless_of_which_purse_backs_it():
+    offer, why = _pick(_RoutingClient(sol_rate=10 * 10**18, tao_rate=11 * 10**18))
+    assert why == '' and offer[1] == 'tao'
+    offer, _ = _pick(_RoutingClient(sol_rate=12 * 10**18, tao_rate=11 * 10**18))
+    assert offer[1] == 'sol'
+
+
+def test_an_exact_tie_goes_to_sol_because_its_failure_guarantee_is_instant():
+    offer, _ = _pick(_RoutingClient(sol_rate=11 * 10**18, tao_rate=11 * 10**18))
+    assert offer[1] == 'sol', 'same value to the taker, strictly better guarantee'
+
+
+def test_an_offer_with_no_locked_bond_behind_it_is_not_bid_on():
+    # The contract's entry gate refuses an unlocked attestation, so bidding would burn the fee.
+    offer, _ = _pick(_RoutingClient(tao_locked=False))
+    assert offer[1] == 'sol'
+
+
+def test_a_tao_offer_is_sized_against_its_own_leg_not_the_sol_one():
+    from allways.cli.swap_commands.swap_intake import compute_intake_amounts
+
+    # sol->tao at 11 tao per sol: a 1 SOL source is a 11 TAO dest. A tao-backed swap is
+    # collateralised against the TAO leg (rao), a sol-backed one against the SOL leg (lamports).
+    tao = compute_intake_amounts('sol', 'tao', 10**9, '11', 'tao')
+    sol = compute_intake_amounts('sol', 'tao', 10**9, '11', 'sol')
+    assert tao.collateral_amount == 11 * 10**9 == tao.to_amount
+    assert sol.collateral_amount == 10**9 == sol.from_amount
+
+
+def test_a_backing_absent_from_the_legs_is_refused_the_way_the_program_refuses_it():
+    from allways.cli.swap_commands.swap_intake import compute_intake_amounts
+
+    with pytest.raises(ValueError, match='tao'):
+        compute_intake_amounts('sol', 'btc', 10**9, '0.0021', 'tao')
+
+
+def test_a_tao_offer_whose_bond_is_too_thin_says_so_in_tao():
+    # 11 TAO leg needs 12.1 TAO of bond; a 1 TAO purse cannot take it, and the message has to be
+    # denominated in the asset the miner actually posted.
+    client = _RoutingClient(sol_rate=1, tao_rate=11 * 10**18, tao_purse=10**9)
+    client.quotes.pop('sol')
+    offer, why = _pick(client)
+    assert offer is None
+    assert 'collateral too low' in why and 'TAO' in why
+
+
+def test_the_routed_bid_names_the_backing_it_won():
+    import threading
+    from unittest.mock import patch
+    from allways.validator.reserve_engine import reserve_on_behalf
+
+    client = _RoutingClient()
+    client.open_or_request = lambda miner, f, t, backing='sol': client.bids.append(backing) or 'sig'
+    validator = SimpleNamespace(
+        solana_client=client,
+        axon_lock=threading.RLock(),
+        state_store=SimpleNamespace(upsert_routed_request=lambda *a: None),
+        axon_assets={},
+    )
+    with patch('allways.validator.reserve_engine.resolve_miner_pubkey', return_value='m1'):
+        res = reserve_on_behalf(
+            validator, 'hk', 'sol', 'tao', '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF',
+            'user-sol', 'user-tao', 10**9,
+        )
+    assert res.ok, res.reason
+    assert client.bids == ['tao'], 'a bid on the wrong backing lands on a different offer entirely'

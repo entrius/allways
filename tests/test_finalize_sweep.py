@@ -32,7 +32,7 @@ class SweepClient:
         return self._reservation
 
     def finalize_reservation(
-        self, miner, user, user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount
+        self, miner, user, user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount, backing='sol'
     ):
         self.finalized.append(
             (str(miner), str(user), user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount)
@@ -48,6 +48,7 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
         rate=RATE_FIXED,
         reserved_until=reserved_until,
         finalize_by=finalize_by,
+        collateral_chain='sol',
     )
 
 

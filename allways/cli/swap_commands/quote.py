@@ -25,6 +25,8 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
+    backing_purse,
+    bounds_from_config,
     compute_intake_amounts,
     rate_display_from_fixed,
     select_best_miner,
@@ -33,7 +35,6 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.constants import FEE_DIVISOR
 from allways.utils.rate import apply_fee_deduction, directional_rate, is_executable_rate
-
 
 # The failure guarantee each backing carries. It differs in TIMING, not in whether you are made
 # whole — say that plainly rather than making a taker infer it from the asset name.
@@ -86,8 +87,8 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
 
     _, client = get_solana_cli_context(need_keypair=False)
     cfg = safe_read(lambda: client.get_config(), what='read config')
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    bounds = bounds_from_config(cfg) if cfg else {}
+    min_swap, max_swap = bounds.get('sol', (0, 0))
 
     from_amount = to_smallest_units(amount, from_chain)
     to_dec = get_chain_def(to_chain).decimals
@@ -100,12 +101,18 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
             continue
         for q in e.quotes:
             if q.from_chain == from_chain and q.to_chain == to_chain:
+                backing = getattr(q, 'collateral_chain', None) or 'sol'
+                # The purse the contract will check for THIS offer — local lamports for a
+                # sol-backed quote, the attested effective bond for any other.
+                purse = backing_purse(client, q.miner, e.state, backing)
+                if purse is None:
+                    continue
                 candidates.append(
                     MinerCandidate(
                         miner=q.miner,
                         rate_display=rate_display_from_fixed(q.rate),
-                        collateral=e.collateral,
-                        backing=getattr(q, 'collateral_chain', None) or 'sol',
+                        collateral=purse,
+                        backing=backing,
                     )
                 )
 
@@ -118,15 +125,19 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
             continue
         if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
             continue
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
+        try:
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
+        except ValueError:
+            continue
         if amts.to_amount <= 0:
             continue
-        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
+        lo, hi = bounds.get(c.backing, (min_swap, max_swap))
+        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, lo, hi, c.backing)
         if not ok:
             continue
         viable.append((c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR)))
 
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     best_miner = str(best[0].miner) if best else None
 
     if as_json:

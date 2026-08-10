@@ -465,7 +465,7 @@ class _Gate:
 def _screen(gate, from_chain, to_chain, client=None):
     from allways.cli.swap_commands.swap import _screen_deliverability
 
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='150')
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='150', backing='sol')
     with patch('allways.cli.swap_commands.swap._gate_provider', return_value=gate):
         _screen_deliverability(client or MagicMock(), {}, cand, from_chain, to_chain, 'recvaddr', 'useraddr', 10**6)
     return gate
@@ -532,7 +532,7 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
         min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
     )
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10, backing='sol')
     argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
