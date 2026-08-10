@@ -10,7 +10,7 @@ import requests
 from solders.keypair import Keypair
 
 from allways.assets.base import ProviderUnreachableError
-from allways.assets.solana import Sol
+from allways.assets.solana import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
 
 
@@ -156,6 +156,61 @@ class TestAddressValidity:
         assert p.is_valid_address('not-a-key') is False
         assert p.is_valid_address('') is False
         assert p.is_valid_address(None) is False
+
+
+class TestDeliveryGates:
+    """Solana's reserved account keys are read-only in every transaction, so a transfer to one
+    always fails and an honest miner must never be slashed for missing it. Verified against LiteSVM
+    (2026-08-10): all 31 reserved keys reject the credit; the incinerator and ordinary/PDA/program
+    addresses accept it. Ownership is NOT the test — Stake/Config/AddressLookupTable are owned by
+    the upgradeable loader, StakeConfig has no account, and the SPL Token program is executable
+    yet fundable."""
+
+    # One per shape the account-owner heuristic got wrong, plus the obvious burn target.
+    RESERVED = [
+        '11111111111111111111111111111111',  # System Program — owner NativeLoader
+        'SysvarC1ock11111111111111111111111111111111',  # sysvar — owner Sysvar
+        'StakeConfig11111111111111111111111111111111',  # no account exists at all
+        'Stake11111111111111111111111111111111111111',  # Core BPF: owner is the upgradeable loader
+        'Config1111111111111111111111111111111111111',  # ditto
+        'AddressLookupTab1e1111111111111111111111111',  # ditto
+        'Feature111111111111111111111111111111111111',  # no account exists
+    ]
+    DELIVERABLE = [
+        '1nc1nerator11111111111111111111111111111111',  # deliberately not reserved — a burn must land
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # executable, loader-owned, receives SOL fine
+    ]
+
+    @pytest.mark.parametrize('address', RESERVED)
+    def test_reserved_key_blocks_reservation_and_exempts_slash(self, address):
+        p = provider_with(FakeRpc())
+        assert p.can_deliver_to(address, 10**9) is False
+        assert p.delivery_refused(address, 0) is True
+
+    @pytest.mark.parametrize('address', DELIVERABLE)
+    def test_fundable_special_addresses_pass(self, address):
+        p = provider_with(FakeRpc())
+        assert p.can_deliver_to(address, 10**9) is True
+        assert p.delivery_refused(address, 0) is False
+
+    def test_ordinary_wallet_passes(self):
+        p = provider_with(FakeRpc())
+        addr = str(Keypair().pubkey())
+        assert p.can_deliver_to(addr, 10**9) is True
+        assert p.delivery_refused(addr, 0) is False
+
+    def test_gates_need_no_rpc(self):
+        """Offline by construction — a dead RPC can neither block a reservation nor defer a slash."""
+        p = provider_with(FakeRpc(raise_conn=True))
+        assert p.can_deliver_to(self.RESERVED[0], 10**9) is False
+        assert p.delivery_refused(self.RESERVED[0], 0) is True
+
+    def test_reserved_set_matches_agave(self):
+        """Guards against a typo silently un-blocking a key: agave v3.1.14 lists exactly 31."""
+        assert len(RESERVED_ACCOUNTS) == 31
+        assert all(32 <= len(a) <= 44 for a in RESERVED_ACCOUNTS)
+        p = provider_with(FakeRpc())
+        assert all(p.is_valid_address(a) for a in RESERVED_ACCOUNTS)
 
 
 class TestProofRoundtrip:
