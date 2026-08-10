@@ -287,6 +287,9 @@ class EvmAsset(Asset):
     _MAX_SCAN_CURSORS = 64
 
     def __init__(self):
+        # Asset-scoped log tag (the wire id). Transport lines carry the CHAIN's tag instead —
+        # one Arbitrum ladder serves every Arbitrum asset, so the two must stay distinguishable.
+        self._log = f'[{self.chain_def.id}]'
         self.last_send_error: Optional[str] = None
         # Settled-tx cache, keyed tx_hash → immutable per-block facts. A mined tx's receipt
         # and its block's timestamp are immutable per block hash, so the validator's 12s
@@ -301,10 +304,6 @@ class EvmAsset(Asset):
         # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
         self.scan_cursors: dict[Tuple[str, str, int], int] = {}
         self.SCAN_LOOKBACK_BLOCKS = max(1, SCAN_LOOKBACK_SECS // self.chain_def.seconds_per_block)
-
-    @property
-    def _key_env(self) -> str:
-        return f'{self.chain_def.env_prefix}_PRIVATE_KEY'
 
     def _send_error(self, msg: str) -> None:
         self.last_send_error = msg
@@ -322,13 +321,14 @@ class EvmAsset(Asset):
 
     def check_connection(self, require_send: bool = True) -> None:
         if require_send:
-            key = os.environ.get(self._key_env)
+            key_env = self.chain._key_env
+            key = os.environ.get(key_env)
             if not key:
-                raise ConnectionError(f'{self.chain_def.env_prefix} signing requires the {self._key_env} env var')
+                raise ConnectionError(f'{self.chain_def.env_prefix} signing requires the {key_env} env var')
             try:
                 Account.from_key(key)
             except Exception as e:
-                raise ConnectionError(f'{self._key_env} is not a valid 32-byte hex key: {e}') from e
+                raise ConnectionError(f'{key_env} is not a valid 32-byte hex key: {e}') from e
         chain_id, tip = self.chain.connect_network()
         bt.logging.success(
             f'[{self.chain.network_def.label}Rpc] connected: '

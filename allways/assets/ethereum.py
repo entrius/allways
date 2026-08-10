@@ -9,8 +9,6 @@ from allways.assets.base import ProviderUnreachableError, SendResult, Transactio
 from allways.assets.evm import ETHEREUM, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import CHAIN_ETH, ChainDefinition
 
-LOG_ETH = '[EthRpc]'
-
 TRANSFER_GAS = 21_000
 # Refuse destinations whose receive hook wants more than this — bounds the miner's gas
 # spend against a hostile contract; the slash gate exempts code-bearing dests anyway.
@@ -30,7 +28,7 @@ class Ether(EvmAsset, EvmChain):
     """
 
     def __init__(self):
-        EvmChain.__init__(self, ETHEREUM, 'ETH')
+        EvmChain.__init__(self, ETHEREUM, CHAIN_ETH.env_prefix)
         EvmAsset.__init__(self)
 
     @property
@@ -59,7 +57,7 @@ class Ether(EvmAsset, EvmChain):
         except Exception as e:
             raise ProviderUnreachableError(f'ETH RPC unreachable: {e}') from e
         if tx is None:
-            bt.logging.debug(f'{LOG_ETH} tx {tx_hash[:16]}... not found')
+            bt.logging.debug(f'{self._log} tx {tx_hash[:16]}... not found')
             return None
 
         to = self.chain.normalize_address(tx.get('to') or '')  # null for contract creation
@@ -67,7 +65,7 @@ class Ether(EvmAsset, EvmChain):
         amount = int(tx.get('value') or '0x0', 16)
         if to != self.chain.normalize_address(expected_recipient) or amount < expected_amount:
             bt.logging.warning(
-                f'{LOG_ETH} tx {tx_hash[:16]}... does not pay {expected_recipient} >= {expected_amount} wei '
+                f'{self._log} tx {tx_hash[:16]}... does not pay {expected_recipient} >= {expected_amount} wei '
                 f'(to={tx.get("to")}, value={amount})'
             )
             return None
@@ -105,7 +103,7 @@ class Ether(EvmAsset, EvmChain):
             if receipt is None:
                 raise ProviderUnreachableError(f'ETH tx {tx_hash[:16]}... is mined but its receipt is unavailable')
             if int(receipt.get('status') or '0x0', 16) != 1:
-                bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
+                bt.logging.warning(f'{self._log} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
                 return None
 
             block_number = int(receipt['blockNumber'], 16)
@@ -125,7 +123,7 @@ class Ether(EvmAsset, EvmChain):
                     f'ETH tx {tx_hash[:16]}... is mined but block {block_number} has no readable timestamp'
                 )
             if is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'):
-                bt.logging.warning(f'{LOG_ETH} tx {tx_hash[:16]}... block was reorged out — rejecting')
+                bt.logging.warning(f'{self._log} tx {tx_hash[:16]}... block was reorged out — rejecting')
                 return None
 
             # Cache only a fully-settled, internally-consistent read (status 1, timestamped,
