@@ -77,6 +77,9 @@ class SolanaSwap:
     timeout_at: int
     max_extend_at: int
     fulfilled_at: int
+    # The purse this swap draws against (W2b). Defaulted so a pre-W2b caller still constructs, but
+    # every read of it is a collateral decision — the W3 relay reads it to know whose bond answers.
+    collateral_chain: str = 'sol'
 
     @property
     def key_hex(self) -> str:
@@ -111,6 +114,7 @@ def swap_from_solana(acct, swap_key: Optional[bytes] = None) -> SolanaSwap:
         timeout_at=acct.timeout_at,
         max_extend_at=acct.max_extend_at,
         fulfilled_at=acct.fulfilled_at,
+        collateral_chain=getattr(acct, 'collateral_chain', 'sol'),
     )
 
 

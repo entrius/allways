@@ -697,3 +697,23 @@ def test_a_loop_with_no_relay_configured_decides_exactly_as_before():
     loop, _ = loop_with()
     assert loop.relay is None
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_the_flattened_swap_view_carries_the_backing_it_draws_against():
+    # The relay's two hooks both key off this field, and the on-chain Swap has carried it since
+    # W2b — a view that drops it makes an off-chain-backed swap look locally settled.
+    from types import SimpleNamespace as NS
+
+    from allways.solana.client import swap_from_solana
+
+    PK = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+
+    acct = NS(
+        miner=PK, user=PK, from_chain='sol', to_chain='tao',
+        user_from_addr='a', user_to_addr='b', miner_from_addr='c', miner_to_addr='d',
+        rate=1, collateral_amount=1, from_amount=1, to_amount=1,
+        from_tx_hash='srctx', from_tx_block=0, to_tx_hash='', to_tx_block=0,
+        status=NS(), initiated_at=0, timeout_at=0, max_extend_at=0, fulfilled_at=0,
+        collateral_chain='tao',
+    )
+    assert swap_from_solana(acct).collateral_chain == 'tao'
