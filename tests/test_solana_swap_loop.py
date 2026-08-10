@@ -656,7 +656,7 @@ def _loop_with_relay(relay, backing='tao'):
     swap.collateral_chain = backing
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = SimpleNamespace(
-        get_swaps=lambda: [(f'pda', swap)],
+        get_swaps=lambda: [('pda', swap)],
         get_reservation=lambda miner: make_reservation(),
     )
     return SolanaSwapLoop(client, providers, fee_divisor=100, relay=relay), swap

@@ -7,13 +7,12 @@ the confirm-or-abort native fallback, send-safety messaging, and the axon disk c
 
 import time
 import types
-
-from allways.cli.swap_commands.swap_intake import MinerCandidate
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
 from allways.cli.swap_commands.swap import swap_now_command
+from allways.cli.swap_commands.swap_intake import MinerCandidate
 
 USER = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
 ROUTER = '5DtUJ9ytbeCMjovFieNwaxxqRP3DzT6iQPnZTyKmi3n6iXey'

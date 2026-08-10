@@ -9,8 +9,6 @@ source chain's confirmation depth, which accrues after the claim via the crank's
 
 import time
 import types
-
-from allways.cli.swap_commands.swap_intake import MinerCandidate
 from unittest.mock import MagicMock, patch
 
 from allways.cli.swap_commands.helpers import live_unclaimed
@@ -21,6 +19,7 @@ from allways.cli.swap_commands.swap import (
     _poll_reservation,
     _self_crank_resolve,
 )
+from allways.cli.swap_commands.swap_intake import MinerCandidate
 from allways.solana.rpc import TransientRpcError
 
 EMPTY = bytes(32)

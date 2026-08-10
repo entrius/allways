@@ -346,8 +346,8 @@ class _RoutingClient:
 
 
 def _pick(client, from_amount=10**9):
-    from allways.validator.reserve_engine import _best_offer
     from allways.cli.swap_commands.swap_intake import bounds_from_config
+    from allways.validator.reserve_engine import _best_offer
 
     state = client.get_miner_state('m1')
     bounds = bounds_from_config(client.get_config())
@@ -403,6 +403,7 @@ def test_a_tao_offer_whose_bond_is_too_thin_says_so_in_tao():
 def test_the_routed_bid_names_the_backing_it_won():
     import threading
     from unittest.mock import patch
+
     from allways.validator.reserve_engine import reserve_on_behalf
 
     client = _RoutingClient()
