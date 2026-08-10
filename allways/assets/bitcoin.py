@@ -44,6 +44,10 @@ def detect_address_type(address: str) -> str:
     return 'unknown'
 
 
+# Networks using Bitcoin's test address encoding — testnet3, testnet4 and signet share it.
+TESTNET_ENCODINGS = ('testnet', 'testnet4', 'signet')
+
+
 def to_mainnet_wif(wif: str) -> str:
     """Convert a testnet/regtest WIF (0xef) to mainnet (0x80) for signing libraries."""
     decoded = base58.b58decode_check(wif)
@@ -169,7 +173,7 @@ class Bitcoin(Asset, Chain):
             from embit.networks import NETWORKS
             from embit.script import p2pkh, p2sh, p2wpkh
 
-            net = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
+            net = NETWORKS['test'] if self.network in TESTNET_ENCODINGS else NETWORKS['main']
             pub = EmbitPrivateKey.from_wif(wif).get_public_key()
             seg = p2wpkh(pub)
             return self.normalize_address(address) in {
@@ -318,6 +322,8 @@ class Bitcoin(Asset, Chain):
             defaults = ('https://mempool.space/testnet4/api',)
         elif self.network == 'testnet':
             defaults = ('https://blockstream.info/testnet/api', 'https://mempool.space/testnet/api')
+        elif self.network == 'signet':
+            defaults = ('https://blockstream.info/signet/api', 'https://mempool.space/signet/api')
         else:
             defaults = ('https://blockstream.info/api', 'https://mempool.space/api')
         return [(url, None) for url in defaults]
@@ -536,7 +542,7 @@ class Bitcoin(Asset, Chain):
             return None
 
         try:
-            network = NETWORKS['test'] if self.network in ('testnet', 'testnet4') else NETWORKS['main']
+            network = NETWORKS['test'] if self.network in TESTNET_ENCODINGS else NETWORKS['main']
             privkey = EmbitPrivateKey.from_wif(wif)
             pubkey = privkey.get_public_key()
             segwit_script = p2wpkh(pubkey)

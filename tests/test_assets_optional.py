@@ -42,3 +42,15 @@ def test_required_failure_still_raises(registry):
 def test_none_means_all_required(registry):
     with pytest.raises(RuntimeError, match='failed startup check'):
         cp.create_assets(check=True)
+
+
+def test_evm_network_names_match_the_rpc_registry():
+    """chains.py names the networks the CLI accepts; assets/evm.py names the chain ids the
+    provider dials. One fact in two files, so CI compares them."""
+    for chain_id, cls, kwarg_names in cp.ASSET_REGISTRY:
+        if kwarg_names:
+            continue
+        asset = cls()
+        served = getattr(asset.chain, 'network_def', None)
+        if served:
+            assert set(asset.chain_def.networks) == set(served.chain_ids), chain_id
