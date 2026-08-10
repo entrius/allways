@@ -96,6 +96,12 @@ class TestAddresses:
         assert not provider.is_valid_address(None)
         assert not provider.is_valid_address('f39Fd6e51aad88F6F4ce6aB8827279cffFb92266')  # no 0x
 
+    def test_zero_address_rejected(self, provider):
+        # ERC-20 transfer() reverts to the zero address (no blacklist/pause gate catches it), so an
+        # honest miner reserved for it would be forced into a slash. Reject at the format gate.
+        assert not provider.is_valid_address('0x' + '00' * 20)
+        assert not provider.is_valid_address('0x' + '0' * 40)
+
     def test_normalize_lowercases(self, provider):
         assert provider.normalize_address(TEST_ADDR) == TEST_ADDR.lower()
 

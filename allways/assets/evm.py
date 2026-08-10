@@ -227,6 +227,10 @@ class EvmChain(Chain):
         validating checksums, which would wave through exactly the typos EIP-55 exists to catch."""
         if not isinstance(address, str) or not _HEX_ADDR_RE.match(address):
             return False
+        # The zero address is never a real destination: ETH burns to it, and an ERC-20 transfer()
+        # reverts on it — a dest no delivery gate catches, so an honest miner would be slashed.
+        if int(address, 16) == 0:
+            return False
         body = address[2:]
         if body == body.lower() or body == body.upper():
             return True

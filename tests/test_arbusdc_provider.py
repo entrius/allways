@@ -258,6 +258,11 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_call': eth_call_views()})
         assert provider.can_deliver_to(RECIPIENT, AMOUNT) is True
 
+    def test_zero_address_is_not_a_valid_dest(self, provider):
+        # USDC transfer() reverts to the zero address (no blacklist/pause gate would catch it), so a
+        # reservation aimed there would strand the miner into a slash. The format gate must reject it.
+        assert provider.chain.is_valid_address('0x' + '00' * 20) is False
+
     def test_blacklisted_dest_blocks_reserve(self, provider):
         rpc_stub(provider, {'eth_call': eth_call_views(blacklisted=[RECIPIENT])})
         assert provider.can_deliver_to(RECIPIENT, AMOUNT) is False
