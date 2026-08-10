@@ -73,27 +73,6 @@ _RULES: list[_Rule] = [
         ),
     ),
     (
-        'invalid_source_proof',
-        'invalid source address proof',
-        True,
-        lambda ctx: (
-            f'Signature for [yellow]{_ctx_get(ctx, "from_address", "<your source address>")}[/yellow] '
-            'did not verify. The signing key (BTC_PRIVATE_KEY/WIF or coldkey) does not match '
-            'the source address.'
-        ),
-    ),
-    (
-        'address_cooldown',
-        'address on cooldown',
-        True,
-        lambda ctx: (
-            f'Source address [yellow]{_ctx_get(ctx, "from_address", "<your source address>")}[/yellow] '
-            f'is cooling down — {_ctx_get(ctx, "raw_reason", "").removeprefix("Address on cooldown: ")}. '
-            f'Each failed reservation doubles the next cooldown; wait it out or reserve from a different '
-            'address.'
-        ),
-    ),
-    (
         'wrong_direction',
         'miner does not support this swap direction',
         True,
