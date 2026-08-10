@@ -19,6 +19,7 @@ from allways.assets.erc20 import (
     TRANSFER_TOPIC0,
     ArbUsdc,
 )
+from allways.assets.evm import EvmRpcError
 from allways.chains import CHAIN_ARBUSDC
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
@@ -380,7 +381,21 @@ class TestSendGuards:
         responses = self._send_responses()
 
         def revert(params):
-            raise RuntimeError('execution reverted: Blacklistable: account is blacklisted')
+            raise EvmRpcError('rpc error', {'code': 3, 'message': 'execution reverted: account is blacklisted'})
+
+        responses['eth_estimateGas'] = revert
+        rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, AMOUNT) is None
+        assert 'refuses' in provider.last_send_error
+
+    def test_revert_detected_by_code_when_message_lacks_the_word(self, provider, monkeypatch):
+        # The old string-match missed a code-3 revert phrased without "revert" and would have
+        # broadcast a doomed tx (gas burned, no delivery). The typed verdict catches it.
+        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        responses = self._send_responses()
+
+        def revert(params):
+            raise EvmRpcError('rpc error', {'code': 3, 'message': 'gas required exceeds allowance'})
 
         responses['eth_estimateGas'] = revert
         rpc_stub(provider, responses)

@@ -16,12 +16,30 @@ from allways.assets.chain import Chain
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
+
+class EvmRpcError(RuntimeError):
+    """A JSON-RPC ``error`` object from an endpoint (an execution/method result), distinct from a
+    transport failure. Carries the structured error so callers branch on the code, not the message
+    wording (which varies by provider). ``is_execution_revert`` is a deterministic on-chain verdict."""
+
+    def __init__(self, message: str, error: Any):
+        super().__init__(message)
+        self.error = error if isinstance(error, dict) else {}
+
+    @property
+    def is_execution_revert(self) -> bool:
+        # Geth: code 3 + 'execution reverted'; others: -32000 with 'revert' in the message.
+        return self.error.get('code') == 3 or 'revert' in str(self.error.get('message') or '').lower()
+
+
 # eth_maxPriorityFeePerGas fallback when an endpoint doesn't serve it (1 gwei clears
 # comfortably in normal conditions without meaningfully overpaying a transfer).
 FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
 
-# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its
-# block-count bound from its own block time so the window means the same everywhere.
+# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its block
+# bound from its own block time. Note seconds_per_block is an integer floor, so on sub-second
+# chains (Arbitrum ~0.25s → floored to 1) the bound covers ~4× fewer wall-seconds than this.
+# Harmless: the scanner only surfaces a hash the confirm path re-verifies by exact tx hash.
 SCAN_LOOKBACK_SECS = 300
 
 
@@ -138,6 +156,7 @@ class EvmChain(Chain):
         log = f'{self.network_def.label}Rpc'
         payload = {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}
         last_err: Optional[Exception] = None
+        revert_err: Optional[EvmRpcError] = None
         saw_null = False
         for i, base in enumerate(rpc_bases):
             pos = f'[{i + 1}/{len(rpc_bases)}]'
@@ -165,7 +184,11 @@ class EvmChain(Chain):
 
             if 'error' in body:
                 err = body['error']
-                last_err = RuntimeError(f'{base} {method}: rpc error {err}')
+                last_err = EvmRpcError(f'{base} {method}: rpc error {err}', err)
+                # A revert is a deterministic execution verdict — remember it so it outranks any
+                # transport error from a later endpoint (else a flaky node masks a real refusal).
+                if last_err.is_execution_revert:
+                    revert_err = last_err
                 bt.logging.warning(f'{log} {pos} {tag} {method} → rpc error {err}; {tail}')
                 continue
 
@@ -179,6 +202,8 @@ class EvmChain(Chain):
             else:
                 bt.logging.debug(f'{log} {pos} {tag} {method} → ok')
             return result
+        if revert_err is not None:
+            raise revert_err
         if saw_null and last_err is None:
             return None
         if saw_null:

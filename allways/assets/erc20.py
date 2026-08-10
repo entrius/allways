@@ -414,7 +414,7 @@ class Erc20(EvmAsset):
         try:
             est = int(self.chain.eth_rpc('eth_estimateGas', [params]), 16)
         except Exception as e:
-            return None if 'revert' in str(e).lower() else DEFAULT_TOKEN_TRANSFER_GAS
+            return None if getattr(e, 'is_execution_revert', False) else DEFAULT_TOKEN_TRANSFER_GAS
         gas = est + est // 5
         return None if gas > MAX_TOKEN_TRANSFER_GAS else gas
 
@@ -447,6 +447,8 @@ class Erc20(EvmAsset):
         if self._refused_at(address):
             return True
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
+        # Span is in blocks; seconds_per_block floors to 1 on sub-second chains, so this reaches
+        # ~4× fewer wall-seconds than it reads. Fine here — the latest probe above is load-bearing.
         span = min(60, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         for probe in dict.fromkeys(hex(max(0, tip - span // d)) for d in (1, 2)):
             try:

@@ -11,6 +11,7 @@ import pytest
 
 from allways.assets.base import ProviderUnreachableError
 from allways.assets.ethereum import Ether
+from allways.assets.evm import EvmRpcError
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -347,6 +348,28 @@ class TestRpcFailover:
         provider.rpc_bases = ['https://a.example']
         with pytest.raises(Exception):
             provider.eth_rpc('eth_blockNumber', [])
+
+    def test_execution_revert_raises_typed_verdict(self, provider):
+        body = {'error': {'code': 3, 'message': 'execution reverted', 'data': '0x'}}
+        provider.http.post = lambda url, json=None, timeout=15: self._Resp(body=body)
+        provider.rpc_bases = ['https://a.example']
+        with pytest.raises(EvmRpcError) as exc:
+            provider.eth_rpc('eth_estimateGas', [{}])
+        assert exc.value.is_execution_revert
+
+    def test_revert_outranks_later_transport_failure(self, provider):
+        # A deterministic revert on endpoint A must not be masked by endpoint B being down —
+        # else the caller reads "transient" and broadcasts a doomed tx.
+        def post(url, json=None, timeout=15):
+            if 'a.example' in url:
+                return self._Resp(body={'error': {'code': 3, 'message': 'execution reverted'}})
+            raise ConnectionError('down')
+
+        provider.http.post = post
+        provider.rpc_bases = ['https://a.example', 'https://b.example']
+        with pytest.raises(EvmRpcError) as exc:
+            provider.eth_rpc('eth_estimateGas', [{}])
+        assert exc.value.is_execution_revert
 
 
 class TestCheckConnection:
