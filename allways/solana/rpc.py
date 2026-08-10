@@ -124,6 +124,11 @@ class SolanaRpc:
         val = res.get('value')
         return None if val is None else int(val['lamports'])
 
+    def get_account_owner(self, pubkey, commitment: str = 'confirmed') -> Optional[str]:
+        res = self._call('getAccountInfo', [str(pubkey), {'encoding': 'base64', 'commitment': commitment}])
+        val = res.get('value')
+        return None if val is None else str(val['owner'])
+
     def get_program_accounts(
         self,
         program_id,

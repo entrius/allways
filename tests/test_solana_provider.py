@@ -158,6 +158,55 @@ class TestAddressValidity:
         assert p.is_valid_address(None) is False
 
 
+class TestDeliveryGates:
+    """Builtin/sysvar destinations are readonly-enforced: the runtime rejects the lamport credit,
+    so an honest miner can never deliver and must never be slashed for it. Verified against LiteSVM
+    (2026-08-10): System Program and every sysvar fail with ReadonlyLamportChange; the SPL Token
+    Program — executable, but loader-owned — receives SOL fine, so ownership is the test."""
+
+    SYSTEM_PROGRAM = '11111111111111111111111111111111'
+    CLOCK_SYSVAR = 'SysvarC1ock11111111111111111111111111111111'
+
+    def owner_rpc(self, owner):
+        rpc = FakeRpc()
+        rpc.get_account_owner = lambda pubkey, commitment='confirmed': owner
+        return rpc
+
+    def failing_rpc(self):
+        rpc = FakeRpc()
+
+        def boom(pubkey, commitment='confirmed'):
+            raise requests.ConnectionError('down')
+
+        rpc.get_account_owner = boom
+        return rpc
+
+    @pytest.mark.parametrize(
+        'owner', ['NativeLoader1111111111111111111111111111111', 'Sysvar1111111111111111111111111111111111111']
+    )
+    def test_readonly_owner_blocks_reservation_and_exempts_slash(self, owner):
+        p = provider_with(self.owner_rpc(owner))
+        assert p.can_deliver_to(self.SYSTEM_PROGRAM, 10**9) is False
+        assert p.delivery_refused(self.SYSTEM_PROGRAM, 0) is True
+
+    @pytest.mark.parametrize(
+        'owner', ['11111111111111111111111111111111', 'BPFLoader2111111111111111111111111111111111', None]
+    )
+    def test_ordinary_and_deployed_program_dests_pass(self, owner):
+        """System-owned wallets and loader-owned (executable) programs both take a credit."""
+        p = provider_with(self.owner_rpc(owner))
+        assert p.can_deliver_to(str(Keypair().pubkey()), 10**9) is True
+        assert p.delivery_refused(str(Keypair().pubkey()), 0) is False
+
+    def test_reserve_gate_fails_open_on_rpc_trouble(self):
+        assert provider_with(self.failing_rpc()).can_deliver_to(self.CLOCK_SYSVAR, 10**9) is True
+
+    def test_slash_gate_raises_on_rpc_trouble(self):
+        """A blind chain view must defer the slash, never falsify one — the caller catches and WAITs."""
+        with pytest.raises(requests.ConnectionError):
+            provider_with(self.failing_rpc()).delivery_refused(self.CLOCK_SYSVAR, 0)
+
+
 class TestProofRoundtrip:
     def test_sign_then_verify(self):
         kp = Keypair()

@@ -15,6 +15,17 @@ from allways.solana.rpc import SolanaRpc, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
+# Accounts these programs own are readonly-enforced: the runtime rejects any lamport change,
+# so a transfer to one ALWAYS fails (ReadonlyLamportChange). Covers every builtin (System,
+# Vote, Stake, ComputeBudget, the loaders) and every sysvar. Deployed BPF programs are owned
+# by a loader instead and receive SOL fine — executability is not the test, ownership is.
+READONLY_OWNERS = frozenset(
+    {
+        'NativeLoader1111111111111111111111111111111',
+        'Sysvar1111111111111111111111111111111111111',
+    }
+)
+
 
 class Sol(Asset, Chain):
     """Solana swap-leg provider for native SOL transfers.
@@ -203,6 +214,25 @@ class Sol(Asset, Chain):
         except Exception as e:
             bt.logging.error(f'SOL get_balance failed for {address}: {e}')
             return 0
+
+    def _is_readonly_account(self, address: str) -> bool:
+        """Whether the runtime forbids crediting ``address`` (ownership is immutable, so one
+        read at latest is definitive — no historical sampling, unlike the EVM code probe)."""
+        return self.rpc.get_account_owner(address) in READONLY_OWNERS
+
+    def can_deliver_to(self, address: str, amount: int) -> bool:
+        """Reserve-time gate. Fails open — only a positive readonly-owner read blocks a reservation."""
+        try:
+            return not self._is_readonly_account(address)
+        except Exception as e:
+            bt.logging.warning(f'{LOG_SOL} owner probe failed for {address}: {e} — allowing')
+            return True
+
+    def delivery_refused(self, address: str, since_unix: int) -> bool:
+        """Slash gate: a builtin/sysvar destination is undeliverable by construction — the runtime
+        rejects the lamport credit outright, so the miner could never have paid. Raises when the
+        chain view is unavailable (caller defers rather than slashing on a blind spot)."""
+        return self._is_readonly_account(address)
 
     def is_valid_address(self, address: str) -> bool:
         """Validate a base58 ed25519 pubkey (32 bytes) without RPC."""
