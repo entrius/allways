@@ -81,12 +81,16 @@ class TestPinnedContract:
             'router': '',
         }
 
-    def test_testnet_pick_is_declared_and_valid(self):
-        # The bundle's testnet must be one of the accepted names, and must not be mainnet —
-        # `env testnet` silently leaving a chain on mainnet spends real funds on test swaps.
+    def test_testnet_pick_is_valid_where_declared(self):
+        # A declared testnet must be an accepted name and must never be mainnet — `env testnet`
+        # silently leaving a chain on mainnet spends real funds on test swaps. Leaving it
+        # undeclared is the honest option for a chain with no testnet (testnet_name falls back
+        # to the default then), so empty is allowed and every live chain declares one.
         for chain in NAME_SELECTED_CHAINS:
-            assert chain.testnet_network in chain.networks
-            assert chain.testnet_network != 'mainnet'
+            if chain.testnet_network:
+                assert chain.testnet_network in chain.networks
+                assert chain.testnet_network != 'mainnet'
+        assert all(c.testnet_network for c in NAME_SELECTED_CHAINS)
 
     def test_accepted_network_names(self):
         accepted = {c.id: c.networks for c in NAME_SELECTED_CHAINS}

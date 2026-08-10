@@ -230,9 +230,9 @@ CONFIG_SET_HELP = """Set a configuration value.
         program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:
-        env:            testnet | mainnet   (sets all chains at once)
-        network:        finney | test | local | ws://...
-        solana-network: devnet | mainnet | localnet   (or set a custom solana-rpc URL)
+        env:             testnet | mainnet   (sets all chains at once)
+        network:         finney | test | local | ws://...
+        solana-network:  devnet | mainnet | localnet   (or set a custom solana-rpc URL)
 {chain_networks}[/dim]
 
     [dim]Examples:
