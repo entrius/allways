@@ -49,6 +49,7 @@ VAULT_DIRTYING_EVENTS = {
 
 _ATTRIBUTION_TTL_SECS = 300
 _VAULT_CURSOR_KEY = 'vault_event_block'
+_EXIT_KEY_PREFIX = 'exit:'
 
 
 @dataclass(frozen=True)
@@ -111,8 +112,8 @@ class BondRelay:
         # Miners whose attestation needs recomputing. Event-driven ONLY: an idle miner never
         # enters this set, so it never gets a write (its old attestation is old-but-correct).
         self._dirty: Set[str] = set()
-        # Miners mid-exit (TAO bit cleared, bond still locked). Re-derived by reconcile, so a
-        # restart mid-exit resumes without any persisted exit state.
+        # Miners whose purse was DEACTIVATED and whose bond is still locked. Armed by the event
+        # (and persisted — see arm_exit), never inferred from the bit being down.
         self._exiting: Set[str] = set()
         self._reconciled = False
         self._next_reconcile = 0.0
@@ -222,12 +223,11 @@ class BondRelay:
             miner = str(fields['miner'])
             self.mark_dirty(miner)
             if fields['enabled']:
-                self._exiting.discard(miner)
+                self.disarm_exit(miner)
             else:
                 # TAO-side deactivation: one-way until re-lock, so quiescence is now a stable
                 # fact rather than a snapshot. The exit sequence takes it from here.
-                self._exiting.add(miner)
-                bt.logging.info(f'relay: {miner[:8]} deactivated its {self.backing} purse — exit sequence armed')
+                self.arm_exit(miner)
 
     def mark_dirty(self, miner: str) -> None:
         self._dirty.add(str(miner))
@@ -274,6 +274,10 @@ class BondRelay:
         Returns True when nothing was left undone — the condition the startup barrier waits on.
         Repairs the one hole the event path structurally can't cover: a crash BETWEEN paired
         writes (vault mutated, attestation refresh never sent)."""
+        # Rediscover WHO exists before asking what they owe: the bound set is the iteration set
+        # below, so a cached map would hide a miner that bound since the last pass for a whole TTL
+        # — including one that bound and bonded in the same minute.
+        self.attribution(refresh=True)
         bonded = self.bonded_miners()
         for miner in bonded:
             self.mark_dirty(miner)
@@ -289,10 +293,15 @@ class BondRelay:
         return ok
 
     def bonded_miners(self) -> List[str]:
-        """Every miner the relay could owe a write for: those carrying an attestation for this
-        backing, plus anyone with an open obligation in the ledger. Bound-but-never-attested
-        miners come in through the vault's own lock/post events."""
-        miners: Set[str] = set()
+        """Every miner the relay could owe a write for.
+
+        Deliberately the whole BOUND set, not just the attested one: a miner's first bond is
+        posted and locked on the vault before any attestation exists, and if that pair of vault
+        events lands while this validator is down, nothing else would ever discover it. Enumerating
+        bindings makes the reconcile loop the backstop for entry as well as for repair. A bound
+        miner with no bond costs three vault reads and produces no write (see
+        ``attestation._write_one``)."""
+        miners: Set[str] = set(self.attribution())
         try:
             for _pda, att in self.solana.get_all('BondAttestation'):
                 if str(getattr(att, 'chain', self.backing)).lower() == self.backing:
@@ -306,20 +315,36 @@ class BondRelay:
             bt.logging.warning(f'relay: ledger scan failed: {e}')
         return sorted(miners)
 
+    def arm_exit(self, miner: str) -> None:
+        """Record a DEACTIVATION. This is persisted because on-chain a miner that deactivated and
+        one that never activated are the same state — bit down, bond locked — and unlocking the
+        second would release a bond that was only waiting to enter service. Failing to unlock is a
+        support ticket; unlocking what shouldn't be is a money-safety hole, so the ambiguity
+        resolves toward doing nothing."""
+        miner = str(miner)
+        self._exiting.add(miner)
+        self.store.set_relay_meta(f'{_EXIT_KEY_PREFIX}{miner}', '1')
+        bt.logging.info(f'relay: {miner[:8]} deactivated its {self.backing} purse — exit sequence armed')
+
+    def disarm_exit(self, miner: str) -> None:
+        miner = str(miner)
+        self._exiting.discard(miner)
+        self.store.delete_relay_meta(f'{_EXIT_KEY_PREFIX}{miner}')
+
     def _refresh_exiting(self, bonded: List[str]) -> None:
-        """Re-derive the exit set from chain — the reason no exit state is persisted. A miner is
-        exiting iff its purse bit is down while its bond is still locked."""
-        for miner in bonded:
+        """Reload the armed exits and drop any whose purse came back. Only ever REMOVES from the
+        set — see ``arm_exit`` for why the arming half can't be derived from chain."""
+        try:
+            self._exiting.update(self.store.relay_meta_prefix(_EXIT_KEY_PREFIX))
+        except Exception as e:
+            bt.logging.warning(f'relay: could not reload the exit set: {e}')
+        for miner in list(self._exiting):
             try:
                 ms = self.solana.get_miner_state(miner)
             except Exception:
                 continue
-            if ms is None:
-                continue
-            if int(getattr(ms, 'active_backings', 0)) & self.backing_bit:
-                self._exiting.discard(miner)
-            else:
-                self._exiting.add(miner)
+            if ms is not None and int(getattr(ms, 'active_backings', 0)) & self.backing_bit:
+                self.disarm_exit(miner)
 
     # ─── heartbeat ───────────────────────────────────────────────────────────
 
@@ -385,7 +410,7 @@ class BondRelay:
 
     def _vault_head(self) -> Optional[int]:
         try:
-            return int(self.vault.subtensor.get_current_block())
+            return self.vault.head()
         except Exception as e:
             bt.logging.debug(f'relay: vault head read failed: {e}')
             return None

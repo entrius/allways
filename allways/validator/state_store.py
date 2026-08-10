@@ -576,6 +576,15 @@ class ValidatorStateStore:
         row = self._fetchone('SELECT value FROM relay_meta WHERE key = ?', (key,))
         return row['value'] if row is not None else None
 
+    def relay_meta_prefix(self, prefix: str) -> Dict[str, str]:
+        """Every relay_meta row whose key starts with ``prefix`` — the armed exit set, which has to
+        outlive a restart because "deactivated" and "never activated" look identical on chain."""
+        rows = self._fetchall('SELECT key, value FROM relay_meta WHERE key LIKE ?', (f'{prefix}%',))
+        return {r['key'][len(prefix) :]: r['value'] for r in rows}
+
+    def delete_relay_meta(self, key: str) -> None:
+        self._execute('DELETE FROM relay_meta WHERE key = ?', (key,))
+
     def set_relay_meta(self, key: str, value: str) -> None:
         self._execute(
             """

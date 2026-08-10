@@ -18,6 +18,7 @@ from typing import Any, Dict
 import bittensor as bt
 
 from allways import dev_signal
+from allways.vault import codec
 
 
 def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
@@ -26,7 +27,7 @@ def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
     swap_key = bytes(fields['swap_key']).hex()
     miner = str(fields['miner'])
     snapshot = relay.store.get_relay_swap(swap_key)
-    user_addr = snapshot['user_addr'] if snapshot else ''
+    user_addr = _payable(snapshot['user_addr']) if snapshot else ''
     if not user_addr:
         # This validator never saw the swap live (fresh state DB, or down for its whole life), so
         # it cannot name the payee. The obligation is still recorded: it keeps netting off the
@@ -56,6 +57,18 @@ def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
         penalty=int(fields['penalty']),
         reimbursement=int(fields['reimbursement']),
     )
+
+
+def _payable(addr: str) -> str:
+    """The address only counts as a payee if the vault could actually pay it. The program never
+    validated the user's backing-chain address, so a malformed one reaches us intact; rejecting it
+    once here beats raising on every pass forever."""
+    try:
+        codec.account_bytes(addr)
+    except Exception:
+        bt.logging.error(f'relay: reimbursement address {addr!r} is not a payable account id')
+        return ''
+    return addr
 
 
 def arm_verdicts(relay, now: int) -> None:

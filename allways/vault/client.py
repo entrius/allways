@@ -299,6 +299,15 @@ class BondVaultClient:
 
     # ─── events ──────────────────────────────────────────────────────────────
 
+    def head(self) -> Optional[int]:
+        """Current chain head, for the event-poll cursor. Read through the same substrate that
+        serves the events, so the cursor and the events can never be from different worlds."""
+        try:
+            return int(self.subtensor.substrate.get_block_number(self.subtensor.substrate.get_chain_head()))
+        except Exception as e:
+            bt_debug(f'vault head read failed: {e}')
+            return None
+
     def poll_events(self, start_block: int, end_block: int) -> List[VaultEvent]:
         """Vault events emitted in ``[start_block, end_block]``, oldest first.
 
@@ -343,6 +352,16 @@ class BondVaultClient:
             topics = [str(t) for t in (attrs.get('topics') or [])]
             out.append((topics, raw))
         return out
+
+
+def bt_debug(message: str) -> None:
+    """Debug logging that never drags bittensor into a CLI import path that doesn't need it."""
+    try:
+        import bittensor as bt
+
+        bt.logging.debug(message)
+    except Exception:
+        pass
 
 
 def _event_names(receipt) -> List[str]:

@@ -8,6 +8,7 @@ validator that cannot read the vault must decline rather than guess.
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -39,15 +40,15 @@ class FakeVault:
 
     def __init__(self, collateral=None, settled=None, lock=None, readable=True, timeline=None):
         self.timeline = timeline if timeline is not None else []
-        self.collateral = collateral or {HOTKEY: 100 * RAO}
-        self.settled = settled or {}
-        self.lock = lock or {HOTKEY: (True, 3)}
+        self.collateral = {HOTKEY: 100 * RAO} if collateral is None else dict(collateral)
+        self.settled = dict(settled or {})
+        self.lock = {HOTKEY: (True, 3)} if lock is None else dict(lock)
         self.slashed = set()
         self.readable = readable
         self.calls = []
         self.reject = set()
         self.events = []
-        self.subtensor = SimpleNamespace(get_current_block=lambda: 100)
+        self.head = lambda: 100
 
     def get_collateral(self, hotkey):
         return self.collateral.get(hotkey, 0) if self.readable else None
@@ -96,6 +97,8 @@ class FakeVault:
 class FakeSolana:
     def __init__(self, miner_states=None, attestations=None, config=None, timeline=None):
         self.timeline = timeline if timeline is not None else []
+        # The pubkey->hotkey bindings `build_attribution` would derive off the Binding PDAs.
+        self.attributions: dict = {}
         self.keypair = SimpleNamespace(pubkey=lambda: 'validator-pubkey')
         self.program_id = None
         self.miner_states = miner_states or {}
@@ -134,6 +137,15 @@ class FakeSolana:
         return 'sig-heartbeat'
 
 
+@pytest.fixture(autouse=True)
+def _attribution_from_chain():
+    """`build_attribution` re-scans the Binding PDAs; the fakes answer it from `attributions`."""
+    with patch(
+        'allways.validator.relay.engine.build_attribution', lambda client: dict(client.attributions)
+    ):
+        yield
+
+
 def _store():
     return ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
 
@@ -162,7 +174,9 @@ def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
         clock=lambda: NOW,
         config=RelayConfig(**cfg),
     )
-    relay._attribution = attribution if attribution is not None else {MINER: HOTKEY, MINER2: HOTKEY2}
+    bindings = attribution if attribution is not None else {MINER: HOTKEY, MINER2: HOTKEY2}
+    solana.attributions = dict(bindings)
+    relay._attribution = dict(bindings)
     relay._attribution_at = NOW
     return relay
 
@@ -237,10 +251,17 @@ def test_an_unreadable_vault_yields_no_attestation_at_all():
     assert attestation_job.compute(relay, MINER, HOTKEY) is None
 
 
-def test_an_idle_miner_is_never_written():
+def test_an_idle_miner_is_never_rewritten():
+    # Writes are event-driven: once the attestation says the truth, a miner nothing happened to
+    # gets no further write, however many passes go by.
     relay = _relay()
     relay.step(NOW)
-    assert not [c for c in relay.solana.calls if c[0] == 'vote_set_attestation']
+    before = len([c for c in relay.solana.calls if c[0] == 'vote_set_attestation'])
+    assert before == 1, 'the first pass asserts the bond it just discovered'
+    relay._next_reconcile = 0  # even forcing the slow repair loop
+    relay.step(NOW + 1)
+    relay.step(NOW + 2)
+    assert len([c for c in relay.solana.calls if c[0] == 'vote_set_attestation']) == before
 
 
 def test_an_unchanged_attestation_is_not_rewritten():
@@ -615,17 +636,29 @@ def test_a_vote_already_in_the_live_round_is_not_cast_twice():
     assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
 
 
-def test_reconcile_rediscovers_an_exit_stranded_by_a_restart():
-    # Exit progress is deliberately NOT persisted — it is re-derived from chain, which is what
-    # makes a restart mid-exit a non-event.
-    solana = FakeSolana(
-        miner_states={MINER: _miner_state(active_backings=0)},
-        attestations={MINER: SimpleNamespace(chain='tao', miner=MINER, effective_balance=0, locked=True, epoch=3)},
-    )
-    relay = _relay(solana=solana)
-    assert MINER not in relay._exiting
+def test_a_bond_that_never_entered_service_is_never_unlocked():
+    # THE trap: on chain, "deactivated" and "never activated" are the same state — purse bit down,
+    # bond locked. A miner that has bonded and is waiting to activate must not have its bond
+    # released out from under it.
+    relay = _exiting_relay()
+    relay._exiting.clear()  # nothing armed it: no deactivation ever happened
     relay.reconcile(NOW)
-    assert MINER in relay._exiting
+    assert not [c for c in relay.vault.calls if c[0] == 'vote_unlock']
+    assert MINER not in relay._exiting
+
+
+def test_reconcile_resumes_an_exit_stranded_by_a_restart():
+    # The arming half IS persisted, so a validator that restarts mid-exit picks the sequence back
+    # up from its own ledger rather than from an ambiguous on-chain bit.
+    store = _store()
+    first = _relay(store=store)
+    first.arm_exit(MINER)
+
+    second = _relay(store=store, solana=FakeSolana(miner_states={MINER: _miner_state(active_backings=0)}))
+    assert MINER not in second._exiting
+    second.reconcile(NOW)
+    assert MINER in second._exiting
+    assert [c for c in second.vault.calls if c[0] == 'vote_unlock']
 
 
 def test_reconcile_repairs_an_attestation_that_drifted_while_we_were_down():
@@ -671,3 +704,52 @@ def test_a_step_never_raises_out_into_the_forward_pass():
     relay.solana.get_all = lambda name: (_ for _ in ()).throw(RuntimeError('rpc down'))
     relay.store.close()
     relay.step(NOW)  # must not raise
+
+
+def test_reconcile_discovers_a_first_bond_no_event_ever_told_us_about():
+    # A miner posts and locks on the vault before any attestation exists. If that pair of events
+    # lands while this validator is down, nothing else would discover it — so reconcile enumerates
+    # the whole bound set, not just the attested one.
+    solana = FakeSolana(miner_states={MINER: _miner_state()})
+    relay = _relay(solana=solana)
+    assert solana.get_bond_attestation(MINER) is None
+    relay.reconcile(NOW)
+    assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in solana.calls
+
+
+def test_a_bound_miner_with_no_bond_gets_no_account_opened_for_it():
+    # Writing "zero" would open a rent-paying attestation per registered miner to say nothing.
+    solana = FakeSolana(miner_states={MINER: _miner_state()})
+    relay = _relay(vault=FakeVault(collateral={}, lock={}), solana=solana)
+    relay.reconcile(NOW)
+    assert not [c for c in solana.calls if c[0] == 'vote_set_attestation']
+
+
+def test_a_bond_netted_to_zero_is_still_asserted():
+    # Nets-to-zero is a real claim — "this miner's bond is entirely spoken for" — and the entry
+    # guards must see it. Only "no bond at all" is silence.
+    solana = FakeSolana(miner_states={MINER: _miner_state()})
+    relay = _relay(vault=FakeVault(collateral={HOTKEY: 5 * RAO}), solana=solana)
+    relay.store.record_relay_slash(SWAP, MINER, 'tao', 50 * RAO, 50 * RAO, USER_TAO, NOW)
+    relay.reconcile(NOW)
+    assert ('vote_set_attestation', MINER, 'tao', 0, True, 3) in solana.calls
+
+
+def test_a_malformed_reimbursement_address_is_rejected_once_not_every_pass():
+    # The program never validated the user's backing-chain address, so a malformed one reaches the
+    # relay intact. It must be refused as a payee, not raise on every tick forever.
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', 'not-an-ss58', NOW)
+    relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+    assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
+    assert len(relay.store.open_relay_slashes('tao')) == 1
+
+
+def test_reconcile_refreshes_who_exists_before_asking_what_they_owe():
+    # A miner that binds after startup must not stay invisible for an attribution TTL — the bound
+    # set is the reconcile iteration set, so a stale map hides it completely.
+    relay = _relay(attribution={MINER2: HOTKEY2})  # a stale map that predates the new binding
+    relay.solana.attributions = {MINER: HOTKEY, MINER2: HOTKEY2}
+    relay.reconcile(NOW)
+    assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in relay.solana.calls

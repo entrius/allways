@@ -7,8 +7,10 @@ past, every slash verdict for this miner applied on the vault — settle the res
 ONE-ENTRY batch, and finally ``vote_unlock`` at the CURRENT epoch. A miner must never unlock while
 fee-encumbered, and the epoch binding means a stale round can't unlock a re-locked bond.
 
-Nothing about an exit is persisted: the sequence is re-derived from chain every pass (purse bit
-down + bond still locked), so a restart mid-exit simply resumes.
+The arming half is persisted, deliberately: on chain a miner that deactivated and one that has
+never activated are the same state (purse bit down, bond locked), so inferring an exit from the bit
+alone would unlock the bond of a miner that was only waiting to enter service. Everything after
+arming is re-derived every pass, so a restart mid-exit simply resumes.
 
 **True-up.** Per-swap fee rounds are uneconomic, so fees ride the attestation off-chain and land
 on the vault as one block-boundary-aligned global batch. Every validator fires at the same
@@ -58,7 +60,7 @@ def _advance(relay, miner: str, now: int) -> bool:
         return False
     locked, epoch = lock
     if not locked:
-        relay._exiting.discard(miner)  # nothing left to do — the bond is already free to withdraw
+        relay.disarm_exit(miner)  # nothing left to do — the bond is already free to withdraw
         return True
 
     quiescent, why = _quiescence(relay, miner, now)
@@ -82,7 +84,7 @@ def _quiescence(relay, miner: str, now: int) -> Tuple[bool, str]:
     if ms is None:
         return False, 'miner state unreadable'
     if int(getattr(ms, 'active_backings', 0)) & relay.backing_bit:
-        relay._exiting.discard(miner)
+        relay.disarm_exit(miner)
         return False, 'purse re-activated'
     if getattr(ms, 'has_active_swap', False):
         return False, 'swap still in flight'

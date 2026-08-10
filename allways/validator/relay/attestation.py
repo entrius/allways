@@ -36,6 +36,12 @@ class Attested:
     locked: bool
     epoch: int
 
+    @property
+    def is_empty(self) -> bool:
+        """No bond on the vault at all — as opposed to a bond that nets to zero, which is a real
+        assertion (it says "this miner is spoken for") and must still be written."""
+        return not self.locked and self.effective_balance == 0 and self.epoch == 0
+
     def matches(self, account: Any) -> bool:
         return (
             account is not None
@@ -95,6 +101,10 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> b
         return False
     current = relay.solana.get_bond_attestation(miner, relay.backing)
     if desired.matches(current):
+        return True
+    if current is None and desired.is_empty:
+        # A bound miner who never posted a bond. There is nothing to assert, and writing it would
+        # open a rent-paying account per registered miner for the sake of saying "zero".
         return True
     key = f'attest:{miner}:{desired.effective_balance}:{desired.locked}:{desired.epoch}'
     if relay.throttled(key, now):
