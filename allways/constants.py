@@ -121,6 +121,22 @@ VOTE_ROUND_TTL_SECS = 1_800
 # so an unlanded round has expired (and is reopenable with our snapshot) by the time we retry.
 WEIGHTS_VOTE_RETRY_SECS = 1_800
 
+# ─── W3 bond relay (Solana ledger ↔ Bittensor vault) ─────
+# Cadences the relayer runs on. All overridable per-process via the matching ALLWAYS_RELAY_* env
+# vars (see validator/relay/engine.RelayConfig) — a dev stack has to run these in seconds.
+# The heartbeat is a LAZY global liveness bump, not a data refresh: attestation writes are
+# event-driven, and the on-chain fuse wants max-age ≥ 2× this.
+RELAY_HEARTBEAT_INTERVAL_SECS = 12 * 3600
+# Time-aligned global fee true-up. Every validator fires at the same boundary and reads totals at
+# it, so the batch vector is byte-identical; a boundary with zero delta is skipped as pure postage.
+RELAY_FEE_CADENCE_SECS = 2 * 86400
+# Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes).
+RELAY_RECONCILE_INTERVAL_SECS = 900
+# Margin past a miner's busy/settling windows before its exit sequence calls the bond quiescent.
+RELAY_QUIESCENCE_GRACE_SECS = 60
+# Retention for the live-swap reimbursement snapshots; rows with an unapplied slash are exempt.
+RELAY_SWAP_RETENTION_SECS = 7 * 86400
+
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are
 # tiny and only queried while an offering still polls a finished swap — 7 days is generous.
