@@ -110,6 +110,55 @@ def test_an_unrecognised_topic_is_not_guessed_at(meta):
     assert meta.spec_for_topic('0x' + 'ff' * 32) is None
 
 
+class _EventSub:
+    """Substrate stand-in shaped like a real node's event record: the signature topic sits on the
+    RECORD, beside the event, and never inside the event's own attributes."""
+
+    def __init__(self, records):
+        self.records = records
+        self.substrate = self
+
+    def get_block_hash(self, block):
+        return f'0xblock{block}'
+
+    def get_events(self, _block_hash):
+        return self.records
+
+
+def _emitted(topic, data, contract=ALICE):
+    return {
+        'module_id': 'Contracts',
+        'event_id': 'ContractEmitted',
+        'attributes': {'contract': contract, 'data': data},
+        'topics': [topic],
+    }
+
+
+def test_a_vault_event_is_found_by_the_topic_on_its_record(meta):
+    spec = meta.events['CollateralPosted']
+    data = bytes([3] * 32) + _u128(50) + _u128(70)
+    sub = _EventSub([_emitted(spec.signature_topic, '0x' + data.hex())])
+    events = BondVaultClient(sub, ALICE, metadata=meta).poll_events(1, 1)
+    assert [e.name for e in events] == ['CollateralPosted']
+    assert events[0].fields['total'] == 70
+
+
+def test_an_event_payload_decodes_in_either_node_shape(meta):
+    # `data` is a SCALE Bytes like every other blob, so a payload that happens to be valid UTF-8
+    # arrives already decoded rather than as hex — same hazard as the read path.
+    spec = meta.events['FeesRecycled']
+    data = b'\x00' * 16
+    sub = _EventSub([_emitted(spec.signature_topic, _as_node_shape(data))])
+    events = BondVaultClient(sub, ALICE, metadata=meta).poll_events(1, 1)
+    assert [(e.name, e.fields['tao_amount']) for e in events] == [('FeesRecycled', 0)]
+
+
+def test_another_contracts_event_at_the_same_address_is_ignored(meta):
+    sub = _EventSub([{'module_id': 'Contracts', 'event_id': 'Called',
+                      'attributes': {'contract': ALICE}, 'topics': []}])
+    assert BondVaultClient(sub, ALICE, metadata=meta).poll_events(1, 1) == []
+
+
 # --- reads --------------------------------------------------------------------------------------
 
 

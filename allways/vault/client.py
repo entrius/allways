@@ -345,11 +345,15 @@ class BondVaultClient:
             attrs = body.get('attributes') or {}
             if not isinstance(attrs, dict) or str(attrs.get('contract')) != self.address:
                 continue
-            data = attrs.get('data')
-            raw = bytes.fromhex(data[2:]) if isinstance(data, str) else bytes(data or b'')
-            topics = [str(t) for t in (attrs.get('topics') or [])]
+            raw = _return_bytes(attrs.get('data') or b'')
+            # Topics sit on the event RECORD, beside the event rather than inside its attributes.
+            topics = [str(t) for t in (_record_topics(record) or attrs.get('topics') or [])]
             out.append((topics, raw))
         return out
+
+
+def _record_topics(record) -> List[str]:
+    return list(record.get('topics') or []) if isinstance(record, dict) else []
 
 
 def _return_bytes(payload) -> bytes:
