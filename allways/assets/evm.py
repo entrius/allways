@@ -36,8 +36,10 @@ class EvmRpcError(RuntimeError):
 # comfortably in normal conditions without meaningfully overpaying a transfer).
 FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
 
-# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its
-# block-count bound from its own block time so the window means the same everywhere.
+# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its block
+# bound from its own block time. Note seconds_per_block is an integer floor, so on sub-second
+# chains (Arbitrum ~0.25s → floored to 1) the bound covers ~4× fewer wall-seconds than this.
+# Harmless: the scanner only surfaces a hash the confirm path re-verifies by exact tx hash.
 SCAN_LOOKBACK_SECS = 300
 
 
