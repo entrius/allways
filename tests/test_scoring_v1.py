@@ -618,17 +618,18 @@ class TestReplayCrownTime:
         store.close()
 
     def test_boundary_squat_dropped_per_block(self, tmp_path: Path):
-        """Squatter posts a live, executable rate (50000 TAO/BTC) whose smallest
-        in-band leg (0.5 TAO at 1000 sats) exceeds their 0.15 TAO collateral.
-        Survives is_executable_rate but the per-block gate drops them — entire
-        window unfilled (no other holders)."""
+        """Squatter posts a live, executable canonical rate (2.2e-5 BTC/SOL —
+        best in the lowest-wins sort) whose smallest in-band
+        leg (~0.45 SOL at the 1000-sat dust floor) exceeds their 0.15 SOL collateral. Survives
+        is_executable_rate but the per-block gate drops them — entire window
+        unfilled (no other holders)."""
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_squat'})
         seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_squat', 'btc', 'sol', 50000.0, 0),
+            ('hk_squat', 'btc', 'sol', 2.2e-5, 0),
         )
         conn.commit()
 
@@ -655,7 +656,7 @@ class TestReplayCrownTime:
         seed_collateral(watcher, 'hk_funded', 500_000_000, block=0)
         conn = store.require_connection()
         for row in (
-            ('hk_squat', 'btc', 'sol', 50000.0, 0),  # best rate, can't fund
+            ('hk_squat', 'btc', 'sol', 2.2e-5, 0),  # best rate, can't fund
             ('hk_funded', 'btc', 'sol', 326.0, 0),  # runner-up, can fund
         ):
             conn.execute(
@@ -710,12 +711,12 @@ class TestReplayCrownTime:
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
         watcher = make_watcher(store, active={'hk_squat'})
         seed_collateral(watcher, 'hk_squat', 150_000_000, block=0)
-        # Top-up mid-window — collateral clears the 1.10× requirement on the 0.5 TAO leg.
+        # Top-up mid-window — collateral clears the 1.10× requirement on the ~0.45 SOL leg.
         watcher.apply_event(600, 'CollateralPosted', {'miner': 'hk_squat', 'amount': 400_000_000, 'total': 550_000_000})
         conn = store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-            ('hk_squat', 'btc', 'sol', 50000.0, 0),
+            ('hk_squat', 'btc', 'sol', 2.2e-5, 0),
         )
         conn.commit()
 
@@ -730,8 +731,8 @@ class TestReplayCrownTime:
             min_swap_lamports=100_000_000,
             max_swap_lamports=500_000_000,
         )
-        # Blocks (100, 600] dropped (collateral 0.15 < 0.5 TAO leg).
-        # Blocks (600, 1100] credited (collateral 0.5 TAO).
+        # Blocks (100, 600] dropped (collateral 0.15 SOL < the 0.5 SOL requirement).
+        # Blocks (600, 1100] credited (0.55 SOL clears it).
         assert crown == {'hk_squat': 500.0}
         store.close()
 
@@ -1152,7 +1153,7 @@ class TestSnapshotCurrentCrownHolders:
 
     def test_boundary_squat_excluded_from_live_table(self, tmp_path: Path):
         """The squatter posts the best, executable rate but their 0.15 TAO
-        collateral can't fund the 0.5 TAO leg it forces. The live table must
+        collateral can't fund the ~0.45 SOL leg it forces. The live table must
         drop them to the funded runner-up, matching the ledger."""
         v = make_validator(
             tmp_path,
@@ -1161,8 +1162,8 @@ class TestSnapshotCurrentCrownHolders:
             max_swap_amount=500_000_000,
             collaterals={'hk_squat': 150_000_000, 'hk_funded': 500_000_000},
         )
-        # btc→sol (into the bounded SOL leg): the squat rate forces a 0.5-SOL leg the squatter can't fund.
-        self._seed_rate(v.state_store, 'hk_squat', 50000.0, 'btc', 'sol')  # best rate, can't fund
+        # btc→sol (into the bounded SOL leg): the squat rate forces a ~0.45-SOL leg the squatter can't fund.
+        self._seed_rate(v.state_store, 'hk_squat', 2.2e-5, 'btc', 'sol')  # best rate, can't fund
         self._seed_rate(v.state_store, 'hk_funded', 326.0, 'btc', 'sol')  # runner-up, can fund
 
         rows = snapshot_current_crown_holders(v, v.block)
@@ -1191,7 +1192,7 @@ class TestLedgerSnapshotAgreement:
             collaterals={'hk_squat': 150_000_000, 'hk_funded': 500_000_000},
         )
         conn = v.state_store.require_connection()
-        for hk, rate in (('hk_squat', 50000.0), ('hk_funded', 326.0)):
+        for hk, rate in (('hk_squat', 2.2e-5), ('hk_funded', 326.0)):
             conn.execute(
                 'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
                 (hk, 'btc', 'sol', rate, 0),
@@ -2609,10 +2610,10 @@ class TestCrownCanFund:
 
     def test_unexecutable_rate_is_unconstrained(self):
         # min_leg 0 = "no in-band fundable swap" — executability is policed by
-        # is_executable_rate, not this gate (the #392 sentinel rate, btc→sol).
+        # is_executable_rate, not this gate (the crown-squat low canonical, btc→sol).
         assert crown_can_fund(
             'hk',
-            1e10,
+            1e-12,
             from_chain='btc',
             to_chain='sol',
             min_swap_lamports=100_000_000,
