@@ -413,7 +413,17 @@ class ValidatorStateStore:
                 user_to_addr = excluded.user_to_addr,
                 from_amount = excluded.from_amount
             """,
-            (miner, from_chain, to_chain, backing, user_pubkey, user_from_addr, user_to_addr, str(int(from_amount)), created_at),
+            (
+                miner,
+                from_chain,
+                to_chain,
+                backing,
+                user_pubkey,
+                user_from_addr,
+                user_to_addr,
+                str(int(from_amount)),
+                created_at,
+            ),
         )
 
     def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str, backing: str = 'sol') -> List[dict]:

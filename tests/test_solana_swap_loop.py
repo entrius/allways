@@ -115,7 +115,7 @@ def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None):
     resv = reservation if reservation is not None else make_reservation(created_at=created_at)
     client = SimpleNamespace(
         get_swaps=lambda: [],
-        get_reservation=lambda miner, backing="sol": resv,
+        get_reservation=lambda miner, backing='sol': resv,
     )
     return SolanaSwapLoop(client, providers, fee_divisor=100), providers
 
@@ -235,7 +235,7 @@ def test_pending_attestation_stale_deposit_rejected_as_replay():
 
 def test_pending_attestation_no_reservation_waits():
     loop, _ = loop_with(result=True)
-    loop.client.get_reservation = lambda miner, backing="sol": None
+    loop.client.get_reservation = lambda miner, backing='sol': None
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.WAIT
 
 
@@ -364,7 +364,7 @@ def test_source_pending_at_ceiling_no_extend():
 
 def test_source_pending_no_reservation_waits():
     loop, _ = loop_with(result=False, reservation=None)
-    loop.client.get_reservation = lambda miner, backing="sol": None
+    loop.client.get_reservation = lambda miner, backing='sol': None
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.WAIT
 
 
@@ -447,7 +447,7 @@ class ExtendRecordingClient:
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
-    def extend_reservation(self, miner, target_at, backing="sol"):
+    def extend_reservation(self, miner, target_at, backing='sol'):
         self.calls.append(('extend_reservation', miner, target_at))
         if self.reservation_exc:
             raise self.reservation_exc
@@ -457,7 +457,7 @@ class ExtendRecordingClient:
         if self.timeout_exc:
             raise self.timeout_exc
 
-    def close_stale_claim(self, miner, swap_key, backing="sol"):
+    def close_stale_claim(self, miner, swap_key, backing='sol'):
         self.calls.append(('close_stale_claim', miner, swap_key))
         if self.close_exc:
             raise self.close_exc
@@ -511,7 +511,7 @@ def test_run_once_discovers_and_decides_mix():
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = SimpleNamespace(
         get_swaps=lambda: swaps,
-        get_reservation=lambda miner, backing="sol": make_reservation(),
+        get_reservation=lambda miner, backing='sol': make_reservation(),
     )
     loop = SolanaSwapLoop(client, providers, fee_divisor=100, read_only=True)
     out = dict(loop.run_once(now=1500))
@@ -531,7 +531,7 @@ class VoteRecordingClient:
     def get_swaps(self):
         return self._swaps
 
-    def get_reservation(self, miner, backing="sol"):
+    def get_reservation(self, miner, backing='sol'):
         return make_reservation()
 
     def has_voted(self, req_type, target, voter):
@@ -593,7 +593,7 @@ class PoolRecordingClient:
         assert name == 'Pool'
         return list(enumerate(self._pools))
 
-    def resolve_pool(self, miner, backing="sol"):
+    def resolve_pool(self, miner, backing='sol'):
         self.resolved.append(miner)
         return 'SIG'
 
@@ -621,7 +621,7 @@ def test_resolve_pools_read_only_casts_nothing():
 
 def test_resolve_pools_one_failure_does_not_break_sweep():
     class Boom(PoolRecordingClient):
-        def resolve_pool(self, miner, backing="sol"):
+        def resolve_pool(self, miner, backing='sol'):
             if miner == 'bad':
                 raise RuntimeError('rpc down')
             return super().resolve_pool(miner)
@@ -644,7 +644,7 @@ def test_benign_marker_classifies_lost_race():
 def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():
     # A peer resolved the pool between our read and our tx → benign NoRequests, swallowed quietly.
     class Raced(PoolRecordingClient):
-        def resolve_pool(self, miner, backing="sol"):
+        def resolve_pool(self, miner, backing='sol'):
             if miner == 'raced':
                 raise RuntimeError('custom program error: NoRequests')
             return super().resolve_pool(miner)
@@ -677,7 +677,7 @@ def _loop_with_relay(relay, backing='tao'):
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = SimpleNamespace(
         get_swaps=lambda: [('pda', swap)],
-        get_reservation=lambda miner, backing="sol": make_reservation(),
+        get_reservation=lambda miner, backing='sol': make_reservation(),
     )
     return SolanaSwapLoop(client, providers, fee_divisor=100, relay=relay), swap
 

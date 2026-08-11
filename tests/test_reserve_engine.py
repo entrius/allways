@@ -55,7 +55,7 @@ class FakeClient:
     def get_miner_state(self, miner):
         return self.miner_state
 
-    def get_pool(self, miner, backing="sol"):
+    def get_pool(self, miner, backing='sol'):
         return self._pool
 
     def get_quote(self, miner, from_chain, to_chain, backing='sol'):
@@ -344,7 +344,7 @@ class StatusClient:
         self.swap_keys_queried.append(swap_key)
         return self._swap
 
-    def get_reservation(self, miner, backing="sol"):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def get_hotkey_binding(self, hotkey_bytes):
@@ -474,14 +474,14 @@ class _ConfirmClient(FakeClient):
         self.extensions = []
         self.extend_raises = False
 
-    def get_reservation(self, miner, backing="sol"):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
         self.claims.append((swap_key, from_tx_hash, from_tx_block))
         return 'claimsig'
 
-    def extend_reservation(self, miner, target_at, backing="sol"):
+    def extend_reservation(self, miner, target_at, backing='sol'):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)

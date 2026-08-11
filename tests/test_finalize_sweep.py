@@ -28,7 +28,7 @@ class SweepClient:
         self._reservation = reservation
         self.finalized = []
 
-    def get_reservation(self, miner, backing="sol"):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def finalize_reservation(
@@ -60,7 +60,9 @@ def _validator(tmp_path, client, *, read_only=False):
 
 
 def _queue(store, user, *, created_at=NOW - 10, from_amount=1_000_000_000):
-    store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', user, f'{user[:6]}src', f'{user[:6]}dst', from_amount, created_at)
+    store.upsert_routed_request(
+        MINER, 'sol', 'btc', 'sol', user, f'{user[:6]}src', f'{user[:6]}dst', from_amount, created_at
+    )
 
 
 def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):

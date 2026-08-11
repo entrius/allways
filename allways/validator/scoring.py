@@ -182,8 +182,7 @@ def is_eligible(miner_state, now: Optional[int] = None) -> bool:
     which zeroes only the settling hub's contribution instead of the whole miner."""
     del now  # strikes are time-free; kept in the signature for its many call sites
     return (
-        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
-        and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
+        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
     )
 
 
@@ -428,8 +427,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, current_time)
-                for hk, ms in live_states.items()
+                hk: direction_eligible(ms, from_chain, to_chain, current_time) for hk, ms in live_states.items()
             },
         )
         for row in rows:
@@ -553,9 +551,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
-            eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, ts) for hk, ms in live_states.items()
-            },
+            eligibility={hk: direction_eligible(ms, from_chain, to_chain, ts) for hk, ms in live_states.items()},
         )
         rows.extend(dir_rows)
     return miner_score_tuples(rows, ts)
