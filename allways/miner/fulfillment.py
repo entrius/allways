@@ -12,7 +12,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
@@ -67,6 +67,8 @@ class SwapFulfiller:
         # neuron's reload mutates what we read here.
         self.my_addresses: Dict[str, str] = my_addresses if my_addresses is not None else {}
         self.sent: Dict[str, SentSwap] = {}
+        # This pass's live obligations (poller snapshot) — the dest-balance gate's denominator.
+        self.active_obligations: List[SolanaSwap] = []
         self.mark_fulfilled_attempts: Dict[str, int] = {}
         self.cushion_warned: Set[str] = set()
         self.unmarked_stale_warned: Set[str] = set()
@@ -152,6 +154,44 @@ class SwapFulfiller:
                 f'{newly_retained}'
             )
             self.unmarked_stale_warned.update(newly_retained)
+
+    def note_active_swaps(self, swaps: List[SolanaSwap]) -> None:
+        """Snapshot this pass's live obligations (called by the miner loop each poll) so the
+        dest-balance gate can total what the wallet owes across concurrent swaps."""
+        self.active_obligations = list(swaps)
+
+    def unfunded_obligation_reason(self, swap: SolanaSwap, user_receives: int) -> Optional[str]:
+        """v3.1: one swap per hub means several payouts can be owed at once. Refuse to START this
+        send unless the dest wallet covers it PLUS every EARLIER-initiated, not-yet-sent obligation
+        on the same chain — first-come priority, so a late send never starves an earlier commitment.
+        Returns the refusal reason, or None when funded (or when no balance view exists — the send
+        path still fails loudly on a genuine shortfall)."""
+        provider = self.providers.get(swap.to_chain)
+        from_address = self.my_addresses.get(swap.to_chain)
+        if provider is None or not from_address:
+            return None
+        pending = 0
+        for other in self.active_obligations:
+            if other.key_hex == swap.key_hex or other.to_chain != swap.to_chain:
+                continue
+            if other.key_hex in self.sent:
+                continue  # already broadcast — those funds have left (or are leaving) the wallet
+            if int(other.initiated_at or 0) >= int(swap.initiated_at or 0):
+                continue  # only EARLIER commitments outrank this one
+            pending += apply_fee_deduction(other.to_amount, self.fee_divisor)
+        if pending == 0:
+            return None  # single-obligation case — the provider's own preflight covers it
+        try:
+            balance = int(provider.get_balance(from_address))
+        except Exception as e:
+            bt.logging.warning(f'Swap {swap.key_hex[:16]}: dest balance read failed ({e}) — gate skipped')
+            return None
+        if balance < user_receives + pending:
+            return (
+                f'dest wallet holds {balance} but owes {user_receives} here + {pending} to '
+                f'earlier in-flight swaps on {swap.to_chain}'
+            )
+        return None
 
     def verify_swap_safety(self, swap: SolanaSwap) -> Optional[Tuple[int, str]]:
         """Verify the swap is safe to fulfill.
@@ -295,6 +335,14 @@ class SwapFulfiller:
             user_receives_amount, my_source_address = safety_result
 
             if not self.verify_user_sent_funds(swap, my_source_address):
+                return False
+
+            # Total-obligation gate (v3.1): don't broadcast a payout the wallet can only cover by
+            # starving an earlier concurrent swap — defer and retry once funds allow.
+            shortfall = self.unfunded_obligation_reason(swap, user_receives_amount)
+            if shortfall is not None:
+                bt.logging.warning(f'Swap {key[:16]}: deferring send — {shortfall}')
+                dev_signal.emit('refuse', swap_key=key, reason='unfunded_obligation')
                 return False
 
             send_result = self.send_dest_funds(swap, user_receives_amount)

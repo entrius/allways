@@ -232,6 +232,9 @@ class Miner(BaseMinerNeuron):
         # Retain send-cache entries for every swap still live on-chain (Active or Fulfilled-awaiting-confirm).
         live_keys = {s.key_hex for s in active_swaps} | {s.key_hex for s in fulfilled_swaps}
         self.swap_fulfiller.cleanup_stale_sends(live_keys)
+        # Per-hub concurrency (v3.1): the fulfiller totals live obligations per dest chain before
+        # each send, so a wallet can't be committed past what it holds.
+        self.swap_fulfiller.note_active_swaps(active_swaps)
 
         if active_swaps:
             bt.logging.debug(f'Processing {len(active_swaps)} active swap(s)')
