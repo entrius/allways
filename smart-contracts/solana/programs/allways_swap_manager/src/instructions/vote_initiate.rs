@@ -139,6 +139,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         let collateral_amount = ctx.accounts.swap.collateral_amount;
         let from_amount = ctx.accounts.swap.from_amount;
         let to_amount = ctx.accounts.swap.to_amount;
+        let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
 
         let swap = &mut ctx.accounts.swap;
         swap.status = SwapStatus::Active;
@@ -169,6 +170,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             from_amount,
             to_amount,
             initiated_at: now,
+            collateral_chain,
         });
     }
     Ok(())

@@ -50,6 +50,9 @@ pub struct SwapInitiated {
     pub from_amount: u128,
     pub to_amount: u128,
     pub initiated_at: i64,
+    /// Backing hub (v3.1: appended last — one live swap PER hub, so per-miner events are ambiguous
+    /// without it; prefix decoders keep working).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -113,6 +116,8 @@ pub struct ReservationExtended {
     pub miner: Pubkey,
     pub validator: Pubkey,
     pub reserved_until: i64,
+    /// Backing hub whose reservation slid (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -268,6 +273,8 @@ pub struct ReservationFilled {
     pub from_amount: u128,
     pub to_amount: u128,
     pub reserved_until: i64,
+    /// Backing hub this fill draws on (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 /// An unfilled reservation was reaped after its finalize deadline (miner freed, fee already sunk).
@@ -275,6 +282,8 @@ pub struct ReservationFilled {
 pub struct UnfilledReservationClosed {
     pub miner: Pubkey,
     pub router: Pubkey,
+    /// Backing hub whose slot was reaped (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 /// The closed pool's draw seed slot has been pinned to a not-yet-produced slot. Re-emitted if that
@@ -283,6 +292,8 @@ pub struct UnfilledReservationClosed {
 pub struct PoolDrawArmed {
     pub miner: Pubkey,
     pub seed_slot: u64,
+    /// Backing hub whose contest armed (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -292,6 +303,8 @@ pub struct PoolResolved {
     pub winner: Pubkey,
     /// How many bids contended.
     pub requests: u8,
+    /// Backing hub whose contest resolved (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 // --- Phase 10: consensus-governed validator weights ---

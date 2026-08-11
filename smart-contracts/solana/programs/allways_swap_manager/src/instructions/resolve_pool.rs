@@ -138,7 +138,11 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     if ctx.accounts.pool.seed_slot == 0 {
         let seed_slot = cur_slot.saturating_add(SEED_SLOT_DELAY_SLOTS);
         ctx.accounts.pool.seed_slot = seed_slot;
-        emit!(PoolDrawArmed { miner: miner_key, seed_slot });
+        emit!(PoolDrawArmed {
+            miner: miner_key,
+            seed_slot,
+            collateral_chain: ctx.accounts.pool.collateral_chain.clone(),
+        });
         return Ok(());
     }
 
@@ -156,7 +160,11 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
             // could have waited for.
             let seed_slot = cur_slot.saturating_add(SEED_SLOT_DELAY_SLOTS);
             ctx.accounts.pool.seed_slot = seed_slot;
-            emit!(PoolDrawArmed { miner: miner_key, seed_slot });
+            emit!(PoolDrawArmed {
+                miner: miner_key,
+                seed_slot,
+                collateral_chain: ctx.accounts.pool.collateral_chain.clone(),
+            });
             return Ok(());
         }
     };
@@ -207,7 +215,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.to_chain = to_chain;
     // Backing pinned at the draw, immutable from here (finalize + claim only read it) — carried from
     // the quote the pool opened against, so the purse the miner offered is the purse that answers.
-    r.collateral_chain = collateral_chain;
+    r.collateral_chain = collateral_chain.clone();
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
@@ -241,6 +249,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         miner: miner_key,
         winner: winner_router,
         requests: req_count,
+        collateral_chain,
     });
     Ok(())
 }

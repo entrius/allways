@@ -57,6 +57,7 @@ pub fn handler(ctx: Context<ExtendReservation>, target_at: i64) -> Result<()> {
         miner: ctx.accounts.miner.key(),
         validator,
         reserved_until: target_at,
+        collateral_chain: ctx.accounts.reservation.collateral_chain.clone(),
     });
     Ok(())
 }

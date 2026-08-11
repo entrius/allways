@@ -61,6 +61,7 @@ pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
     emit!(UnfilledReservationClosed {
         miner: ctx.accounts.miner.key(),
         router,
+        collateral_chain: ctx.accounts.reservation.collateral_chain.clone(),
     });
     Ok(())
 }

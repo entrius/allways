@@ -145,7 +145,7 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let router_key = ctx.accounts.router.key();
 
-    let (from_chain, to_chain, reserved_until) = {
+    let (from_chain, to_chain, reserved_until, event_backing) = {
         let r = &mut ctx.accounts.reservation;
         r.user = user; // pin taker + payout so the validator-relayed claim can't redirect it
         r.from_addr = user_from_addr;
@@ -156,7 +156,7 @@ pub fn handler(
         r.created_at = now; // source-freshness floor: the deposit must postdate the FILL, not the draw
         r.reserved_until = now.saturating_add(ttl);
         r.max_extend_at = r.reserved_until.saturating_add(extension_budget);
-        (r.from_chain.clone(), r.to_chain.clone(), r.reserved_until)
+        (r.from_chain.clone(), r.to_chain.clone(), r.reserved_until, r.collateral_chain.clone())
     };
 
     // Tighten the hub's busy lock to the filled reservation's actual life. The bid set it
@@ -175,6 +175,7 @@ pub fn handler(
         from_amount,
         to_amount,
         reserved_until,
+        collateral_chain: event_backing,
     });
     Ok(())
 }

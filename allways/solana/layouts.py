@@ -316,8 +316,10 @@ EVENT_LAYOUTS = {
         'closes_at' / I64,
         'seed_slot' / U64,
     ),
-    'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64),
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8),
+    'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
+    'PoolResolved': CStruct(
+        'miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String
+    ),
     'QuoteRemoved': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
@@ -335,7 +337,9 @@ EVENT_LAYOUTS = {
         'updated_at' / I64,
         'update_fee' / U64,
     ),
-    'ReservationExtended': CStruct('miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64),
+    'ReservationExtended': CStruct(
+        'miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64, 'collateral_chain' / String
+    ),
     'ReservationFilled': CStruct(
         'miner' / Pubkey32,
         'router' / Pubkey32,
@@ -346,10 +350,13 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'reserved_until' / I64,
+        'collateral_chain' / String,
     ),
     'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
-    'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32),
+    'UnfilledReservationClosed': CStruct(
+        'miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String
+    ),
     'SwapClaimed': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
@@ -378,6 +385,7 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'initiated_at' / I64,
+        'collateral_chain' / String,
     ),
     # `slash` is what moved on Solana (0 for a non-"sol" backing); `penalty`/`reimbursement` are the
     # absolute figures the backing chain owes and `payee` is whom it owes them to (empty for "sol",
