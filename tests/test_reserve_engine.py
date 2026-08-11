@@ -32,7 +32,12 @@ def _rate_fixed(display: float) -> int:
 
 class FakeClient:
     def __init__(self, *, active=True, has_active_swap=False, quote_rate=0.0021, pool=None, collateral=10**12):
-        self.miner_state = SimpleNamespace(active=active, has_active_swap=has_active_swap, collateral=collateral)
+        self.miner_state = SimpleNamespace(
+            active=active,
+            has_active_swap=has_active_swap,
+            active_swap_backings=1 if has_active_swap else 0,
+            collateral=collateral,
+        )
         self.quote = SimpleNamespace(
             rate=_rate_fixed(quote_rate), from_chain='sol', to_chain='btc', collateral_chain='sol'
         )
@@ -50,7 +55,7 @@ class FakeClient:
     def get_miner_state(self, miner):
         return self.miner_state
 
-    def get_pool(self, miner):
+    def get_pool(self, miner, backing="sol"):
         return self._pool
 
     def get_quote(self, miner, from_chain, to_chain, backing='sol'):
@@ -339,7 +344,7 @@ class StatusClient:
         self.swap_keys_queried.append(swap_key)
         return self._swap
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing="sol"):
         return self._reservation
 
     def get_hotkey_binding(self, hotkey_bytes):
@@ -469,14 +474,14 @@ class _ConfirmClient(FakeClient):
         self.extensions = []
         self.extend_raises = False
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing="sol"):
         return self._reservation
 
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
         self.claims.append((swap_key, from_tx_hash, from_tx_block))
         return 'claimsig'
 
-    def extend_reservation(self, miner, target_at):
+    def extend_reservation(self, miner, target_at, backing="sol"):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)

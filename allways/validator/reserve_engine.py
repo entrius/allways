@@ -29,6 +29,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.constants import NUMERAIRE_CHAIN
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
+from allways.solana.pdas import BACKING_BITS
 from allways.validator.binding import hotkey_ss58, verify_binding
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -121,28 +122,34 @@ def reserve_on_behalf(
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     quote = None
-    pool = client.get_pool(miner_pk)
-    joining = (
-        pool is not None
-        and int(getattr(pool, 'opened_at', 0) or 0) != 0
-        and now <= int(getattr(pool, 'closes_at', 0) or 0)
-        and pool.from_chain == from_chain
-        and pool.to_chain == to_chain
-    )
+    # Contest slots are per (miner, hub) since v3.1 — a joinable pool may exist on any backing.
+    pool = None
+    joining = False
+    backing = NUMERAIRE_CHAIN
+    for candidate_backing in BACKING_BITS:
+        p = client.get_pool(miner_pk, candidate_backing)
+        if (
+            p is not None
+            and int(getattr(p, 'opened_at', 0) or 0) != 0
+            and now <= int(getattr(p, 'closes_at', 0) or 0)
+            and p.from_chain == from_chain
+            and p.to_chain == to_chain
+        ):
+            pool, joining, backing = p, True, candidate_backing
+            break
     if joining:
-        # A late bid must match the backing the pool already pinned — the pool is one offer's
-        # contest, not the direction's.
-        backing = str(getattr(pool, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
         quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
     else:
-        if miner_state.has_active_swap:
-            return ReserveResult(False, 'miner is busy with another swap; try again shortly')
         offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds)
         if offer is None:
             return ReserveResult(False, why)
         quote, backing = offer
         rate_fixed = quote.rate
+        # One swap per HUB: only the chosen offer's hub has to be idle — the other hub's swap
+        # neither draws on this pot nor blocks it.
+        if int(getattr(miner_state, 'active_swap_backings', 0)) & BACKING_BITS.get(backing, 0):
+            return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
 
     try:
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing)
@@ -198,9 +205,9 @@ def reserve_on_behalf(
     # The entry landed — queue the user's details for `finalize_won_seats`. Persisted (not held in
     # memory) so a validator restart inside the pool/finalize window still honors the routing promise.
     validator.state_store.upsert_routed_request(
-        str(miner_pk), from_chain, to_chain, str(user_pk), user_from_addr, user_to_addr, from_amount, now
+        str(miner_pk), from_chain, to_chain, backing, str(user_pk), user_from_addr, user_to_addr, from_amount, now
     )
-    pool = client.get_pool(miner_pk)
+    pool = client.get_pool(miner_pk, backing)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
     return ReserveResult(True, '', closes_at, sig)
 
@@ -230,13 +237,13 @@ def finalize_won_seats(validator, now: int) -> list:
     read_only = validator.solana_swap_loop.read_only
     me = str(client.keypair.pubkey())
     finalized: list = []
-    for miner, from_chain, to_chain in store.distinct_routed_pools():
-        queue = store.pending_routed_requests(miner, from_chain, to_chain)
+    for miner, from_chain, to_chain, backing in store.distinct_routed_pools():
+        queue = store.pending_routed_requests(miner, from_chain, to_chain, backing)
         if not queue:
             continue
         entered_at = queue[0]['created_at']
         try:
-            resv = client.get_reservation(Pubkey.from_string(miner))
+            resv = client.get_reservation(Pubkey.from_string(miner), backing)
         except Exception as e:
             bt.logging.warning(f'routed sweep {miner[:8]}: reservation read failed, retrying next step: {e}')
             continue
@@ -259,20 +266,18 @@ def finalize_won_seats(validator, now: int) -> list:
             # outcome (lost to another router, filled, lapsed) → drop.
             if drawn_unfilled and now <= int(resv.finalize_by):
                 bt.logging.info(f'routed sweep {miner[:8]}: seat won by another router, dropping queue')
-                store.delete_routed_requests(miner, from_chain, to_chain)
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
             elif fresh:
                 bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
-                store.delete_routed_requests(miner, from_chain, to_chain)
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         req = draw_pool_winner(queue)
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
         try:
-            # The draw copied the winning quote's backing into the Reservation; the fill has to be
-            # sized against THAT leg, and named on-chain, or the contract's purse gate reads the
-            # wrong side of the swap.
-            backing = str(getattr(resv, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
+            # The reservation lives at the queue's backing-seeded address, so the stored chain can
+            # only agree; the fill is sized against THAT leg or the purse gate reads the wrong side.
             fill = compute_intake_amounts(
                 from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing
             )
@@ -292,10 +297,10 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
             bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
-            store.delete_routed_requests(miner, from_chain, to_chain)
+            store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
-        store.delete_routed_requests(miner, from_chain, to_chain)
+        store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
     store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
     return finalized

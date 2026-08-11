@@ -347,7 +347,7 @@ class _RoutingClient:
     def get_config(self):
         return SimpleNamespace(min_swap_amount=0, max_swap_amount=0, tao_min_swap_amount=0, tao_max_swap_amount=0)
 
-    def get_pool(self, miner):
+    def get_pool(self, miner, backing="sol"):
         return None
 
 

@@ -393,6 +393,7 @@ class ValidatorStateStore:
         miner: str,
         from_chain: str,
         to_chain: str,
+        backing: str,
         user_pubkey: str,
         user_from_addr: str,
         user_to_addr: str,
@@ -400,31 +401,31 @@ class ValidatorStateStore:
         created_at: int,
     ) -> None:
         """Persist one routed reservation request. A retry from the same user for the
-        same (miner, direction) refreshes addresses/amount but keeps its original
-        ``created_at`` — a retry never loses its FIFO position."""
+        same (miner, direction, backing) refreshes addresses/amount but keeps its
+        original ``created_at`` — a retry never loses its FIFO position."""
         self._execute(
             """
             INSERT INTO routed_requests
-                (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, from_amount, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(miner, from_chain, to_chain, user_pubkey) DO UPDATE SET
+                (miner, from_chain, to_chain, backing, user_pubkey, user_from_addr, user_to_addr, from_amount, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(miner, from_chain, to_chain, backing, user_pubkey) DO UPDATE SET
                 user_from_addr = excluded.user_from_addr,
                 user_to_addr = excluded.user_to_addr,
                 from_amount = excluded.from_amount
             """,
-            (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, str(int(from_amount)), created_at),
+            (miner, from_chain, to_chain, backing, user_pubkey, user_from_addr, user_to_addr, str(int(from_amount)), created_at),
         )
 
-    def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> List[dict]:
-        """A miner-direction's queued requests, oldest first (the FIFO order
+    def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str, backing: str = 'sol') -> List[dict]:
+        """A (miner, direction, backing) queue, oldest first (the FIFO order
         ``draw_pool_winner`` selects from)."""
         rows = self._fetchall(
             """
             SELECT user_pubkey, user_from_addr, user_to_addr, from_amount, created_at FROM routed_requests
-            WHERE miner = ? AND from_chain = ? AND to_chain = ?
+            WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ?
             ORDER BY created_at ASC, id ASC
             """,
-            (miner, from_chain, to_chain),
+            (miner, from_chain, to_chain, backing),
         )
         return [
             {
@@ -437,18 +438,18 @@ class ValidatorStateStore:
             for r in rows
         ]
 
-    def distinct_routed_pools(self) -> List[Tuple[str, str, str]]:
-        """The (miner, from_chain, to_chain) keys with pending requests — the
-        finalize sweep's iteration set."""
-        rows = self._fetchall('SELECT DISTINCT miner, from_chain, to_chain FROM routed_requests')
-        return [(r['miner'], r['from_chain'], r['to_chain']) for r in rows]
+    def distinct_routed_pools(self) -> List[Tuple[str, str, str, str]]:
+        """The (miner, from_chain, to_chain, backing) keys with pending requests —
+        the finalize sweep's iteration set."""
+        rows = self._fetchall('SELECT DISTINCT miner, from_chain, to_chain, backing FROM routed_requests')
+        return [(r['miner'], r['from_chain'], r['to_chain'], r['backing']) for r in rows]
 
-    def delete_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> None:
-        """Drop a miner-direction's whole queue — called on any terminal outcome
+    def delete_routed_requests(self, miner: str, from_chain: str, to_chain: str, backing: str = 'sol') -> None:
+        """Drop one (miner, direction, backing) queue — called on any terminal outcome
         (finalized, lost, expired). Non-selected users re-request via their client."""
         self._execute(
-            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ?',
-            (miner, from_chain, to_chain),
+            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ?',
+            (miner, from_chain, to_chain, backing),
         )
 
     def prune_routed_requests(self, cutoff_time: int) -> None:
@@ -755,6 +756,12 @@ class ValidatorStateStore:
             if cols and 'swap_key' not in cols:
                 conn.execute('ALTER TABLE clearing_rates ADD COLUMN swap_key TEXT')
                 conn.execute('DELETE FROM clearing_rates')
+            # v3.1: routed queues are keyed per (miner, direction, BACKING) — one hub's residue must
+            # not dead-end another hub's queue. Pre-v3.1 rows were all sol-backed by construction.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(routed_requests)')]
+            if cols and 'backing' not in cols:
+                conn.execute("ALTER TABLE routed_requests ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
+                conn.execute('DROP INDEX IF EXISTS idx_routed_requests_key')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -857,6 +864,7 @@ class ValidatorStateStore:
                     miner          TEXT NOT NULL,
                     from_chain     TEXT NOT NULL,
                     to_chain       TEXT NOT NULL,
+                    backing        TEXT NOT NULL DEFAULT 'sol',
                     user_pubkey    TEXT NOT NULL,
                     user_from_addr TEXT NOT NULL,
                     user_to_addr   TEXT NOT NULL,
@@ -864,7 +872,7 @@ class ValidatorStateStore:
                     created_at     INTEGER NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_routed_requests_key
-                    ON routed_requests(miner, from_chain, to_chain, user_pubkey);
+                    ON routed_requests(miner, from_chain, to_chain, backing, user_pubkey);
 
                 -- W3 bond relay. relay_swaps snapshots a live off-chain-backed swap's
                 -- backing-chain user address: it is the vote_slash reimbursement target, the

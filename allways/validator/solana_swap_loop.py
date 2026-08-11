@@ -197,9 +197,11 @@ class SolanaSwapLoop:
             bt.logging.warning(f'{self._label(swap)}: delivery_refused check failed ({e}) — deferring, not slashing')
             return True
 
-    def _get_reservation(self, miner: Any) -> Any:
+    def _get_reservation(self, miner: Any, backing: str) -> Any:
+        """The (miner, hub) reservation slot — per-backing since v3.1, so a swap's timeline is read
+        off ITS hub's slot and a concurrent other-hub reservation can't shadow it."""
         try:
-            return self.client.get_reservation(miner)
+            return self.client.get_reservation(miner, backing)
         except Exception as e:
             bt.logging.warning(f'reservation read failed for miner: {e}')
             return None
@@ -219,7 +221,7 @@ class SolanaSwapLoop:
 
     def _extend_reservation_action(self, swap: Any, info: Any, now: int) -> SwapAction:
         """Source leg valid-but-unconfirmed near reservation expiry → slide reserved_until, else WAIT."""
-        reservation = self._get_reservation(swap.miner)
+        reservation = self._get_reservation(swap.miner, str(swap.collateral_chain))
         if reservation is None:
             return SwapAction(SwapDecision.WAIT)
         target = self._extend_target(
@@ -305,7 +307,7 @@ class SolanaSwapLoop:
         return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
 
     def _decide_pending_attestation(self, swap: Any, now: int) -> SwapAction:
-        reservation = self._get_reservation(swap.miner)
+        reservation = self._get_reservation(swap.miner, str(swap.collateral_chain))
         # An orphaned claim can never attest (vote_initiate needs a live reservation) — reap it (close_stale_claim)
         # to free the miner + reclaim rent. Covers a dropped/RBF'd source and one past its extension ceiling; a
         # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
@@ -391,7 +393,8 @@ class SolanaSwapLoop:
         label = self._label(swap)
         try:
             if decision == SwapDecision.ATTEST:
-                if self.client.has_voted(pdas.REQ_INITIATE, swap.miner, voter):
+                # Initiate rounds key by swap_key since v3.1 (like confirm/timeout).
+                if self.client.has_voted(pdas.REQ_INITIATE, swap_key, voter):
                     return False
                 backing = str(getattr(swap, 'collateral_chain', 'sol') or 'sol').lower()
                 sig = self.client.vote_initiate(swap_key, swap.miner, backing=backing)
@@ -405,9 +408,9 @@ class SolanaSwapLoop:
                 sig = self.client.timeout_swap(swap_key, swap.miner, swap.user)
             elif decision == SwapDecision.CANCEL:
                 # Permissionless reap (no vote round) — first validator wins, peers no-op benignly.
-                sig = self.client.close_stale_claim(swap.miner, swap_key)
+                sig = self.client.close_stale_claim(swap.miner, swap_key, str(swap.collateral_chain))
             elif decision == SwapDecision.EXTEND_RESERVATION:
-                sig = self.client.extend_reservation(swap.miner, action.target_at)
+                sig = self.client.extend_reservation(swap.miner, action.target_at, str(swap.collateral_chain))
             elif decision == SwapDecision.EXTEND_TIMEOUT:
                 sig = self.client.extend_timeout(swap_key, swap.miner, action.target_at)
             else:
@@ -471,7 +474,7 @@ class SolanaSwapLoop:
                 bt.logging.info(f'pool {miner}: WOULD resolve_pool ({len(reqs)} req, read-only)')
                 continue
             try:
-                self.client.resolve_pool(miner)
+                self.client.resolve_pool(miner, str(getattr(pool, 'collateral_chain', 'sol') or 'sol'))
             except Exception as e:  # one bad pool must not break the pass
                 if m := benign_marker(e, _BENIGN_RESOLVE_MARKERS):
                     bt.logging.debug(f'pool {miner}: resolve_pool no-op ({m})')
