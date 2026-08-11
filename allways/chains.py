@@ -17,6 +17,13 @@ class ChainDefinition:
     native_unit: str  # Smallest unit name (e.g. 'satoshi')
     decimals: int  # Precision (e.g. 8 for BTC, 9 for TAO)
     env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_NETWORK)
+    # Network names the provider accepts in {env_prefix}_NETWORK; [0] is the default (mainnet).
+    # Empty = the network isn't picked by name (sol/tao resolve by RPC URL / bittensor network).
+    networks: tuple[str, ...] = ()
+    # Which of ``networks`` the `alw config set env testnet` bundle selects. Named, not
+    # positional: a chain can offer several testnets (BTC has three) and only one is the
+    # supported one, so the choice must survive reordering the list.
+    testnet_network: str = ''
     seconds_per_block: int = 12  # Average block time on this chain
     min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
     # Smallest amount that can actually exist/move on-chain, in native units
@@ -41,6 +48,8 @@ CHAIN_BTC = ChainDefinition(
     native_unit='satoshi',
     decimals=8,
     env_prefix='BTC',
+    networks=('mainnet', 'testnet', 'testnet4', 'signet'),
+    testnet_network='testnet4',
     seconds_per_block=600,
     min_confirmations=2,
     # 1000 sat, not the bare 546 P2PKH dust line: margin vs higher dustrelayfee / wallet quirks, and a tighter executable-rate ceiling.
@@ -82,6 +91,8 @@ CHAIN_ETH = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='ETH',
+    networks=('mainnet', 'sepolia'),
+    testnet_network='sepolia',
     seconds_per_block=12,
     # ~1 beacon epoch. True finality is 2 epochs (~64 blocks); post-merge reorgs deeper than
     # 2 blocks are vanishingly rare, so 32 buys near-finality without doubling the leg time.
@@ -100,15 +111,15 @@ CHAIN_ARBUSDC = ChainDefinition(
     native_unit='µUSDC',
     decimals=6,
     env_prefix='ARBUSDC',
+    networks=('mainnet', 'sepolia'),  # sepolia = Arbitrum Sepolia
+    testnet_network='sepolia',
     # ~4 blocks/s real; 1s is the integer floor. 90 confs ≈ 25s real (~90s in extension
     # math) — both far inside the 600s default program grace, so no grace-table arm.
     seconds_per_block=1,
     min_confirmations=90,
-    # F1 pin — DO NOT raise until the is_executable_rate orientation fix lands: the gate
-    # consumes the canonical arbusdc-per-SOL rate as if it were SOL-per-arbusdc on the
-    # arbusdc->sol side, so a real dust floor can demand a source above max_swap and
-    # silently burn the direction's pool. ERC-20 transfers have no protocol minimum, so
-    # 1 is also honest.
+    # ERC-20 transfers have no protocol minimum, so 1 is the honest floor. (The old
+    # F1 orientation defect that made this value load-bearing is fixed in utils/rate.py;
+    # raising it to an economic floor is now safe if ever wanted.)
     min_onchain_amount=1,
     # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (Arbitrum
     # timestamps are non-decreasing, but monotonicity says nothing about hub-spoke skew).
@@ -118,12 +129,33 @@ CHAIN_ARBUSDC = ChainDefinition(
     asset_locator='0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
 )
 
+CHAIN_HYPE = ChainDefinition(
+    id='hype',
+    name='Hyperliquid',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='HYPE',
+    networks=('mainnet', 'testnet'),
+    testnet_network='testnet',
+    # ~1s small blocks (transfers never need the 60s big blocks — those carry >2M gas).
+    seconds_per_block=1,
+    # HyperBFT finalizes the block sequence on inclusion — no reorgs to outrun. 2 is a
+    # one-block margin against an endpoint serving a head its consensus hasn't sealed yet.
+    min_confirmations=2,
+    # Rate sanity floor, not an economic guarantee: 0.0001 HYPE covers a 21k-gas transfer
+    # below ~4.7 gwei — miners price real gas into their quotes.
+    min_onchain_amount=100_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
     'sol': CHAIN_SOL,
     'eth': CHAIN_ETH,
     'arbusdc': CHAIN_ARBUSDC,
+    'hype': CHAIN_HYPE,
 }
 
 

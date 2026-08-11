@@ -128,6 +128,10 @@ class Miner(BaseMinerNeuron):
         detached miner reads garbage from stdin, producing spurious
         "password invalid" errors mid-swap.
 
+        An unencrypted keyfile has no password to cache, and prompting for one
+        hands a detached miner an EOFError at boot instead of a running neuron
+        — so that case unlocks directly.
+
         Reads ``MINER_BITTENSOR_COLDKEY_PASSWORD`` if set, otherwise prompts
         once at startup. Uses ``save_password_to_env`` (not direct
         ``os.environ`` assignment) because bittensor-wallet 4.0.1 stores the
@@ -135,6 +139,11 @@ class Miner(BaseMinerNeuron):
         ``BT_PW__...`` env var is rejected as malformed base64.
         """
         from getpass import getpass
+
+        if not self.wallet.coldkey_file.is_encrypted():
+            self.wallet.unlock_coldkey()
+            bt.logging.info('Bittensor coldkey unlocked (keyfile is not encrypted)')
+            return
 
         password = os.environ.get('MINER_BITTENSOR_COLDKEY_PASSWORD')
         if not password:

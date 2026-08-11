@@ -180,10 +180,17 @@ class SolanaSwapLoop:
         return True
 
     def _dest_refuses(self, swap: Any) -> bool:
-        """Evidence the dest can't receive (or the check is unavailable) — either way, never slash on it."""
+        """Evidence the dest can't receive (or the check is unavailable) — either way, never slash on it.
+
+        Beyond issuer refusal (blacklist/pause), a malformed dest address is undeliverable by
+        construction and never the miner's fault. A self-represented taker reserves on-chain directly,
+        bypassing the reserve-time address gate, so this slash-side check is the miner's only guard
+        against a poisoned (e.g. zero-address) reservation."""
         provider = self.providers.get(swap.to_chain)
         if provider is None:
             return False
+        if not provider.chain.is_valid_address(swap.user_to_addr):
+            return True
         try:
             return provider.delivery_refused(swap.user_to_addr, int(swap.initiated_at))
         except Exception as e:

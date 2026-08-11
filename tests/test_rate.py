@@ -1,6 +1,8 @@
 """Tests for allways.utils.rate — to_amount calculation and fee deduction math."""
 
+from dataclasses import replace
 from decimal import Decimal
+from unittest.mock import patch
 
 from allways.chains import get_chain_def
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
@@ -333,29 +335,41 @@ class TestDirectionalRate:
 class TestIsExecutableRate:
     """Crown-eligibility gate against sentinel quotes that no user can route.
 
-    SOL is the bounded asset (``collateral_amount``): the contract's ``min_swap_amount``/``max_swap_amount``
-    constrain the SOL leg, in lamports. Bounds: ``min_swap=0.1 SOL``, ``max_swap=0.5 SOL``. (BTC decimals
-    8, SOL/TAO 9 → btc↔sol decimal_factor 10, same boundary arithmetic as the retired btc↔tao gate.)
+    ``rate`` is the CANONICAL number the chain stores — spoke per 1 SOL — in BOTH
+    directions (what every production caller feeds). SOL is the bounded asset
+    (``collateral_amount``): the contract's ``min_swap_amount``/``max_swap_amount``
+    constrain the SOL leg, in lamports. Bounds here: ``min_swap=0.1 SOL``, ``max_swap=0.5 SOL``.
+
+    The crown-relevant sentinel is a LOW canonical rate on the spoke→sol direction
+    (lowest wins that sort): it maps even 1 smallest-unit of spoke above ``max_swap``,
+    so nothing routes. A huge canonical rate is routable in principle and simply loses
+    the sort — permissive by design.
     """
 
     MIN = 100_000_000  # 0.1 SOL
     MAX = 500_000_000  # 0.5 SOL
 
-    def test_sane_btc_to_sol_rate_executable(self):
-        assert is_executable_rate(326.0, 'btc', 'sol', self.MIN, self.MAX) is True
+    def test_sane_btc_rates_executable_both_directions(self):
+        # ~0.0021 BTC per SOL: 0.1 SOL needs ~21_000 sats — comfortably fundable.
+        assert is_executable_rate(0.0021, 'btc', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(0.0021, 'sol', 'btc', self.MIN, self.MAX) is True
 
-    def test_sane_sol_to_btc_rate_executable(self):
-        assert is_executable_rate(326.0, 'sol', 'btc', self.MIN, self.MAX) is True
+    def test_crown_squat_low_btc_rate_rejected(self):
+        # 1e-12 BTC/SOL wins the btc→sol sort but maps 1 sat to 5e12 lamports —
+        # far above max_swap; no positive integer source routes.
+        assert is_executable_rate(1e-12, 'btc', 'sol', self.MIN, self.MAX) is False
+        assert is_executable_rate(1e-12, 'sol', 'btc', self.MIN, self.MAX) is False
 
-    def test_huge_btc_to_sol_rate_rejected(self):
-        """1e10 SOL/BTC: 1 sat → 1e11 lamports = 100 SOL, far above 0.5 SOL max.
-        No positive integer sat lands in [0.1, 0.5] SOL."""
-        assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, self.MAX) is False
-
-    def test_float_max_btc_to_sol_rate_rejected(self):
-        """The other sentinel miners post: float-max wins the rate sort but
-        overflows the conversion math entirely."""
+    def test_float_max_rate_rejected(self):
+        """Sentinel miners post float-max: its inverse is subnormal and the band math
+        leaves float range entirely — rejected, never crashes."""
         assert is_executable_rate(1.797e308, 'btc', 'sol', self.MIN, self.MAX) is False
+        assert is_executable_rate(1.797e308, 'sol', 'btc', self.MIN, self.MAX) is False
+
+    def test_huge_rate_loses_the_sort_but_is_routable(self):
+        # 1e10 BTC/SOL is a terrible offer that can never win the crown; a (huge)
+        # source does route an in-bounds SOL leg, so the gate stays permissive.
+        assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, self.MAX) is True
 
     def test_zero_rate_rejected(self):
         assert is_executable_rate(0.0, 'btc', 'sol', self.MIN, self.MAX) is False
@@ -370,31 +384,42 @@ class TestIsExecutableRate:
     def test_bounds_unset_is_permissive(self):
         """Both bounds at 0 → no on-chain limit configured → don't filter.
         Matches the contract's unset-bounds sentinel."""
-        assert is_executable_rate(1e10, 'btc', 'sol', 0, 0) is True
-        assert is_executable_rate(1e-10, 'sol', 'btc', 0, 0) is True
-
-    def test_sane_eth_rates_executable(self):
-        """ETH is the first spoke with MORE decimals than the hub (18 vs 9), so the eth↔sol
-        decimal_factor is fractional (1e-9) — the gate math must survive that regime.
-        ~20 SOL per ETH: 0.1 SOL ÷ (20 × 1e-9) = 5e6 wei min source, comfortably fundable."""
-        assert is_executable_rate(20.0, 'eth', 'sol', self.MIN, self.MAX) is True
-        assert is_executable_rate(20.0, 'sol', 'eth', self.MIN, self.MAX) is True
-
-    def test_huge_eth_to_sol_rate_rejected(self):
-        """1e20 SOL/ETH: even the min_onchain_amount source (5e13 wei) maps to
-        5e13 × 1e20 × 1e-9 = 5e24 lamports — absurdly above max. No fundable source fits."""
-        assert is_executable_rate(1e20, 'eth', 'sol', self.MIN, self.MAX) is False
+        assert is_executable_rate(1e-12, 'btc', 'sol', 0, 0) is True
+        assert is_executable_rate(1e-12, 'sol', 'btc', 0, 0) is True
 
     def test_max_unset_only_lower_bound_enforced(self):
-        """If only min_swap is set, every rate above the floor is executable."""
-        assert is_executable_rate(1e10, 'btc', 'sol', self.MIN, 0) is True
+        """If only min_swap is set, every fundable-source rate is executable."""
+        assert is_executable_rate(1e-12, 'btc', 'sol', self.MIN, 0) is True
+        assert is_executable_rate(1e-12, 'sol', 'btc', self.MIN, 0) is True
 
-    def test_sol_to_btc_lowball_rate_rejected(self):
-        """sol→btc with rate=1e-8 implies 0.1 SOL buys 1e7 BTC — destination
-        absurdity, not a granularity miss. Caught by the symmetric check:
-        treating 1/r = 1e8 as a btc→sol rate, 1 sat already overshoots
-        max_swap on the SOL leg, so the original rate is sentinel-low."""
-        assert is_executable_rate(1e-8, 'sol', 'btc', self.MIN, self.MAX) is False
+    def test_sane_eth_rates_executable(self):
+        """ETH has MORE decimals than the hub (18 vs 9) → fractional decimal_factor (1e-9).
+        ~0.05 ETH per SOL: 0.1 SOL needs 5e15 wei (0.005 ETH), comfortably fundable."""
+        assert is_executable_rate(0.05, 'eth', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(0.05, 'sol', 'eth', self.MIN, self.MAX) is True
+
+    def test_crown_squat_low_eth_rate_rejected(self):
+        """1e-20 ETH/SOL: 1 wei maps to 1e11 lamports — above max_swap; unroutable."""
+        assert is_executable_rate(1e-20, 'eth', 'sol', self.MIN, self.MAX) is False
+
+    def test_sane_hype_rates_executable(self):
+        # ~0.2 SOL per HYPE, canonical 'HYPE per 1 SOL' — same 18 decimals as ETH but twice
+        # the on-chain floor, which is the input this gate actually reads.
+        assert is_executable_rate(5.0, 'hype', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(5.0, 'sol', 'hype', self.MIN, self.MAX) is True
+
+    def test_absurd_hype_rate_unexecutable(self):
+        assert is_executable_rate(1e-20, 'hype', 'sol', self.MIN, self.MAX) is False
+
+    def test_sane_tao_sol_rates_executable(self):
+        """tao↔sol: both 9-decimal, decimal_factor 1. ~2 TAO per SOL routes."""
+        assert is_executable_rate(2.0, 'tao', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(2.0, 'sol', 'tao', self.MIN, self.MAX) is True
+
+    def test_crown_squat_low_tao_rate_rejected(self):
+        """1e-10 TAO/SOL: 1 rao overshoots max_swap on the SOL leg — unroutable."""
+        assert is_executable_rate(1e-10, 'tao', 'sol', self.MIN, self.MAX) is False
+        assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
 
     def test_non_sol_pair_is_permissive(self):
         """A pair with no SOL leg (e.g. legacy btc↔tao) has no SOL bound to
@@ -402,71 +427,44 @@ class TestIsExecutableRate:
         assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, self.MAX) is True
         assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is True
 
-    def test_sane_tao_sol_rates_executable(self):
-        """tao↔sol: both 9-decimal, decimal_factor 1. A ~1:1 rate routes."""
-        assert is_executable_rate(1.0, 'tao', 'sol', self.MIN, self.MAX) is True
-        assert is_executable_rate(1.0, 'sol', 'tao', self.MIN, self.MAX) is True
-
-    def test_huge_tao_to_sol_rate_rejected(self):
-        """1e10 SOL/TAO: the smallest fundable TAO source maps far above max_swap."""
-        assert is_executable_rate(1e10, 'tao', 'sol', self.MIN, self.MAX) is False
-
-    def test_lowball_sol_to_tao_rate_rejected(self):
-        """Symmetric out of SOL: 1e-10 TAO/SOL → inverse 1e10 overshoots on the SOL leg."""
-        assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
-
     DUST = get_chain_def('btc').min_onchain_amount  # smallest fundable BTC source
 
-    def test_sub_dust_boundary_rate_rejected(self):
-        """At max_swap/10, the only in-bounds source is 1 sat — below the BTC
-        dust floor, so unfundable. Rejected (the crown-squat rate)."""
-        rate = self.MAX / 10  # SOL leg at 1 sat == max_swap; 1 sat < dust
+    def test_one_sat_boundary_rate_rejected(self):
+        """At r = 10/max_swap the only in-bounds source is 1 sat — below the BTC
+        dust floor, so unfundable. Rejected (the boundary of the squat regime)."""
+        rate = 10 / self.MAX  # 1 sat → exactly max_swap on the SOL leg
         assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
-
-    def test_dust_floor_boundary_rate_executable(self):
-        """At the rate where the dust floor maps exactly to max_swap, the
-        smallest fundable source is in-bounds — just executable."""
-        rate = self.MAX / (10 * self.DUST)  # DUST sat → max_swap on the SOL leg
-        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is True
-
-    def test_just_past_dust_floor_boundary_rejected(self):
-        """Just above the boundary, even the dust floor overshoots max_swap →
-        no fundable source routes."""
-        rate = (self.MAX / (10 * self.DUST)) * 1.0001
-        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
-
-    def test_sol_to_btc_sub_dust_boundary_rate_rejected(self):
-        """Symmetric: r = 10/max_swap maps 1 sat (sub-dust) to max_swap on the
-        inverse leg — rejected (the crown-squat rate)."""
-        rate = 10 / self.MAX
         assert is_executable_rate(rate, 'sol', 'btc', self.MIN, self.MAX) is False
 
-    def test_sol_to_btc_dust_floor_boundary_executable(self):
-        """Symmetric boundary at the dust floor: the dust-clearing inverse
-        source maps in-bounds — just executable."""
-        rate = (10 * self.DUST) / self.MAX
+    def test_dust_floor_boundary_rate_executable(self):
+        """At the rate where the dust floor maps exactly to max_swap, the smallest
+        fundable source is in-bounds — just executable."""
+        rate = (10 * self.DUST) / self.MAX  # DUST sats → max_swap on the SOL leg
+        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(rate, 'sol', 'btc', self.MIN, self.MAX) is True
 
+    def test_just_past_dust_floor_boundary_rejected(self):
+        """Just below the boundary, even the dust floor overshoots max_swap →
+        no fundable source routes."""
+        rate = ((10 * self.DUST) / self.MAX) * 0.999
+        assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
+
     def test_arbusdc_rates_executable_at_unit_floor(self):
-        """F1 regression guard — arbusdc must stay routable BOTH ways while its
-        min_onchain_amount stays pinned at 1. The gate consumes the canonical USDC-per-SOL
-        rate as if it were SOL-per-USDC on the arbusdc→sol side (the PR-E orientation
-        defect), so a real dust floor (e.g. 0.01 USDC = 10_000) pushes the implied minimum
-        source above max_swap and silently burns the direction's pool. If this test fails
-        because the floor was raised: revert the floor — it is load-bearing until PR-E."""
+        """arbusdc regression guard (the F1 pin, kept): the pair must stay routable
+        BOTH ways at the honest unit floor. The orientation defect this guarded
+        against is fixed — the gate now inverts the canonical rate correctly."""
         assert get_chain_def('arbusdc').min_onchain_amount == 1
         assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
-    def test_sol_to_btc_sentinel_unset_bounds_still_permissive(self):
-        """Unset bounds disable the gate in both directions — keeps the
-        legacy "no on-chain bounds yet" path permissive."""
-        assert is_executable_rate(1e-8, 'sol', 'btc', 0, 0) is True
-
-    def test_sol_to_btc_zero_max_only_min_set_is_permissive(self):
-        """If only min_swap is set (max_swap=0), any rate above the floor
-        symmetry still passes. Mirrors test_max_unset_only_lower_bound_enforced."""
-        assert is_executable_rate(1e-8, 'sol', 'btc', self.MIN, 0) is True
+    def test_arbusdc_survives_a_real_dust_floor(self):
+        """What PR-E unlocks: with the orientation fixed, a real economic floor
+        (0.01 USDC = 10_000 µUSDC) no longer kills the arbusdc→sol direction —
+        0.1 SOL needs ~15 USDC at 150 USDC/SOL, far above any dust floor."""
+        floor = replace(get_chain_def('arbusdc'), min_onchain_amount=10_000)
+        with patch.dict('allways.chains.SUPPORTED_CHAINS', {'arbusdc': floor}):
+            assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
+            assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
 
 class TestQuantizeRate:

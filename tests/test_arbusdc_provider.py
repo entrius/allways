@@ -19,6 +19,7 @@ from allways.assets.erc20 import (
     TRANSFER_TOPIC0,
     ArbUsdc,
 )
+from allways.assets.evm import EvmRpcError
 from allways.chains import CHAIN_ARBUSDC
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
@@ -258,6 +259,11 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_call': eth_call_views()})
         assert provider.can_deliver_to(RECIPIENT, AMOUNT) is True
 
+    def test_zero_address_is_not_a_valid_dest(self, provider):
+        # USDC transfer() reverts to the zero address (no blacklist/pause gate would catch it), so a
+        # reservation aimed there would strand the miner into a slash. The format gate must reject it.
+        assert provider.chain.is_valid_address('0x' + '00' * 20) is False
+
     def test_blacklisted_dest_blocks_reserve(self, provider):
         rpc_stub(provider, {'eth_call': eth_call_views(blacklisted=[RECIPIENT])})
         assert provider.can_deliver_to(RECIPIENT, AMOUNT) is False
@@ -375,7 +381,21 @@ class TestSendGuards:
         responses = self._send_responses()
 
         def revert(params):
-            raise RuntimeError('execution reverted: Blacklistable: account is blacklisted')
+            raise EvmRpcError('rpc error', {'code': 3, 'message': 'execution reverted: account is blacklisted'})
+
+        responses['eth_estimateGas'] = revert
+        rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, AMOUNT) is None
+        assert 'refuses' in provider.last_send_error
+
+    def test_revert_detected_by_code_when_message_lacks_the_word(self, provider, monkeypatch):
+        # The old string-match missed a code-3 revert phrased without "revert" and would have
+        # broadcast a doomed tx (gas burned, no delivery). The typed verdict catches it.
+        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        responses = self._send_responses()
+
+        def revert(params):
+            raise EvmRpcError('rpc error', {'code': 3, 'message': 'gas required exceeds allowance'})
 
         responses['eth_estimateGas'] = revert
         rpc_stub(provider, responses)

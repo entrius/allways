@@ -14,6 +14,7 @@ from bittensor.utils import ss58_encode
 from rich.console import Console
 from rich.text import Text
 
+from allways.chains import SUPPORTED_CHAINS, ChainDefinition
 from allways.classes import SwapStatus
 from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
@@ -36,12 +37,23 @@ SOLANA_NETWORKS = {
     'mainnet': 'https://api.mainnet-beta.solana.com',
     'localnet': 'http://127.0.0.1:8899',
 }
-# Names the BTC provider (BTC_NETWORK env) accepts; endpoints default to public esplora per network.
-BTC_NETWORKS = ('mainnet', 'testnet', 'testnet4', 'signet')
-# Names the ETH provider (ETH_NETWORK env) accepts; endpoints default to public JSON-RPC per network.
-ETH_NETWORKS = ('mainnet', 'sepolia')
-# Names the arbusdc provider (ARBUSDC_NETWORK env) accepts; sepolia = Arbitrum Sepolia.
-ARBUSDC_NETWORKS = ('mainnet', 'sepolia')
+# Chains that pick their network by NAME from {env_prefix}_NETWORK (registry rows carry the
+# accepted names). Every per-chain CLI surface — the `<id>-network` keys, the env bundles, the
+# `alw config` rows, `config set` validation — derives from this, so a new chain adds none.
+NAME_SELECTED_CHAINS = tuple(c for c in SUPPORTED_CHAINS.values() if c.networks)
+
+
+def network_key(chain: ChainDefinition) -> str:
+    """CLI config key that sets this chain's network (e.g. 'btc-network')."""
+    return f'{chain.id}-network'
+
+
+def testnet_name(chain: ChainDefinition) -> str:
+    """Network the `env testnet` bundle picks; a chain with no testnet stays on its default."""
+    return chain.testnet_network or chain.networks[0]
+
+
+CHAIN_NETWORK_KEYS = tuple(network_key(c) for c in NAME_SELECTED_CHAINS)
 # One-liner env bundle: `alw config set env testnet|mainnet` sets every chain's network + netuid
 # + the default router. Testnet routes through the Ventura Labs validator; mainnet self-represents
 # (no routing validator live yet). `alw config set router <ss58>` opts into routing on mainnet.
@@ -49,18 +61,14 @@ ENV_BUNDLES = {
     'testnet': {
         'network': 'test',
         'solana-network': 'devnet',
-        'btc-network': 'testnet4',
-        'eth-network': 'sepolia',
-        'arbusdc-network': 'sepolia',
+        **{network_key(c): testnet_name(c) for c in NAME_SELECTED_CHAINS},
         'netuid': '19',
         'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
     },
     'mainnet': {
         'network': 'finney',
         'solana-network': 'mainnet',
-        'btc-network': 'mainnet',
-        'eth-network': 'mainnet',
-        'arbusdc-network': 'mainnet',
+        **{network_key(c): c.networks[0] for c in NAME_SELECTED_CHAINS},
         'netuid': '7',
         # No routing validator on mainnet yet — bid self-represented until one ships a routing
         # product. Explicit '' (not omitted) so re-running `env mainnet` CLEARS a stale router.
@@ -110,25 +118,13 @@ def load_cli_keypair(config: dict):
     return keys.load_or_create(path)
 
 
-def apply_btc_network_env(config: dict) -> None:
-    """Feed btc-network config into the BTC provider, which reads BTC_NETWORK from the env.
-    A real BTC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
-    if not os.environ.get('BTC_NETWORK') and config.get('btc-network'):
-        os.environ['BTC_NETWORK'] = config['btc-network']
-
-
-def apply_eth_network_env(config: dict) -> None:
-    """Feed eth-network config into the ETH provider, which reads ETH_NETWORK from the env.
-    A real ETH_NETWORK env wins (explicit override); otherwise the configured name is applied."""
-    if not os.environ.get('ETH_NETWORK') and config.get('eth-network'):
-        os.environ['ETH_NETWORK'] = config['eth-network']
-
-
-def apply_arbusdc_network_env(config: dict) -> None:
-    """Feed arbusdc-network config into the arbusdc provider, which reads ARBUSDC_NETWORK from the
-    env. A real ARBUSDC_NETWORK env wins (explicit override); otherwise the configured name is applied."""
-    if not os.environ.get('ARBUSDC_NETWORK') and config.get('arbusdc-network'):
-        os.environ['ARBUSDC_NETWORK'] = config['arbusdc-network']
+def apply_chain_network_env(config: dict) -> None:
+    """Feed each `<id>-network` config value into the provider's {PREFIX}_NETWORK env var.
+    A real env var wins (explicit override); otherwise the configured name is applied."""
+    for chain in NAME_SELECTED_CHAINS:
+        env_var = f'{chain.env_prefix}_NETWORK'
+        if not os.environ.get(env_var) and config.get(network_key(chain)):
+            os.environ[env_var] = config[network_key(chain)]
 
 
 # Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().

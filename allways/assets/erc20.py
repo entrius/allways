@@ -68,11 +68,14 @@ class Erc20(EvmAsset):
     """A generic ERC-20 asset on an EVM chain, bound by its registry row.
 
     Not fused: the token composes its host network's `EvmChain` (``self._chain``) — the
-    first non-fused asset, and the shape a second same-network token shares a chain
-    instance through. Settlement truth is the token contract's Transfer log, never
-    tx.value: verification accepts a tx iff its status-1 receipt carries a Transfer from
-    the PINNED contract paying the expected recipient, and the provable payer is the
-    log's `from` topic. Delivery gates are issuer-shaped: blacklist + pause, and
+    first non-fused asset. Each token builds its own chain instance today; a second token
+    on the same network would want them pooled (one ladder, one tip fetch per pass) — a
+    construction change here, not a shape change.
+
+    Settlement truth is the token contract's Transfer log, never tx.value: verification
+    accepts a tx iff its status-1 receipt carries a Transfer from the PINNED contract
+    paying the expected recipient, and the provable payer is the log's `from` topic.
+    Delivery gates are issuer-shaped: blacklist + pause, and
     deliberately NO getCode — contract wallets receive ERC-20 fine, and a code probe
     would hand them slash immunity.
     """
@@ -82,7 +85,6 @@ class Erc20(EvmAsset):
         self._chain = EvmChain(EVM_NETWORKS[chain_def.host_chain], chain_def.env_prefix)
         EvmAsset.__init__(self)
         self.token_contract = _token_contract(chain_def, self.chain.network)
-        self._log = f'[{chain_def.id}]'
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -308,7 +310,7 @@ class Erc20(EvmAsset):
         norm = self.chain.normalize_address
         acct = self.chain._account()
         if acct is None:
-            self._send_error(f'{self._key_env} not set or unusable')
+            self._send_error(f'{self.chain._key_env} not set or unusable')
             return None
         if from_address and norm(acct.address) != norm(from_address):
             self._send_error(
@@ -412,7 +414,7 @@ class Erc20(EvmAsset):
         try:
             est = int(self.chain.eth_rpc('eth_estimateGas', [params]), 16)
         except Exception as e:
-            return None if 'revert' in str(e).lower() else DEFAULT_TOKEN_TRANSFER_GAS
+            return None if getattr(e, 'is_execution_revert', False) else DEFAULT_TOKEN_TRANSFER_GAS
         gas = est + est // 5
         return None if gas > MAX_TOKEN_TRANSFER_GAS else gas
 
@@ -445,6 +447,8 @@ class Erc20(EvmAsset):
         if self._refused_at(address):
             return True
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
+        # Span is in blocks; seconds_per_block floors to 1 on sub-second chains, so this reaches
+        # ~4× fewer wall-seconds than it reads. Fine here — the latest probe above is load-bearing.
         span = min(60, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         for probe in dict.fromkeys(hex(max(0, tip - span // d)) for d in (1, 2)):
             try:

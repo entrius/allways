@@ -16,12 +16,30 @@ from allways.assets.chain import Chain
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
+
+class EvmRpcError(RuntimeError):
+    """A JSON-RPC ``error`` object from an endpoint (an execution/method result), distinct from a
+    transport failure. Carries the structured error so callers branch on the code, not the message
+    wording (which varies by provider). ``is_execution_revert`` is a deterministic on-chain verdict."""
+
+    def __init__(self, message: str, error: Any):
+        super().__init__(message)
+        self.error = error if isinstance(error, dict) else {}
+
+    @property
+    def is_execution_revert(self) -> bool:
+        # Geth: code 3 + 'execution reverted'; others: -32000 with 'revert' in the message.
+        return self.error.get('code') == 3 or 'revert' in str(self.error.get('message') or '').lower()
+
+
 # eth_maxPriorityFeePerGas fallback when an endpoint doesn't serve it (1 gwei clears
 # comfortably in normal conditions without meaningfully overpaying a transfer).
 FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
 
-# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its
-# block-count bound from its own block time so the window means the same everywhere.
+# Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its block
+# bound from its own block time. Note seconds_per_block is an integer floor, so on sub-second
+# chains (Arbitrum ~0.25s → floored to 1) the bound covers ~4× fewer wall-seconds than this.
+# Harmless: the scanner only surfaces a hash the confirm path re-verifies by exact tx hash.
 SCAN_LOOKBACK_SECS = 300
 
 
@@ -64,9 +82,19 @@ ARBITRUM = EvmNetwork(
         'sepolia': ('https://arbitrum-sepolia-rpc.publicnode.com', 'https://arbitrum-sepolia.drpc.org'),
     },
 )
+HYPERLIQUID = EvmNetwork(
+    label='Hyperliquid',
+    chain_ids={'mainnet': 999, 'testnet': 998},
+    rpc_urls={
+        # The official gateways are rate-limited to 100 req/min per IP — fine as the keyless
+        # default, but operators should point {PREFIX}_RPC_URLS at a keyed endpoint.
+        'mainnet': ('https://rpc.hyperliquid.xyz/evm', 'https://hyperliquid.drpc.org'),
+        'testnet': ('https://rpc.hyperliquid-testnet.xyz/evm', 'https://hyperliquid-testnet.drpc.org'),
+    },
+)
 
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
-EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM}
+EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM, 'hyperliquid': HYPERLIQUID}
 
 
 class EvmChain(Chain):
@@ -138,6 +166,7 @@ class EvmChain(Chain):
         log = f'{self.network_def.label}Rpc'
         payload = {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}
         last_err: Optional[Exception] = None
+        revert_err: Optional[EvmRpcError] = None
         saw_null = False
         for i, base in enumerate(rpc_bases):
             pos = f'[{i + 1}/{len(rpc_bases)}]'
@@ -165,7 +194,11 @@ class EvmChain(Chain):
 
             if 'error' in body:
                 err = body['error']
-                last_err = RuntimeError(f'{base} {method}: rpc error {err}')
+                last_err = EvmRpcError(f'{base} {method}: rpc error {err}', err)
+                # A revert is a deterministic execution verdict — remember it so it outranks any
+                # transport error from a later endpoint (else a flaky node masks a real refusal).
+                if last_err.is_execution_revert:
+                    revert_err = last_err
                 bt.logging.warning(f'{log} {pos} {tag} {method} → rpc error {err}; {tail}')
                 continue
 
@@ -179,6 +212,8 @@ class EvmChain(Chain):
             else:
                 bt.logging.debug(f'{log} {pos} {tag} {method} → ok')
             return result
+        if revert_err is not None:
+            raise revert_err
         if saw_null and last_err is None:
             return None
         if saw_null:
@@ -226,6 +261,10 @@ class EvmChain(Chain):
         no RPC). Done by hand: eth_utils 5+ ``is_address`` accepts unprefixed hex and stopped
         validating checksums, which would wave through exactly the typos EIP-55 exists to catch."""
         if not isinstance(address, str) or not _HEX_ADDR_RE.match(address):
+            return False
+        # The zero address is never a real destination: ETH burns to it, and an ERC-20 transfer()
+        # reverts on it — a dest no delivery gate catches, so an honest miner would be slashed.
+        if int(address, 16) == 0:
             return False
         body = address[2:]
         if body == body.lower() or body == body.upper():
@@ -287,6 +326,9 @@ class EvmAsset(Asset):
     _MAX_SCAN_CURSORS = 64
 
     def __init__(self):
+        # Asset-scoped log tag (the wire id). Transport lines carry the CHAIN's tag instead —
+        # one Arbitrum ladder serves every Arbitrum asset, so the two must stay distinguishable.
+        self._log = f'[{self.chain_def.id}]'
         self.last_send_error: Optional[str] = None
         # Settled-tx cache, keyed tx_hash → immutable per-block facts. A mined tx's receipt
         # and its block's timestamp are immutable per block hash, so the validator's 12s
@@ -301,10 +343,6 @@ class EvmAsset(Asset):
         # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
         self.scan_cursors: dict[Tuple[str, str, int], int] = {}
         self.SCAN_LOOKBACK_BLOCKS = max(1, SCAN_LOOKBACK_SECS // self.chain_def.seconds_per_block)
-
-    @property
-    def _key_env(self) -> str:
-        return f'{self.chain_def.env_prefix}_PRIVATE_KEY'
 
     def _send_error(self, msg: str) -> None:
         self.last_send_error = msg
@@ -322,13 +360,14 @@ class EvmAsset(Asset):
 
     def check_connection(self, require_send: bool = True) -> None:
         if require_send:
-            key = os.environ.get(self._key_env)
+            key_env = self.chain._key_env
+            key = os.environ.get(key_env)
             if not key:
-                raise ConnectionError(f'{self.chain_def.env_prefix} signing requires the {self._key_env} env var')
+                raise ConnectionError(f'{self.chain_def.env_prefix} signing requires the {key_env} env var')
             try:
                 Account.from_key(key)
             except Exception as e:
-                raise ConnectionError(f'{self._key_env} is not a valid 32-byte hex key: {e}') from e
+                raise ConnectionError(f'{key_env} is not a valid 32-byte hex key: {e}') from e
         chain_id, tip = self.chain.connect_network()
         bt.logging.success(
             f'[{self.chain.network_def.label}Rpc] connected: '

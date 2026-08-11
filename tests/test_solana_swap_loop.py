@@ -61,18 +61,26 @@ class RecordingProvider:
     True=confirmed, False=matched-but-unconfirmed (extendable), None=absent. block_time, confirmations and a
     per-chain replay_grace_secs feed the freshness + extension-target math."""
 
-    def __init__(self, result=True, block_time=FRESH, grace=0, confirmations=0):
+    def __init__(self, result=True, block_time=FRESH, grace=0, confirmations=0, valid_addr=True):
         self.result = result
         self.block_time = block_time
         self.grace = grace
         self.confirmations = confirmations
         self.refuses = False
+        self.valid_addr = valid_addr
         self.calls = []
 
     def delivery_refused(self, address, since_unix):
         if self.refuses == 'unreachable':
             raise ProviderUnreachableError('down')
         return self.refuses
+
+    @property
+    def chain(self):
+        return self  # fused-provider shape: the asset is its own chain
+
+    def is_valid_address(self, address):
+        return self.valid_addr
 
     @property
     def chain_def(self):
@@ -178,6 +186,14 @@ def test_fulfilled_overdue_refusal_check_down_defers():
 def test_active_overdue_refusing_dest_waits_no_slash():
     loop, providers = loop_with(result=None)
     providers['sol'].refuses = True
+    assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+
+
+def test_overdue_malformed_dest_addr_waits_no_slash():
+    # A self-represented taker can reserve with a poison dest (e.g. 0x0) the reserve gate never saw.
+    # A malformed dest is undeliverable through no fault of the miner — the slash gate must not fire.
+    loop, providers = loop_with(result=None)
+    providers['sol'].valid_addr = False
     assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
 
 

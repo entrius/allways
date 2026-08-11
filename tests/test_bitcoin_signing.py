@@ -394,3 +394,30 @@ class TestCanSendFromCase:
         addr, _, _ = sign_message(TEST_WIF, 'p2wpkh', 'x', deterministic=True)
         with patch.dict(os.environ, {'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
             assert provider.can_send_from(addr.upper())
+
+
+class TestSignet:
+    """signet was an accepted BTC_NETWORK with no branch here, so it fell through to mainnet
+    Esplora and mainnet address encoding — a signet operator watched the real chain and derived
+    real addresses. Its addresses are testnet's (embit's signet row differs only in a display
+    name) and both public Esploras serve it."""
+
+    @staticmethod
+    def _p2wpkh(network: str) -> str:
+        from embit.ec import PrivateKey
+        from embit.networks import NETWORKS
+        from embit.script import p2wpkh
+
+        return p2wpkh(PrivateKey.from_wif(TEST_WIF).get_public_key()).address(NETWORKS[network])
+
+    def test_derives_test_addresses_not_mainnet_ones(self, monkeypatch):
+        monkeypatch.setenv('BTC_NETWORK', 'signet')
+        monkeypatch.setenv('BTC_PRIVATE_KEY', TEST_WIF)
+        provider = Bitcoin()
+        assert provider.can_send_from(self._p2wpkh('signet'))
+        assert not provider.can_send_from(self._p2wpkh('main'))
+
+    def test_uses_signet_esplora(self, monkeypatch):
+        monkeypatch.setenv('BTC_NETWORK', 'signet')
+        monkeypatch.delenv('BTC_ESPLORA_URLS', raising=False)
+        assert all('/signet/' in url for url, _ in Bitcoin().btc_api_bases())

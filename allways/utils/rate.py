@@ -171,55 +171,54 @@ def is_executable_rate(
 ) -> bool:
     """True iff the rate is fundably routable in its declared direction.
 
-    Crown-eligibility gate against rates that no user can route. The on-chain swap bounds
-    (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg** (``collateral_amount``), so SOL is the
-    bounded asset and ``min_swap_lamports``/``max_swap_lamports`` are SOL lamports. Routable means a source >= the
-    source chain's ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
+    Crown-eligibility gate against rates that no user can route. ``rate`` is the CANONICAL
+    number every caller stores and feeds — spoke per 1 SOL — in BOTH directions. The on-chain
+    swap bounds (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg**
+    (``collateral_amount``), so SOL is the bounded asset and ``min_swap_lamports``/
+    ``max_swap_lamports`` are SOL lamports. Routable means a spoke source >= the spoke's
+    ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
 
-    * X→SOL: high-side rates — even the smallest fundable source maps above ``max``, so no fundable
-      source produces an in-bounds SOL leg.
-    * SOL→X: the SOL leg IS the source, so it trivially fits any bounds, but absurd rates imply absurd
-      destinations. Caught by the symmetric check on ``1/rate``: if the inverse direction has no fundable
-      source, the original rate is at an extreme of the executable spectrum.
+    Both directions reduce to the same spoke-side question. X→SOL: an absurdly LOW canonical
+    rate (the crown-squat — lowest wins that sort) makes even 1 smallest-unit of spoke
+    overshoot ``max``, so nothing routes. SOL→X: the SOL leg is the source and trivially fits,
+    but the symmetric spoke-side check keeps the executable spectrum bounded.
 
-    A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 → permissive.
-    Non-SOL pairs (no SOL leg) have no bound to enforce → permissive.
+    A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 →
+    permissive. Non-SOL pairs (no SOL leg) have no bound to enforce → permissive.
     """
     if not math.isfinite(rate) or rate <= 0:
         return False
     if min_swap_lamports <= 0 and max_swap_lamports <= 0:
         return True
 
-    def _has_integer_routable_source(forward_rate: float, src_chain: str) -> bool:
-        # For a "src → sol" direction at ``forward_rate`` (sol per src), is there an src amount that is
-        # fundable on-chain (>= the chain's min_onchain_amount) whose SOL leg lands in bounds?
+    def _has_integer_routable_source(sol_per_source: float, src_chain: str) -> bool:
+        # For a "src → sol" leg: is there a src amount that is fundable on-chain (>= the
+        # chain's min_onchain_amount) whose SOL leg lands in bounds?
+        # sol_lamports = source_units × sol_per_source × 10**(sol_dec - src_dec).
         src = get_chain_def(src_chain)
         decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
-        denom = forward_rate * decimal_factor
+        denom = sol_per_source * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
-            # rate × decimal_factor overflowed → smallest positive integer source already maps above max.
             return False
         # Floor at the source chain's dust/existential minimum: a rate whose only in-bounds source is
         # below it (e.g. 1 sat) is unfundable, so unexecutable.
-        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_lamports) / denom))
+        lo = max(1, min_swap_lamports) / denom
+        if not math.isfinite(lo):
+            # The rate is beyond float routing math (e.g. float-max canonical) — sentinel.
+            return False
+        min_source = max(src.min_onchain_amount, math.ceil(lo))
         if max_swap_lamports <= 0:
             return True
         max_source = math.floor(max_swap_lamports / denom)
         return min_source <= max_source
 
+    # Callers feed canonical spoke-per-SOL; the source-side check wants SOL-per-spoke — invert.
+    # (The X→SOL branch used to pass the canonical rate through uninverted: the F1 orientation
+    # defect, which made any real spoke dust floor unroutable at rate² error.)
     if to_chain == NUMERAIRE_CHAIN:
-        # Forward into SOL: sol_lamports = source_units × rate × 10**(sol_dec - src_dec).
-        return _has_integer_routable_source(rate, from_chain)
-
+        return _has_integer_routable_source(1.0 / rate, from_chain)
     if from_chain == NUMERAIRE_CHAIN and to_chain != NUMERAIRE_CHAIN:
-        # Reverse out of SOL: the SOL leg is the source itself, so any positive lamport in [min, max] is
-        # trivially in bounds — but absurd rates imply destinations so large no rational user would route,
-        # and the miner can post them just to win the lowest-rate-wins crown. Treat ``1/rate`` as a
-        # ``to_chain → sol`` rate and apply the same integer-routability check by symmetry.
-        inverse = 1.0 / rate
-        if not math.isfinite(inverse) or inverse <= 0:
-            return False
-        return _has_integer_routable_source(inverse, to_chain)
+        return _has_integer_routable_source(1.0 / rate, to_chain)
 
     # Non-SOL pairs have no SOL-leg bound to enforce.
     return True
@@ -244,7 +243,8 @@ def min_executable_sol_leg(
     if to_chain == NUMERAIRE_CHAIN:
         src = get_chain_def(from_chain)
         decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
-        denom = rate * decimal_factor
+        # Same orientation as the gate: canonical spoke-per-SOL in, SOL-per-spoke for the math.
+        denom = (1.0 / rate) * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0
         min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_lamports) / denom))

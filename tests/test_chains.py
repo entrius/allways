@@ -8,6 +8,7 @@ from allways.chains import (
     CHAIN_ARBUSDC,
     CHAIN_BTC,
     CHAIN_ETH,
+    CHAIN_HYPE,
     CHAIN_TAO,
     EXTENSION_BUCKET_SECONDS,
     SUPPORTED_CHAINS,
@@ -30,6 +31,9 @@ class TestGetChain:
     def test_arbusdc(self):
         assert get_chain_def('arbusdc') is CHAIN_ARBUSDC
 
+    def test_hype(self):
+        assert get_chain_def('hype') is CHAIN_HYPE
+
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
             get_chain_def('doge')
@@ -43,7 +47,7 @@ class TestGetChain:
             assert chain.id == chain_id
 
     def test_layered_fields_default_none_for_native_assets(self):
-        for chain_id in ('btc', 'tao', 'sol', 'eth'):
+        for chain_id in ('btc', 'tao', 'sol', 'eth', 'hype'):
             assert get_chain_def(chain_id).host_chain is None
             assert get_chain_def(chain_id).asset_locator is None
         assert CHAIN_ARBUSDC.host_chain == 'arbitrum'
@@ -124,6 +128,10 @@ class TestComputeExtensionTargetSecs:
     def test_arbusdc_remaining_confs(self):
         # arbusdc needs 90 confs, 1s each: remaining=90, raw = 10000 + 90 + 120 = 10210, bucket up to 10800.
         assert compute_extension_target_secs('arbusdc', 0, self.NOW, self.CEILING) == 10_800
+
+    def test_hype_remaining_confs(self):
+        # hype needs 2 confs, 1s each: remaining=2, raw = 10000 + 2 + 120 = 10122, bucket up to 10200.
+        assert compute_extension_target_secs('hype', 0, self.NOW, self.CEILING) == 10_200
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
