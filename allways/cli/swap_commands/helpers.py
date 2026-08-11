@@ -42,8 +42,11 @@ NAME_SELECTED_CHAINS = tuple(c for c in SUPPORTED_CHAINS.values() if c.networks)
 
 
 def network_key(chain: ChainDefinition) -> str:
-    """CLI config key that sets this chain's network (e.g. 'btc-network')."""
-    return f'{chain.id}-network'
+    """CLI config key that sets this NETWORK's name (e.g. 'btc-network', 'arb-network').
+
+    Keyed off env_prefix, not the asset id, so it names the same thing the env var does —
+    assets sharing a network get one row between them, never one each."""
+    return f'{chain.env_prefix.lower()}-network'
 
 
 def testnet_name(chain: ChainDefinition) -> str:

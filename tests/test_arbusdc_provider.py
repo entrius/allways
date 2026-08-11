@@ -36,8 +36,8 @@ AMOUNT = 150_000_000  # 150 USDC in µUSDC
 
 @pytest.fixture
 def provider(monkeypatch):
-    monkeypatch.setenv('ARBUSDC_NETWORK', 'sepolia')
-    for var in ('ARBUSDC_RPC_URLS', 'ARBUSDC_PRIVATE_KEY', 'ARBUSDC_TOKEN_CONTRACT'):
+    monkeypatch.setenv('ARB_NETWORK', 'sepolia')
+    for var in ('ARB_RPC_URLS', 'ARB_PRIVATE_KEY', 'ARBUSDC_TOKEN_CONTRACT'):
         monkeypatch.delenv(var, raising=False)
     return ArbUsdc()
 
@@ -342,22 +342,22 @@ class TestSendGuards:
 
     def test_no_key_refused(self, provider):
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
-        assert 'ARBUSDC_PRIVATE_KEY' in provider.last_send_error
+        assert 'ARB_PRIVATE_KEY' in provider.last_send_error
 
     def test_key_mismatch_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         assert provider.send_amount(RECIPIENT, AMOUNT, from_address=RECIPIENT) is None
         assert 'key mismatch' in provider.last_send_error
 
     def test_insufficient_token_balance_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         rpc_stub(provider, self._send_responses(token_balance=AMOUNT - 1))
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
         assert 'Insufficient ARBUSDC' in provider.last_send_error
 
     def test_insufficient_gas_balance_refused(self, provider, monkeypatch):
         # F6: token-rich but gas-poor must refuse BEFORE broadcasting a doomed transfer.
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         rpc_stub(provider, self._send_responses(gas_balance=10))
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
         assert 'Insufficient gas balance' in provider.last_send_error
@@ -365,7 +365,7 @@ class TestSendGuards:
     def test_insufficient_balance_diagnosed_before_estimator_revert(self, provider, monkeypatch):
         # An underfunded transfer reverts in the estimator too — the balance check runs first
         # so a token-poor miner reads "Insufficient", not "destination refuses".
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         responses = self._send_responses(token_balance=AMOUNT - 1)
 
         def revert(params):
@@ -377,7 +377,7 @@ class TestSendGuards:
         assert 'Insufficient ARBUSDC' in provider.last_send_error
 
     def test_reverting_transfer_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         responses = self._send_responses()
 
         def revert(params):
@@ -391,7 +391,7 @@ class TestSendGuards:
     def test_revert_detected_by_code_when_message_lacks_the_word(self, provider, monkeypatch):
         # The old string-match missed a code-3 revert phrased without "revert" and would have
         # broadcast a doomed tx (gas burned, no delivery). The typed verdict catches it.
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         responses = self._send_responses()
 
         def revert(params):
@@ -403,12 +403,12 @@ class TestSendGuards:
         assert 'refuses' in provider.last_send_error
 
     def test_absurd_gas_estimate_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         rpc_stub(provider, self._send_responses(est=hex(200_000)))  # ×1.2 > 150k cap
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
 
     def test_happy_path_broadcasts_transfer_calldata(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         sent = {}
         responses = self._send_responses()
 
@@ -429,13 +429,13 @@ class TestSendGuards:
     def test_lowercase_contract_override_still_sends(self, provider, monkeypatch):
         # eth-account refuses a non-checksummed `to`; the sign path checksums it, so a
         # lowercase ARBUSDC_TOKEN_CONTRACT (env repoint, e2e fake) must not brick sends.
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         provider.token_contract = provider.token_contract.lower()
         rpc_stub(provider, self._send_responses())
         assert provider.send_amount(RECIPIENT, AMOUNT, from_address=TEST_ADDR) is not None
 
     def test_prior_broadcast_reused_not_resent(self, provider, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         prior_tx = '0x' + 'aa' * 32
         provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, 990)
         responses = self._send_responses()
@@ -450,7 +450,7 @@ class TestSendGuards:
 
     def test_stale_dedup_entry_expires(self, provider, monkeypatch):
         # An entry older than the lookback window is dropped, not reused (#461 class).
-        monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
+        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         prior_tx = '0x' + 'aa' * 32
         provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, 1000 - provider.SCAN_LOOKBACK_BLOCKS - 1)
         rpc_stub(provider, self._send_responses())
@@ -491,12 +491,12 @@ class TestScanner:
 
 class TestNetworkAndContract:
     def test_unknown_network_raises(self, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_NETWORK', 'seplia')
-        with pytest.raises(ValueError, match='ARBUSDC_NETWORK'):
+        monkeypatch.setenv('ARB_NETWORK', 'seplia')
+        with pytest.raises(ValueError, match='ARB_NETWORK'):
             ArbUsdc()
 
     def test_unset_defaults_to_mainnet_with_registry_contract(self, monkeypatch):
-        for var in ('ARBUSDC_NETWORK', 'ARBUSDC_RPC_URLS', 'ARBUSDC_TOKEN_CONTRACT'):
+        for var in ('ARB_NETWORK', 'ARB_RPC_URLS', 'ARBUSDC_TOKEN_CONTRACT'):
             monkeypatch.delenv(var, raising=False)
         p = ArbUsdc()
         assert p.chain.network == 'mainnet'
@@ -506,7 +506,7 @@ class TestNetworkAndContract:
         assert provider.token_contract == CONTRACT
 
     def test_env_override_wins(self, monkeypatch):
-        monkeypatch.setenv('ARBUSDC_NETWORK', 'sepolia')
+        monkeypatch.setenv('ARB_NETWORK', 'sepolia')
         monkeypatch.setenv('ARBUSDC_TOKEN_CONTRACT', '0x' + '42' * 20)
         assert ArbUsdc().token_contract == '0x' + '42' * 20
 
@@ -528,7 +528,7 @@ class TestCheckConnection:
             provider.check_connection(require_send=False)
 
     def test_missing_key_fails_when_send_required(self, provider):
-        with pytest.raises(ConnectionError, match='ARBUSDC_PRIVATE_KEY'):
+        with pytest.raises(ConnectionError, match='ARB_PRIVATE_KEY'):
             provider.check_connection(require_send=True)
 
     def test_wrong_network_endpoint_deeper_in_ladder_fails_boot(self, provider):

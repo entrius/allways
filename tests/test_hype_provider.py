@@ -9,7 +9,7 @@ import pytest
 from eth_account import Account
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.evm import HYPERLIQUID
+from allways.assets.evm import HYPERLIQUID, EvmChain
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
 from allways.assets.hype import Hype
 from allways.chains import CHAIN_HYPE, get_chain_def
@@ -45,7 +45,7 @@ def rpc_stub(provider, responses: dict):
         value = responses[method]
         return value(params) if callable(value) else value
 
-    provider.eth_rpc = fake_rpc
+    provider.chain.eth_rpc = fake_rpc
     return provider
 
 
@@ -70,8 +70,11 @@ class TestRegistryRow:
         assert provider.chain_def is CHAIN_HYPE is get_chain_def('hype')
         assert 'hype' in LAUNCH_SPOKES
 
-    def test_native_coin_is_fused_with_its_chain(self, provider):
-        assert provider.chain is provider
+    def test_native_coin_composes_its_chain(self, provider):
+        # A native coin is an asset ON its network, not the network — same seam as a token,
+        # so a second asset can land beside it without either claiming to be the chain.
+        assert isinstance(provider.chain, EvmChain) and provider.chain is not provider
+        assert provider.chain.env_prefix == CHAIN_HYPE.env_prefix
 
     def test_decimals_and_prefix(self):
         assert (CHAIN_HYPE.decimals, CHAIN_HYPE.env_prefix, CHAIN_HYPE.native_unit) == (18, 'HYPE', 'wei')
@@ -83,11 +86,11 @@ class TestRegistryRow:
 
 class TestNetworkSelection:
     def test_mainnet_chain_id(self, provider):
-        assert provider.chain_id == 999
+        assert provider.chain.chain_id == 999
 
     def test_testnet_chain_id(self, monkeypatch):
         monkeypatch.setenv('HYPE_NETWORK', 'testnet')
-        assert Hype().chain_id == 998
+        assert Hype().chain.chain_id == 998
 
     def test_unknown_network_raises(self, monkeypatch):
         # A typo must never fall back to mainnet — that spends real HYPE against test swaps.
@@ -97,16 +100,16 @@ class TestNetworkSelection:
 
     def test_unset_network_defaults_to_mainnet(self, monkeypatch):
         monkeypatch.delenv('HYPE_NETWORK', raising=False)
-        assert Hype().network == 'mainnet'
+        assert Hype().chain.network == 'mainnet'
 
     @pytest.mark.parametrize('network', tuple(HYPERLIQUID.chain_ids))
     def test_every_network_has_a_keyless_default_ladder(self, monkeypatch, network):
         monkeypatch.setenv('HYPE_NETWORK', network)
-        assert Hype().rpc_bases == list(HYPERLIQUID.rpc_urls[network])
+        assert Hype().chain.rpc_bases == list(HYPERLIQUID.rpc_urls[network])
 
     def test_rpc_urls_env_overrides_the_public_ladder(self, monkeypatch):
         monkeypatch.setenv('HYPE_RPC_URLS', 'https://paid.example/key/,https://backup.example')
-        assert Hype().rpc_bases == ['https://paid.example/key', 'https://backup.example']
+        assert Hype().chain.rpc_bases == ['https://paid.example/key', 'https://backup.example']
 
     def test_wrong_network_endpoint_fails_startup(self, monkeypatch):
         # Testnet configured, a mainnet endpoint answering: the ladder must be rejected outright,
