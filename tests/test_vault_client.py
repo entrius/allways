@@ -147,7 +147,7 @@ def test_an_event_payload_decodes_in_either_node_shape(meta):
     # `data` is a SCALE Bytes like every other blob, so a payload that happens to be valid UTF-8
     # arrives already decoded rather than as hex — same hazard as the read path.
     spec = meta.events['FeesRecycled']
-    data = b'\x00' * 16
+    data = b'\x00' * 32  # tao_amount + donated, both u128
     sub = _EventSub([_emitted(spec.signature_topic, _as_node_shape(data))])
     events = BondVaultClient(sub, ALICE, metadata=meta).poll_events(1, 1)
     assert [(e.name, e.fields['tao_amount']) for e in events] == [('FeesRecycled', 0)]
