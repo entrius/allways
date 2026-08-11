@@ -98,11 +98,13 @@ pub struct FeesRecycled {
 }
 
 /// A unanimous round approved this candidate; they join the set only once they
-/// call `accept_validator` themselves, proving they hold the key.
+/// call `accept_validator` themselves, proving they hold the key. Past
+/// `expires_at` — or after any set change — the approval is void.
 #[ink::event]
 pub struct ValidatorPending {
     #[ink(topic)]
     pub candidate: AccountId,
+    pub expires_at: u32,
 }
 
 /// Validator joined (after accepting) or was removed

@@ -15,6 +15,9 @@ pub enum Error {
     AlreadyValidator,
     /// Caller has no pending admission to accept
     NotPendingValidator,
+    /// Pending admission expired, or the validator set changed under it — the
+    /// set must approve the candidate again
+    AdmissionVoid,
     /// A validator may not vote on their own removal
     SelfRemoval,
     /// Validator has already voted on this round

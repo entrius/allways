@@ -141,7 +141,9 @@ mod allways_bond_vault {
         // Candidates carried by a unanimous add round, awaiting their own
         // accept_validator call. Proving key control before joining keeps a
         // typo'd address from permanently inflating the quorum denominator.
-        pending_validators: Vec<AccountId>,
+        // (candidate, approval block, approving set hash): the admission
+        // expires with the round TTL, and any set change voids it.
+        pending_validators: Vec<(AccountId, u32, Hash)>,
 
         // Miner bonds. `lock_state` is (locked, epoch): epoch increments on
         // every lock/unlock transition and is what the Solana mirror carries —
@@ -224,6 +226,25 @@ mod allways_bond_vault {
         /// in-flight money round on each membership change.
         fn validator_set_hash(&self) -> Hash {
             Self::hash_request(&self.validators)
+        }
+
+        /// A pending admission is live only inside the round TTL AND under the
+        /// set that approved it. Either miss and the candidate must be voted
+        /// in again — a sleeper must not be able to accept into a later set.
+        fn pending_is_live(&self, approved_at: u32, set_hash: Hash) -> bool {
+            set_hash == self.validator_set_hash()
+                && self.env().block_number() <= approved_at.saturating_add(self.vote_round_ttl)
+        }
+
+        /// Drop dead admissions so they stop holding a MAX_VALIDATORS slot.
+        /// Called at the head of `vote_add_validator`: the only place that can
+        /// run out of slots is also the place that reclaims them.
+        fn sweep_pending(&mut self) {
+            let now = self.env().block_number();
+            let ttl = self.vote_round_ttl;
+            let set_hash = self.validator_set_hash();
+            self.pending_validators
+                .retain(|(_, at, s)| *s == set_hash && now <= at.saturating_add(ttl));
         }
 
         /// Keccak-hash any SCALE-encodable value. Call sites pass the full
@@ -759,7 +780,10 @@ mod allways_bond_vault {
         #[ink(message)]
         pub fn vote_add_validator(&mut self, candidate: AccountId) -> Result<(), Error> {
             self.ensure_validator()?;
-            if self.validators.contains(&candidate) || self.pending_validators.contains(&candidate) {
+            self.sweep_pending();
+            if self.validators.contains(&candidate)
+                || self.pending_validators.iter().any(|(c, _, _)| c == &candidate)
+            {
                 return Err(Error::AlreadyValidator);
             }
             if self.validators.len().saturating_add(self.pending_validators.len()) >= MAX_VALIDATORS
@@ -786,8 +810,14 @@ mod allways_bond_vault {
             if quorum {
                 self.clear_request_data(id);
                 self.governance_request.remove(Self::account_hash(&candidate));
-                self.pending_validators.push(candidate);
-                self.env().emit_event(ValidatorPending { candidate });
+                let approved_at = self.env().block_number();
+                let set_hash = self.validator_set_hash();
+                self.pending_validators
+                    .push((candidate, approved_at, set_hash));
+                self.env().emit_event(ValidatorPending {
+                    candidate,
+                    expires_at: approved_at.saturating_add(self.vote_round_ttl),
+                });
             }
             Ok(())
         }
@@ -795,13 +825,22 @@ mod allways_bond_vault {
         /// The candidate's own signature completes their admission — proof they
         /// hold the key. Without it a typo'd address would join the set, count
         /// toward every quorum, and never be able to vote.
+        ///
+        /// Bounded by the round TTL and the approving set: a candidate who sits
+        /// on an approval cannot surface later and land in a set that never
+        /// agreed to them, holding every money quorum hostage.
         #[ink(message)]
         pub fn accept_validator(&mut self) -> Result<(), Error> {
             let caller = self.env().caller();
-            if !self.pending_validators.contains(&caller) {
-                return Err(Error::NotPendingValidator);
+            let (_, approved_at, set_hash) = *self
+                .pending_validators
+                .iter()
+                .find(|(c, _, _)| c == &caller)
+                .ok_or(Error::NotPendingValidator)?;
+            if !self.pending_is_live(approved_at, set_hash) {
+                return Err(Error::AdmissionVoid);
             }
-            self.pending_validators.retain(|v| v != &caller);
+            self.pending_validators.retain(|(c, _, _)| c != &caller);
             self.validators.push(caller);
             self.env().emit_event(ValidatorUpdated {
                 validator: caller,
@@ -991,11 +1030,16 @@ mod allways_bond_vault {
             self.validators.clone()
         }
 
-        /// Candidates a unanimous round approved, still awaiting their own
-        /// `accept_validator`. They count toward no quorum until they accept.
+        /// Candidates a unanimous round approved and who can still accept —
+        /// expired or set-voided admissions are omitted, since neither can ever
+        /// join. They count toward no quorum until they accept.
         #[ink(message)]
         pub fn get_pending_validators(&self) -> Vec<AccountId> {
-            self.pending_validators.clone()
+            self.pending_validators
+                .iter()
+                .filter(|(_, at, s)| self.pending_is_live(*at, *s))
+                .map(|(c, _, _)| *c)
+                .collect()
         }
 
         #[ink(message)]
@@ -1085,6 +1129,12 @@ mod allways_bond_vault {
             credit_contract(amount);
             vault.post_collateral().unwrap();
             ink::env::test::set_value_transferred::<crate::CustomEnvironment>(0);
+        }
+
+        fn advance_blocks(n: u32) {
+            for _ in 0..n {
+                ink::env::test::advance_block::<crate::CustomEnvironment>();
+            }
         }
 
         /// TAO arriving with no claim against it — a plain transfer to the
@@ -1444,6 +1494,75 @@ mod allways_bond_vault {
             assert_eq!(vault.vote_add_validator(acc.charlie), Err(Error::NotValidator));
             vault.accept_validator().unwrap();
             assert_eq!(vault.accept_validator(), Err(Error::NotPendingValidator));
+        }
+
+        /// The bootstrap-freeze risk: a candidate approved by a one-validator
+        /// seed set, who stalls and surfaces later, would otherwise join a set
+        /// that never agreed to them — and every money quorum would then need
+        /// the sleeper's signature.
+        #[ink::test]
+        fn an_expired_admission_can_never_accept() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+            set_caller(acc.django);
+            vault.vote_add_validator(acc.eve).unwrap();
+            assert_eq!(vault.get_pending_validators(), ink::prelude::vec![acc.eve]);
+
+            advance_blocks(vault.get_vote_round_ttl() + 1);
+            assert!(vault.get_pending_validators().is_empty());
+            set_caller(acc.eve);
+            assert_eq!(vault.accept_validator(), Err(Error::AdmissionVoid));
+            assert_eq!(vault.get_validators(), ink::prelude::vec![acc.django]);
+        }
+
+        /// An approval is consent from THAT set. Change the set and the consent
+        /// is gone — the new set must approve the candidate itself.
+        #[ink::test]
+        fn a_set_change_voids_a_pending_admission() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+            for validator in [acc.django, acc.eve, acc.charlie] {
+                set_caller(validator);
+                vault.vote_add_validator(acc.frank).unwrap();
+            }
+            assert_eq!(vault.get_pending_validators(), ink::prelude::vec![acc.frank]);
+
+            // The set frank was approved by no longer exists.
+            set_caller(acc.django);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            set_caller(acc.eve);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+
+            assert!(vault.get_pending_validators().is_empty());
+            set_caller(acc.frank);
+            assert_eq!(vault.accept_validator(), Err(Error::AdmissionVoid));
+            assert_eq!(vault.get_validators(), ink::prelude::vec![acc.django, acc.eve]);
+        }
+
+        /// Dead admissions must not sit on the MAX_VALIDATORS budget forever —
+        /// otherwise a full pending list permanently blocks every real add.
+        #[ink::test]
+        fn expired_admissions_are_swept_and_their_slots_reclaimed() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+            set_caller(acc.django);
+            // Fill every remaining slot with approvals nobody ever accepts.
+            for i in 0..MAX_VALIDATORS as u8 - 1 {
+                vault
+                    .vote_add_validator(AccountId::from([100 + i; 32]))
+                    .unwrap();
+            }
+            assert_eq!(
+                vault.vote_add_validator(acc.eve),
+                Err(Error::InvalidValidatorSet)
+            );
+
+            advance_blocks(vault.get_vote_round_ttl() + 1);
+            vault.vote_add_validator(acc.eve).unwrap();
+            assert_eq!(vault.get_pending_validators(), ink::prelude::vec![acc.eve]);
+            // Swept from storage, not merely hidden from the view.
+            assert_eq!(vault.pending_validators.len(), 1);
         }
 
         #[ink::test]
