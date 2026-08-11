@@ -81,9 +81,15 @@ so activation waits on validators mirroring it to Solana rather than on a local 
 alw miner bind-hotkey                          # the vault keys bonds by hotkey, joined via this binding
 alw vault post-collateral <TAO>                # bond into the vault (signed by the hotkey)
 alw vault lock                                 # enter service — only a LOCKED bond is attested
-                                               # validators mirror the bond and activate the TAO purse
+                                               # wait a minute: validators mirror the bond to Solana
+alw miner activate --backing tao               # validators vote that purse active
 alw miner post sol <addr> tao <addr> <rate> --backing tao
 ```
+
+Purses activate one at a time, so `alw miner activate` lights one. It infers the backing when only
+one purse is funded and not yet serving — which is every step of the order above — and asks for
+`--backing` only when both are candidates at once. Activation is refused, not queued, while the
+bond has yet to be mirrored: retry rather than wait on the request.
 
 `alw miner status` shows the required bond and whether each purse is serving yet.
 

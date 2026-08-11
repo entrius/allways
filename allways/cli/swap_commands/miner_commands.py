@@ -9,6 +9,7 @@ from rich.table import Table
 from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
+    activation_prerequisites,
     backing_label,
     console,
     fail,
@@ -16,6 +17,8 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     get_solana_cli_context,
     loading,
+    purse_states,
+    resolve_activation_backing,
 )
 from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
@@ -76,17 +79,25 @@ def miner_status(pubkey: str):
     # already net of accrued fees and voted slashes. Say so: an operator comparing it to `alw vault
     # status` (which prints the vault's GROSS counter) must know why the two differ.
     tao_bit = bool(mask & BACKING_BIT_TAO)
+    tao_floor = int(getattr(config, 'tao_min_collateral', 0) or 0) if config is not None else 0
     att = None
     if tao_bit or ms is not None:
         try:
             att = client.get_bond_attestation(target, 'tao')
         except SolanaClientError:
             att = None
-    if att is not None or tao_bit:
-        bond = f'{int(att.effective_balance) / TAO_TO_RAO:.9f} TAO' if att is not None else '(no attestation)'
+    # Shown whenever the deployment backs TAO at all, not only once an attestation exists: a miner
+    # whose bond has not been mirrored yet is exactly the one who needs to be told that is why.
+    if att is not None or tao_bit or tao_floor:
+        bond = (
+            f'{int(att.effective_balance) / TAO_TO_RAO:.9f} TAO'
+            if att is not None
+            else '(no attestation — validators mirror a LOCKED bond on their own cadence)'
+        )
+        if att is not None and not att.locked:
+            bond += ' [yellow](attested UNLOCKED — backs nothing)[/yellow]'
         table.add_row('TAO purse (effective)', bond + _purse_state(tao_bit))
-        if config is not None:
-            table.add_row('Min Required (TAO)', f'{int(config.tao_min_collateral) / TAO_TO_RAO:.9f} TAO')
+        table.add_row('Min Required (TAO)', f'{tao_floor / TAO_TO_RAO:.9f} TAO')
 
     table.add_row('Status', '[green]Active[/green]' if is_active else '[red]Inactive[/red]')
     table.add_row('Has Active Swap', '[yellow]Yes[/yellow]' if has_active_swap else '[dim]No[/dim]')
@@ -160,15 +171,22 @@ def miner_status(pubkey: str):
 
 
 @miner_group.command('activate')
-def miner_activate():
-    """Activate miner via dendrite broadcast to all validators.
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Which purse to light: sol | tao. Inferred when only one is funded and dark.',
+)
+def miner_activate(backing: str):
+    """Activate one of your purses via dendrite broadcast to all validators.
 
-    [dim]Broadcasts a MinerActivateSynapse to all validators. Each validator
-    independently verifies commitment and collateral, then votes on contract.
-    Activation requires quorum.[/dim]
+    [dim]Purses activate separately, so this lights one. Without --backing it picks the single
+    funded, not-yet-serving purse; with two candidates it asks you to name one. Each validator
+    independently re-checks that purse before voting, and activation requires quorum.[/dim]
 
     [dim]Examples:
-        $ alw miner activate[/dim]
+        $ alw miner activate
+        $ alw miner activate --backing tao[/dim]
     """
     import bittensor as bt
 
@@ -179,24 +197,40 @@ def miner_activate():
     netuid = config['netuid']
     hotkey = wallet.hotkey.ss58_address
 
-    def _is_active() -> bool:
-        """Resolve active flag off Solana: hotkey → bound pubkey (HotkeyBinding) → MinerState."""
+    def _miner_pubkey():
+        """The miner's Solana identity: hotkey → HotkeyBinding → pubkey. None when unbound."""
         try:
             hk_bytes = bytes.fromhex(bt.Keypair(ss58_address=hotkey).public_key.hex())
             binding = client.get_hotkey_binding(hk_bytes)
-            if binding is None:
-                return False
-            ms = client.get_miner_state(binding.miner)
-            return bool(ms and ms.active)
+            return None if binding is None else binding.miner
+        except Exception:
+            return None
+
+    def _is_lit(target, want: str) -> bool:
+        """Whether THAT purse is serving. The `active` OR view would call a SOL-serving miner done
+        the moment it asks for its TAO purse, which is the one question this has to answer."""
+        try:
+            ms = client.get_miner_state(target)
+            return bool(ms) and bool(int(getattr(ms, 'active_backings', 0) or 0) & BACKING_BITS[want])
         except Exception:
             return False
 
     console.print(f'\n[bold]Miner Activate: {hotkey[:16]}...[/bold]\n')
 
-    # Pre-flight: check if already active
-    if _is_active():
-        console.print('[yellow]Miner is already active.[/yellow]\n')
-        return
+    miner_pk = _miner_pubkey()
+    if miner_pk is None:
+        fail('Your hotkey is not bound to a Solana pubkey yet — run `alw miner bind-hotkey` first.')
+    try:
+        with loading('Reading your purses...'):
+            miner_state = client.get_miner_state(miner_pk)
+            states = purse_states(client, miner_pk, miner_state, client.get_config())
+    except SolanaClientError as e:
+        fail(f'Failed to read miner data: {e}')
+    if miner_state is None:
+        fail('You have no on-chain miner state yet — run `alw collateral deposit` first.')
+
+    backing = resolve_activation_backing(states, backing)
+    console.print(f'Lighting your [cyan]{backing.upper()}[/cyan] purse.\n')
 
     # Discover serving validators from metagraph (on-chain whitelist enforced at vote time)
     dendrite = bt.Dendrite(wallet=wallet)
@@ -215,7 +249,7 @@ def miner_activate():
         timestamp = str(int(time.time()))
         message = f'activate:{hotkey}:{timestamp}'
         signature = wallet.hotkey.sign(message.encode()).hex()
-        synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message)
+        synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message, backing=backing)
 
         with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
             responses = asyncio.get_event_loop().run_until_complete(
@@ -244,12 +278,12 @@ def miner_activate():
     with loading('Checking on-chain activation...'):
         for _ in range(15):
             time.sleep(2)
-            if _is_active():
+            if _is_lit(miner_pk, backing):
                 activated = True
                 break
 
     if activated:
-        console.print('[green]Miner activated successfully[/green]\n')
+        console.print(f'[green]{backing.upper()} purse activated successfully[/green]\n')
         return
 
     if accepted == 0 and no_response == len(validator_axons):
@@ -260,8 +294,8 @@ def miner_activate():
         # Translator couldn't pin down a single cause — fall back to the prerequisites checklist.
         console.print('[dim]Prerequisites for activation:[/dim]')
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
-        console.print('[dim]  - Collateral posted (alw collateral deposit) — activation gates on the'
-                      ' purse, not on quotes[/dim]')
+        for line in activation_prerequisites(backing):
+            console.print(f'[dim]  - {line}[/dim]')
         console.print('[dim]  - Quotes come AFTER activation: alw miner post/quotes needs the purse'
                       ' already serving[/dim]')
         console.print('[dim]Run `alw miner status` to see which are missing.[/dim]')

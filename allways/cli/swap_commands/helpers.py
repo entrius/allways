@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.text import Text
 
 from allways.classes import SwapStatus
+from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.solana import pdas
 from allways.solana.client import SolanaClientError
@@ -771,3 +772,95 @@ def resolve_quote_backing(miner_state, from_chain: str, to_chain: str, explicit:
             f'so it is never inferred from market depth.'
         )
     return active[0]
+
+
+# ─── Activation backing (W2 / D2) ────────────────────────────────────────────
+# Purses activate one at a time, so `alw miner activate` names one. A purse is a candidate when it
+# is DARK and funded above its own floor — the same purse read and floor the contract's guard uses,
+# so the CLI's answer about which purses are ready is the chain's answer.
+
+
+@dataclass(frozen=True)
+class PurseState:
+    """One backing's activation-relevant facts, in that backing's own smallest unit."""
+
+    backing: str
+    purse: Optional[int]  # None = nothing usable there: no bond at all, or one that isn't locked
+    floor: int
+    lit: bool
+
+    @property
+    def ready(self) -> bool:
+        return not self.lit and self.purse is not None and self.purse >= self.floor
+
+
+def purse_states(client, miner, miner_state, config) -> List[PurseState]:
+    """Every backing this subnet knows, as it stands for this miner. Drives both the activation
+    choice and `alw miner status`, so the two can never disagree about why a purse isn't serving."""
+    mask = int(getattr(miner_state, 'active_backings', 0) or 0) if miner_state is not None else 0
+    floors = floors_from_config(config) if config is not None else {}
+    out = []
+    for backing, bit in pdas.BACKING_BITS.items():
+        purse = backing_purse(client, miner, miner_state, backing) if miner_state is not None else None
+        out.append(PurseState(backing, purse, int(floors.get(backing, 0)), bool(mask & bit)))
+    return out
+
+
+def resolve_activation_backing(states: List[PurseState], explicit: Optional[str] = None) -> str:
+    """Which purse `alw miner activate` should ask validators to light, per the D2 ergonomics.
+
+    Infers SILENTLY when exactly one purse is dark and funded (the common case — including the miner
+    who bonds TAO after activating SOL), and HARD-ERRORS naming --backing when both are. Funding is
+    never the tie-breaker between two ready purses: the miner says which guarantee it wants to sell.
+    """
+    by_backing = {s.backing: s for s in states}
+    ready = [s.backing for s in states if s.ready]
+
+    if explicit is not None:
+        explicit = explicit.lower()
+        state = by_backing.get(explicit)
+        if state is None:
+            fail(f'--backing must be one of: {", ".join(pdas.BACKING_BITS)} (got "{explicit}")')
+        if state.lit:
+            fail(f'Your {explicit.upper()} purse is already serving.')
+        if not state.ready:
+            fail(_underfunded(state))
+        return explicit
+
+    if not ready:
+        dark = [s for s in states if not s.lit]
+        if not dark:
+            fail('Every purse you have is already serving.')
+        fail(' '.join(_underfunded(s) for s in dark))
+    if len(ready) > 1:
+        fail(
+            f'Both of your purses are funded and dark ({", ".join(ready)}), so the choice is yours to '
+            f'make: pass --backing <{"|".join(ready)}>. Each purse sells a different failure guarantee '
+            f'(SOL = instant SOL refund; TAO = TAO reimbursement, shortly after timeout), and you can '
+            f'activate the other one straight after.'
+        )
+    return ready[0]
+
+
+def activation_prerequisites(backing: str) -> List[str]:
+    """What the named purse needs before validators will vote for it. A SOL checklist shown to a
+    miner whose TAO activation was refused is worse than no checklist: it sends them to the wrong
+    chain to fix the wrong thing."""
+    if backing == pdas.BACKING_CHAIN_SOL:
+        return ['Collateral posted (alw collateral deposit) — activation gates on the purse, not on quotes']
+    return [
+        f'{backing.upper()} bond posted AND locked in the vault (alw vault post-collateral, alw vault lock)',
+        'Validators have mirrored that bond to Solana — the attestation is written on their cadence,'
+        ' so a fresh lock needs a minute',
+    ]
+
+
+def _underfunded(state: PurseState) -> str:
+    """Why a dark purse is not a candidate — the shortfall and its fix, not a generic 'not eligible'."""
+    if state.purse is None:
+        return (
+            f'Your {state.backing.upper()} purse has no LOCKED bond attested on Solana yet '
+            f'(`alw vault post-collateral` then `alw vault lock`, then give validators a minute).'
+        )
+    fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault post-collateral'
+    return f'Your {state.backing.upper()} purse holds {state.purse} < the {state.floor} floor (`{fix}`).'
