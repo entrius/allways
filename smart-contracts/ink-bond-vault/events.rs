@@ -115,6 +115,15 @@ pub struct ValidatorUpdated {
     pub registered: bool,
 }
 
+/// The `add_stake_recycle` destination, moved by a unanimous
+/// `vote_set_recycle_target` round. Both fields move together.
+#[ink::event]
+pub struct RecycleTargetUpdated {
+    #[ink(topic)]
+    pub staking_hotkey: AccountId,
+    pub netuid: u16,
+}
+
 /// Whole config replaced by a unanimous `vote_set_config` round. Carries every
 /// field, not a delta — the round agreed on this exact tuple.
 #[ink::event]

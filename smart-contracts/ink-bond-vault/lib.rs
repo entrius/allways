@@ -85,6 +85,7 @@ mod allways_bond_vault {
     const REQ_ADD_VALIDATOR: u8 = 3;
     const REQ_REMOVE_VALIDATOR: u8 = 4;
     const REQ_CONFIG: u8 = 5;
+    const REQ_RECYCLE_TARGET: u8 = 6;
 
     // Fee-settle batch ceiling: bounds per-entry storage writes so a quorum
     // application always fits a block. One cadence round covers ≤256 miners;
@@ -121,9 +122,9 @@ mod allways_bond_vault {
 
     #[ink(storage)]
     pub struct AllwaysBondVault {
-        // Configuration. staking_hotkey + netuid are the hard-coded
-        // add_stake_recycle target — there is deliberately NO custodial
-        // recycle_address fallback in this contract (the pot is ownerless).
+        // Configuration. staking_hotkey + netuid are the add_stake_recycle
+        // target, movable only by a unanimous round — there is deliberately NO
+        // custodial recycle_address fallback here (the pot is ownerless).
         // No chain-ext latch either: #2560 verified live in runtime v443.
         //
         // There is NO owner field and no admin of any kind: every knob below is
@@ -966,6 +967,52 @@ mod allways_bond_vault {
             Ok(())
         }
 
+        /// Move the `add_stake_recycle` destination in one unanimous round.
+        /// A hotkey that stops being stakeable (swap_hotkey, deregistration, an
+        /// upstream rule change) would otherwise revert every recycle forever,
+        /// with no owner and no upgrade path to repair it. Hotkey and netuid
+        /// move together: a hotkey is only registered on some subnets.
+        #[ink(message)]
+        pub fn vote_set_recycle_target(
+            &mut self,
+            staking_hotkey: AccountId,
+            netuid: u16,
+        ) -> Result<(), Error> {
+            self.ensure_validator()?;
+
+            let payload = (
+                REQ_RECYCLE_TARGET,
+                staking_hotkey,
+                netuid,
+                self.validator_set_hash(),
+            );
+            let round_hash = Self::hash_request(&payload);
+            let existing = self.governance_request.get(round_hash);
+            let (id, votes, quorum) =
+                self.cast_vote_with(existing, round_hash, self.unanimous_votes())?;
+            self.governance_request.insert(round_hash, &id);
+
+            self.env().emit_event(VaultVoteCast {
+                validator: self.env().caller(),
+                req_type: REQ_RECYCLE_TARGET,
+                request_id: id,
+                subject: round_hash,
+                vote_count: votes,
+            });
+
+            if quorum {
+                self.clear_request_data(id);
+                self.governance_request.remove(round_hash);
+                self.staking_hotkey = staking_hotkey;
+                self.netuid = netuid;
+                self.env().emit_event(RecycleTargetUpdated {
+                    staking_hotkey,
+                    netuid,
+                });
+            }
+            Ok(())
+        }
+
         // =====================================================================
         // Queries
         // =====================================================================
@@ -1754,6 +1801,66 @@ mod allways_bond_vault {
             vault.vote_set_config(500, 9_000, 66, 600).unwrap();
             assert_eq!(vault.get_min_collateral(), 500);
             assert_eq!(vault.get_consensus_threshold(), 66);
+        }
+
+        /// The recycle destination is the one config the vault cannot survive
+        /// going stale: an unstakeable hotkey reverts every recycle forever.
+        #[ink::test]
+        fn recycle_target_moves_only_by_a_unanimous_round() {
+            let acc = accounts();
+            let mut vault = new_vault();
+            assert_eq!(vault.get_staking_hotkey(), acc.frank);
+            assert_eq!(vault.get_netuid(), 7);
+
+            set_caller(acc.alice);
+            assert_eq!(
+                vault.vote_set_recycle_target(acc.charlie, 9),
+                Err(Error::NotValidator)
+            );
+
+            // One of two validators is not unanimity — nothing moves.
+            set_caller(acc.django);
+            vault.vote_set_recycle_target(acc.charlie, 9).unwrap();
+            assert_eq!(vault.get_staking_hotkey(), acc.frank);
+            assert_eq!(vault.get_netuid(), 7);
+
+            // A divergent target opens its own round rather than joining.
+            set_caller(acc.eve);
+            vault.vote_set_recycle_target(acc.charlie, 11).unwrap();
+            assert_eq!(vault.get_staking_hotkey(), acc.frank);
+
+            // Agreeing on the exact pair applies both fields at once.
+            vault.vote_set_recycle_target(acc.charlie, 9).unwrap();
+            assert_eq!(vault.get_staking_hotkey(), acc.charlie);
+            assert_eq!(vault.get_netuid(), 9);
+        }
+
+        /// Bound to the approving set exactly like `vote_set_config`: a
+        /// membership change must void an in-flight target round.
+        #[ink::test]
+        fn a_set_change_voids_an_open_recycle_target_round() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+
+            set_caller(acc.django);
+            vault.vote_set_recycle_target(acc.bob, 9).unwrap();
+
+            set_caller(acc.django);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            set_caller(acc.eve);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+
+            // django's pre-change vote is stranded under the old set's round:
+            // at n=2 eve's vote alone is not unanimity, so nothing applies.
+            set_caller(acc.eve);
+            vault.vote_set_recycle_target(acc.bob, 9).unwrap();
+            assert_eq!(vault.get_staking_hotkey(), acc.frank);
+
+            // The surviving set votes it through under its own hash.
+            set_caller(acc.django);
+            vault.vote_set_recycle_target(acc.bob, 9).unwrap();
+            assert_eq!(vault.get_staking_hotkey(), acc.bob);
         }
 
         #[ink::test]

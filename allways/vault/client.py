@@ -270,6 +270,22 @@ class BondVaultClient:
         except codec.VaultCodecError:
             return None
 
+    def get_staking_hotkey(self) -> Optional[str]:
+        """The hotkey every ``recycle_fees`` stakes into. Moves only by a unanimous round."""
+        reader = self._read('get_staking_hotkey')
+        try:
+            return reader.account() if reader is not None else None
+        except codec.VaultCodecError:
+            return None
+
+    def get_netuid(self) -> Optional[int]:
+        """The subnet the recycle target is staked on — a hotkey is only registered on some."""
+        reader = self._read('get_netuid')
+        try:
+            return reader.uint(2) if reader is not None else None
+        except codec.VaultCodecError:
+            return None
+
     def get_validators(self) -> Optional[List[str]]:
         """The current validator set. Its SIZE is the governance bar: add/config need every
         member, removal every member but the target."""
@@ -341,6 +357,17 @@ class BondVaultClient:
 
     def recycle_fees(self, keypair=None) -> VaultCallResult:
         return self.submit(self.metadata.call('recycle_fees'), keypair=keypair)
+
+    def vote_set_recycle_target(self, hotkey: str, netuid: int, keypair=None) -> VaultCallResult:
+        """Move the ``add_stake_recycle`` destination. UNANIMOUS: every current validator must
+        submit this identical pair, and any set change voids an in-flight round. Both fields move
+        together — a hotkey is only registered on some subnets."""
+        return self.submit(
+            self.metadata.call(
+                'vote_set_recycle_target', codec.account_bytes(hotkey), codec.u16(netuid)
+            ),
+            keypair=keypair,
+        )
 
     def admin_call(self, label: str, *args: bytes, keypair=None) -> VaultCallResult:
         """Owner-only config/validator-set setters. No admin path touches funds."""

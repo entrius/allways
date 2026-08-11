@@ -304,6 +304,36 @@ def admin_remove_validator(ss58):
                  'remove-validator ' + ss58)
 
 
+@vault_admin_group.command('set-recycle-target', show_disclaimer=True)
+@click.argument('ss58')
+@click.argument('netuid', type=int)
+def admin_set_recycle_target(ss58, netuid):
+    """Vote the recycle destination SS58 + NETUID (UNANIMOUS — every current validator).
+
+    [dim]Every `vault recycle` stakes the pot into this hotkey on this subnet. If the hotkey ever
+    stops being stakeable (hotkey swap, deregistration) recycling reverts until this is moved.
+    Both fields move together — a hotkey is only registered on some subnets.[/dim]
+    """
+    if netuid < 0 or netuid > 0xFFFF:
+        fail('Netuid must be 0-65535')
+
+    vault = _client()
+    current_hotkey = vault.get_staking_hotkey()
+    current_netuid = vault.get_netuid()
+    console.print('\n[bold]Recycle target[/bold]')
+    console.print(f'  Hotkey: {current_hotkey or "[dim]unreadable[/dim]"} -> {ss58}')
+    console.print(f'  Netuid: {current_netuid if current_netuid is not None else "?"} -> {netuid}\n')
+    console.print('  [yellow]The hotkey must be registered on this subnet, or every recycle '
+                  'reverts until a new unanimous round moves it.[/yellow]')
+
+    _vote_submit(
+        'vote_set_recycle_target',
+        [_account_bytes(ss58), codec.u16(netuid)],
+        f'Vote to recycle into {ss58} on netuid {netuid}?',
+        f'set-recycle-target {ss58} {netuid}',
+    )
+
+
 @vault_admin_group.command('set-config', show_disclaimer=True)
 @click.option('--min-collateral', type=float, help='Minimum bond required to lock (TAO)')
 @click.option('--max-collateral', type=float, help='Maximum bond (TAO; 0 = unlimited)')

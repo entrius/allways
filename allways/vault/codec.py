@@ -41,6 +41,10 @@ def u8(n: int) -> bytes:
     return int(n).to_bytes(1, 'little')
 
 
+def u16(n: int) -> bytes:
+    return int(n).to_bytes(2, 'little')
+
+
 def u32(n: int) -> bytes:
     return int(n).to_bytes(4, 'little')
 
