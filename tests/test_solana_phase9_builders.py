@@ -67,9 +67,9 @@ def test_open_or_request_ix(client):
         (pdas.quote_pda(miner, 'sol', 'btc', 'sol', PID), False, False),
         # "sol" reads the local vault, so the optional attestation slot carries the program id.
         (PID, False, False),
-        (pdas.pool_pda(miner, PID), False, True),
+        (pdas.pool_pda(miner, 'sol', PID), False, True),
         (pdas.treasury_pda(PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
 
@@ -85,8 +85,8 @@ def test_resolve_pool_ix(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.pool_pda(miner, PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.pool_pda(miner, 'sol', PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (SLOT_HASHES, False, False),
         (SYSTEM_PROGRAM, False, False),
     ]

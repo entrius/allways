@@ -498,6 +498,7 @@ IX_DISCRIMINATORS = {
     # quotes these did NOT move, so they sit where the live program looks; run them per pre-v3 miner.
     'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
     'close_legacy_reservation': bytes([114, 19, 114, 1, 9, 107, 205, 116]),
+    'close_legacy_initiate_round': bytes([70, 12, 167, 155, 208, 160, 73, 154]),
     # v3 upgrade cranks (no args each; run migrate_config first).
     'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
     'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),

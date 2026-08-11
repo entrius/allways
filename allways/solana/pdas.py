@@ -83,12 +83,29 @@ def attestation_round_pda(miner, chain: str, program_id: Optional[Pubkey] = None
     return _derive([b'vote', bytes([REQ_SET_ATTESTATION]), _pk_bytes(miner), chain.encode()], program_id)
 
 
-def reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+def reservation_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """One reservation slot per (miner, hub) — the backing is in the seeds (v3.1)."""
+    return _derive([b'resv', _pk_bytes(miner), backing.encode()], program_id)
+
+
+def pool_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """One lottery-contest slot per (miner, hub) — the backing is in the seeds (v3.1)."""
+    return _derive([b'pool', _pk_bytes(miner), backing.encode()], program_id)
+
+
+def legacy_reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The RETIRED pre-v3.1 per-miner address — only `close_legacy_reservation` resolves it now."""
     return _derive([b'resv', _pk_bytes(miner)], program_id)
 
 
-def pool_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+def legacy_pool_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The RETIRED pre-v3.1 per-miner address — only `close_legacy_pool` resolves it now."""
     return _derive([b'pool', _pk_bytes(miner)], program_id)
+
+
+def legacy_initiate_round_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The RETIRED per-miner initiate round (live rounds key by swap_key) — closer-only."""
+    return _derive([b'vote', bytes([REQ_INITIATE]), _pk_bytes(miner)], program_id)
 
 
 def swap_pda(swap_key: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:

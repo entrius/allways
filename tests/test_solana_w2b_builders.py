@@ -167,19 +167,20 @@ def test_close_legacy_quote_targets_the_old_derivation_and_pays_the_miner(client
     ]
 
 
-def test_close_legacy_slots_target_the_live_addresses_and_pay_the_miner(client):
-    # The v3 counterpart, and the reason it looks different: these two PDAs did NOT move, so the
-    # builder names the SAME address the live program resolves and the on-chain length check is what
-    # separates a legacy record from a live one.
+def test_close_legacy_slots_target_the_retired_addresses_and_pay_the_miner(client):
+    # v3.1 moved the live slots to backing-qualified seeds, so the closers name the RETIRED
+    # [seed, miner] addresses — the derivation itself is the legacy proof now, and a live slot is
+    # structurally out of reach at a different address entirely.
     miner = Keypair().pubkey()
     client.close_legacy_pool(miner)
     ix = _ix(client)
-    assert _body(ix) == b'', 'no args — the account proves its own vintage by length'
+    assert _body(ix) == b'', 'no args — the retired address proves its own vintage'
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, False),
         (miner, False, True),
-        (pdas.pool_pda(miner, PID), False, True),
+        (pdas.legacy_pool_pda(miner, PID), False, True),
     ]
+    assert pdas.legacy_pool_pda(miner, PID) != pdas.pool_pda(miner, 'sol', PID)
 
     client.close_legacy_reservation(miner)
     ix = _ix(client)
@@ -187,7 +188,17 @@ def test_close_legacy_slots_target_the_live_addresses_and_pay_the_miner(client):
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, False),
         (miner, False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.legacy_reservation_pda(miner, PID), False, True),
+    ]
+
+    # The retired per-miner initiate round: rent refunds the CALLING validator (it funded rounds).
+    client.close_legacy_initiate_round(miner)
+    ix = _ix(client)
+    assert _body(ix) == b''
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (miner, False, False),
+        (pdas.legacy_initiate_round_pda(miner, PID), False, True),
     ]
 
 

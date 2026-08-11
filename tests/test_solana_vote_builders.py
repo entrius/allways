@@ -82,7 +82,7 @@ def test_submit_swap_claim_ix(client):
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
@@ -99,8 +99,8 @@ def test_vote_initiate_ix(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
-        (pdas.vote_round_pda(pdas.REQ_INITIATE, miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
+        (pdas.vote_round_pda(pdas.REQ_INITIATE, SK, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond
         (SYSTEM_PROGRAM, False, False),
@@ -162,7 +162,7 @@ def test_close_stale_claim_ix(client):
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (miner, False, False),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
     ]
 
@@ -256,5 +256,5 @@ def test_extend_reservation_ix(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
     ]
