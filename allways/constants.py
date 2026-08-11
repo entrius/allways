@@ -138,6 +138,14 @@ RELAY_QUIESCENCE_GRACE_SECS = 60
 # Retention for the live-swap reimbursement snapshots; rows with an unapplied slash are exempt.
 RELAY_SWAP_RETENTION_SECS = 7 * 86400
 
+# ─── TAO bond vault (ink!) — deployed contract address, of record ───
+# So a deployment isn't lost. The runtime resolves the ACTIVE vault via ALLWAYS_VAULT_ADDRESS /
+# `alw config set vault-address`; this constant is the reference record per network.
+# TESTNET (SN19, deployed 2026-08-11)
+TAO_HUB_VAULT_ADDRESS = '5GAE4JD8zpQUfYLKKqWifLMEpEo9YrqkkUUdxjsmHyogBEcD'
+# MAINNET
+# TAO_HUB_VAULT_ADDRESS = ''  # fill when prod is deployed
+
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are
 # tiny and only queried while an offering still polls a finished swap — 7 days is generous.
