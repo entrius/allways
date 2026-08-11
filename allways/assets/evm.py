@@ -98,11 +98,13 @@ BSC = EvmNetwork(
     label='BNB Smart Chain',
     chain_ids={'mainnet': 56, 'testnet': 97},  # testnet = Chapel
     rpc_urls={
-        # Two independent keyless operators. drpc is deliberately absent: its free BSC tier
-        # 429s under a burst, and a ladder whose second endpoint always errors can never reach
-        # null quorum, so every genuinely-absent tx would raise instead of returning None.
-        'mainnet': ('https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org'),
-        'testnet': ('https://bsc-testnet-rpc.publicnode.com', 'https://bsc-testnet-dataseed.bnbchain.org'),
+        # Picked on a real eth_getTransactionReceipt under load, not on eth_chainId: publicnode's
+        # BSC mainnet node answers chainId and then 403s every receipt ('Archive requests require a
+        # personal token') even one block back, and the receipt IS the settlement check. drpc's free
+        # BSC tier 429s under any burst, which would strand null quorum. Both excluded on purpose.
+        'mainnet': ('https://bsc-dataseed.bnbchain.org', 'https://bsc.blockrazor.xyz'),
+        # publicnode's TESTNET node does serve receipts — the asymmetry with mainnet is deliberate.
+        'testnet': ('https://bsc-testnet-dataseed.bnbchain.org', 'https://bsc-testnet-rpc.publicnode.com'),
     },
 )
 
