@@ -442,7 +442,7 @@ def test_malformed_swap_key_raises_value_error(tmp_path):
 # confirms (the crank defers voting until confirmations accrue); fast-fails without a claim on absent/mismatch
 # (None) or a stale MINED deposit, so the short reservation TTL frees the miner.
 import allways.validator.reserve_engine as rc  # noqa: E402
-from allways.assets.base import ProviderUnreachableError, TransactionInfo  # noqa: E402
+from allways.assets.asset import ProviderUnreachableError, TransactionInfo  # noqa: E402
 from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
 
 CONFIRM_CREATED_AT = 1000

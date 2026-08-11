@@ -6,9 +6,9 @@ import bittensor as bt
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
-from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
-from allways.chains import ChainDefinition, get_chain_def
+from allways.chains import ChainDefinition
 
 
 def _selector(signature: str) -> str:
@@ -497,10 +497,3 @@ class Erc20(EvmAsset):
                 return log['transactionHash']
         self._set_cursor(key, head)
         return None
-
-
-class ArbUsdc(Erc20):
-    """USDC on Arbitrum — a config-row binding of the generic Erc20 (see chains.CHAIN_ARBUSDC)."""
-
-    def __init__(self):
-        super().__init__(get_chain_def('arbusdc'))

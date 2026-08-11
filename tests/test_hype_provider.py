@@ -8,10 +8,10 @@ chain id every signed tx commits to, and the sub-second block time that drives t
 import pytest
 from eth_account import Account
 
-from allways.assets.base import ProviderUnreachableError
+from allways.assets.asset import ProviderUnreachableError
 from allways.assets.evm import HYPERLIQUID
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
-from allways.assets.hyperliquid import Hype
+from allways.assets.hype import Hype
 from allways.chains import CHAIN_HYPE, get_chain_def
 from allways.constants import LAUNCH_SPOKES
 

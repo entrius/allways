@@ -2,15 +2,16 @@ from typing import Dict, NamedTuple, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
-from allways.assets.base import Asset, SendResult, TransactionInfo
-from allways.assets.bitcoin import Bitcoin
+from allways.assets.arbusdc import ArbUsdc
+from allways.assets.asset import Asset, SendResult, TransactionInfo
+from allways.assets.btc import Bitcoin
 from allways.assets.chain import Chain
-from allways.assets.erc20 import ArbUsdc, Erc20
-from allways.assets.ethereum import Ether
+from allways.assets.erc20 import Erc20
+from allways.assets.eth import Ether
 from allways.assets.evm_coin import EvmCoin
-from allways.assets.hyperliquid import Hype
-from allways.assets.solana import Sol
-from allways.assets.subtensor import Tao
+from allways.assets.hype import Hype
+from allways.assets.sol import Sol
+from allways.assets.tao import Tao
 
 __all__ = [
     'Asset',

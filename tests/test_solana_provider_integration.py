@@ -16,7 +16,7 @@ import time
 import pytest
 from solders.keypair import Keypair
 
-from allways.assets.solana import Sol
+from allways.assets.sol import Sol
 from allways.solana.rpc import SolanaRpc
 
 pytestmark = pytest.mark.integration

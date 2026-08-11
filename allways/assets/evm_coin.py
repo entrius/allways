@@ -5,7 +5,7 @@ import bittensor as bt
 from eth_account import Account
 from eth_utils import to_checksum_address
 
-from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain, EvmNetwork
 from allways.chains import ChainDefinition
 

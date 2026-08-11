@@ -9,7 +9,7 @@
 
 import bittensor as bt
 
-from allways.assets.subtensor import Tao
+from allways.assets.tao import Tao
 from allways.validator.reserve_engine import confirm_deposit
 
 

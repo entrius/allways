@@ -374,7 +374,7 @@ def test_can_send_from_gates_on_signer(monkeypatch):
     funds move (prevents the wrong-key deposit the validator would reject)."""
     from types import SimpleNamespace
 
-    from allways.assets.solana import Sol
+    from allways.assets.sol import Sol
 
     kp = SimpleNamespace(pubkey=lambda: 'PINNED')
     p = Sol.__new__(Sol)
