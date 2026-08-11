@@ -140,10 +140,9 @@ pub fn check_entry_gates(
     // Reject an unknown chain here rather than letting the gates answer for it — same error at every
     // door, whether or not the heartbeat happens to be fresh.
     backing_bit(collateral_chain)?;
-    // A penalty still settling on a backing chain freezes the WHOLE miner, not just that purse: a
-    // pending seizure means the miner owes money nobody has taken yet. `settling_until` is 0 for a
-    // SOL-only miner and for any locally-settled timeout (those seize atomically), so the SOL path
-    // only ever meets this gate when a TAO slash really is outstanding.
+    // A pending seizure freezes the WHOLE miner: it owes money nobody has taken yet. Zero for a
+    // SOL-only miner and for locally-settled timeouts (those seize atomically), so the SOL path meets
+    // this gate only when a TAO slash really is outstanding.
     require!(now >= miner_state.settling_until, ErrorCode::MinerSettling);
     // The fuse stays non-local: it is an attestation-freshness question, and a locally-settled
     // backing reads no attestation.

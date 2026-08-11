@@ -1,16 +1,10 @@
-//! Permissionless reap of the two reused per-miner slots the v3 upgrade left unreadable.
+//! Permissionless reap of the two reused per-miner slots the v3 upgrade left unreadable. `Pool` and
+//! `Reservation` gained `collateral_chain` mid-struct but — unlike the quote PDAs — their SEEDS did
+//! not change, so a pre-v3 miner's records sit where `open_or_request` looks and lock it out forever.
 //!
-//! `Pool` and `Reservation` both gained `collateral_chain` mid-struct in v3, and unlike the quote PDAs
-//! their SEEDS did not change — so an existing miner's v10 accounts sit at exactly the addresses
-//! `open_or_request` resolves, where `init_if_needed` tries to parse them and fails with
-//! `AccountDidNotDeserialize`. `withdraw_collateral` does not close them, so draining swaps is not
-//! enough: without a closer, every miner registered before the upgrade is locked out permanently.
-//!
-//! Legacy-ness is proven by SIZE. The v10 allocation is exactly one `collateral_chain` field shorter
-//! than the live one, and the only writer of either account (`open_or_request`, via `init_if_needed`)
-//! allocates the live length — so a legacy length can only mean a genuine pre-upgrade leftover, and a
-//! live v3 account can never match. Rent goes back to the miner the slot belongs to; the caller pays
-//! only the transaction, so this is a favor anyone can do and nobody can profit from.
+//! Legacy-ness is proven by SIZE: `open_or_request` is the only writer of these addresses and always
+//! allocates the live length, so a shorter allocation can only be a genuine leftover and a live slot
+//! can never match. See the design doc's migration runbook for the full argument.
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::System;
@@ -96,9 +90,8 @@ pub fn close_reservation(ctx: Context<CloseLegacyReservation>) -> Result<()> {
 }
 
 /// The whole safety argument. `live_len` is what this program allocates today; a pre-v3 record is
-/// exactly `COLLATERAL_CHAIN_LEN` shorter, and nothing can produce any other length at these
-/// addresses. Requiring the legacy length therefore refuses a live account structurally rather than
-/// by policy — there is no argument a caller can pass that makes a v3 slot reapable.
+/// exactly `COLLATERAL_CHAIN_LEN` shorter. Requiring that length refuses a live account structurally,
+/// not by policy — no argument a caller can pass makes a v3 slot reapable.
 fn require_legacy(
     info: &AccountInfo,
     program_id: &Pubkey,
