@@ -253,15 +253,29 @@ _RULES: list[_Rule] = [
     ),
     (
         'already_active',
-        'miner is already active',
+        'purse already active',
         True,
-        lambda ctx: 'Your miner is already active.',
+        lambda ctx: 'That purse is already serving — `alw miner status` lists each purse separately.',
     ),
     (
         'insufficient_collateral',
         'insufficient collateral',
         True,
         lambda ctx: f'Insufficient collateral ({_ctx_get(ctx, "raw_reason", "")}). Top up with: alw collateral deposit',
+    ),
+    (
+        'unknown_backing',
+        'unknown backing',
+        True,
+        lambda ctx: f'{_ctx_get(ctx, "raw_reason", "")}',
+    ),
+    # Every off-chain-backing refusal — the reasons carry their own fix, so the raw one IS the
+    # headline. Transient by default: most clear on their own once the relay catches up.
+    (
+        'bond_not_ready',
+        'bond ',
+        False,
+        lambda ctx: f'{_ctx_get(ctx, "raw_reason", "")} `alw miner status` shows the bond as validators see it.',
     ),
     # ------ Generic / shared ------
     (

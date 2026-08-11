@@ -55,7 +55,7 @@ def check(validator, miner_hotkey: str, miner_pk, miner_state, backing: str, now
     if bit is None:
         return _no(f'Unknown backing "{backing}" — this subnet backs: {", ".join(pdas.BACKING_BITS)}')
     if active_bits(miner_state) & bit:
-        return _no(f'The {backing.upper()} purse is already active')
+        return _no(f'Purse already active: {backing.upper()}')
 
     config = validator.solana_client.get_config()
     floor = floors_from_config(config).get(backing, 0)
@@ -74,22 +74,22 @@ def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, 
     max_age = int(getattr(config, 'attest_max_age_secs', 0) or 0)
     if age > max_age:
         return _no(
-            f'{unit} bonding is fused off — the attestation heartbeat is {age}s old (max {max_age}s). '
+            f'Bond attestation is fused off — the {unit} heartbeat is {age}s old (max {max_age}s). '
             f'Retry once the relay fleet is live again.'
         )
 
     attestation = validator.solana_client.get_bond_attestation(miner_pk, backing)
     if attestation is None:
         return _no(
-            f'No {unit} bond attestation on chain yet. Validators mirror the vault on their own '
-            f'cadence — post and lock your bond, then retry in a minute.'
+            f'Bond attestation for your {unit} purse is missing. Validators mirror the vault on their '
+            f'own cadence — post and lock your bond, then retry in a minute.'
         )
     if not attestation.locked:
-        return _no(f'Your {unit} bond is attested as UNLOCKED — an unlocked bond backs nothing. Lock it first.')
+        return _no(f'Bond attestation says your {unit} bond is UNLOCKED, and an unlocked bond backs nothing.')
     if int(attestation.effective_balance) < floor:
         return _no(
-            f'Insufficient {unit} bond: {attestation.effective_balance} < {floor} (the attested figure is '
-            f'your gross bond net of accrued fees and voted slashes).'
+            f'Bond below the {unit} floor: {attestation.effective_balance} < {floor} (the attested figure '
+            f'is your gross bond net of accrued fees and voted slashes).'
         )
     return _vault(validator, miner_hotkey, backing, attestation, floor)
 
@@ -100,21 +100,21 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int) 
     unit = backing.upper()
     vault = axon_vault_client(validator)
     if vault is None:
-        return _no(f'This validator does not relay {unit} bonds, so it cannot verify yours.')
+        return _no(f'Bond relay not configured on this validator, so it cannot verify your {unit} bond.')
     with validator.axon_lock:
         lock = vault.get_lock_state(miner_hotkey)
         gross = vault.get_collateral(miner_hotkey)
     if lock is None or gross is None:
-        return _no(f'Could not read your bond off the {unit} vault right now — retry shortly.')
+        return _no(f'Bond could not be read off the {unit} vault right now — retry shortly.')
 
     locked, epoch = lock
     if not locked:
-        return _no(f'Your bond is not locked on the {unit} vault (the attestation has yet to catch up).')
+        return _no(f'Bond is not locked on the {unit} vault (the attestation has yet to catch up).')
     if int(epoch) != int(attestation.epoch):
         return _no(
-            f'The {unit} attestation is stale — it asserts lock epoch {attestation.epoch}, the vault is at '
+            f'Bond attestation is stale — it asserts lock epoch {attestation.epoch}, the {unit} vault is at '
             f'{epoch}. Retry once validators have re-mirrored your bond.'
         )
     if int(gross) < floor:
-        return _no(f'Your {unit} bond on the vault is {gross} < {floor}.')
+        return _no(f'Bond on the {unit} vault is {gross} < {floor}.')
     return _OK

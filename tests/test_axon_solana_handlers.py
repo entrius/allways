@@ -229,7 +229,7 @@ def test_activate_tao_refuses_a_bond_unlocked_on_the_vault(monkeypatch):
     client = FakeSolanaClient(miner_state=miner_state(), attestation=attested())
     v = with_vault(monkeypatch, make_validator(client, vault=FakeVault(locked=False)))
     s = run(axon_handlers.handle_miner_activate(v, activate_synapse('tao')))
-    assert s.accepted is False and 'not locked' in s.rejection_reason
+    assert s.accepted is False and 'not locked on the TAO vault' in s.rejection_reason
     assert client.calls == []
 
 
@@ -238,7 +238,7 @@ def test_activate_tao_refuses_an_unreadable_vault(monkeypatch):
     client = FakeSolanaClient(miner_state=miner_state(), attestation=attested())
     v = with_vault(monkeypatch, make_validator(client, vault=FakeVault(locked=None)))
     s = run(axon_handlers.handle_miner_activate(v, activate_synapse('tao')))
-    assert s.accepted is False and 'Could not read' in s.rejection_reason
+    assert s.accepted is False and 'could not be read off the TAO vault' in s.rejection_reason
     assert client.calls == []
 
 
@@ -247,7 +247,7 @@ def test_activate_tao_refuses_when_no_attestation_exists_yet(monkeypatch):
     client = FakeSolanaClient(miner_state=miner_state(), attestation=None)
     v = with_vault(monkeypatch, make_validator(client, vault=FakeVault()))
     s = run(axon_handlers.handle_miner_activate(v, activate_synapse('tao')))
-    assert s.accepted is False and 'No TAO bond attestation' in s.rejection_reason
+    assert s.accepted is False and 'attestation for your TAO purse is missing' in s.rejection_reason
     assert client.calls == []
 
 
@@ -263,7 +263,7 @@ def test_activate_tao_refuses_a_bond_under_its_own_floor(monkeypatch):
     client = FakeSolanaClient(miner_state=miner_state(), attestation=attested(balance=TAO_FLOOR - 1))
     v = with_vault(monkeypatch, make_validator(client, vault=FakeVault()))
     s = run(axon_handlers.handle_miner_activate(v, activate_synapse('tao')))
-    assert s.accepted is False and 'Insufficient TAO bond' in s.rejection_reason
+    assert s.accepted is False and 'Bond below the TAO floor' in s.rejection_reason
     assert client.calls == []
 
 
@@ -281,7 +281,7 @@ def test_activate_tao_refuses_on_a_validator_with_no_relay(monkeypatch):
     client = FakeSolanaClient(miner_state=miner_state(), attestation=attested())
     v = with_vault(monkeypatch, make_validator(client, vault=None))
     s = run(axon_handlers.handle_miner_activate(v, activate_synapse('tao')))
-    assert s.accepted is False and 'does not relay' in s.rejection_reason
+    assert s.accepted is False and 'Bond relay not configured' in s.rejection_reason
     assert client.calls == []
 
 
