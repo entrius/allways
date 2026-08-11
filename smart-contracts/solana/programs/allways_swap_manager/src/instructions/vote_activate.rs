@@ -2,7 +2,9 @@ use anchor_lang::prelude::*;
 
 use crate::backing;
 use crate::consensus::{backing_request_hash, record_vote, reset_round};
-use crate::constants::{ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_ACTIVATE, VOTE_SEED};
+use crate::constants::{
+    ATTEST_SEED, BACKING_BIT_SOL, CONFIG_SEED, MINER_SEED, REQ_ACTIVATE, VOTE_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::{MinerActivated, MinerBackingChanged};
 use crate::state::{BondAttestation, Config, MinerState, VoteRound};
@@ -90,7 +92,11 @@ pub fn handler(ctx: Context<VoteActivate>, backing: String) -> Result<()> {
     if quorum {
         let was_active = ctx.accounts.miner_state.active;
         let active = ctx.accounts.miner_state.set_backing(bit, true);
-        ctx.accounts.miner_state.deactivation_at = 0;
+        // Only the SOL purse coming back clears the cooldown it started. Clearing on ANY activation
+        // would let a miner lighting its TAO purse wipe a running SOL withdrawal cooldown.
+        if bit & BACKING_BIT_SOL != 0 {
+            ctx.accounts.miner_state.deactivation_at = 0;
+        }
         reset_round(&mut ctx.accounts.vote_round);
         emit!(MinerBackingChanged {
             miner: miner_key,

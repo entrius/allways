@@ -42,8 +42,11 @@ pub fn apply_penalty(
             active_backings: miner_state.active_backings,
             at: now,
         });
+        // The SOL bit just dropped, so the local-collateral cooldown starts here — same rule as
+        // self-`deactivate`. Gating it on `!still_active` instead would let a slashed dual miner idle
+        // the cooldown out on its TAO purse and withdraw the moment it drops the SOL one.
+        miner_state.deactivation_at = now;
         if !still_active {
-            miner_state.deactivation_at = now;
             // Without this emit the scorer — which rebuilds the active set purely from
             // MinerActivated/MinerDeactivated events — keeps paying crown to a miner the chain
             // already considers inactive, until some later vote event happens to fire.

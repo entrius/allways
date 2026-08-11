@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::backing;
 use crate::consensus::{backing_request_hash, record_vote, reset_round};
-use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_DEACTIVATE, VOTE_SEED};
+use crate::constants::{BACKING_BIT_SOL, CONFIG_SEED, MINER_SEED, REQ_DEACTIVATE, VOTE_SEED};
 use crate::error::ErrorCode;
 use crate::events::{MinerBackingChanged, MinerDeactivated};
 use crate::state::{Config, MinerState, VoteRound};
@@ -79,10 +79,13 @@ pub fn handler(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
             active_backings: ctx.accounts.miner_state.active_backings,
             at: now,
         });
-        // The withdrawal cooldown starts only when the LAST purse goes dark — a miner still trading on
-        // another backing has not left, and MinerDeactivated must not claim it has.
-        if !active {
+        // The cooldown guards LOCAL collateral, so it tracks the SOL bit dropping — same rule as
+        // self-`deactivate`. MinerDeactivated stays on the OR view: a miner still trading on another
+        // backing has not left, and the event must not claim it has.
+        if bit & BACKING_BIT_SOL != 0 {
             ctx.accounts.miner_state.deactivation_at = now;
+        }
+        if !active {
             emit!(MinerDeactivated { miner: miner_key, at: now });
         }
         msg!("miner deactivated via consensus: {}", miner_key);

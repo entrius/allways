@@ -33,6 +33,7 @@ const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111
 const REQ_ACTIVATE: u8 = 0;
 const REQ_INITIATE: u8 = 2;
 const REQ_DEACTIVATE: u8 = 5;
+const REQ_TIMEOUT: u8 = 7;
 const REQ_SET_ATTESTATION: u8 = 9;
 const REQ_ATTEST_HEARTBEAT: u8 = 10;
 const BASE_TS: i64 = 1_700_000_000;
@@ -1410,4 +1411,128 @@ fn test_partial_self_exit_of_a_dark_purse_is_refused() {
     let m = miner.pubkey();
     let err = send(&mut svm, self_deactivate_ix(&m, Some(TAO)), &m, &miner).unwrap_err();
     assert!(err.contains("MinerNotActive"), "dropping an already-dark purse, got: {err}");
+}
+
+// --- the withdrawal cooldown tracks the SOL bit in EVERY writer -----------------------------------
+
+fn timeout_ix(validator: &Pubkey, miner: &Pubkey, key: [u8; 32]) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::TimeoutSwap { swap_key: key }.data(),
+        allways_swap_manager::accounts::TimeoutSwap {
+            validator: *validator,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            collateral_vault: collateral_vault_pda(miner),
+            user: LOTTERY_USER,
+            swap: swap_pda(&key),
+            vote_round: vote_pda(REQ_TIMEOUT, &key),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+
+#[test]
+fn test_a_slash_that_drops_only_the_sol_bit_still_starts_the_cooldown() {
+    // `apply_penalty` used to stamp `deactivation_at` only when the LAST purse went dark, so a slashed
+    // dual-purse miner kept a zero stamp — and `withdraw_collateral` skips the cooldown entirely at
+    // zero, so dropping the (already dark) TAO purse afterwards freed the collateral immediately.
+    let (mut svm, admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    // A SOL-backed swap on the spoke pair, driven to an in-flight state through the public path.
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+    send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("finalize");
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &m, "soltx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let initiated_at = now_ts(&svm);
+    send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "soltx1", None), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(&mut svm, initiate_ix(&vals[1].pubkey(), &m, "soltx1", None), &vals[1].pubkey(), &vals[1]).expect("i1");
+
+    // Raise the floor so the 1.1× seizure leaves the SOL purse deficient — the branch that drops the bit.
+    send(
+        &mut svm,
+        admin_ix(
+            &admin.pubkey(),
+            allways_swap_manager::instruction::SetMinCollateral { amount: COLLATERAL - 1 }.data(),
+        ),
+        &admin.pubkey(),
+        &admin,
+    )
+    .expect("raise the sol floor");
+
+    let timeout_ts = initiated_at + TIMEOUT_SECS + 1;
+    set_clock(&mut svm, timeout_ts);
+    let key = swap_key("soltx1");
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &m, key), &vals[0].pubkey(), &vals[0]).expect("t0");
+    send(&mut svm, timeout_ix(&vals[1].pubkey(), &m, key), &vals[1].pubkey(), &vals[1]).expect("t1");
+
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_TAO, "the deficient SOL purse went dark, TAO kept trading");
+    assert!(ms.active, "the miner has not left — the OR view still holds");
+    assert_eq!(ms.deactivation_at, timeout_ts, "the SOL bit dropping starts the local-collateral cooldown");
+}
+
+#[test]
+fn test_lighting_another_purse_does_not_clear_a_running_sol_cooldown() {
+    // `vote_activate` used to zero `deactivation_at` on ANY backing's activation, so a miner inside its
+    // SOL withdrawal cooldown could wipe the clock by lighting TAO instead of waiting it out.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    let dropped_at = now_ts(&svm);
+    send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("drop the sol purse");
+    assert_eq!(miner_state(&svm, &m).deactivation_at, dropped_at, "cooldown running");
+
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_TAO, "TAO lit, SOL still dark");
+    assert_eq!(ms.deactivation_at, dropped_at, "a TAO activation must not clear the SOL cooldown");
+
+    // Only the SOL purse coming back clears the cooldown it started.
+    send(&mut svm, activate_ix(&vals[0].pubkey(), &m, SOL, None), &vals[0].pubkey(), &vals[0]).expect("s0");
+    send(&mut svm, activate_ix(&vals[1].pubkey(), &m, SOL, None), &vals[1].pubkey(), &vals[1]).expect("s1");
+    assert_eq!(miner_state(&svm, &m).deactivation_at, 0, "re-lighting SOL clears its own cooldown");
+}
+
+#[test]
+fn test_a_forced_sol_deactivation_starts_the_cooldown_on_a_still_lit_miner() {
+    // The vote_deactivate half of the same rule (the #616 floor sweep, per purse): the cooldown keys off
+    // the SOL bit, not off the miner going fully dark.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    let swept_at = now_ts(&svm);
+    send(&mut svm, deactivate_ix(&vals[0].pubkey(), &m, SOL), &vals[0].pubkey(), &vals[0]).expect("d0");
+    send(&mut svm, deactivate_ix(&vals[1].pubkey(), &m, SOL), &vals[1].pubkey(), &vals[1]).expect("d1");
+
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_TAO, "only the swept purse went dark");
+    assert!(ms.active);
+    assert_eq!(ms.deactivation_at, swept_at, "a forced SOL sweep starts the cooldown too");
+}
+
+#[test]
+fn test_a_forced_tao_deactivation_leaves_the_sol_cooldown_alone() {
+    // The other side of it: sweeping TAO must not stamp the local-collateral clock, or a SOL-serving
+    // miner would carry a cooldown for a purse it never dropped.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+
+    send(&mut svm, deactivate_ix(&vals[0].pubkey(), &m, TAO), &vals[0].pubkey(), &vals[0]).expect("d0");
+    send(&mut svm, deactivate_ix(&vals[1].pubkey(), &m, TAO), &vals[1].pubkey(), &vals[1]).expect("d1");
+
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_SOL);
+    assert_eq!(ms.deactivation_at, 0, "a TAO sweep is gated on the vault's unlock path, not this clock");
 }
