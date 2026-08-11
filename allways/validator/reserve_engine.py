@@ -13,7 +13,7 @@ import bittensor as bt
 from bittensor import Keypair
 from solders.pubkey import Pubkey
 
-from allways.assets.base import ProviderUnreachableError
+from allways.assets.asset import ProviderUnreachableError
 from allways.chains import SUPPORTED_CHAINS
 from allways.cli.swap_commands.swap_intake import (
     candidate_miners,

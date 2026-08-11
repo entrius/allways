@@ -11,7 +11,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.assets.base import Asset, ProviderUnreachableError
+from allways.assets.asset import Asset, ProviderUnreachableError
 from allways.assets.chain import Chain
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
@@ -71,7 +71,9 @@ ETHEREUM = EvmNetwork(
     chain_ids={'mainnet': 1, 'sepolia': 11_155_111},
     rpc_urls={
         'mainnet': ('https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org'),
-        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.drpc.org'),
+        # drpc's free tier stopped serving Sepolia (rpc error 35), leaving the ladder
+        # single-endpoint — a null then never reaches quorum and every absent tx raises.
+        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'),
     },
 )
 ARBITRUM = EvmNetwork(

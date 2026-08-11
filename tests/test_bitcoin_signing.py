@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from bitcoin_message_tool.bmt import sign_message, verify_message
 
-from allways.assets.bitcoin import (
+from allways.assets.btc import (
     ADDR_TYPE_P2PKH,
     ADDR_TYPE_P2SH_P2WPKH,
     ADDR_TYPE_P2TR,

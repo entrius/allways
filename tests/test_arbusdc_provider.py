@@ -10,14 +10,14 @@ from typing import Optional
 
 import pytest
 
-from allways.assets.base import ProviderUnreachableError
+from allways.assets.arbusdc import ArbUsdc
+from allways.assets.asset import ProviderUnreachableError
 from allways.assets.erc20 import (
     SEL_BALANCE_OF,
     SEL_IS_BLACKLISTED,
     SEL_PAUSED,
     SEL_TRANSFER,
     TRANSFER_TOPIC0,
-    ArbUsdc,
 )
 from allways.assets.evm import EvmRpcError
 from allways.chains import CHAIN_ARBUSDC

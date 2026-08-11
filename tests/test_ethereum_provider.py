@@ -9,8 +9,8 @@ from typing import Optional
 
 import pytest
 
-from allways.assets.base import ProviderUnreachableError
-from allways.assets.ethereum import Ether
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.eth import Ether
 from allways.assets.evm import EvmRpcError
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
