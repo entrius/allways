@@ -367,9 +367,7 @@ class BondVaultClient:
         submit this identical pair, and any set change voids an in-flight round. Both fields move
         together — a hotkey is only registered on some subnets."""
         return self.submit(
-            self.metadata.call(
-                'vote_set_recycle_target', codec.account_bytes(hotkey), codec.u16(netuid)
-            ),
+            self.metadata.call('vote_set_recycle_target', codec.account_bytes(hotkey), codec.u16(netuid)),
             keypair=keypair,
         )
 

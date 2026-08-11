@@ -337,8 +337,10 @@ def admin_set_recycle_target(ss58, netuid):
     console.print('\n[bold]Recycle target[/bold]')
     console.print(f'  Hotkey: {current_hotkey or "[dim]unreadable[/dim]"} -> {ss58}')
     console.print(f'  Netuid: {current_netuid if current_netuid is not None else "?"} -> {netuid}\n')
-    console.print('  [yellow]The hotkey must be registered on this subnet, or every recycle '
-                  'reverts until a new unanimous round moves it.[/yellow]')
+    console.print(
+        '  [yellow]The hotkey must be registered on this subnet, or every recycle '
+        'reverts until a new unanimous round moves it.[/yellow]'
+    )
 
     _vote_submit(
         'vote_set_recycle_target',
@@ -386,8 +388,10 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
     if new_threshold > 100:
         fail('Threshold must be 1-100')
     if new_threshold < MIN_THRESHOLD:
-        fail(f'Threshold must be >= {MIN_THRESHOLD}% (the contract refuses less — below a '
-             'strict majority a minority quorum could fabricate a slash)')
+        fail(
+            f'Threshold must be >= {MIN_THRESHOLD}% (the contract refuses less — below a '
+            'strict majority a minority quorum could fabricate a slash)'
+        )
     if new_ttl < MIN_VOTE_ROUND_TTL:
         fail(f'Round TTL must be >= {MIN_VOTE_ROUND_TTL} blocks (the contract refuses less)')
 
@@ -400,9 +404,11 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
     # 0 is the contract's UNLIMITED sentinel, so a validator meaning "stop new
     # bonds" would be voting the exact opposite. Make them say it out loud.
     if new_max == 0:
-        console.print('  [yellow]max-collateral 0 means UNLIMITED, not closed: miners may bond '
-                      'any amount, and a compromised quorum could fabricate slashes against all '
-                      'of it. To restrict bonding, vote a small positive bound.[/yellow]\n')
+        console.print(
+            '  [yellow]max-collateral 0 means UNLIMITED, not closed: miners may bond '
+            'any amount, and a compromised quorum could fabricate slashes against all '
+            'of it. To restrict bonding, vote a small positive bound.[/yellow]\n'
+        )
         if not _admin_confirm('Vote a config that leaves max collateral UNLIMITED?'):
             console.print('[yellow]Cancelled[/yellow]')
             return

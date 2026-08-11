@@ -106,9 +106,7 @@ def test_invalid_binding_sig_drops_miner():
 
 
 def _ns(successful, failed, settling_until=0):
-    return SimpleNamespace(
-        successful_swaps=successful, failed_swaps=failed, settling_until=settling_until
-    )
+    return SimpleNamespace(successful_swaps=successful, failed_swaps=failed, settling_until=settling_until)
 
 
 def test_is_eligible_boundaries():

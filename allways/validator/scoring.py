@@ -215,9 +215,7 @@ def build_eligibility(
 ) -> Dict[str, bool]:
     """``{hotkey: eligible_bool}`` for on-metagraph miners — ``is_eligible`` over the
     on-chain ``MinerState`` counters (see ``live_miner_states``)."""
-    return {
-        hk: is_eligible(ms, now) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()
-    }
+    return {hk: is_eligible(ms, now) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()}
 
 
 @dataclass
