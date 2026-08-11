@@ -94,9 +94,25 @@ HYPERLIQUID = EvmNetwork(
         'testnet': ('https://rpc.hyperliquid-testnet.xyz/evm', 'https://hyperliquid-testnet.drpc.org'),
     },
 )
+BSC = EvmNetwork(
+    label='BNB Smart Chain',
+    chain_ids={'mainnet': 56, 'testnet': 97},  # testnet = Chapel
+    rpc_urls={
+        # Two independent keyless operators. drpc is deliberately absent: its free BSC tier
+        # 429s under a burst, and a ladder whose second endpoint always errors can never reach
+        # null quorum, so every genuinely-absent tx would raise instead of returning None.
+        'mainnet': ('https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org'),
+        'testnet': ('https://bsc-testnet-rpc.publicnode.com', 'https://bsc-testnet-dataseed.bnbchain.org'),
+    },
+)
 
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
-EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM, 'hyperliquid': HYPERLIQUID}
+EVM_NETWORKS: Mapping[str, EvmNetwork] = {
+    'ethereum': ETHEREUM,
+    'arbitrum': ARBITRUM,
+    'hyperliquid': HYPERLIQUID,
+    'bsc': BSC,
+}
 
 
 class EvmChain(Chain):

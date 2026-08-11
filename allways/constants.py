@@ -87,7 +87,7 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
 
 
 # Chains paired against each hub; add a chain here to launch its pairs.
-LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc', 'hype')
+LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc', 'hype', 'bnb')
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
 # lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
