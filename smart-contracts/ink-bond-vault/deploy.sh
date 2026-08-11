@@ -11,7 +11,8 @@
 #   max_collateral  10 τ    — the D7 quorum-compromise bound: a compromised quorum
 #                             can fabricate slashes against every bond at once, so
 #                             cap the per-miner exposure until the set widens.
-#   threshold       66%     — 2-of-3 today; `get_required_votes` rounds up.
+#   threshold       66%     — 2-of-3 today; `get_required_votes` rounds up. Below
+#                             51 (a strict majority) the instantiation FAILS.
 #   vote_round_ttl  600     — blocks (~2 h at 12 s) a vote round stays open.
 #   validators      seed set — the ONLY way validators ever come to exist: there
 #                             is no owner and no admin key on this contract. An

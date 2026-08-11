@@ -21,9 +21,10 @@ from allways.cli.swap_commands.helpers import console, fail, get_cli_context, lo
 from allways.constants import TAO_TO_RAO
 from allways.vault import BondVaultClient, VaultConfigError, codec
 
-# Mirrors MIN_VOTE_ROUND_TTL in the vault contract — fail locally with a clear
-# message rather than eating an opaque ContractReverted.
+# Mirror the vault contract's floors — fail locally with a clear message rather
+# than eating an opaque ContractReverted.
 MIN_VOTE_ROUND_TTL = 100
+MIN_THRESHOLD = 51
 
 
 def _client(use_coldkey: bool = False) -> BondVaultClient:
@@ -306,7 +307,7 @@ def admin_remove_validator(ss58):
 @vault_admin_group.command('set-config', show_disclaimer=True)
 @click.option('--min-collateral', type=float, help='Minimum bond required to lock (TAO)')
 @click.option('--max-collateral', type=float, help='Maximum bond (TAO; 0 = unlimited)')
-@click.option('--threshold', type=int, help='Consensus threshold percent (1-100)')
+@click.option('--threshold', type=int, help=f'Consensus threshold percent ({MIN_THRESHOLD}-100)')
 @click.option('--round-ttl', type=int, help='Vote-round TTL in blocks')
 def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
     """Vote the WHOLE vault config (UNANIMOUS — every current validator).
@@ -336,8 +337,11 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
     new_threshold = threshold if threshold is not None else current['threshold']
     new_ttl = round_ttl if round_ttl is not None else current['ttl']
 
-    if not 0 < new_threshold <= 100:
+    if new_threshold > 100:
         fail('Threshold must be 1-100')
+    if new_threshold < MIN_THRESHOLD:
+        fail(f'Threshold must be >= {MIN_THRESHOLD}% (the contract refuses less — below a '
+             'strict majority a minority quorum could fabricate a slash)')
     if new_ttl < MIN_VOTE_ROUND_TTL:
         fail(f'Round TTL must be >= {MIN_VOTE_ROUND_TTL} blocks (the contract refuses less)')
 

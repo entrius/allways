@@ -21,6 +21,9 @@ pub enum Error {
     AlreadyVoted,
     /// A pending round exists with a different hash for this key
     PendingConflict,
+    /// Consensus threshold below MIN_THRESHOLD — a sub-majority quorum could
+    /// fabricate a slash against any bond
+    ThresholdTooLow,
     /// Amount must be greater than zero
     InvalidAmount,
     /// Bond below the minimum required for this operation

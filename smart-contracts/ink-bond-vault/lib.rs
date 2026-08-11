@@ -99,6 +99,11 @@ mod allways_bond_vault {
     // single validator, and at n=1 there would be nobody left to vote at all.
     const MIN_VALIDATORS_TO_REMOVE: usize = 3;
 
+    // Floor on the consensus threshold. ceil(n*51/100) is a strict majority at
+    // every n, so no quorum can ever be smaller than the honest one — below
+    // this a single validator could fabricate a slash and pay itself.
+    const MIN_THRESHOLD: u8 = 51;
+
     // Floor on the configurable round TTL. Quorum-gated config means a
     // *unanimous* mistake could otherwise set a TTL so short that no round can
     // ever gather its votes — unrecoverable, with no owner left to repair it.
@@ -355,8 +360,11 @@ mod allways_bond_vault {
                     return Err(Error::InvalidValidatorSet);
                 }
             }
-            if consensus_threshold_percent == 0 || consensus_threshold_percent > 100 {
+            if consensus_threshold_percent > 100 {
                 return Err(Error::InvalidAmount);
+            }
+            if consensus_threshold_percent < MIN_THRESHOLD {
+                return Err(Error::ThresholdTooLow);
             }
             if vote_round_ttl < MIN_VOTE_ROUND_TTL {
                 return Err(Error::InvalidAmount);
@@ -866,8 +874,11 @@ mod allways_bond_vault {
             vote_round_ttl: u32,
         ) -> Result<(), Error> {
             self.ensure_validator()?;
-            if consensus_threshold_percent == 0 || consensus_threshold_percent > 100 {
+            if consensus_threshold_percent > 100 {
                 return Err(Error::InvalidAmount);
+            }
+            if consensus_threshold_percent < MIN_THRESHOLD {
+                return Err(Error::ThresholdTooLow);
             }
             if vote_round_ttl < MIN_VOTE_ROUND_TTL {
                 return Err(Error::InvalidAmount);
@@ -1348,9 +1359,49 @@ mod allways_bond_vault {
                     .map(|_| ()),
                 Err(Error::InvalidAmount)
             );
+            // A sub-majority threshold would let a minority quorum fabricate a
+            // slash against any bond, so it never reaches deployment.
+            assert_eq!(
+                AllwaysBondVault::new(
+                    acc.frank,
+                    7,
+                    MIN_COLLATERAL,
+                    0,
+                    MIN_THRESHOLD - 1,
+                    100,
+                    one.clone()
+                )
+                .map(|_| ()),
+                Err(Error::ThresholdTooLow)
+            );
+            assert!(AllwaysBondVault::new(
+                acc.frank,
+                7,
+                MIN_COLLATERAL,
+                0,
+                MIN_THRESHOLD,
+                100,
+                one.clone()
+            )
+            .is_ok());
             assert!(
                 AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, one).is_ok()
             );
+        }
+
+        /// The floor's whole point: ceil(n*51/100) must exceed n/2 at every set
+        /// size the vault can reach, so a minority can never carry a slash.
+        #[ink::test]
+        fn the_threshold_floor_is_a_strict_majority_at_every_set_size() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+            vault.consensus_threshold_percent = MIN_THRESHOLD;
+            for n in 1..=MAX_VALIDATORS {
+                vault.validators = (0..n as u8)
+                    .map(|i| AccountId::from([i; 32]))
+                    .collect();
+                assert!(u64::from(vault.get_required_votes()) * 2 > n as u64);
+            }
         }
 
         /// The bootstrap ramp: a lone seed validator adds the second alone,
@@ -1478,8 +1529,15 @@ mod allways_bond_vault {
             let mut vault = new_vault();
 
             set_caller(acc.django);
-            assert_eq!(vault.vote_set_config(1, 2, 0, 600), Err(Error::InvalidAmount));
             assert_eq!(vault.vote_set_config(1, 2, 101, 600), Err(Error::InvalidAmount));
+            // Sub-majority thresholds are refused: at 50 or below, ceil() can
+            // hand a minority — at 1%, a single validator — a money quorum.
+            assert_eq!(vault.vote_set_config(1, 2, 0, 600), Err(Error::ThresholdTooLow));
+            assert_eq!(vault.vote_set_config(1, 2, 1, 600), Err(Error::ThresholdTooLow));
+            assert_eq!(
+                vault.vote_set_config(1, 2, MIN_THRESHOLD - 1, 600),
+                Err(Error::ThresholdTooLow)
+            );
             // Below the TTL floor: a unanimous mistake must not be able to
             // starve every future round of the time to gather votes.
             assert_eq!(
