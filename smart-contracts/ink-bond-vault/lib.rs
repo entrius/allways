@@ -157,9 +157,9 @@ mod allways_bond_vault {
         request_voters: Mapping<u64, Vec<AccountId>>,
         request_created: Mapping<u64, u32>,
         request_hash: Mapping<u64, Hash>,
-        // One live unlock round per miner; one live slash round per swap_ref
-        // (keyed by swap_ref, not miner, so two timed-out swaps for the same
-        // miner can be slashed concurrently).
+        // One live unlock round per miner. Slash rounds are keyed by the FULL
+        // verdict hash: divergent figures open separate rounds rather than
+        // conflicting, so no junk vote can park a swap_ref for a whole TTL.
         unlock_request: Mapping<AccountId, u64>,
         slash_request: Mapping<Hash, u64>,
         // Fee-settle rounds keyed by the batch-contents hash, so a cadence
@@ -562,7 +562,10 @@ mod allways_bond_vault {
 
         /// Apply a slash verdict relayed from Solana. `swap_ref` is the Solana
         /// swap key (32 bytes); the round hash binds every argument so all
-        /// validators must relay the identical verdict. On quorum: seize
+        /// validators must relay the identical verdict, and it KEYS the round
+        /// too — a junk verdict opens its own round instead of parking the
+        /// swap_ref's for a TTL, and the `slashed` marker still allows exactly
+        /// one application ever. On quorum: seize
         /// min(penalty, collateral), reimburse the wronged user (push, with a
         /// pull fallback via claim_slash so a failed transfer can't revert the
         /// quorum application), credit any surplus to the fee pot.
@@ -588,9 +591,9 @@ mod allways_bond_vault {
 
             let round_hash =
                 Self::hash_request(&(REQ_SLASH, miner, swap_ref, penalty, user, reimbursement));
-            let existing = self.slash_request.get(swap_ref);
+            let existing = self.slash_request.get(round_hash);
             let (id, votes, quorum) = self.cast_vote(existing, round_hash)?;
-            self.slash_request.insert(swap_ref, &id);
+            self.slash_request.insert(round_hash, &id);
 
             self.env().emit_event(VaultVoteCast {
                 validator: self.env().caller(),
@@ -601,10 +604,11 @@ mod allways_bond_vault {
             });
 
             if quorum {
-                // Permanent marker first: this swap_ref can never slash again.
+                // Permanent marker first: this swap_ref can never slash again,
+                // whatever other verdict rounds are open against it.
                 self.slashed.insert(swap_ref, &true);
                 self.clear_request_data(id);
-                self.slash_request.remove(swap_ref);
+                self.slash_request.remove(round_hash);
 
                 let current = self.collateral.get(miner).unwrap_or(0);
                 let seized = core::cmp::min(penalty, current);
@@ -1114,13 +1118,20 @@ mod allways_bond_vault {
         }
 
         fn seeded_vault(validators: Vec<AccountId>) -> AllwaysBondVault {
+            seeded_vault_at(validators, 100)
+        }
+
+        /// At a majority threshold an honest quorum carries a verdict without
+        /// the dissenter — which is what the anti-grief rounds are about.
+        fn seeded_vault_at(validators: Vec<AccountId>, threshold: u8) -> AllwaysBondVault {
             let acc = accounts();
             set_caller(acc.alice);
             ink::env::test::set_account_balance::<crate::CustomEnvironment>(
                 contract_id(),
                 ED_RESERVE,
             );
-            AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, validators).unwrap()
+            AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, threshold, 100, validators)
+                .unwrap()
         }
 
         fn post(vault: &mut AllwaysBondVault, miner: AccountId, amount: Balance) {
@@ -1231,6 +1242,45 @@ mod allways_bond_vault {
             );
         }
 
+        /// Anti-grief: one validator voting a junk verdict must not be able to
+        /// park a swap_ref's round for a whole TTL, renewably, and stall the
+        /// real reimbursement. Divergent figures open SEPARATE rounds.
+        #[ink::test]
+        fn divergent_slash_verdicts_open_separate_rounds() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault_at(ink::prelude::vec![acc.django, acc.eve, acc.charlie], 66);
+            post(&mut vault, acc.bob, 5_000);
+
+            // The griefer's verdict lands first, on the same swap_ref.
+            let swap_ref = Hash::from([9u8; 32]);
+            set_caller(acc.charlie);
+            vault
+                .vote_slash(acc.bob, swap_ref, 5_000, acc.charlie, 5_000)
+                .unwrap();
+
+            // The honest majority's own round is unobstructed by it.
+            for validator in [acc.django, acc.eve] {
+                set_caller(validator);
+                vault
+                    .vote_slash(acc.bob, swap_ref, 3_000, acc.frank, 2_500)
+                    .unwrap();
+            }
+            assert!(vault.is_slashed(swap_ref));
+            assert_eq!(vault.get_collateral(acc.bob), 2_000);
+            assert_eq!(vault.get_accumulated_fees(), 500);
+
+            // And the marker, not the round key, is what stops a second
+            // application — the griefer's round can never be completed.
+            set_caller(acc.django);
+            assert_eq!(
+                vault.vote_slash(acc.bob, swap_ref, 5_000, acc.charlie, 5_000),
+                Err(Error::AlreadySlashed)
+            );
+        }
+
+        /// Every figure is still hash-bound: validators who relay different
+        /// numbers do not co-count toward one quorum.
         #[ink::test]
         fn slash_round_hash_binds_all_args() {
             let acc = accounts();
@@ -1243,12 +1293,21 @@ mod allways_bond_vault {
                 .vote_slash(acc.bob, swap_ref, 3_000, acc.charlie, 2_500)
                 .unwrap();
 
-            // Same swap_ref, different amount ⇒ different hash ⇒ conflict.
+            // Same swap_ref, different amount ⇒ its own round, not a vote on
+            // django's: at quorum 2 neither applies.
             set_caller(acc.eve);
-            assert_eq!(
-                vault.vote_slash(acc.bob, swap_ref, 2_000, acc.charlie, 1_500),
-                Err(Error::PendingConflict)
-            );
+            vault
+                .vote_slash(acc.bob, swap_ref, 2_000, acc.charlie, 1_500)
+                .unwrap();
+            assert!(!vault.is_slashed(swap_ref));
+            assert_eq!(vault.get_collateral(acc.bob), 5_000);
+
+            // Agreeing on django's exact verdict is what applies it.
+            vault
+                .vote_slash(acc.bob, swap_ref, 3_000, acc.charlie, 2_500)
+                .unwrap();
+            assert!(vault.is_slashed(swap_ref));
+            assert_eq!(vault.get_collateral(acc.bob), 2_000);
         }
 
         #[ink::test]
