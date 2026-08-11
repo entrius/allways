@@ -115,6 +115,16 @@ def backing_purse(client, miner, miner_state, backing: str) -> Optional[int]:
     return int(attestation.effective_balance)
 
 
+def floors_from_config(cfg) -> Dict[str, int]:
+    """Per-backing ACTIVATION floors off the on-chain Config — mirrors ``backing.rs::activation_floor``.
+    Each is in its own backing asset's smallest unit (lamports for "sol", rao for "tao"); a floor is
+    never converted through a rate, which would smuggle a price oracle into a guard."""
+    return {
+        NUMERAIRE_CHAIN: int(getattr(cfg, 'min_collateral', 0) or 0),
+        'tao': int(getattr(cfg, 'tao_min_collateral', 0) or 0),
+    }
+
+
 def bounds_from_config(cfg) -> BoundsByBacking:
     """Per-backing swap bounds off the on-chain Config — mirrors ``backing.rs::swap_bounds``."""
     return {

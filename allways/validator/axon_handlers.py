@@ -9,12 +9,15 @@ These are attached to the validator's axon via functools.partial
 to inject the validator context.
 """
 
+import time
 from typing import TYPE_CHECKING, Tuple
 
 import bittensor as bt
 
+from allways.solana import pdas
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
+from allways.validator import activation
 from allways.validator.reserve_engine import (
     confirm_deposit,
     reserve_on_behalf,
@@ -72,16 +75,16 @@ async def handle_miner_activate(
     validator: 'Validator',
     synapse: MinerActivateSynapse,
 ) -> MinerActivateSynapse:
-    """Process miner activation: confirm on-chain eligibility + vote_activate on the Solana contract.
+    """Process miner activation: confirm the named purse's eligibility + vote_activate that backing.
 
-    The miner flags down a validator; the validator resolves its bound Solana pubkey (A5 HotkeyBinding),
-    checks MinerState (not already active, collateral >= Config.min_collateral — the contract re-checks
-    both at quorum), and submits vote_activate. The old commitment/quote gate is a Phase-8 concern; the
-    contract's vote_activate requires no quote, so it's dropped here."""
+    The miner flags down a validator naming ONE purse; the validator resolves its bound Solana pubkey
+    (A5 HotkeyBinding) and checks that purse's own facts (see `activation.check`) before voting. Purses
+    activate independently since W2, so the gate is the backing's bit, never the `active` OR view."""
     miner_hotkey = synapse.dendrite.hotkey
     client = validator.solana_client
+    backing = (synapse.backing or pdas.BACKING_CHAIN_SOL).lower()
     label = miner_label(validator, miner_hotkey)
-    ctx = f'[{label}] MinerActivate'
+    ctx = f'[{label}] MinerActivate {backing.upper()}'
     bt.logging.info(f'{ctx}: REQUEST received (full hotkey={miner_hotkey})')
 
     try:
@@ -104,16 +107,13 @@ async def handle_miner_activate(
         if miner_state is None:
             reject_synapse(synapse, 'Miner has no on-chain state yet (post collateral first)', ctx)
             return synapse
-        if miner_state.active:
-            reject_synapse(synapse, 'Miner is already active', ctx)
+
+        verdict = activation.check(validator, miner_hotkey, miner_pk, miner_state, backing, int(time.time()))
+        if not verdict.ok:
+            reject_synapse(synapse, verdict.reason, ctx)
             return synapse
 
-        min_collateral = client.get_config().min_collateral
-        if miner_state.collateral < min_collateral:
-            reject_synapse(synapse, f'Insufficient collateral: {miner_state.collateral} < {min_collateral}', ctx)
-            return synapse
-
-        client.vote_activate(miner_pk)
+        client.vote_activate(miner_pk, backing=backing)
         synapse.accepted = True
         bt.logging.info(f'{ctx}: ACTIVATED — vote_activate submitted')
 

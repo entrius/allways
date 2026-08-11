@@ -14,14 +14,18 @@ import bittensor as bt
 class MinerActivateSynapse(bt.Synapse):
     """Miner broadcasts activation request to all validators.
 
-    Validators verify the miner's on-chain commitment exists and collateral
-    meets minimum, then vote_activate on the contract.
+    Validators verify the named purse clears its own floor on chain, then
+    vote_activate that backing on the contract.
     """
 
     # Request fields (miner fills)
     hotkey: str
     signature: str
     message: str
+    # Which purse to light (W2 — each backing activates separately). The miner resolves it, never
+    # the validator: the backing sets the guarantee a taker gets, so it is never inferred here.
+    # Absent = "sol", which is what every pre-W2 miner means and keeps its wire format valid.
+    backing: Optional[str] = None
 
     # Response fields (validator fills)
     accepted: Optional[bool] = None

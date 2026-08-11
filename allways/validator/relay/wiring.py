@@ -66,6 +66,17 @@ def build_bond_relay(validator: Any, read_only: bool = False) -> Optional[BondRe
     return relay
 
 
+def axon_vault_client(validator: Any) -> Optional[BondVaultClient]:
+    """A read-only vault client on the AXON's subtensor, or None when this validator has no relay.
+    Handler threads must never touch the relay's own websocket (mid-extrinsic on the forward loop),
+    so this rebinds the resolved address + metadata per call — and so follows a socket reconnect."""
+    relay = getattr(validator, 'bond_relay', None)
+    axon_subtensor = getattr(validator, 'axon_subtensor', None)
+    if relay is None or axon_subtensor is None:
+        return None
+    return BondVaultClient(axon_subtensor, relay.vault.address, metadata=relay.vault.metadata)
+
+
 def _close(subtensor) -> None:
     if subtensor is not None:
         try:
