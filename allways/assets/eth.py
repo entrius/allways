@@ -1,4 +1,3 @@
-from allways.assets.evm import ETHEREUM
 from allways.assets.evm_coin import EvmCoin
 from allways.chains import CHAIN_ETH
 
@@ -10,4 +9,4 @@ class Ether(EvmCoin):
     same shape every native EVM coin takes."""
 
     def __init__(self):
-        super().__init__(CHAIN_ETH, ETHEREUM)
+        super().__init__(CHAIN_ETH)

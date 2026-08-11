@@ -353,7 +353,7 @@ class TestSendGuards:
         monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         rpc_stub(provider, self._send_responses(token_balance=AMOUNT - 1))
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
-        assert 'Insufficient ARBUSDC' in provider.last_send_error
+        assert 'insufficient balance' in provider.last_send_error
 
     def test_insufficient_gas_balance_refused(self, provider, monkeypatch):
         # F6: token-rich but gas-poor must refuse BEFORE broadcasting a doomed transfer.
@@ -374,7 +374,7 @@ class TestSendGuards:
         responses['eth_estimateGas'] = revert
         rpc_stub(provider, responses)
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
-        assert 'Insufficient ARBUSDC' in provider.last_send_error
+        assert 'insufficient balance' in provider.last_send_error
 
     def test_reverting_transfer_refused(self, provider, monkeypatch):
         monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)

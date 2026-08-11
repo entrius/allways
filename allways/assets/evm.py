@@ -316,9 +316,9 @@ class EvmAsset(Asset):
     """Base for assets on EVM chains: key handling, send dedup ladder, deposit-scan
     cursors, the settled-tx cache, and the connection check scaffold.
 
-    Chain questions route through ``self.chain`` (seam rule): a fused native coin is its
-    own chain; a token binds ``self._chain`` to its host network's `EvmChain` at
-    construction. Env vars key off the asset's ``chain_def.env_prefix``.
+    Chain questions route through ``self.chain`` (seam rule): every EVM asset, coin or
+    token, binds ``self._chain`` to its host network's `EvmChain` at construction. Env
+    vars key off that NETWORK's ``env_prefix``, shared by every asset on it.
     """
 
     # Settled-tx cache bound — comfortably above any realistic concurrent-leg count.
