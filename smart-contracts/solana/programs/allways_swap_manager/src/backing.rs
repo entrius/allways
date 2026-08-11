@@ -129,22 +129,28 @@ pub fn require_fresh_heartbeat(config: &Config, now: i64) -> Result<()> {
     Ok(())
 }
 
-/// Entry gates for a swap backed off-chain: the fuse above, plus busy-until-settled. A locally-settled
-/// backing passes both by construction — its penalty already moved inside `timeout_swap`.
+/// Entry gates for a new swap: busy-until-settled for EVERY backing, plus the dead-man fuse for the
+/// ones that settle elsewhere.
 pub fn check_entry_gates(
     config: &Config,
     miner_state: &MinerState,
     collateral_chain: &str,
     now: i64,
 ) -> Result<()> {
-    // Reject an unknown chain here rather than letting the fuse answer for it — same error at every
-    // gate, whether or not the heartbeat happens to be fresh.
+    // Reject an unknown chain here rather than letting the gates answer for it — same error at every
+    // door, whether or not the heartbeat happens to be fresh.
     backing_bit(collateral_chain)?;
+    // A penalty still settling on a backing chain freezes the WHOLE miner, not just that purse: a
+    // pending seizure means the miner owes money nobody has taken yet. `settling_until` is 0 for a
+    // SOL-only miner and for any locally-settled timeout (those seize atomically), so the SOL path
+    // only ever meets this gate when a TAO slash really is outstanding.
+    require!(now >= miner_state.settling_until, ErrorCode::MinerSettling);
+    // The fuse stays non-local: it is an attestation-freshness question, and a locally-settled
+    // backing reads no attestation.
     if settles_locally(collateral_chain) {
         return Ok(());
     }
     require_fresh_heartbeat(config, now)?;
-    require!(now >= miner_state.settling_until, ErrorCode::MinerSettling);
     Ok(())
 }
 
@@ -307,6 +313,20 @@ mod tests {
         settling.settling_until = 2_000;
         assert!(check_entry_gates(&cfg, &settling, "tao", 1_999).is_err());
         assert!(check_entry_gates(&cfg, &settling, "tao", 2_000).is_ok());
+    }
+
+    #[test]
+    fn a_pending_off_chain_seizure_freezes_the_sol_path_too() {
+        // A miner owing an untaken TAO seizure is frozen whole — the settle gate is above the
+        // locally-settling early return, so it applies to a SOL-backed open as well.
+        let cfg = config_with(1_000, ATTEST_MAX_AGE_SECS);
+        let mut settling = miner_with(7);
+        settling.settling_until = 2_000;
+        assert!(check_entry_gates(&cfg, &settling, "sol", 1_999).is_err());
+        assert!(check_entry_gates(&cfg, &settling, "sol", 2_000).is_ok());
+        // And it costs an unencumbered SOL-only miner nothing: settling_until is 0 for them, and a
+        // locally-settled timeout never writes it.
+        assert!(check_entry_gates(&cfg, &miner_with(7), "sol", 1).is_ok());
     }
 
     #[test]

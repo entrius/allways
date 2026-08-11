@@ -840,16 +840,11 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
     assert_eq!(ms.busy_until, settled_at, "exit lock");
     assert_eq!(ms.settling_until, settled_at, "entry lock — a separate field, same deadline");
 
-    // A new TAO-backed fill is refused while the penalty is still settling on the backing chain.
+    // New work is refused while the penalty is still settling on the backing chain — at the first
+    // door, the permissionless pool open, so no fresh contest can even be started.
     beat_heartbeat(&mut svm, &vals);
-    draw_tao_backed(&mut svm, &vals[0], &m);
-    let err = send(
-        &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
-        &vals[0].pubkey(),
-        &vals[0],
-    )
-    .expect_err("still settling");
+    let err = send(&mut svm, open_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO), &vals[0].pubkey(), &vals[0])
+        .expect_err("still settling");
     assert!(err.contains("MinerSettling"), "{err}");
 
     // Past the grace it clears itself — no crank, no second write.
@@ -866,12 +861,50 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
 }
 
 #[test]
-fn test_settling_until_never_blocks_the_sol_path() {
-    // The lock is per-settlement-latency, not per-miner: a SOL-backed swap settles atomically inside
-    // timeout_swap, so it must be reachable even while a TAO settlement is outstanding.
+fn test_a_pending_off_chain_settlement_freezes_the_sol_path_too() {
+    // A pending seizure freezes the WHOLE miner: an outstanding TAO slash is money the miner owes that
+    // nobody has taken yet, so it must not be able to open fresh SOL work in the meantime either.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
-    set_settling_until(&mut svm, &m, BASE_TS + 100_000);
+    let settled_at = BASE_TS + 100_000;
+
+    // Draw first, so both SOL doors can be tried against the same outstanding settlement.
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+    set_settling_until(&mut svm, &m, settled_at);
+
+    let err = send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect_err("sol-backed finalize while a TAO seizure is outstanding");
+    assert!(err.contains("MinerSettling"), "{err}");
+
+    // And the user-triggered door, which has no validator in the loop at all.
+    let err = send(&mut svm, open_ix(&vals[1].pubkey(), &m, SPOKE_FROM, SPOKE_TO), &vals[1].pubkey(), &vals[1])
+        .expect_err("sol-backed pool open while a TAO seizure is outstanding");
+    assert!(err.contains("MinerSettling"), "{err}");
+
+    // Self-clearing, like the TAO side: past the grace the same fill goes through, no crank.
+    set_clock(&mut svm, settled_at);
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+    send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("settled ⇒ SOL entry reopens");
+}
+
+#[test]
+fn test_a_sol_only_miner_is_untouched_by_the_settle_gate() {
+    // The gate costs the SOL path nothing in the normal case: `settling_until` is 0 for a SOL-only
+    // miner and a locally-settled timeout never writes it, so the whole SOL lifecycle is unaffected.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    assert_eq!(miner_state(&svm, &m).settling_until, 0, "nothing has ever settled off-chain here");
 
     draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
     send(
@@ -880,8 +913,18 @@ fn test_settling_until_never_blocks_the_sol_path() {
         &vals[0].pubkey(),
         &vals[0],
     )
-    .expect("sol-backed entry is untouched by settling_until");
-    assert_eq!(miner_state(&svm, &m).settling_until, BASE_TS + 100_000, "and the lock still stands");
+    .expect("finalize");
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &m, "soltx2"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let initiated_at = now_ts(&svm);
+    send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "soltx2", None), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(&mut svm, initiate_ix(&vals[1].pubkey(), &m, "soltx2", None), &vals[1].pubkey(), &vals[1]).expect("i1");
+
+    // And the local timeout that follows leaves it at 0 — the seizure already happened, atomically.
+    set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
+    let key = swap_key("soltx2");
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &m, key), &vals[0].pubkey(), &vals[0]).expect("t0");
+    send(&mut svm, timeout_ix(&vals[1].pubkey(), &m, key), &vals[1].pubkey(), &vals[1]).expect("t1");
+    assert_eq!(miner_state(&svm, &m).settling_until, 0, "a local seizure owes nothing later");
 }
 
 // --- per-hub activation ------------------------------------------------------------------------
