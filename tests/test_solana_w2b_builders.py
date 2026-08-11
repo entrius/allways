@@ -61,6 +61,8 @@ def _metas(ix):
         'open_or_request',
         'deactivate',
         'close_legacy_quote',
+        'close_legacy_pool',
+        'close_legacy_reservation',
         'vote_set_attestation',
         'vote_attest_heartbeat',
         'set_tao_min_swap_amount',
@@ -162,6 +164,30 @@ def test_close_legacy_quote_targets_the_old_derivation_and_pays_the_miner(client
         (client.keypair.pubkey(), True, False),  # caller only pays the tx
         (miner, False, True),  # rent goes back to the miner that paid it
         (pdas.legacy_quote_pda(miner, 'btc', 'sol', PID), False, True),
+    ]
+
+
+def test_close_legacy_slots_target_the_live_addresses_and_pay_the_miner(client):
+    # The v3 counterpart, and the reason it looks different: these two PDAs did NOT move, so the
+    # builder names the SAME address the live program resolves and the on-chain length check is what
+    # separates a legacy record from a live one.
+    miner = Keypair().pubkey()
+    client.close_legacy_pool(miner)
+    ix = _ix(client)
+    assert _body(ix) == b'', 'no args — the account proves its own vintage by length'
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, False),
+        (miner, False, True),
+        (pdas.pool_pda(miner, PID), False, True),
+    ]
+
+    client.close_legacy_reservation(miner)
+    ix = _ix(client)
+    assert _body(ix) == b''
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, False),
+        (miner, False, True),
+        (pdas.reservation_pda(miner, PID), False, True),
     ]
 
 

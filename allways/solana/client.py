@@ -560,6 +560,29 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('close_legacy_quote', b'', metas)])
 
+    def close_legacy_pool(self, miner) -> str:
+        """Permissionless: reap a pre-v3 `Pool` sitting at the address the live program resolves. Same
+        seeds as the live one — which is why this is needed at all — so legacy-ness is proven on-chain
+        by the account's LENGTH, and a live pool cannot be reached. Rent goes to the miner."""
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(m, False, True),
+            AccountMeta(pdas.pool_pda(m, self.program_id), False, True),
+        ]
+        return self._send([self._ix('close_legacy_pool', b'', metas)])
+
+    def close_legacy_reservation(self, miner) -> str:
+        """The `close_legacy_pool` twin for the reservation slot, which `open_or_request` resolves in
+        the same instruction and fails to parse for the same reason."""
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(m, False, True),
+            AccountMeta(pdas.reservation_pda(m, self.program_id), False, True),
+        ]
+        return self._send([self._ix('close_legacy_reservation', b'', metas)])
+
     def deactivate(self, backing: Optional[str] = None) -> str:
         """Miner self-deactivation (no consensus). `backing=None` is the full exit (every purse);
         naming one drops only that purse and leaves the rest trading. Guarded on-chain: must be active,

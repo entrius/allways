@@ -12,9 +12,11 @@ use {
     },
     allways_swap_manager::constants::{
         required_collateral, ATTEST_MAX_AGE_SECS, BACKING_BIT_SOL, BACKING_BIT_TAO, CONFIG_VERSION,
-        POOL_WINDOW_SECS, SETTLEMENT_GRACE_SECS, TAO_MIN_COLLATERAL_RAO,
+        MAX_CHAIN_LEN, POOL_WINDOW_SECS, SETTLEMENT_GRACE_SECS, TAO_MIN_COLLATERAL_RAO,
     },
-    allways_swap_manager::state::{BondAttestation, Config, MinerState, Pool, Reservation, Swap, ValidatorInfo},
+    allways_swap_manager::state::{
+        BondAttestation, Config, MinerState, Pool, Request, Reservation, Swap, ValidatorInfo,
+    },
     litesvm::LiteSVM,
     solana_account::Account,
     solana_hash::Hash,
@@ -1578,4 +1580,245 @@ fn test_a_forced_tao_deactivation_leaves_the_sol_cooldown_alone() {
     let ms = miner_state(&svm, &m);
     assert_eq!(ms.active_backings, BACKING_BIT_SOL);
     assert_eq!(ms.deactivation_at, 0, "a TAO sweep is gated on the vault's unlock path, not this clock");
+}
+
+// --- the legacy Pool/Reservation closer (migration completeness) -----------------------------------
+
+/// Bytes v3 added to each reused slot: one `collateral_chain` String at `MAX_CHAIN_LEN`.
+const LEGACY_SHRINK: usize = 4 + MAX_CHAIN_LEN;
+
+/// The v10 `Pool` body — no `collateral_chain`, and its seeds are the SAME as the live one's, which is
+/// the whole reason a closer is needed at all.
+#[derive(AnchorSerialize)]
+struct PoolV10 {
+    miner: Pubkey,
+    from_chain: String,
+    to_chain: String,
+    miner_from_addr: String,
+    miner_to_addr: String,
+    rate: u128,
+    opened_at: i64,
+    closes_at: i64,
+    seed_slot: u64,
+    requests: Vec<Request>,
+    bump: u8,
+}
+
+/// The v10 `Reservation` body — `collateral_amount` sat directly after `to_chain`.
+#[derive(AnchorSerialize)]
+struct ReservationV10 {
+    router: Pubkey,
+    from_addr: String,
+    user: Pubkey,
+    user_to_addr: String,
+    from_chain: String,
+    to_chain: String,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+    miner_from_addr: String,
+    miner_to_addr: String,
+    rate: u128,
+    created_at: i64,
+    reserved_until: i64,
+    finalize_by: i64,
+    max_extend_at: i64,
+    claimed_swap_key: [u8; 32],
+    bump: u8,
+}
+
+/// Plant a legacy record padded to the EXACT v10 allocation. Borsh writes Strings at their real length,
+/// so an on-chain record carries the rest of its allocation as zero slack — and the allocation length is
+/// the closer's entire proof, so the fixture has to reproduce it byte for byte. Returns the rent.
+fn plant_legacy(svm: &mut LiteSVM, pda: Pubkey, disc: &[u8], body: Vec<u8>, alloc_len: usize) -> u64 {
+    let mut data = disc.to_vec();
+    data.extend(body);
+    assert!(data.len() <= alloc_len, "legacy body overflows the v10 allocation");
+    data.resize(alloc_len, 0);
+    let lamports = svm.minimum_balance_for_rent_exemption(alloc_len);
+    svm.set_account(pda, Account { lamports, data, owner: pid(), executable: false, rent_epoch: 0 })
+        .unwrap();
+    lamports
+}
+
+fn plant_legacy_pool(svm: &mut LiteSVM, miner: &Pubkey, router: Pubkey) -> u64 {
+    let body = PoolV10 {
+        miner: *miner,
+        from_chain: SPOKE_FROM.to_string(),
+        to_chain: SPOKE_TO.to_string(),
+        miner_from_addr: MINER_FROM.to_string(),
+        miner_to_addr: MINER_TO.to_string(),
+        rate: RATE,
+        opened_at: BASE_TS - 900,
+        closes_at: BASE_TS - 600,
+        seed_slot: 42,
+        requests: vec![Request { router }],
+        bump: 255,
+    };
+    let mut buf = Vec::new();
+    body.serialize(&mut buf).unwrap();
+    plant_legacy(
+        svm,
+        pool_pda(miner),
+        &Pool::DISCRIMINATOR,
+        buf,
+        8 + Pool::INIT_SPACE - LEGACY_SHRINK,
+    )
+}
+
+fn plant_legacy_reservation(svm: &mut LiteSVM, miner: &Pubkey, router: Pubkey) -> u64 {
+    let body = ReservationV10 {
+        router,
+        from_addr: "userSrcAddr".to_string(),
+        user: LOTTERY_USER,
+        user_to_addr: "userDstAddr".to_string(),
+        from_chain: SPOKE_FROM.to_string(),
+        to_chain: SPOKE_TO.to_string(),
+        collateral_amount: SOL_AMOUNT,
+        from_amount: 1_333_333_333,
+        to_amount: SOL_AMOUNT as u128,
+        miner_from_addr: MINER_FROM.to_string(),
+        miner_to_addr: MINER_TO.to_string(),
+        rate: RATE,
+        created_at: BASE_TS - 600,
+        reserved_until: BASE_TS - 300,
+        finalize_by: BASE_TS - 400,
+        max_extend_at: BASE_TS,
+        claimed_swap_key: [0u8; 32],
+        bump: 255,
+    };
+    let mut buf = Vec::new();
+    body.serialize(&mut buf).unwrap();
+    plant_legacy(
+        svm,
+        resv_pda(miner),
+        &Reservation::DISCRIMINATOR,
+        buf,
+        8 + Reservation::INIT_SPACE - LEGACY_SHRINK,
+    )
+}
+
+fn close_legacy_pool_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseLegacyPool {}.data(),
+        allways_swap_manager::accounts::CloseLegacyPool {
+            caller: *caller,
+            miner: *miner,
+            pool: pool_pda(miner),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn close_legacy_reservation_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseLegacyReservation {}.data(),
+        allways_swap_manager::accounts::CloseLegacyReservation {
+            caller: *caller,
+            miner: *miner,
+            reservation: resv_pda(miner),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn is_closed(svm: &LiteSVM, pda: &Pubkey) -> bool {
+    svm.get_account(pda).is_none_or(|a| a.lamports == 0 && a.data.is_empty())
+}
+
+#[test]
+fn test_the_legacy_closer_unlocks_a_miner_stranded_by_the_v3_layout() {
+    // Pool/Reservation SEEDS did not change in v3 but their layout did, so an existing miner's v10
+    // records sit at exactly the addresses `open_or_request` resolves — and it cannot parse them.
+    // withdraw_collateral never closed these, so draining swaps does not help: without this closer
+    // every miner registered before the upgrade is locked out permanently.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let router = vals[0].pubkey();
+    let pool_rent = plant_legacy_pool(&mut svm, &m, router);
+    let resv_rent = plant_legacy_reservation(&mut svm, &m, router);
+
+    // The lockout, demonstrated rather than assumed. It is not a tidy AccountDidNotDeserialize: the
+    // inserted field shifts every later String, so borsh reads a garbage length prefix and the program
+    // dies allocating. Worth knowing for the runbook — an operator grepping for the deserialize error
+    // would not find it.
+    let err = send(&mut svm, open_ix(&router, &m, SPOKE_FROM, SPOKE_TO), &router, &vals[0]).unwrap_err();
+    assert!(
+        err.contains("AccountDidNotDeserialize") || err.contains("memory allocation failed"),
+        "v10 records must lock the miner out, got: {err}"
+    );
+
+    let miner_before = svm.get_account(&m).unwrap().lamports;
+    send(&mut svm, close_legacy_pool_ix(&router, &m), &router, &vals[0]).expect("reap the legacy pool");
+    send(&mut svm, close_legacy_reservation_ix(&router, &m), &router, &vals[0])
+        .expect("reap the legacy reservation");
+
+    assert!(is_closed(&svm, &pool_pda(&m)), "the pool slot is handed back to the system program");
+    assert!(is_closed(&svm, &resv_pda(&m)), "and so is the reservation slot");
+    assert_eq!(
+        svm.get_account(&m).unwrap().lamports,
+        miner_before + pool_rent + resv_rent,
+        "rent goes back to the miner that the slot belongs to — the caller profits nothing"
+    );
+
+    // The payoff: the same miner opens a pool again, freshly allocated under the current layout.
+    send(&mut svm, open_ix(&router, &m, SPOKE_FROM, SPOKE_TO), &router, &vals[0]).expect("re-open");
+    assert_eq!(svm.get_account(&pool_pda(&m)).unwrap().data.len(), 8 + Pool::INIT_SPACE);
+    assert_eq!(svm.get_account(&resv_pda(&m)).unwrap().data.len(), 8 + Reservation::INIT_SPACE);
+    assert_eq!(
+        Pool::try_deserialize(&mut svm.get_account(&pool_pda(&m)).unwrap().data.as_slice())
+            .unwrap()
+            .collateral_chain,
+        SOL,
+        "re-created under v13, backing and all"
+    );
+}
+
+#[test]
+fn test_the_legacy_closer_refuses_a_live_slot() {
+    // A v13 record is LONGER than any legacy one by exactly the field v3 added, and the only writer of
+    // these addresses allocates the live length — so requiring the legacy length puts a live pool or a
+    // held reservation structurally out of reach, not merely out of policy.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let router = vals[0].pubkey();
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+    assert_eq!(svm.get_account(&pool_pda(&m)).unwrap().data.len(), 8 + Pool::INIT_SPACE);
+    assert_eq!(svm.get_account(&resv_pda(&m)).unwrap().data.len(), 8 + Reservation::INIT_SPACE);
+
+    let err = send(&mut svm, close_legacy_pool_ix(&router, &m), &router, &vals[0]).unwrap_err();
+    assert!(err.contains("InvalidAccountForMigration"), "a live pool must be unreachable, got: {err}");
+    let err = send(&mut svm, close_legacy_reservation_ix(&router, &m), &router, &vals[0]).unwrap_err();
+    assert!(err.contains("InvalidAccountForMigration"), "a held reservation likewise, got: {err}");
+
+    // Both survive intact — no data zeroed, no rent moved.
+    assert_eq!(reservation_acct(&svm, &m).router, router, "the drawn reservation is untouched");
+    assert_ne!(svm.get_account(&pool_pda(&m)).unwrap().lamports, 0);
+}
+
+#[test]
+fn test_the_legacy_closer_pays_rent_only_to_the_slots_own_miner() {
+    // The rent destination is a PDA seed, so it cannot be redirected: naming a different miner derives
+    // a different address and the account handed in stops matching.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let router = vals[0].pubkey();
+    plant_legacy_pool(&mut svm, &m, router);
+
+    let stranger = Keypair::new().pubkey();
+    let ix = Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseLegacyPool {}.data(),
+        allways_swap_manager::accounts::CloseLegacyPool {
+            caller: router,
+            miner: stranger,
+            pool: pool_pda(&m),
+        }
+        .to_account_metas(None),
+    );
+    let err = send(&mut svm, ix, &router, &vals[0]).unwrap_err();
+    assert!(err.contains("ConstraintSeeds"), "the rent destination is seed-bound, got: {err}");
+    assert!(!is_closed(&svm, &pool_pda(&m)), "and the slot is still there to be reaped properly");
 }

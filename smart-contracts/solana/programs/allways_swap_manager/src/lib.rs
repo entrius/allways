@@ -320,6 +320,18 @@ pub mod allways_swap_manager {
     pub fn close_legacy_quote(ctx: Context<CloseLegacyQuote>) -> Result<()> {
         close_legacy_quote::handler(ctx)
     }
+    /// Permissionless: reap a pre-v3 `Pool` left at the address the live one resolves to, refunding
+    /// rent to the miner. Without it every miner registered before the upgrade is locked out of
+    /// `open_or_request` forever (the seeds didn't change but the layout did). A live Pool is
+    /// structurally unreachable — see the handler's size proof.
+    pub fn close_legacy_pool(ctx: Context<CloseLegacyPool>) -> Result<()> {
+        close_legacy_slot::close_pool(ctx)
+    }
+    /// The same reap for the pre-v3 `Reservation` slot, which `open_or_request` resolves in the same
+    /// instruction and would fail to parse for the same reason.
+    pub fn close_legacy_reservation(ctx: Context<CloseLegacyReservation>) -> Result<()> {
+        close_legacy_slot::close_reservation(ctx)
+    }
 
     // --- Identity binding ---
     /// A miner links its Solana pubkey to its Bittensor hotkey (stores the hotkey + an sr25519 sig the

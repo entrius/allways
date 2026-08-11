@@ -470,6 +470,10 @@ IX_DISCRIMINATORS = {
     'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),
     # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
     'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
+    # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
+    # quotes these did NOT move, so they sit where the live program looks; run them per pre-v3 miner.
+    'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
+    'close_legacy_reservation': bytes([114, 19, 114, 1, 9, 107, 205, 116]),
     # v3 upgrade cranks (no args each; run migrate_config first).
     'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
     'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),
