@@ -71,7 +71,9 @@ ETHEREUM = EvmNetwork(
     chain_ids={'mainnet': 1, 'sepolia': 11_155_111},
     rpc_urls={
         'mainnet': ('https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org'),
-        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.drpc.org'),
+        # drpc's free tier stopped serving Sepolia (rpc error 35), leaving the ladder
+        # single-endpoint — a null then never reaches quorum and every absent tx raises.
+        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'),
     },
 )
 ARBITRUM = EvmNetwork(
