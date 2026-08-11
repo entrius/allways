@@ -1006,6 +1006,9 @@ fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
     let ms = miner_state(&svm, &m);
     assert_eq!(ms.active_swap_backings, BACKING_BIT_SOL | BACKING_BIT_TAO, "one live swap per hub");
     assert!(ms.has_active_swap);
+    // Each obligation reserves 1.10× of its own fill against its own pot.
+    assert_eq!(ms.reserved(BACKING_BIT_SOL), required_collateral(SOL_AMOUNT));
+    assert_eq!(ms.reserved(BACKING_BIT_TAO), required_collateral(TAO_AMOUNT as u64));
 
     // Both overdue. The TAO verdict lands first — verdict-only, busy-until-settled on ITS hub.
     let overdue = tao_initiated.max(sol_initiated) + TIMEOUT_SECS + 1;
@@ -1052,6 +1055,7 @@ fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
     let ms = miner_state(&svm, &m);
     assert!(!ms.has_active_swap, "both obligations settled");
     assert_eq!(ms.failed_swaps, 2, "strikes stay GLOBAL across hubs");
+    assert_eq!(ms.reserved(BACKING_BIT_SOL) + ms.reserved(BACKING_BIT_TAO), 0, "reservations released");
 
     // Per-hub exit: the sol hub is free NOW; the tao hub stays locked until its grace passes.
     send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("sol exits mid-tao-settle");
@@ -1060,6 +1064,47 @@ fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
     set_clock(&mut svm, overdue + SETTLEMENT_GRACE_SECS + 1);
     send(&mut svm, self_deactivate_ix(&m, None), &m, &miner).expect("tao exits after its grace");
     assert_eq!(miner_state(&svm, &m).active_backings, 0);
+}
+
+#[test]
+fn test_reserved_collateral_nets_out_of_the_entry_gate() {
+    // Fund-safety #1: a fill must clear 1.10× against UN-reserved collateral. Strict one-per-hub
+    // makes >1 obligation per pot structurally unreachable, so the reserved sum is planted directly —
+    // the gate must still refuse, proving the guardrail holds the moment anything ever allows a
+    // second fill against one pot.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+
+    // Reserve so much of the pot that the (otherwise easily covered) fill no longer fits net.
+    let mut ms = miner_state(&svm, &m);
+    ms.add_reserved(BACKING_BIT_SOL, COLLATERAL - required_collateral(SOL_AMOUNT) + 1).unwrap();
+    let mut buf = Vec::new();
+    ms.try_serialize(&mut buf).unwrap();
+    overwrite(&mut svm, miner_pda(&m), buf);
+
+    let err = send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect_err("gross collateral covers the fill, net of reserved it must not");
+    assert!(err.contains("InsufficientCollateral"), "{err}");
+
+    // Release the phantom obligation and the identical fill clears.
+    let mut ms = miner_state(&svm, &m);
+    ms.release_reserved(BACKING_BIT_SOL, u64::MAX);
+    let mut buf = Vec::new();
+    ms.try_serialize(&mut buf).unwrap();
+    overwrite(&mut svm, miner_pda(&m), buf);
+    send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("same fill, un-reserved pot");
 }
 
 #[test]

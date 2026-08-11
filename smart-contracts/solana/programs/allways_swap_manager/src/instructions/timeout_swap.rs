@@ -133,6 +133,9 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
             0
         };
         ctx.accounts.miner_state.set_swap(bit, false);
+        // The obligation ends with the verdict either way: locally the slash just moved, and for a
+        // vaulted backing the debit is already pessimistically netted into the attestation.
+        ctx.accounts.miner_state.release_reserved(bit, penalty);
         ctx.accounts.miner_state.failed_swaps =
             ctx.accounts.miner_state.failed_swaps.saturating_add(1);
 

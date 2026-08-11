@@ -100,14 +100,17 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             now,
         )?;
         // Obligation gate: the miner must hold the over-collateralization requirement in the purse the
-        // swap pinned as its backing (same leg-lookup discipline as finalize) before being bound.
+        // swap pinned as its backing (same leg-lookup discipline as finalize), NET of what in-flight
+        // obligations already reserve, before being bound.
         let purse = crate::backing::backing_purse(
             &ctx.accounts.swap.collateral_chain,
             &ctx.accounts.miner_state,
             ctx.accounts.attestation.as_deref().map(|a| &**a),
         )?;
+        let hub_bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
         require!(
-            purse >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
+            purse.saturating_sub(ctx.accounts.miner_state.reserved(hub_bit))
+                >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
             ErrorCode::InsufficientCollateral
         );
     }
@@ -146,6 +149,11 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         let bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
         ctx.accounts.miner_state.set_swap(bit, true);
         ctx.accounts.miner_state.set_busy(bit, timeout_at); // hub stays busy through the swap deadline
+        // Reserve the obligation now that it binds; released at confirm/timeout quorum. Every
+        // obligation terminates via an instruction, so the sum can never leak via a passive expiry.
+        ctx.accounts
+            .miner_state
+            .add_reserved(bit, crate::constants::required_collateral(collateral_amount))?;
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         ctx.accounts.reservation.claimed_swap_key = [0u8; 32];
         // Unique swap_key seed → the round is never reused; close it and refund rent, like the

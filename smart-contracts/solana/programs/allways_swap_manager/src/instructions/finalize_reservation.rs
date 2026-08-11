@@ -124,16 +124,19 @@ pub fn handler(
     // penalty on that chain. Both are no-ops for "sol", which settles inside `timeout_swap`.
     backing::check_entry_gates(cfg, &ctx.accounts.miner_state, backing, now)?;
 
-    // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front. Collateral only
-    // rises while busy (withdraw is locked), so passing here means vote_initiate's identical gate can't
-    // later strand a user who has already sent source funds.
+    // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front, NET of what
+    // in-flight obligations already reserve (the v3.1 guardrail: N fills can never share one pot's
+    // headroom). Collateral only rises while busy, so vote_initiate's identical gate can't later
+    // strand a user who has already sent source funds.
     let purse = backing::backing_purse(
         backing,
         &ctx.accounts.miner_state,
         ctx.accounts.attestation.as_deref(),
     )?;
+    let hub_bit = backing::backing_bit(backing)?;
     require!(
-        purse >= required_collateral(collateral_amount),
+        purse.saturating_sub(ctx.accounts.miner_state.reserved(hub_bit))
+            >= required_collateral(collateral_amount),
         ErrorCode::InsufficientCollateral
     );
 

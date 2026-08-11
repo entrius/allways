@@ -145,6 +145,9 @@ pub fn handler(
         let bit = crate::backing::backing_bit(&collateral_chain)?;
         ctx.accounts.miner_state.set_swap(bit, false);
         ctx.accounts.miner_state.set_busy(bit, 0);
+        ctx.accounts
+            .miner_state
+            .release_reserved(bit, crate::constants::required_collateral(collateral_amount));
         ctx.accounts.miner_state.successful_swaps =
             ctx.accounts.miner_state.successful_swaps.saturating_add(1);
 

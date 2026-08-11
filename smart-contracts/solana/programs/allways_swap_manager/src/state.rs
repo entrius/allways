@@ -213,6 +213,28 @@ impl MinerState {
     pub fn settling_any_until(&self) -> i64 {
         self.settling_until.iter().copied().max().unwrap_or(0)
     }
+
+    /// Collateral already obligated to in-flight swaps on this hub, in the backing's own units.
+    pub fn reserved(&self, bit: u8) -> u64 {
+        self.reserved_collateral[Self::backing_slot(bit)]
+    }
+
+    /// Reserve collateral for a new obligation (initiate quorum). Checked: a sum that wraps would
+    /// silently free everything it was guarding.
+    pub fn add_reserved(&mut self, bit: u8, amount: u64) -> Result<()> {
+        let slot = Self::backing_slot(bit);
+        self.reserved_collateral[slot] = self.reserved_collateral[slot]
+            .checked_add(amount)
+            .ok_or(crate::error::ErrorCode::Overflow)?;
+        Ok(())
+    }
+
+    /// Release a settled obligation (confirm/timeout quorum). Saturating: a release must never fail
+    /// a terminal instruction, and under-release only leaves the gate conservative.
+    pub fn release_reserved(&mut self, bit: u8, amount: u64) {
+        let slot = Self::backing_slot(bit);
+        self.reserved_collateral[slot] = self.reserved_collateral[slot].saturating_sub(amount);
+    }
 }
 
 /// A miner's bond on one backing chain, as asserted by validator quorum
@@ -606,5 +628,28 @@ mod tests {
         assert_eq!(ms.settling_slot(BACKING_BIT_TAO), 3_000);
         assert_eq!(ms.settling_slot(BACKING_BIT_SOL), 0);
         assert_eq!(ms.settling_any_until(), 3_000);
+    }
+
+    #[test]
+    fn reserved_collateral_is_per_hub_and_round_trips() {
+        let mut ms = miner();
+        ms.add_reserved(BACKING_BIT_SOL, 500).unwrap();
+        ms.add_reserved(BACKING_BIT_TAO, 900).unwrap();
+        assert_eq!(ms.reserved(BACKING_BIT_SOL), 500);
+        assert_eq!(ms.reserved(BACKING_BIT_TAO), 900);
+        ms.release_reserved(BACKING_BIT_SOL, 500);
+        assert_eq!(ms.reserved(BACKING_BIT_SOL), 0);
+        assert_eq!(ms.reserved(BACKING_BIT_TAO), 900, "one hub's release touches only its slot");
+    }
+
+    #[test]
+    fn reserved_collateral_never_wraps_in_either_direction() {
+        let mut ms = miner();
+        ms.add_reserved(BACKING_BIT_SOL, u64::MAX).unwrap();
+        assert!(ms.add_reserved(BACKING_BIT_SOL, 1).is_err(), "overflow must refuse, not wrap");
+        // Over-release saturates to zero — a terminal instruction must never fail on it, and the
+        // gate only gets more conservative.
+        ms.release_reserved(BACKING_BIT_TAO, 7);
+        assert_eq!(ms.reserved(BACKING_BIT_TAO), 0);
     }
 }
