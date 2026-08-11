@@ -41,7 +41,9 @@ const TIMEOUT_SECS: i64 = 3_600;
 const MIN_COLLATERAL: u64 = 1_000_000_000; // 1 SOL
 const COLLATERAL: u64 = 10_000_000_000; // 10 SOL
 const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL
-const TAO_AMOUNT: u128 = 3_000_000_000; // 3 TAO, in rao
+// 0.5 TAO, in rao — inside the deployed [0.1 τ, 1 τ] band, so these tests exercise the backing
+// guards rather than the size bounds.
+const TAO_AMOUNT: u128 = 500_000_000;
 const FROM_TX_BLOCK: u32 = 800_000;
 const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
 const TAO: &str = "tao";

@@ -265,11 +265,11 @@ pub const DEFAULT_FULFILLMENT_TIMEOUT_SECS: i64 = 600; // 10 min
 /// fulfillment timeout: a tight base, extended while the source tx confirms.
 pub const DEFAULT_RESERVATION_TTL_SECS: i64 = 600; // 10 min
 
-/// Initial TAO-backed swap-size bounds, in rao (`Config.tao_min/max_swap_amount`; 0 max = unbounded).
-/// Seeded at the validator floor rather than a guessed policy number: the TAO backing path is inert
-/// until W2, so the admin tunes these before the first TAO-backed quote can exist.
-pub const TAO_MIN_SWAP_AMOUNT_RAO: u64 = 1_000;
-pub const TAO_MAX_SWAP_AMOUNT_RAO: u64 = 0;
+/// Deploy TAO-backed swap-size bounds, in rao (`Config.tao_min/max_swap_amount`; 0 max = unbounded).
+/// Min = the fee-meaningfulness floor (a 1% fee on 0.1 τ dwarfs ~0.0002 τ of settlement postage).
+/// Max = a deliberately conservative 1 τ start while the quorum that can slash bonds is small.
+pub const TAO_MIN_SWAP_AMOUNT_RAO: u64 = 100_000_000; // 0.1 τ
+pub const TAO_MAX_SWAP_AMOUNT_RAO: u64 = 1_000_000_000; // 1 τ — raised via set_tao_swap_bounds
 
 // Same rules the setters enforce (validate::min_swap_amount / swap_bounds), checked at compile time so
 // the seed can't be a value a later setter would reject.
@@ -292,10 +292,10 @@ const _: () = assert!(
     "SETTLEMENT_GRACE_SECS must be within [1 min, 2 h]"
 );
 
-/// Initial `Config.tao_min_collateral` — the attested effective bond (rao) a miner must hold to
-/// activate its TAO backing, the rao twin of the lamport `min_collateral`. 0.1 TAO is a conservative
-/// non-zero seed, NOT a policy number: the admin sets the real floor before the first TAO-backed quote.
-pub const TAO_MIN_COLLATERAL_RAO: u64 = 100_000_000;
+/// Deploy `Config.tao_min_collateral` — the attested effective bond (rao) a miner must hold to
+/// activate its TAO backing, the rao twin of the lamport `min_collateral`. Anchored to the smallest
+/// bond that can serve one min swap: 1.1 × TAO_MIN_SWAP_AMOUNT_RAO = 0.11 τ, floored up to 0.25 τ.
+pub const TAO_MIN_COLLATERAL_RAO: u64 = 250_000_000; // 0.25 τ
 
 /// Initial `Config.attest_max_age_secs` — the dead-man fuse: TAO-backed entry (finalize/initiate) is
 /// refused once the global attestation heartbeat is older than this. A circuit breaker, not a cadence,

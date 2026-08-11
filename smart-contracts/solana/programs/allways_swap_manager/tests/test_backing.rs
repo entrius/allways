@@ -12,7 +12,7 @@ use {
         ToAccountMetas,
     },
     allways_swap_manager::constants::{
-        required_collateral, POOL_WINDOW_SECS, SETTLEMENT_GRACE_SECS,
+        required_collateral, POOL_WINDOW_SECS, SETTLEMENT_GRACE_SECS, TAO_MIN_SWAP_AMOUNT_RAO,
     },
     allways_swap_manager::events::SwapTimedOut,
     allways_swap_manager::state::{Config, MinerState, Pool, Reservation, Swap},
@@ -39,7 +39,7 @@ const TTL: i64 = 1_800;
 const TIMEOUT_SECS: i64 = 3_600;
 const COLLATERAL: u64 = 10_000_000_000; // 10 SOL
 const SOL_AMOUNT: u64 = 2_000_000_000; // 2 SOL — the collateral-denominated leg on the "sol" path
-const TAO_AMOUNT: u128 = 3_000_000_000; // 3 TAO (rao) — the collateral-denominated leg on the "tao" path
+const TAO_AMOUNT: u128 = 500_000_000; // 0.5 TAO (rao), inside the deployed [0.1, 1] τ band
 const OTHER_AMOUNT: u128 = 1_333_333_333; // the non-collateral leg (asset-native units)
 const FROM_TX_BLOCK: u32 = 800_000;
 const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
@@ -691,7 +691,10 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     // setup never beat a heartbeat), which proves bounds were the only thing standing in the way.
     send(
         &mut svm,
-        admin_ix(&admin.pubkey(), allways_swap_manager::instruction::SetTaoMinSwapAmount { amount: 1_000 }.data()),
+        admin_ix(
+            &admin.pubkey(),
+            allways_swap_manager::instruction::SetTaoMinSwapAmount { amount: TAO_MIN_SWAP_AMOUNT_RAO }.data(),
+        ),
         &admin.pubkey(),
         &admin,
     )
@@ -721,13 +724,14 @@ fn test_collateral_binds_to_the_backing_leg_on_either_side_of_the_pair() {
     .expect_err("collateral_amount must equal the sol leg");
     assert!(err.contains("InvalidAmount"), "{err}");
 
-    // A backing that is on neither leg has nothing to size against.
+    // A backing that is on neither leg has nothing to size against. The named amount sits inside the
+    // rao bounds so the leg lookup — not the size check that precedes it — is what rejects the fill.
     let (mut svm, _admin, vals, miner) = setup();
     draw(&mut svm, &vals[0], &miner.pubkey(), SPOKE_FROM, SPOKE_TO);
     set_reservation_backing(&mut svm, &miner.pubkey(), "tao"); // btc→sol, backed by TAO
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )
