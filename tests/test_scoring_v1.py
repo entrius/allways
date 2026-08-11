@@ -71,10 +71,12 @@ class FakeSolanaClient:
         miner_counters: dict[str, tuple[int, int]],
         collaterals: dict[str, int] | None = None,
         inactive: set[str] | None = None,
+        settling: dict[str, int] | None = None,
     ):
         self._counters = miner_counters
         self._collaterals = collaterals or {}
         self._inactive = inactive or set()
+        self._settling = settling or {}
 
     def get_all(self, name: str):
         if name == 'MinerState':
@@ -87,6 +89,7 @@ class FakeSolanaClient:
                         failed_swaps=f,
                         active=hk not in self._inactive,
                         collateral=self._collaterals.get(hk, 0),
+                        settling_until=self._settling.get(hk, 0),
                     ),
                 )
                 for hk, (s, f) in self._counters.items()
@@ -187,6 +190,7 @@ def make_validator(
     collaterals: dict[str, int] | None = None,
     miner_counters: dict[str, tuple[int, int]] | None = None,
     all_eligible: bool = True,
+    settling: dict[str, int] | None = None,
 ) -> SimpleNamespace:
     """Build a SimpleNamespace stand-in for the validator.
 
@@ -238,7 +242,7 @@ def make_validator(
         database_storage=database_storage,
         # Live collateral mirrors the seeded event tables so the scoring-round
         # reconcile is a no-op unless a test diverges them deliberately.
-        solana_client=FakeSolanaClient(miner_counters, collaterals=collaterals),
+        solana_client=FakeSolanaClient(miner_counters, collaterals=collaterals, settling=settling),
     )
 
 
@@ -250,8 +254,8 @@ def pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
     return hotkeys
 
 
-def _miner_state(successful: int, failed: int) -> SimpleNamespace:
-    return SimpleNamespace(successful_swaps=successful, failed_swaps=failed)
+def _miner_state(successful: int, failed: int, settling_until: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(successful_swaps=successful, failed_swaps=failed, settling_until=settling_until)
 
 
 class TestIsEligibleHelper:
@@ -1267,6 +1271,42 @@ class TestCalculateMinerRewards:
 
         assert rewards[0] == 0.0
         np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_settling_miner_earns_nothing(self, tmp_path: Path):
+        """A pending off-chain seizure zeroes the weight for the whole settlement
+        window — the same window the contract refuses new entry over. Counters are
+        clean here: the exclusion comes from ``settling_until`` alone."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys, settling={'hk_a': 4_000_000_000})
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
+        )
+        conn.commit()
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        assert rewards[0] == 0.0
+        np.testing.assert_allclose(rewards[RECYCLE_UID], 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_a_settled_miner_is_paid_again(self, tmp_path: Path):
+        """The exclusion is self-clearing: a past ``settling_until`` is not a strike,
+        so the same crown-holder earns its pool once the seizure has landed."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys=hotkeys, settling={'hk_a': 1})
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            ('hk_a', 'btc', 'sol', 0.00020, 0),
+        )
+        conn.commit()
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_eligible_high_fail_miner_excluded(self, tmp_path: Path):

@@ -28,8 +28,10 @@ def _binding(miner_pk, hotkey_kp, bound_at=1000):
     )
 
 
-def _miner_state(miner_pk, successful, failed):
-    return SimpleNamespace(miner=miner_pk, successful_swaps=successful, failed_swaps=failed)
+def _miner_state(miner_pk, successful, failed, settling_until=0):
+    return SimpleNamespace(
+        miner=miner_pk, successful_swaps=successful, failed_swaps=failed, settling_until=settling_until
+    )
 
 
 class _Client:
@@ -103,7 +105,38 @@ def test_invalid_binding_sig_drops_miner():
     assert build_eligibility(client, metagraph) == {}
 
 
+def _ns(successful, failed, settling_until=0):
+    return SimpleNamespace(
+        successful_swaps=successful, failed_swaps=failed, settling_until=settling_until
+    )
+
+
 def test_is_eligible_boundaries():
-    assert is_eligible(SimpleNamespace(successful_swaps=MIN_SUCCESSFUL_SWAPS, failed_swaps=MAX_FAILED_SWAPS))
-    assert not is_eligible(SimpleNamespace(successful_swaps=MIN_SUCCESSFUL_SWAPS - 1, failed_swaps=0))
-    assert not is_eligible(SimpleNamespace(successful_swaps=99, failed_swaps=MAX_FAILED_SWAPS + 1))
+    assert is_eligible(_ns(MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS))
+    assert not is_eligible(_ns(MIN_SUCCESSFUL_SWAPS - 1, 0))
+    assert not is_eligible(_ns(99, MAX_FAILED_SWAPS + 1))
+
+
+def test_a_settling_miner_earns_nothing():
+    """A pending off-chain seizure is not a rewardable state: the same window the
+    contract refuses new entry over also pays zero. Self-clearing at the deadline —
+    no crank re-enables the miner."""
+    assert not is_eligible(_ns(50, 0, settling_until=2_000), now=1_999)
+    assert is_eligible(_ns(50, 0, settling_until=2_000), now=2_000)
+    assert is_eligible(_ns(50, 0, settling_until=0), now=1_999)
+
+
+def test_settling_exclusion_reaches_the_eligibility_map():
+    """The gate has to bite through ``build_eligibility``, not just the helper —
+    that map is what the reward math multiplies by."""
+    m1, m2 = SolKeypair().pubkey(), SolKeypair().pubkey()
+    hk1, hk2 = _hotkey(), _hotkey()
+    client = _Client(
+        bindings=[_binding(m1, hk1), _binding(m2, hk2)],
+        states=[_miner_state(m1, 50, 0, settling_until=2_000), _miner_state(m2, 50, 0)],
+    )
+    metagraph = SimpleNamespace(hotkeys=[hk1.ss58_address, hk2.ss58_address])
+    assert build_eligibility(client, metagraph, now=1_999) == {
+        hk1.ss58_address: False,
+        hk2.ss58_address: True,
+    }

@@ -171,12 +171,21 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
-def is_eligible(miner_state) -> bool:
+def is_eligible(miner_state, now: Optional[int] = None) -> bool:
     """Flat binary crown gate off the on-chain ``MinerState`` counters (B3.3):
     eligible iff the miner has at least ``MIN_SUCCESSFUL_SWAPS`` successes and at
-    most ``MAX_FAILED_SWAPS`` failures. Replaces ``success_rate³ × credibility``."""
+    most ``MAX_FAILED_SWAPS`` failures. Replaces ``success_rate³ × credibility``.
+
+    Plus the settlement exclusion: while ``now < settling_until`` a penalty is
+    still working its way to the miner's bond on the backing chain, and a pending
+    slash earns nothing. Same window the contract refuses entry over
+    (``backing::check_entry_gates``), so a miner frozen out of new work is not
+    simultaneously being paid for it."""
+    ts = int(time.time()) if now is None else now
     return (
-        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
+        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
+        and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
+        and ts >= int(miner_state.settling_until)
     )
 
 
@@ -198,10 +207,17 @@ def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, 
     return states
 
 
-def build_eligibility(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
+def build_eligibility(
+    solana_client,
+    metagraph,
+    attribution: Optional[Dict[str, str]] = None,
+    now: Optional[int] = None,
+) -> Dict[str, bool]:
     """``{hotkey: eligible_bool}`` for on-metagraph miners — ``is_eligible`` over the
     on-chain ``MinerState`` counters (see ``live_miner_states``)."""
-    return {hk: is_eligible(ms) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()}
+    return {
+        hk: is_eligible(ms, now) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()
+    }
 
 
 @dataclass
@@ -327,7 +343,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # state the ingest lost — before the replay below reads those tables.
     live_states = live_miner_states(self.solana_client, self.metagraph)
     self.event_index.reconcile_live_state(live_states, now=current_time)
-    eligibility = {hk: is_eligible(ms) for hk, ms in live_states.items()}
+    eligibility = {hk: is_eligible(ms, current_time) for hk, ms in live_states.items()}
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -481,7 +497,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     ts = int(time.time()) if at_time is None else at_time
     window_start, window_end = scoring_window_bounds(ts, self.last_scored_time)
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
-    eligibility = build_eligibility(self.solana_client, self.metagraph)
+    eligibility = build_eligibility(self.solana_client, self.metagraph, now=ts)
     try:
         min_swap_amount = int(self.solana_config_cache.min_swap_amount())
         max_swap_amount = int(self.solana_config_cache.max_swap_amount())
