@@ -249,7 +249,10 @@ class SwapFulfiller:
             f'Swap {swap.key_hex[:16]}: initiating dest send of {user_receives_amount} to {swap.user_to_addr} '
             f'on {swap.to_chain}'
         )
-        result = provider.send_amount(swap.user_to_addr, user_receives_amount, from_address=from_address)
+        # dedup_key scopes the provider's send dedup to THIS swap (v3.1 fund-safety #2).
+        result = provider.send_amount(
+            swap.user_to_addr, user_receives_amount, from_address=from_address, dedup_key=swap.key_hex
+        )
         if result:
             tx_hash, block_num = result
             bt.logging.info(

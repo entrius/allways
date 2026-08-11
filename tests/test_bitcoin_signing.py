@@ -281,7 +281,7 @@ class TestBroadcastedTxidsTracking:
         """Each `alw swap` invocation gets a clean set — the prior swap's
         consumed tx hash can't leak across processes."""
         provider = make_lightweight_provider()
-        assert provider.broadcasted_txids == set()
+        assert provider.broadcasted_txids == {}
 
 
 class TestIsValidAddress:

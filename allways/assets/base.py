@@ -194,8 +194,13 @@ class Asset(ABC):
         return False
 
     @abstractmethod
-    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
         """Send funds to an address. Returns (tx_hash, block_number) or None.
+
+        ``dedup_key`` scopes process-local send dedup to ONE obligation (callers pass the swap key):
+        two concurrent swaps with identical (to, amount) must both pay, never share one broadcast.
 
         Providers own their own signing credentials — TAO uses the ``bt.Wallet``
         passed at construction, BTC reads ``BTC_PRIVATE_KEY`` / RPC wallet from

@@ -336,10 +336,10 @@ class EvmAsset(Asset):
         # entry is served only while the fresh tx fetch reports the SAME blockHash; a reorg
         # changes it → miss → full refetch. Only fully-settled entries are cached.
         self._settled_cache: OrderedDict[str, dict] = OrderedDict()
-        # Own broadcasts, tx_hash → (to, amount, head at broadcast): send dedup scoped to this
-        # process and to SCAN_LOOKBACK_BLOCKS (#461 class — a later same-amount swap must never
-        # resolve to an earlier swap's consumed tx).
-        self.broadcasted_txids: dict[str, Tuple[str, int, int]] = {}
+        # Own broadcasts, tx_hash → (to, amount, dedup scope, head at broadcast): send dedup
+        # scoped to this process, ONE obligation (the swap key — v3.1 fund-safety: two concurrent
+        # identical payouts must both send) and SCAN_LOOKBACK_BLOCKS (#461 class).
+        self.broadcasted_txids: dict[str, Tuple[str, int, str, int]] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) — see find_recent_outgoing.
         self.scan_cursors: dict[Tuple[str, str, int], int] = {}
         self.SCAN_LOOKBACK_BLOCKS = max(1, SCAN_LOOKBACK_SECS // self.chain_def.seconds_per_block)
@@ -374,17 +374,17 @@ class EvmAsset(Asset):
             f'network={self.chain.network}, chain_id={chain_id}, tip={tip}'
         )
 
-    def _prior_broadcast(self, want: Tuple[str, int], head: int) -> Optional[str]:
-        """Reusable tx hash from a prior own broadcast to (to, amount); None when a fresh send is
-        provably safe; raises when an in-flight duplicate can't be ruled out. Reuse requires the
-        tx to be in the mempool or settled (status 1) — a reverted tx moved no funds and clears.
-        Entries age out after SCAN_LOOKBACK_BLOCKS (the old mined-scan bound), so a later
-        same-amount swap can never resolve to an earlier swap's consumed tx."""
-        for txid, (to_norm, amt, seen) in list(self.broadcasted_txids.items()):
+    def _prior_broadcast(self, want: Tuple[str, int, str], head: int) -> Optional[str]:
+        """Reusable tx hash from a prior own broadcast to (to, amount, dedup scope); None when a
+        fresh send is provably safe; raises when an in-flight duplicate can't be ruled out. Reuse
+        requires the tx to be in the mempool or settled (status 1) — a reverted tx moved no funds
+        and clears. Keyed on the SWAP, not the payout shape: two concurrent swaps with identical
+        (to, amount) never collide. Entries age out after SCAN_LOOKBACK_BLOCKS."""
+        for txid, (to_norm, amt, scope, seen) in list(self.broadcasted_txids.items()):
             if head - seen > self.SCAN_LOOKBACK_BLOCKS:
                 del self.broadcasted_txids[txid]
                 continue
-            if (to_norm, amt) != want:
+            if (to_norm, amt, scope) != want:
                 continue
             tx = self.chain.eth_rpc('eth_getTransactionByHash', [txid], null_needs_quorum=True)
             if tx is None:

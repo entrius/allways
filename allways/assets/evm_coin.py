@@ -168,7 +168,9 @@ class EvmCoin(EvmAsset, EvmChain):
 
     # --- Sending ---
 
-    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
         """Send the native coin via a type-2 (EIP-1559) transfer signed with {PREFIX}_PRIVATE_KEY.
 
         Amount is in the chain's native unit. ``from_address`` (the miner's committed address)
@@ -194,9 +196,9 @@ class EvmCoin(EvmAsset, EvmChain):
             return None
 
         try:
-            # A prior own broadcast to this dest blocks a fresh send unless provably absent
-            # from every endpoint — probing by hash sees the mempool; never risk paying twice.
-            want = (norm(to_address), int(amount))
+            # A prior own broadcast for THIS obligation blocks a fresh send unless provably
+            # absent from every endpoint — probing by hash sees the mempool; never pay twice.
+            want = (norm(to_address), int(amount), dedup_key or '')
             try:
                 prior = self._prior_broadcast(want, head)
             except Exception as e:

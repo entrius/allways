@@ -421,7 +421,7 @@ class TestSendGuards:
         result = provider.send_amount(RECIPIENT, AMOUNT, from_address=TEST_ADDR)
         assert result == ('0x' + 'ee' * 32, 0)
         # Dedup ledger keys by the PRE-broadcast precomputed txid, recorded before the send.
-        assert list(provider.broadcasted_txids.values()) == [(RECIPIENT.lower(), AMOUNT, 1000)]
+        assert list(provider.broadcasted_txids.values()) == [(RECIPIENT.lower(), AMOUNT, '', 1000)]
         # The signed payload carries transfer() calldata addressed to the token contract.
         assert SEL_TRANSFER.removeprefix('0x') in sent['raw']
         assert RECIPIENT.lower().removeprefix('0x') in sent['raw']
@@ -437,7 +437,7 @@ class TestSendGuards:
     def test_prior_broadcast_reused_not_resent(self, provider, monkeypatch):
         monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
         prior_tx = '0x' + 'aa' * 32
-        provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, 990)
+        provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, '', 990)
         responses = self._send_responses()
         responses['eth_getTransactionByHash'] = {'hash': prior_tx, 'blockNumber': None}  # still in mempool
 
@@ -452,7 +452,7 @@ class TestSendGuards:
         # An entry older than the lookback window is dropped, not reused (#461 class).
         monkeypatch.setenv('ARBUSDC_PRIVATE_KEY', TEST_KEY)
         prior_tx = '0x' + 'aa' * 32
-        provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, 1000 - provider.SCAN_LOOKBACK_BLOCKS - 1)
+        provider.broadcasted_txids[prior_tx] = (RECIPIENT.lower(), AMOUNT, '', 1000 - provider.SCAN_LOOKBACK_BLOCKS - 1)
         rpc_stub(provider, self._send_responses())
         result = provider.send_amount(RECIPIENT, AMOUNT)
         assert result is not None and result[0] != prior_tx

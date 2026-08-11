@@ -296,7 +296,9 @@ class Sol(Asset, Chain):
             bt.logging.error(f'{LOG_SOL} verify_from_proof failed: {e}')
             return False
 
-    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
         """Send ``amount`` lamports to ``to_address`` via SystemProgram transfer.
 
         Signs with the provider's own keypair (callers pass no key material). Returns

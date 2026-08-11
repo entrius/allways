@@ -132,9 +132,10 @@ class Bitcoin(Asset, Chain):
         # callers can surface a useful message without scraping logs.
         self.last_send_error: Optional[str] = None
 
-        # Scopes find_recent_outgoing reuse to this process — a fresh `alw swap`
+        # Scopes find_recent_outgoing reuse to this process AND (v3.1) to one obligation each:
+        # txid → dedup scope (the swap key). A fresh `alw swap`
         # run can't return a tx hash already consumed by an earlier swap.
-        self.broadcasted_txids: set[str] = set()
+        self.broadcasted_txids: dict[str, str] = {}
 
         # Optional operator-supplied Esplora endpoints (paid/private), tried
         # before the public defaults. Empty → public blockstream → mempool.
@@ -511,6 +512,7 @@ class Bitcoin(Asset, Chain):
         amount: int,
         from_address: Optional[str] = None,
         fee_rate_override: Optional[int] = None,
+        dedup_key: Optional[str] = None,
     ) -> SendResult:
         """Send BTC via embit + Blockstream API (no full node required). Amount in satoshis.
 
@@ -558,10 +560,10 @@ class Bitcoin(Asset, Chain):
                 return None
             my_script, my_address, utxos, addr_type = result
 
-            # Reuse only txids this process broadcast — otherwise (from, to, amount)
-            # would match a prior-swap tx that the contract has already consumed.
+            # Reuse only txids this process broadcast FOR THIS OBLIGATION — a shape match alone
+            # would hand a concurrent same-(to, amount) swap the other swap's consumed tx.
             existing = self.find_recent_outgoing(my_address, to_address, amount)
-            if existing and existing in self.broadcasted_txids:
+            if existing and self.broadcasted_txids.get(existing) == (dedup_key or ''):
                 bt.logging.info(f'Reusing prior tx {existing} from {my_address} → {to_address} ({amount} sat)')
                 return (existing, 0)
 
@@ -640,7 +642,7 @@ class Bitcoin(Asset, Chain):
                         )
 
             raw_tx = final_tx.serialize().hex()
-            tx_hash = self.broadcast_tx(raw_tx)
+            tx_hash = self.broadcast_tx(raw_tx, dedup_key=dedup_key)
             if tx_hash is None:
                 return None
 
@@ -717,7 +719,7 @@ class Bitcoin(Asset, Chain):
             return None
         return selected, total_in, fee
 
-    def broadcast_tx(self, raw_hex: str) -> Optional[str]:
+    def broadcast_tx(self, raw_hex: str, dedup_key: Optional[str] = None) -> Optional[str]:
         """Broadcast a raw transaction. Returns tx_hash or None."""
         expected_txid: Optional[str] = None
         try:
@@ -732,7 +734,7 @@ class Bitcoin(Asset, Chain):
         # before tx_exists has caught up. A truly-rejected broadcast leaves
         # the entry harmlessly — Esplora won't surface it for matching.
         if expected_txid:
-            self.broadcasted_txids.add(expected_txid)
+            self.broadcasted_txids[expected_txid] = dedup_key or ''
 
         try:
             resp = self.btc_api_post('/tx', data=raw_hex, timeout=30)
@@ -782,7 +784,9 @@ class Bitcoin(Asset, Chain):
                 time.sleep(3)
         return BTC_MIN_FEE_RATE
 
-    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
         """Send BTC via embit + Esplora. Returns (tx_hash, block_number) or None.
 
         Signing credentials come from ``BTC_PRIVATE_KEY``, not from the caller.
@@ -790,4 +794,4 @@ class Bitcoin(Asset, Chain):
         first-input sender stays on the miner's committed address (validators
         enforce sender == committed address).
         """
-        return self.send_amount_lightweight(to_address, amount, from_address=from_address)
+        return self.send_amount_lightweight(to_address, amount, from_address=from_address, dedup_key=dedup_key)
