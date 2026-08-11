@@ -105,6 +105,12 @@ BSC = EvmNetwork(
         'mainnet': ('https://bsc-dataseed.bnbchain.org', 'https://bsc.blockrazor.xyz'),
         # publicnode's TESTNET node does serve receipts — the asymmetry with mainnet is deliberate.
         'testnet': ('https://bsc-testnet-dataseed.bnbchain.org', 'https://bsc-testnet-rpc.publicnode.com'),
+AVALANCHE = EvmNetwork(
+    label='Avalanche',
+    chain_ids={'mainnet': 43_114, 'fuji': 43_113},
+    rpc_urls={
+        'mainnet': ('https://avalanche-c-chain-rpc.publicnode.com', 'https://avalanche.drpc.org'),
+        'fuji': ('https://avalanche-fuji-c-chain-rpc.publicnode.com', 'https://avalanche-fuji.drpc.org'),
     },
 )
 
@@ -114,6 +120,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'arbitrum': ARBITRUM,
     'hyperliquid': HYPERLIQUID,
     'bsc': BSC,
+    'avalanche': AVALANCHE,
 }
 
 

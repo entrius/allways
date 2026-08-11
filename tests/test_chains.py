@@ -8,6 +8,7 @@ from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
     CHAIN_BNB,
+    CHAIN_AVAX,
     CHAIN_BTC,
     CHAIN_ETH,
     CHAIN_HYPE,
@@ -38,6 +39,8 @@ class TestGetChain:
 
     def test_bnb(self):
         assert get_chain_def('bnb') is CHAIN_BNB
+    def test_avax(self):
+        assert get_chain_def('avax') is CHAIN_AVAX
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -71,11 +74,11 @@ class TestGetChain:
     def test_only_self_hosted_assets_lack_a_host_chain(self):
         for chain_id in ('btc', 'tao', 'sol'):
             assert get_chain_def(chain_id).host_chain is None
-        for chain_id in ('eth', 'hype', 'bnb', 'arbusdc'):
+        for chain_id in ('eth', 'hype', 'bnb', 'avax', 'arbusdc'):
             assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
         # asset_locator is the token-only field: a native coin has no contract to pin.
         assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
-        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb'))
+        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax'))
 
 
 class TestCanonicalPair:
