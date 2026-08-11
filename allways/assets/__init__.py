@@ -5,6 +5,7 @@ import bittensor as bt
 from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import Asset, SendResult, TransactionInfo
 from allways.assets.avax import Avax
+from allways.assets.baseusdc import BaseUsdc
 from allways.assets.bnb import Bnb
 from allways.assets.btc import Bitcoin
 from allways.assets.chain import Chain
@@ -31,6 +32,7 @@ __all__ = [
     'Avax',
     'Erc20',
     'ArbUsdc',
+    'BaseUsdc',
     'create_assets',
 ]
 
@@ -53,6 +55,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('hype', Hype, ()),
     AssetSpec('bnb', Bnb, ()),
     AssetSpec('avax', Avax, ()),
+    AssetSpec('baseusdc', BaseUsdc, ()),
 )
 
 

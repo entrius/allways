@@ -8,6 +8,7 @@ from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
     CHAIN_AVAX,
+    CHAIN_BASEUSDC,
     CHAIN_BNB,
     CHAIN_BTC,
     CHAIN_ETH,
@@ -42,6 +43,9 @@ class TestGetChain:
 
     def test_avax(self):
         assert get_chain_def('avax') is CHAIN_AVAX
+
+    def test_baseusdc(self):
+        assert get_chain_def('baseusdc') is CHAIN_BASEUSDC
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -80,6 +84,12 @@ class TestGetChain:
         # asset_locator is the token-only field: a native coin has no contract to pin.
         assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
         assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax'))
+        for chain_id in ('eth', 'hype', 'arbusdc', 'baseusdc'):
+            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
+        # asset_locator is the token-only field: a native coin has no contract to pin.
+        assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
+        assert CHAIN_BASEUSDC.asset_locator.startswith('0x')
+        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype'))
 
 
 class TestCanonicalPair:
@@ -158,6 +168,10 @@ class TestComputeExtensionTargetSecs:
     def test_bnb_remaining_confs(self):
         # bnb needs 15 confs, 1s each: remaining=15, raw = 10000 + 15 + 120 = 10135, bucket up to 10200.
         assert compute_extension_target_secs('bnb', 0, self.NOW, self.CEILING) == 10_200
+
+    def test_baseusdc_remaining_confs(self):
+        # baseusdc needs 120 confs, 2s each: remaining=120, raw = 10000 + 240 + 120 = 10360, bucket up to 10800.
+        assert compute_extension_target_secs('baseusdc', 0, self.NOW, self.CEILING) == 10_800
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):

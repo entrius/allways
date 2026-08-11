@@ -127,6 +127,17 @@ AVALANCHE = EvmNetwork(
     },
 )
 
+BASE = EvmNetwork(
+    label='Base',
+    chain_ids={'mainnet': 8_453, 'sepolia': 84_532},
+    rpc_urls={
+        # publicnode is deliberately absent: its free Base mainnet endpoint 403s every
+        # eth_getTransactionReceipt as an "archive request", so it can never settle a leg.
+        'mainnet': ('https://mainnet.base.org', 'https://base.drpc.org'),
+        'sepolia': ('https://sepolia.base.org', 'https://base-sepolia.drpc.org'),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
@@ -134,6 +145,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'hyperliquid': HYPERLIQUID,
     'bsc': BSC,
     'avalanche': AVALANCHE,
+    'base': BASE,
 }
 
 

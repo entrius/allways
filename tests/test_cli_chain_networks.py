@@ -56,6 +56,7 @@ class TestPinnedContract:
             'hype-network',
             'bnb-network',
             'avax-network',
+            'base-network',
             'router',
             'env',
         )
@@ -69,6 +70,7 @@ class TestPinnedContract:
             'bnb-network',
             'avax-network',
         )
+        assert CHAIN_NETWORK_KEYS == ('btc-network', 'eth-network', 'arb-network', 'hype-network', 'base-network')
 
     def test_testnet_bundle(self):
         assert ENV_BUNDLES['testnet'] == {
@@ -80,6 +82,7 @@ class TestPinnedContract:
             'hype-network': 'testnet',
             'bnb-network': 'testnet',
             'avax-network': 'fuji',
+            'base-network': 'sepolia',
             'netuid': '19',
             'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
         }
@@ -94,6 +97,7 @@ class TestPinnedContract:
             'hype-network': 'mainnet',
             'bnb-network': 'mainnet',
             'avax-network': 'mainnet',
+            'base-network': 'mainnet',
             'netuid': '7',
             'router': '',
         }
@@ -118,6 +122,7 @@ class TestPinnedContract:
             'hype': ('mainnet', 'testnet'),
             'bnb': ('mainnet', 'testnet'),
             'avax': ('mainnet', 'fuji'),
+            'baseusdc': ('mainnet', 'sepolia'),
         }
 
 
