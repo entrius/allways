@@ -882,9 +882,7 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    fill = compute_intake_amounts(
-        from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing
-    )
+    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing)
     try:
         client.finalize_reservation(
             miner,

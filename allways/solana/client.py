@@ -724,9 +724,7 @@ class AllwaysSolanaClient:
         args = layouts.IX_BACKING_ARGS.build({'backing': backing})
         return self._send([self._ix('vote_deactivate', args, metas)])
 
-    def vote_set_attestation(
-        self, miner, chain: str, effective_balance: int, locked: bool, epoch: int
-    ) -> str:
+    def vote_set_attestation(self, miner, chain: str, effective_balance: int, locked: bool, epoch: int) -> str:
         """Vote a miner's EFFECTIVE bond on one backing chain; written on quorum. `effective_balance`
         must already be net of accrued fees and voted-but-unapplied slashes — the guards above it do no
         further discounting. The full payload is hash-bound, so divergent readings conflict rather than
@@ -754,9 +752,7 @@ class AllwaysSolanaClient:
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, True),
             AccountMeta(
-                pdas.vote_round_pda(
-                    pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.program_id), self.program_id
-                ),
+                pdas.vote_round_pda(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.program_id), self.program_id),
                 False,
                 True,
             ),

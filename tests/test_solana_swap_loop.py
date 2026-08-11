@@ -709,11 +709,27 @@ def test_the_flattened_swap_view_carries_the_backing_it_draws_against():
     PK = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
 
     acct = NS(
-        miner=PK, user=PK, from_chain='sol', to_chain='tao',
-        user_from_addr='a', user_to_addr='b', miner_from_addr='c', miner_to_addr='d',
-        rate=1, collateral_amount=1, from_amount=1, to_amount=1,
-        from_tx_hash='srctx', from_tx_block=0, to_tx_hash='', to_tx_block=0,
-        status=NS(), initiated_at=0, timeout_at=0, max_extend_at=0, fulfilled_at=0,
+        miner=PK,
+        user=PK,
+        from_chain='sol',
+        to_chain='tao',
+        user_from_addr='a',
+        user_to_addr='b',
+        miner_from_addr='c',
+        miner_to_addr='d',
+        rate=1,
+        collateral_amount=1,
+        from_amount=1,
+        to_amount=1,
+        from_tx_hash='srctx',
+        from_tx_block=0,
+        to_tx_hash='',
+        to_tx_block=0,
+        status=NS(),
+        initiated_at=0,
+        timeout_at=0,
+        max_extend_at=0,
+        fulfilled_at=0,
         collateral_chain='tao',
     )
     assert swap_from_solana(acct).collateral_chain == 'tao'

@@ -25,7 +25,11 @@ from allways.vault import codec
 # Repo-relative default: the cargo-contract build artifact.
 DEFAULT_METADATA = (
     Path(__file__).resolve().parents[2]
-    / 'smart-contracts' / 'ink-bond-vault' / 'target' / 'ink' / 'allways_bond_vault.json'
+    / 'smart-contracts'
+    / 'ink-bond-vault'
+    / 'target'
+    / 'ink'
+    / 'allways_bond_vault.json'
 )
 
 # Dry-runs use a generous fixed budget; the actual charge is by weight used.

@@ -224,8 +224,10 @@ def post_pair(
         console.print(f'  {dst_up} → {src_up}: [green]1 {dst_up} = {rev_disp} {src_up}[/green]{same}')
     else:
         console.print(f'  {dst_up} → {src_up}: [yellow]not offered[/yellow]')
-    console.print(f'  Backing:    [cyan]{backing_label(backing)}[/cyan] '
-                  f'[dim](the purse that answers if you fail to deliver)[/dim]')
+    console.print(
+        f'  Backing:    [cyan]{backing_label(backing)}[/cyan] '
+        f'[dim](the purse that answers if you fail to deliver)[/dim]'
+    )
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
     # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
