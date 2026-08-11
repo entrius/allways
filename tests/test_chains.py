@@ -12,6 +12,7 @@ from allways.chains import (
     CHAIN_BNB,
     CHAIN_BTC,
     CHAIN_ETH,
+    CHAIN_ETHUSDC,
     CHAIN_HYPE,
     CHAIN_TAO,
     EXTENSION_BUCKET_SECONDS,
@@ -46,6 +47,9 @@ class TestGetChain:
 
     def test_baseusdc(self):
         assert get_chain_def('baseusdc') is CHAIN_BASEUSDC
+
+    def test_ethusdc(self):
+        assert get_chain_def('ethusdc') is CHAIN_ETHUSDC
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -89,7 +93,13 @@ class TestGetChain:
         # asset_locator is the token-only field: a native coin has no contract to pin.
         assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
         assert CHAIN_BASEUSDC.asset_locator.startswith('0x')
+        for chain_id in ('eth', 'hype', 'arbusdc', 'ethusdc'):
+            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
+        # asset_locator is the token-only field: a native coin has no contract to pin.
+        assert CHAIN_ARBUSDC.asset_locator.startswith('0x') and CHAIN_ETHUSDC.asset_locator.startswith('0x')
         assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype'))
+        # ethusdc rides CHAIN_ETH's network row — same host, same prefix, no networks of its own.
+        assert (CHAIN_ETHUSDC.host_chain, CHAIN_ETHUSDC.env_prefix) == (CHAIN_ETH.host_chain, CHAIN_ETH.env_prefix)
 
 
 class TestCanonicalPair:

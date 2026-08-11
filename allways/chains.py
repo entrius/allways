@@ -229,6 +229,33 @@ CHAIN_BASEUSDC = ChainDefinition(
     asset_locator='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
 )
 
+CHAIN_ETHUSDC = ChainDefinition(
+    id='ethusdc',
+    name='USDC (Ethereum)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Ethereum's prefix, shared with CHAIN_ETH: one ETH_NETWORK / ETH_RPC_URLS / ETH_PRIVATE_KEY
+    # serves both assets, so they can never disagree about which Ethereum they are on.
+    env_prefix='ETH',
+    host_chain='ethereum',
+    # CHAIN_ETH already declares the ETH_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=12,
+    # CHAIN_ETH's finality, deliberately identical — two assets on one chain must not disagree
+    # about its reorg depth. 32 × 12s = 384s, inside the program's 600s default fulfillment grace.
+    min_confirmations=32,
+    # Economic floor, not a protocol one (ERC-20 has no minimum): FiatToken's transfer burns
+    # ~65k gas, ≈$5 at 40 gwei and $1.9k ETH, so a smaller L1 leg cannot cover its own fee.
+    # Diverges from arbusdc's unit floor on purpose — L2 gas is cents, L1 gas is not.
+    min_onchain_amount=5_000_000,
+    # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
+    # one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=0,
+    # Circle-verified native USDC on Ethereum (developers.circle.com, 2026-08-11).
+    asset_locator='0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -239,6 +266,7 @@ SUPPORTED_CHAINS = {
     'bnb': CHAIN_BNB,
     'avax': CHAIN_AVAX,
     'baseusdc': CHAIN_BASEUSDC,
+    'ethusdc': CHAIN_ETHUSDC,
 }
 
 
