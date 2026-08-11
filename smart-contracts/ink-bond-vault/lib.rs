@@ -378,7 +378,7 @@ mod allways_bond_vault {
                 return Err(Error::InvalidValidatorSet);
             }
             for (i, v) in validators.iter().enumerate() {
-                if validators[i + 1..].contains(v) {
+                if validators.iter().skip(i.saturating_add(1)).any(|o| o == v) {
                     return Err(Error::InvalidValidatorSet);
                 }
             }
