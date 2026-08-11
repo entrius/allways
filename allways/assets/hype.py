@@ -1,4 +1,3 @@
-from allways.assets.evm import HYPERLIQUID
 from allways.assets.evm_coin import EvmCoin
 from allways.chains import CHAIN_HYPE
 
@@ -9,4 +8,4 @@ class Hype(EvmCoin):
     HyperEVM speaks plain JSON-RPC, so nothing here is chain-specific beyond the pairing."""
 
     def __init__(self):
-        super().__init__(CHAIN_HYPE, HYPERLIQUID)
+        super().__init__(CHAIN_HYPE)

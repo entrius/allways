@@ -305,8 +305,7 @@ class Erc20(EvmAsset):
         Returns (tx_hash, 0) or None; dedup/rescue ladder mirrors the native EVM send.
         """
         self.last_send_error = None
-        # prefix names the NETWORK (its key/RPC env); token names the ASSET being moved.
-        prefix, token = self.chain_def.env_prefix, self.chain_def.id.upper()
+        prefix = self.chain_def.env_prefix  # the NETWORK's key/RPC env
         norm = self.chain.normalize_address
         acct = self.chain._account()
         if acct is None:
@@ -348,13 +347,13 @@ class Erc20(EvmAsset):
             # estimator too, which would misread as the destination refusing.
             token_balance = self.get_balance(acct.address)
             if token_balance < amount:
-                self._send_error(f'Insufficient {token}: have {token_balance} units, need {amount}')
+                self._send_error(f'{self._log} insufficient balance: have {token_balance} units, need {amount}')
                 return None
 
             calldata = SEL_TRANSFER[2:] + _pad_addr(to_address) + f'{int(amount):064x}'
             gas = self._transfer_gas(acct.address, calldata)
             if gas is None:
-                self._send_error(f'destination {to_address} refuses {token} transfers — not sending')
+                self._send_error(f'{self._log} destination {to_address} refuses transfers — not sending')
                 return None
 
             gas_balance = int(self.chain.eth_rpc('eth_getBalance', [acct.address, 'latest']), 16)
@@ -399,11 +398,11 @@ class Erc20(EvmAsset):
                 self._send_error(f'{prefix} broadcast failed: {broadcast_err}')
                 return None
 
-            bt.logging.info(f'Sent {amount} {token} units to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
+            bt.logging.info(f'{self._log} sent {amount} units to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
             # A quirky null broadcast reply must never persist as a blank tx hash.
             return (tx_hash or expected_txid, 0)
         except Exception as e:
-            self._send_error(f'{prefix} send failed: {type(e).__name__}: {e}')
+            self._send_error(f'{self._log} send failed: {type(e).__name__}: {e}')
             return None
 
     def _transfer_gas(self, from_addr: str, calldata: str) -> Optional[int]:

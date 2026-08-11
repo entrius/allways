@@ -6,7 +6,7 @@ from eth_account import Account
 from eth_utils import to_checksum_address
 
 from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.evm import FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain, EvmNetwork
+from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
 
 TRANSFER_GAS = 21_000
@@ -32,9 +32,9 @@ class EvmCoin(EvmAsset):
     moment a token lands beside it. Both are bound by a registry row, never subclassed.
     """
 
-    def __init__(self, chain_def: ChainDefinition, network_def: EvmNetwork):
+    def __init__(self, chain_def: ChainDefinition):
         self._chain_def = chain_def
-        self._chain = EvmChain(network_def, chain_def.env_prefix)
+        self._chain = EvmChain(EVM_NETWORKS[chain_def.host_chain], chain_def.env_prefix)
         EvmAsset.__init__(self)
 
     @property

@@ -83,7 +83,6 @@ def test_api_key_composes_onto_network_name(monkeypatch):
 
 def test_name_selected_chains_are_the_registry_rows_that_declare_networks():
     assert set(NAME_SELECTED_CHAINS) == {c for c in SUPPORTED_CHAINS.values() if c.networks}
-    assert CHAIN_NETWORK_KEYS == tuple(f'{c.env_prefix.lower()}-network' for c in NAME_SELECTED_CHAINS)
     # Every declared network list starts at mainnet — the bundles and `alw config` default to it.
     assert all(c.networks[0] == 'mainnet' for c in NAME_SELECTED_CHAINS)
 

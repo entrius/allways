@@ -36,9 +36,10 @@ class ChainDefinition:
     # Default 0 (at-or-after the floor; only a tx that predates it is a replay). Absorbs honest miner
     # clock skew; MUST stay well under reservation_ttl_secs — the replay window is exactly this wide (B2).
     replay_grace_secs: int = 0
-    # Layered-asset fields: the wire id stays flat, the layering lives here. None for
-    # assets that are their own network (btc/tao/sol/eth).
-    host_chain: str | None = None  # network whose txs carry this asset (assets/evm.py EVM_NETWORKS key)
+    # The network whose txs carry this asset (assets/evm.py EVM_NETWORKS key). Every EVM row
+    # sets it — native coin and token alike — so both resolve their chain the same way.
+    # None only for assets that ARE their own network (btc/tao/sol).
+    host_chain: str | None = None
     # Canonical MAINNET contract of a hosted asset. Testnet deployments + env overrides
     # resolve in the provider (assets/erc20.py) — each address lives exactly once.
     asset_locator: str | None = None
@@ -94,6 +95,7 @@ CHAIN_ETH = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='ETH',
+    host_chain='ethereum',
     networks=('mainnet', 'sepolia'),
     testnet_network='sepolia',
     seconds_per_block=12,
@@ -138,6 +140,7 @@ CHAIN_HYPE = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='HYPE',
+    host_chain='hyperliquid',
     networks=('mainnet', 'testnet'),
     testnet_network='testnet',
     # ~1s small blocks (transfers never need the 60s big blocks — those carry >2M gas).
