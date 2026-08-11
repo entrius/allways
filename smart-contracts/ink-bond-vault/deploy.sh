@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# DEPLOY — instantiate the bond vault with the decided policy numbers.
+#
+# The vault ships immutable (D7: no set_code_hash), so the constructor arguments
+# below are the deployment. They are written here rather than typed at a prompt
+# because a wrong `max_collateral` cannot be fixed by redeploying the code.
+#
+#   min_collateral  0.25 τ  — the least bond that serves one 0.1 τ min swap at the
+#                             1.10x guard; must equal Solana's `tao_min_collateral`,
+#                             or a miner can lock a bond Solana will not activate.
+#   max_collateral  10 τ    — the D7 quorum-compromise bound: a compromised quorum
+#                             can fabricate slashes against every bond at once, so
+#                             cap the per-miner exposure until the set widens.
+#   threshold       66%     — 2-of-3 today; `get_required_votes` rounds up.
+#   vote_round_ttl  600     — blocks (~2 h at 12 s) a vote round stays open.
+#
+# All four are owner-tunable after deploy (`alw vault admin set-*`); the point of
+# seeding them correctly is that the vault is never live at a wrong value.
+#
+# Usage:
+#   STAKING_HOTKEY=<ss58 registered on NETUID> URL=wss://entrypoint-finney.opentensor.ai:443 \
+#     SURI="<deployer seed>" ./deploy.sh
+#
+# After it prints the address:
+#   1. alw vault admin add-validator <ss58>   — once per validator hotkey
+#   2. alw vault status                        — confirm bounds, threshold, validator set
+#   3. alw config set vault-address <address>  — and ship it to every validator's env
+#   4. record the address + code hash in SOLANA_BITTENSOR_SPLIT_COLLATERAL.md
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+export PATH="$HOME/.cargo/bin:$PATH"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.89.0-x86_64-unknown-linux-gnu}"
+
+URL="${URL:?Set URL to the target chain endpoint (e.g. wss://entrypoint-finney.opentensor.ai:443)}"
+SURI="${SURI:?Set SURI to the deployer seed — it becomes the vault owner}"
+NETUID="${NETUID:-7}"
+STAKING_HOTKEY="${STAKING_HOTKEY:?Set STAKING_HOTKEY to a hotkey registered on netuid $NETUID}"
+
+# Amounts in rao (1 τ = 1e9). Overridable, but every override is a policy change.
+MIN_COLLATERAL="${MIN_COLLATERAL:-250000000}"     # 0.25 τ
+MAX_COLLATERAL="${MAX_COLLATERAL:-10000000000}"   # 10 τ
+CONSENSUS_THRESHOLD="${CONSENSUS_THRESHOLD:-66}"  # percent
+VOTE_ROUND_TTL="${VOTE_ROUND_TTL:-600}"           # blocks
+
+# Set GAS_ARGS="--skip-dry-run --gas ... --proof-size ..." on runtimes whose
+# dry-runs cargo-contract cannot decode (localnet 425; see spike0.sh).
+GAS_ARGS="${GAS_ARGS:-}"
+OUT_DIR=".deploy"
+mkdir -p "$OUT_DIR"
+
+echo "== target:         $URL (netuid $NETUID)"
+echo "== staking_hotkey: $STAKING_HOTKEY"
+echo "== bond bounds:    min $MIN_COLLATERAL rao / max $MAX_COLLATERAL rao"
+echo "== quorum:         $CONSENSUS_THRESHOLD%, round TTL $VOTE_ROUND_TTL blocks"
+read -r -p "Instantiate an IMMUTABLE vault with these values? [y/N] " ok
+[ "$ok" = "y" ] || { echo "aborted"; exit 1; }
+
+echo "== [1/2] cargo contract build --release"
+cargo contract build --release
+
+echo "== [2/2] instantiate"
+# shellcheck disable=SC2086
+cargo contract instantiate --url "$URL" --suri "$SURI" \
+  --args "$STAKING_HOTKEY" "$NETUID" "$MIN_COLLATERAL" "$MAX_COLLATERAL" \
+         "$CONSENSUS_THRESHOLD" "$VOTE_ROUND_TTL" \
+  --execute --skip-confirm $GAS_ARGS --output-json \
+  | tee "$OUT_DIR/instantiate.json"
+
+CONTRACT=$(python3 -c "import json;print(json.load(open('$OUT_DIR/instantiate.json'))['contract'])")
+echo "$CONTRACT" > "$OUT_DIR/contract_address"
+
+echo ""
+echo "VAULT DEPLOYED: $CONTRACT"
+echo "Owner is the SURI signer. Next: add the validator hotkeys, then publish the address."
