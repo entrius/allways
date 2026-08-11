@@ -181,6 +181,19 @@ def test_decode_unknown_discriminator_returns_none():
     assert decode_event(b'\x01\x02') is None  # too short
 
 
+def test_decode_foreign_version_payload_returns_none():
+    # A pre-v3 SwapTimedOut body (no collateral_chain/penalty/reimbursement/payee): a genesis rescan
+    # walks the same program id's retained history and WILL meet these — they must drop, not raise.
+    from borsh_construct import U64, CStruct
+    from construct import Bytes as _Raw
+
+    old = CStruct('swap_key' / _Raw(32), 'miner' / _Raw(32), 'collateral_amount' / U64, 'slash' / U64)
+    body = old.build({'swap_key': bytes(32), 'miner': bytes(32), 'collateral_amount': 5, 'slash': 3})
+    assert decode_event(events.EVENT_DISCRIMINATORS['SwapTimedOut'] + body) is None
+    # Truncated garbage under a known discriminator drops the same way.
+    assert decode_event(events.EVENT_DISCRIMINATORS['QuoteSet'] + b'\x01\x02\x03') is None
+
+
 def test_every_contract_event_is_registered():
     # Every #[event] struct in the program source must decode, or the indexer/validator
     # silently drop it (decode_event returns None for unknown discriminators).

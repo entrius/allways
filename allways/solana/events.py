@@ -9,6 +9,7 @@ crown — replacing the old substrate event_watcher. Only the crown-relevant eve
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
+from construct import ConstructError
 from solders.pubkey import Pubkey
 
 # One source of truth for event discriminators + borsh layouts (all program events) lives in layouts.py,
@@ -33,7 +34,12 @@ def decode_event(raw: bytes) -> Optional[Tuple[str, Any]]:
     name = _BY_DISC.get(bytes(raw[:8]))
     if name is None:
         return None
-    parsed = EVENT_LAYOUTS[name].parse(raw[8:])
+    try:
+        parsed = EVENT_LAYOUTS[name].parse(raw[8:])
+    except ConstructError:
+        # A foreign-version body (e.g. a pre-v3 event in a genesis rescan) — drop it like a
+        # foreign discriminator instead of letting the parse error kill the caller's whole pass.
+        return None
     for field in EVENT_PUBKEY_FIELDS.get(name, []):
         parsed[field] = Pubkey.from_bytes(bytes(parsed[field]))
     return name, parsed
