@@ -18,10 +18,6 @@ ZERO_ADDRESS = '0x' + '00' * 20
 # RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
 # calls per pass (HyperEVM's public RPC allows 100/min). Never binds on ~12s chains (25 blocks).
 MAX_WALK_BLOCKS = 32
-# Hard ceiling on the deposit scanner's block walk, independent of block time: the walk costs one
-# RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
-# calls per pass (HyperEVM's public RPC allows 100/min). Never binds on ~12s chains (25 blocks).
-MAX_WALK_BLOCKS = 32
 
 
 class EvmCoin(EvmAsset, EvmChain):
