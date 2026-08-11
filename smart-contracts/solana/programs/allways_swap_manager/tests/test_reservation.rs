@@ -56,7 +56,7 @@ fn vote_pda(req: u8, m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], m.as_ref()], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     Pubkey::find_program_address(
@@ -66,7 +66,7 @@ fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 
 fn set_clock(svm: &mut LiteSVM, ts: i64) {

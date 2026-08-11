@@ -74,7 +74,10 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    resv_pda_b(m, "sol")
+}
+fn resv_pda_b(m: &Pubkey, backing: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), backing.as_bytes()], &pid()).0
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     Pubkey::find_program_address(
@@ -84,7 +87,7 @@ fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -256,6 +259,17 @@ fn finalize_ix(
     from_amount: u128,
     to_amount: u128,
 ) -> Instruction {
+    finalize_ix_b("sol", router, miner, user, collateral_amount, from_amount, to_amount)
+}
+fn finalize_ix_b(
+    backing: &str,
+    router: &Pubkey,
+    miner: &Pubkey,
+    user: &Pubkey,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::FinalizeReservation {
@@ -272,7 +286,7 @@ fn finalize_ix(
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            reservation: resv_pda(miner),
+            reservation: resv_pda_b(miner, backing),
             attestation: None,
         }
         .to_account_metas(None),
@@ -310,7 +324,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
             system_program: SYSTEM_PROGRAM,
@@ -365,12 +379,26 @@ fn overwrite(svm: &mut LiteSVM, pda: Pubkey, serialized: Vec<u8>) {
     )
     .unwrap();
 }
+/// Re-pin a drawn (sol-seeded) reservation to another backing. v3.1 keys the slot by backing, so the
+/// account must MOVE to the backing's PDA (with its bump) — later instructions derive that address
+/// from the stored chain and would otherwise fail their seeds check.
 fn set_reservation_backing(svm: &mut LiteSVM, miner: &Pubkey, backing: &str) {
     let mut r = reservation_acct(svm, miner);
     r.collateral_chain = backing.to_string();
+    let (new_pda, bump) =
+        Pubkey::find_program_address(&[b"resv", miner.as_ref(), backing.as_bytes()], &pid());
+    r.bump = bump;
     let mut buf = Vec::new();
     r.try_serialize(&mut buf).unwrap();
-    overwrite(svm, resv_pda(miner), buf);
+    let old = svm.get_account(&resv_pda(miner)).unwrap();
+    let mut data = buf;
+    data.resize(old.data.len(), 0);
+    svm.set_account(
+        new_pda,
+        Account { lamports: old.lamports, data, owner: old.owner, executable: old.executable, rent_epoch: old.rent_epoch },
+    )
+    .unwrap();
+    svm.set_account(resv_pda(miner), Account::default()).unwrap();
 }
 fn set_swap_backing(svm: &mut LiteSVM, key: &[u8; 32], backing: &str) {
     let mut s = swap_acct(svm, key);
@@ -702,7 +730,7 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "tao");
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -723,7 +751,7 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     .expect("lower tao min");
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -753,7 +781,7 @@ fn test_collateral_binds_to_the_backing_leg_on_either_side_of_the_pair() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "tao"); // btc→sol, backed by TAO
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -770,7 +798,7 @@ fn test_unsupported_backing_is_refused_at_finalize_and_at_initiate() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "btc");
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, OTHER_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix_b("btc", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, OTHER_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )

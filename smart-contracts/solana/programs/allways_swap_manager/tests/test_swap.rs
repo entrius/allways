@@ -67,7 +67,7 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     Pubkey::find_program_address(
@@ -80,7 +80,7 @@ fn stats_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
     Pubkey::find_program_address(&[b"stats", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -329,7 +329,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
             system_program: SYSTEM_PROGRAM,

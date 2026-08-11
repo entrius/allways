@@ -18,7 +18,8 @@ pub const MINER_SEED: &[u8] = b"miner";
 #[constant]
 pub const VOTE_SEED: &[u8] = b"vote";
 
-/// PDA seed prefix for a confirmed reservation (`seeds = [RESV_SEED, miner_pubkey]`).
+/// PDA seed prefix for a confirmed reservation (`seeds = [RESV_SEED, miner_pubkey, backing]`) —
+/// one slot per (miner, hub) since v3.1, so each hub's contest holds only its own slot.
 #[constant]
 pub const RESV_SEED: &[u8] = b"resv";
 
@@ -47,7 +48,8 @@ pub const BIND_SEED: &[u8] = b"bind";
 #[constant]
 pub const HOTKEY_BIND_SEED: &[u8] = b"hkbind";
 
-/// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
+/// PDA seed prefix for a reservation-lottery pool (`seeds = [POOL_SEED, miner, backing]`) —
+/// one contest slot per (miner, hub) since v3.1.
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
 

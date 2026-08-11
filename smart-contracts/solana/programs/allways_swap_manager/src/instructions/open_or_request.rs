@@ -66,7 +66,7 @@ pub struct OpenOrRequest<'info> {
         init_if_needed,
         payer = router,
         space = 8 + Pool::INIT_SPACE,
-        seeds = [POOL_SEED, miner.key().as_ref()],
+        seeds = [POOL_SEED, miner.key().as_ref(), collateral_chain.as_bytes()],
         bump,
     )]
     pub pool: Box<Account<'info, Pool>>,
@@ -75,13 +75,13 @@ pub struct OpenOrRequest<'info> {
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
 
-    /// The per-miner reservation slot — checked so a new contest can't be opened while a reservation
-    /// is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
+    /// The (miner, hub) reservation slot — checked so a new contest can't be opened while THIS hub's
+    /// reservation is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
     #[account(
         init_if_needed,
         payer = router,
         space = 8 + Reservation::INIT_SPACE,
-        seeds = [RESV_SEED, miner.key().as_ref()],
+        seeds = [RESV_SEED, miner.key().as_ref(), collateral_chain.as_bytes()],
         bump,
     )]
     pub reservation: Box<Account<'info, Reservation>>,

@@ -33,7 +33,7 @@ pub struct FinalizeReservation<'info> {
 
     #[account(
         mut,
-        seeds = [RESV_SEED, miner.key().as_ref()],
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
         bump = reservation.bump,
         constraint = reservation.router == router.key() @ ErrorCode::NoReservation,
     )]

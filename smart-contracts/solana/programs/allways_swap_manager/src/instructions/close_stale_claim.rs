@@ -17,7 +17,11 @@ pub struct CloseStaleClaim<'info> {
     /// CHECK: bound via the swap `has_one` + the reservation PDA seeds.
     pub miner: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump = reservation.bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump = reservation.bump,
+    )]
     pub reservation: Box<Account<'info, Reservation>>,
 
     #[account(

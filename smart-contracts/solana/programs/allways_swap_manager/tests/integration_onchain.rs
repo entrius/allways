@@ -90,10 +90,10 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 /// Weights rounds are keyed by the snapshot hash (`round_key`) so competing proposals coexist.
 fn weights_round_pda(round_key: &[u8; 32]) -> Pubkey {
@@ -344,7 +344,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
             system_program: SYSTEM_PROGRAM,

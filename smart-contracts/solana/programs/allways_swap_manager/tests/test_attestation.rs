@@ -16,6 +16,7 @@ use {
     },
     allways_swap_manager::state::{
         BondAttestation, Config, MinerState, Pool, Request, Reservation, Swap, ValidatorInfo,
+        VoteRound,
     },
     litesvm::LiteSVM,
     solana_account::Account,
@@ -90,6 +91,13 @@ fn attest_round_pda(m: &Pubkey, chain: &str) -> Pubkey {
     .0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
+    resv_pda_b(m, SOL)
+}
+fn resv_pda_b(m: &Pubkey, backing: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), backing.as_bytes()], &pid()).0
+}
+/// The RETIRED pre-v3.1 address (no backing seed) — only the legacy closer resolves it now.
+fn legacy_resv_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
@@ -100,6 +108,13 @@ fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
+    pool_pda_b(m, SOL)
+}
+fn pool_pda_b(m: &Pubkey, backing: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), backing.as_bytes()], &pid()).0
+}
+/// The RETIRED pre-v3.1 address (no backing seed) — only the legacy closer resolves it now.
+fn legacy_pool_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
@@ -291,15 +306,18 @@ fn open_backed_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str, b: &str) ->
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, f, t, b),
             attestation: (b != BACKING).then(|| attest_pda(miner, b)),
-            pool: pool_pda(miner),
+            pool: pool_pda_b(miner, b),
             treasury: treasury_pda(),
-            reservation: resv_pda(miner),
+            reservation: resv_pda_b(miner, b),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
 }
 fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
+    resolve_ix_b(SOL, caller, miner)
+}
+fn resolve_ix_b(backing: &str, caller: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &allways_swap_manager::instruction::ResolvePool {}.data(),
@@ -308,8 +326,8 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            pool: pool_pda(miner),
-            reservation: resv_pda(miner),
+            pool: pool_pda_b(miner, backing),
+            reservation: resv_pda_b(miner, backing),
             slot_hashes: SLOT_HASHES_ID,
             system_program: SYSTEM_PROGRAM,
         }
@@ -317,6 +335,17 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
     )
 }
 fn finalize_ix(
+    router: &Pubkey,
+    miner: &Pubkey,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+    attestation: Option<Pubkey>,
+) -> Instruction {
+    finalize_ix_b(SOL, router, miner, collateral_amount, from_amount, to_amount, attestation)
+}
+fn finalize_ix_b(
+    backing: &str,
     router: &Pubkey,
     miner: &Pubkey,
     collateral_amount: u64,
@@ -340,13 +369,16 @@ fn finalize_ix(
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            reservation: resv_pda(miner),
+            reservation: resv_pda_b(miner, backing),
             attestation,
         }
         .to_account_metas(None),
     )
 }
 fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+    claim_ix_b(SOL, caller, miner, from_tx_hash)
+}
+fn claim_ix_b(backing: &str, caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
@@ -360,7 +392,7 @@ fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction 
             caller: *caller,
             config: config_pda(),
             miner: *miner,
-            reservation: resv_pda(miner),
+            reservation: resv_pda_b(miner, backing),
             swap: swap_pda(&key),
             system_program: SYSTEM_PROGRAM,
         }
@@ -368,6 +400,15 @@ fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction 
     )
 }
 fn initiate_ix(
+    validator: &Pubkey,
+    miner: &Pubkey,
+    from_tx_hash: &str,
+    attestation: Option<Pubkey>,
+) -> Instruction {
+    initiate_ix_b(SOL, validator, miner, from_tx_hash, attestation)
+}
+fn initiate_ix_b(
+    backing: &str,
     validator: &Pubkey,
     miner: &Pubkey,
     from_tx_hash: &str,
@@ -382,8 +423,8 @@ fn initiate_ix(
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            reservation: resv_pda_b(miner, backing),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation,
             system_program: SYSTEM_PROGRAM,
@@ -431,6 +472,10 @@ fn attestation_acct(svm: &LiteSVM, m: &Pubkey, chain: &str) -> BondAttestation {
 fn reservation_acct(svm: &LiteSVM, m: &Pubkey) -> Reservation {
     Reservation::try_deserialize(&mut svm.get_account(&resv_pda(m)).unwrap().data.as_slice()).unwrap()
 }
+fn reservation_acct_b(svm: &LiteSVM, m: &Pubkey, backing: &str) -> Reservation {
+    Reservation::try_deserialize(&mut svm.get_account(&resv_pda_b(m, backing)).unwrap().data.as_slice())
+        .unwrap()
+}
 fn swap_acct(svm: &LiteSVM, key: &[u8; 32]) -> Swap {
     Swap::try_deserialize(&mut svm.get_account(&swap_pda(key)).unwrap().data.as_slice()).unwrap()
 }
@@ -446,12 +491,26 @@ fn overwrite(svm: &mut LiteSVM, pda: Pubkey, serialized: Vec<u8>) {
     )
     .unwrap();
 }
+/// Re-pin a drawn (sol-seeded) reservation to another backing. v3.1 keys the slot by backing, so the
+/// account must MOVE to the backing's PDA (with its bump) — later instructions derive that address
+/// from the stored chain and would otherwise fail their seeds check.
 fn set_reservation_backing(svm: &mut LiteSVM, miner: &Pubkey, backing: &str) {
     let mut r = reservation_acct(svm, miner);
     r.collateral_chain = backing.to_string();
+    let (new_pda, bump) =
+        Pubkey::find_program_address(&[b"resv", miner.as_ref(), backing.as_bytes()], &pid());
+    r.bump = bump;
     let mut buf = Vec::new();
     r.try_serialize(&mut buf).unwrap();
-    overwrite(svm, resv_pda(miner), buf);
+    let old = svm.get_account(&resv_pda(miner)).unwrap();
+    let mut data = buf;
+    data.resize(old.data.len(), 0);
+    svm.set_account(
+        new_pda,
+        Account { lamports: old.lamports, data, owner: old.owner, executable: old.executable, rent_epoch: old.rent_epoch },
+    )
+    .unwrap();
+    svm.set_account(resv_pda(miner), Account::default()).unwrap();
 }
 fn set_swap_backing(svm: &mut LiteSVM, key: &[u8; 32], backing: &str) {
     let mut s = swap_acct(svm, key);
@@ -544,15 +603,18 @@ fn attest(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, bal: u64, locked:
 }
 
 fn arm_and_resolve(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
-    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("arm draw");
-    let a = svm.get_account(&pool_pda(miner)).unwrap();
+    arm_and_resolve_b(svm, val, miner, SOL)
+}
+fn arm_and_resolve_b(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey, backing: &str) {
+    send(svm, resolve_ix_b(backing, &val.pubkey(), miner), &val.pubkey(), val).expect("arm draw");
+    let a = svm.get_account(&pool_pda_b(miner, backing)).unwrap();
     let seed_slot = Pool::try_deserialize(&mut a.data.as_slice()).unwrap().seed_slot;
     let entries: Vec<(u64, Hash)> = [seed_slot - 1, seed_slot, seed_slot + 1]
         .iter()
         .map(|&s| (s, Hash::new_from_array([s as u8; 32])))
         .collect();
     svm.set_sysvar::<SlotHashes>(&SlotHashes::new(&entries));
-    send(svm, resolve_ix(&val.pubkey(), miner), &val.pubkey(), val).expect("resolve");
+    send(svm, resolve_ix_b(backing, &val.pubkey(), miner), &val.pubkey(), val).expect("resolve");
 }
 
 fn draw(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey, f: &str, t: &str) {
@@ -702,7 +764,7 @@ fn test_tao_backed_entry_is_fused_by_heartbeat_age() {
     draw_tao_backed(&mut svm, &vals[0], &m);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -718,7 +780,7 @@ fn test_tao_backed_entry_is_fused_by_heartbeat_age() {
     stale_heartbeat(&mut svm);
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -738,23 +800,23 @@ fn test_the_fuse_is_rechecked_at_initiate() {
     draw_tao_backed(&mut svm, &vals[0], &m);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
     .expect("finalize");
-    send(&mut svm, claim_ix(&vals[0].pubkey(), &m, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&mut svm, claim_ix_b(TAO, &vals[0].pubkey(), &m, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
     set_swap_backing(&mut svm, &swap_key("srctx1"), TAO);
 
     stale_heartbeat(&mut svm);
-    let err = send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0])
+    let err = send(&mut svm, initiate_ix_b(TAO, &vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0])
         .expect_err("stale heartbeat at the obligation gate");
     assert!(err.contains("AttestationStale"), "{err}");
 
     // Beat it again and the same attestation obligates the miner.
     beat_heartbeat(&mut svm, &vals);
-    send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(&mut svm, initiate_ix(&vals[1].pubkey(), &m, "srctx1", attest_key), &vals[1].pubkey(), &vals[1]).expect("i1");
+    send(&mut svm, initiate_ix_b(TAO, &vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(&mut svm, initiate_ix_b(TAO, &vals[1].pubkey(), &m, "srctx1", attest_key), &vals[1].pubkey(), &vals[1]).expect("i1");
     assert!(miner_state(&svm, &m).has_active_swap);
 }
 
@@ -770,7 +832,7 @@ fn test_tao_entry_needs_a_locked_attestation_with_enough_bond() {
     draw_tao_backed(&mut svm, &vals[0], &m);
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, None),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, None),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -781,7 +843,7 @@ fn test_tao_entry_needs_a_locked_attestation_with_enough_bond() {
     attest(&mut svm, &vals, &m, need, false, 1);
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -792,7 +854,7 @@ fn test_tao_entry_needs_a_locked_attestation_with_enough_bond() {
     attest(&mut svm, &vals, &m, need - 1, true, 1);
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -803,7 +865,7 @@ fn test_tao_entry_needs_a_locked_attestation_with_enough_bond() {
     attest(&mut svm, &vals, &m, need, true, 1);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -824,16 +886,16 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
     draw_tao_backed(&mut svm, &vals[0], &m);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
     .expect("finalize");
-    send(&mut svm, claim_ix(&vals[0].pubkey(), &m, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    send(&mut svm, claim_ix_b(TAO, &vals[0].pubkey(), &m, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
     set_swap_backing(&mut svm, &swap_key("srctx1"), TAO);
     let initiated_at = now_ts(&svm);
-    send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(&mut svm, initiate_ix(&vals[1].pubkey(), &m, "srctx1", attest_key), &vals[1].pubkey(), &vals[1]).expect("i1");
+    send(&mut svm, initiate_ix_b(TAO, &vals[0].pubkey(), &m, "srctx1", attest_key), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(&mut svm, initiate_ix_b(TAO, &vals[1].pubkey(), &m, "srctx1", attest_key), &vals[1].pubkey(), &vals[1]).expect("i1");
 
     let timeout_ts = initiated_at + TIMEOUT_SECS + 1;
     set_clock(&mut svm, timeout_ts);
@@ -877,7 +939,7 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
     draw_tao_backed(&mut svm, &vals[0], &m);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -1498,32 +1560,45 @@ fn test_resolve_pool_pins_the_drawn_quotes_backing() {
     send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
         .expect("open");
     assert_eq!(
-        Pool::try_deserialize(&mut svm.get_account(&pool_pda(&m)).unwrap().data.as_slice()).unwrap().collateral_chain,
+        Pool::try_deserialize(&mut svm.get_account(&pool_pda_b(&m, TAO)).unwrap().data.as_slice())
+            .unwrap()
+            .collateral_chain,
         TAO,
         "the pool pins the quote's backing at open"
     );
     set_clock(&mut svm, now + POOL_WINDOW_SECS + 1);
-    arm_and_resolve(&mut svm, &vals[0], &m);
+    arm_and_resolve_b(&mut svm, &vals[0], &m, TAO);
 
-    let r = reservation_acct(&svm, &m);
+    let r = reservation_acct_b(&svm, &m, TAO);
     assert_eq!(r.collateral_chain, TAO, "the draw copies the pool's backing into the Reservation");
     assert_eq!(r.from_chain, HUB_FROM);
     assert_eq!(r.to_chain, HUB_TO);
 }
 
 #[test]
-fn test_a_bid_cannot_join_a_pool_pinned_to_a_different_backing() {
-    // Two quotes, same direction, different guarantee — a late bidder must not be able to slide onto
-    // the other offer's contest.
+fn test_each_backing_gets_its_own_contest_slot() {
+    // v3.1: a different backing is a different hub, and hubs no longer contend — the same direction
+    // opens one contest PER backing, at disjoint pool addresses. Two quotes, same direction,
+    // different guarantee, both live at once.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
     light_tao_purse(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
 
     send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
         .expect("open tao-backed");
-    let err = send(&mut svm, open_backed_ix(&vals[1].pubkey(), &m, HUB_FROM, HUB_TO, SOL), &vals[1].pubkey(), &vals[1])
+    send(&mut svm, open_backed_ix(&vals[1].pubkey(), &m, HUB_FROM, HUB_TO, SOL), &vals[1].pubkey(), &vals[1])
+        .expect("a sol-backed contest opens beside the tao one — per-hub concurrency");
+    let tao_pool =
+        Pool::try_deserialize(&mut svm.get_account(&pool_pda_b(&m, TAO)).unwrap().data.as_slice()).unwrap();
+    let sol_pool =
+        Pool::try_deserialize(&mut svm.get_account(&pool_pda_b(&m, SOL)).unwrap().data.as_slice()).unwrap();
+    assert_eq!(tao_pool.collateral_chain, TAO);
+    assert_eq!(sol_pool.collateral_chain, SOL);
+
+    // Within ONE hub's slot the pinned-offer rule still holds: a different pair cannot join.
+    let err = send(&mut svm, open_backed_ix(&vals[1].pubkey(), &m, SPOKE_FROM, SPOKE_TO, SOL), &vals[1].pubkey(), &vals[1])
         .unwrap_err();
-    assert!(err.contains("MinerBusyDifferentPair"), "backing mismatch must be refused, got: {err}");
+    assert!(err.contains("MinerBusyDifferentPair"), "pair mismatch within a hub still refused: {err}");
 }
 
 #[test]
@@ -1759,7 +1834,7 @@ fn plant_legacy_pool(svm: &mut LiteSVM, miner: &Pubkey, router: Pubkey) -> u64 {
     body.serialize(&mut buf).unwrap();
     plant_legacy(
         svm,
-        pool_pda(miner),
+        legacy_pool_pda(miner),
         &Pool::DISCRIMINATOR,
         buf,
         8 + Pool::INIT_SPACE - LEGACY_SHRINK,
@@ -1791,10 +1866,12 @@ fn plant_legacy_reservation(svm: &mut LiteSVM, miner: &Pubkey, router: Pubkey) -
     body.serialize(&mut buf).unwrap();
     plant_legacy(
         svm,
-        resv_pda(miner),
+        legacy_resv_pda(miner),
         &Reservation::DISCRIMINATOR,
         buf,
-        8 + Reservation::INIT_SPACE - LEGACY_SHRINK,
+        // v13-shaped length (the field count no longer matters — the ADDRESS is the legacy proof, so
+        // one full-length plant covers the generation the SIZE proof used to exclude).
+        8 + Reservation::INIT_SPACE,
     )
 }
 
@@ -1805,7 +1882,7 @@ fn close_legacy_pool_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::CloseLegacyPool {
             caller: *caller,
             miner: *miner,
-            pool: pool_pda(miner),
+            pool: legacy_pool_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -1818,7 +1895,7 @@ fn close_legacy_reservation_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
         allways_swap_manager::accounts::CloseLegacyReservation {
             caller: *caller,
             miner: *miner,
-            reservation: resv_pda(miner),
+            reservation: legacy_resv_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -1829,58 +1906,42 @@ fn is_closed(svm: &LiteSVM, pda: &Pubkey) -> bool {
 }
 
 #[test]
-fn test_the_legacy_closer_unlocks_a_miner_stranded_by_the_v3_layout() {
-    // Pool/Reservation SEEDS did not change in v3 but their layout did, so an existing miner's v10
-    // records sit at exactly the addresses `open_or_request` resolves — and it cannot parse them.
-    // withdraw_collateral never closed these, so draining swaps does not help: without this closer
-    // every miner registered before the upgrade is locked out permanently.
+fn test_the_legacy_closer_reclaims_both_pre_v14_generations() {
+    // The per-hub re-seed orphaned everything at the old `[seed, miner]` addresses — v10-shaped and
+    // v13-shaped alike. The address itself is now the legacy proof, so one closer covers both: here
+    // the pool is planted at the v10 length and the reservation at the full v13 length.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
     let router = vals[0].pubkey();
     let pool_rent = plant_legacy_pool(&mut svm, &m, router);
     let resv_rent = plant_legacy_reservation(&mut svm, &m, router);
 
-    // The lockout, demonstrated rather than assumed. It is not a tidy AccountDidNotDeserialize: the
-    // inserted field shifts every later String, so borsh reads a garbage length prefix and the program
-    // dies allocating. Worth knowing for the runbook — an operator grepping for the deserialize error
-    // would not find it.
-    let err = send(&mut svm, open_ix(&router, &m, SPOKE_FROM, SPOKE_TO), &router, &vals[0]).unwrap_err();
-    assert!(
-        err.contains("AccountDidNotDeserialize") || err.contains("memory allocation failed"),
-        "v10 records must lock the miner out, got: {err}"
-    );
+    // Unlike the v10→v13 upgrade, leftovers no longer collide with the live path — a fresh open
+    // resolves the NEW backing-qualified address and works with the legacy records still in place.
+    send(&mut svm, open_ix(&router, &m, SPOKE_FROM, SPOKE_TO), &router, &vals[0]).expect("open");
+    assert_eq!(svm.get_account(&pool_pda(&m)).unwrap().data.len(), 8 + Pool::INIT_SPACE);
 
     let miner_before = svm.get_account(&m).unwrap().lamports;
     send(&mut svm, close_legacy_pool_ix(&router, &m), &router, &vals[0]).expect("reap the legacy pool");
     send(&mut svm, close_legacy_reservation_ix(&router, &m), &router, &vals[0])
         .expect("reap the legacy reservation");
 
-    assert!(is_closed(&svm, &pool_pda(&m)), "the pool slot is handed back to the system program");
-    assert!(is_closed(&svm, &resv_pda(&m)), "and so is the reservation slot");
+    assert!(is_closed(&svm, &legacy_pool_pda(&m)), "the pool slot is handed back to the system program");
+    assert!(is_closed(&svm, &legacy_resv_pda(&m)), "and so is the reservation slot");
     assert_eq!(
         svm.get_account(&m).unwrap().lamports,
         miner_before + pool_rent + resv_rent,
         "rent goes back to the miner that the slot belongs to — the caller profits nothing"
     );
-
-    // The payoff: the same miner opens a pool again, freshly allocated under the current layout.
-    send(&mut svm, open_ix(&router, &m, SPOKE_FROM, SPOKE_TO), &router, &vals[0]).expect("re-open");
+    // The live pool opened above is untouched by the reap.
     assert_eq!(svm.get_account(&pool_pda(&m)).unwrap().data.len(), 8 + Pool::INIT_SPACE);
-    assert_eq!(svm.get_account(&resv_pda(&m)).unwrap().data.len(), 8 + Reservation::INIT_SPACE);
-    assert_eq!(
-        Pool::try_deserialize(&mut svm.get_account(&pool_pda(&m)).unwrap().data.as_slice())
-            .unwrap()
-            .collateral_chain,
-        SOL,
-        "re-created under v13, backing and all"
-    );
 }
 
 #[test]
-fn test_the_legacy_closer_refuses_a_live_slot() {
-    // A v13 record is LONGER than any legacy one by exactly the field v3 added, and the only writer of
-    // these addresses allocates the live length — so requiring the legacy length puts a live pool or a
-    // held reservation structurally out of reach, not merely out of policy.
+fn test_the_legacy_closer_cannot_reach_a_live_slot() {
+    // Live pools/reservations exist only at backing-qualified addresses, and the closer's seeds pin
+    // it to the retired 2-seed address — structurally disjoint. On the (empty) retired address the
+    // owner check refuses; the live slot is never even named in the transaction.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
     let router = vals[0].pubkey();
@@ -1889,11 +1950,11 @@ fn test_the_legacy_closer_refuses_a_live_slot() {
     assert_eq!(svm.get_account(&resv_pda(&m)).unwrap().data.len(), 8 + Reservation::INIT_SPACE);
 
     let err = send(&mut svm, close_legacy_pool_ix(&router, &m), &router, &vals[0]).unwrap_err();
-    assert!(err.contains("InvalidAccountForMigration"), "a live pool must be unreachable, got: {err}");
+    assert!(err.contains("InvalidAccountForMigration"), "nothing legacy to reap, got: {err}");
     let err = send(&mut svm, close_legacy_reservation_ix(&router, &m), &router, &vals[0]).unwrap_err();
-    assert!(err.contains("InvalidAccountForMigration"), "a held reservation likewise, got: {err}");
+    assert!(err.contains("InvalidAccountForMigration"), "likewise for the reservation, got: {err}");
 
-    // Both survive intact — no data zeroed, no rent moved.
+    // The live accounts survive intact — no data zeroed, no rent moved.
     assert_eq!(reservation_acct(&svm, &m).router, router, "the drawn reservation is untouched");
     assert_ne!(svm.get_account(&pool_pda(&m)).unwrap().lamports, 0);
 }
@@ -1914,11 +1975,51 @@ fn test_the_legacy_closer_pays_rent_only_to_the_slots_own_miner() {
         allways_swap_manager::accounts::CloseLegacyPool {
             caller: router,
             miner: stranger,
-            pool: pool_pda(&m),
+            pool: legacy_pool_pda(&m),
         }
         .to_account_metas(None),
     );
     let err = send(&mut svm, ix, &router, &vals[0]).unwrap_err();
     assert!(err.contains("ConstraintSeeds"), "the rent destination is seed-bound, got: {err}");
-    assert!(!is_closed(&svm, &pool_pda(&m)), "and the slot is still there to be reaped properly");
+    assert!(!is_closed(&svm, &legacy_pool_pda(&m)), "and the slot is still there to be reaped properly");
+}
+
+#[test]
+fn test_the_legacy_initiate_round_closer_refunds_the_caller() {
+    // Initiate rounds moved to swap_key seeds; the old per-miner round address is retired. Rounds
+    // were validator-funded, so this reap refunds the CALLER, not the miner.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let round_pda = vote_pda(REQ_INITIATE, m.as_ref());
+    let body = allways_swap_manager::state::VoteRound {
+        bound_hash: [7u8; 32],
+        voters: vec![vals[0].pubkey()],
+        created_at: BASE_TS - 900,
+        bump: 255,
+    };
+    let mut data = VoteRound::DISCRIMINATOR.to_vec();
+    body.serialize(&mut data).unwrap();
+    let rent = svm.minimum_balance_for_rent_exemption(data.len());
+    svm.set_account(
+        round_pda,
+        Account { lamports: rent, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+
+    let caller = vals[1].pubkey();
+    let before = svm.get_account(&caller).unwrap().lamports;
+    let ix = Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseLegacyInitiateRound {}.data(),
+        allways_swap_manager::accounts::CloseLegacyInitiateRound {
+            caller,
+            miner: m,
+            vote_round: round_pda,
+        }
+        .to_account_metas(None),
+    );
+    send(&mut svm, ix, &caller, &vals[1]).expect("reap the legacy round");
+    assert!(is_closed(&svm, &round_pda));
+    // Refund lands on the caller (net of the tx fee it paid).
+    assert!(svm.get_account(&caller).unwrap().lamports > before, "caller got the rent back");
 }

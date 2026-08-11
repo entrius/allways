@@ -46,7 +46,7 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
 fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     Pubkey::find_program_address(
@@ -56,7 +56,7 @@ fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
     .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 fn swap_pda(k: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", k], &pid()).0
@@ -182,7 +182,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     let initiate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
             &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
-            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, miner.pubkey().as_ref()), swap: swap_pda(&key), attestation: None, system_program: SYS }.to_account_metas(None),
+            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, &key), swap: swap_pda(&key), attestation: None, system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("initiate");
     };
     initiate(&mut svm, &vals[0]);

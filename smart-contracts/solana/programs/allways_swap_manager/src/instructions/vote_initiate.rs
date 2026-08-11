@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::{record_vote, reset_round, swap_request_hash};
+use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{
     ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
 };
@@ -32,14 +32,20 @@ pub struct VoteInitiate<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump,
+    )]
     pub reservation: Box<Account<'info, Reservation>>,
 
+    /// Keyed by swap_key like the confirm/timeout rounds (v3.1): per-hub for free (a swap pins its
+    /// backing), and closable at quorum since the unique seed is never reused.
     #[account(
         init_if_needed,
         payer = validator,
         space = 8 + VoteRound::INIT_SPACE,
-        seeds = [VOTE_SEED, &[REQ_INITIATE], miner.key().as_ref()],
+        seeds = [VOTE_SEED, &[REQ_INITIATE], swap_key.as_ref()],
         bump,
     )]
     pub vote_round: Account<'info, VoteRound>,
@@ -142,7 +148,10 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         ctx.accounts.miner_state.set_busy(bit, timeout_at); // hub stays busy through the swap deadline
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         ctx.accounts.reservation.claimed_swap_key = [0u8; 32];
-        reset_round(&mut ctx.accounts.vote_round);
+        // Unique swap_key seed → the round is never reused; close it and refund rent, like the
+        // confirm/timeout rounds. A straggler's late vote reverts on the NotPending status gate
+        // above before it could re-create the round.
+        ctx.accounts.vote_round.close(ctx.accounts.validator.to_account_info())?;
 
         emit!(SwapInitiated {
             swap_key,

@@ -26,7 +26,11 @@ pub struct SubmitSwapClaim<'info> {
     /// CHECK: bound via the reservation/swap PDA seeds.
     pub miner: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump = reservation.bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump = reservation.bump,
+    )]
     pub reservation: Box<Account<'info, Reservation>>,
 
     /// Boxed (String-heavy) to keep it off the BPF stack.

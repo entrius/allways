@@ -45,14 +45,20 @@ pub struct ResolvePool<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [POOL_SEED, miner.key().as_ref()], bump = pool.bump)]
+    /// Self-referential seed: the pool's own pinned backing names its (miner, hub) address, so no
+    /// backing argument is needed — the address either matches the stored chain or fails to resolve.
+    #[account(
+        mut,
+        seeds = [POOL_SEED, miner.key().as_ref(), pool.collateral_chain.as_bytes()],
+        bump = pool.bump,
+    )]
     pub pool: Account<'info, Pool>,
 
     #[account(
         init_if_needed,
         payer = caller,
         space = 8 + Reservation::INIT_SPACE,
-        seeds = [RESV_SEED, miner.key().as_ref()],
+        seeds = [RESV_SEED, miner.key().as_ref(), pool.collateral_chain.as_bytes()],
         bump,
     )]
     pub reservation: Account<'info, Reservation>,

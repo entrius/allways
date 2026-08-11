@@ -24,7 +24,11 @@ pub struct CloseUnfilledReservation<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump = reservation.bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump = reservation.bump,
+    )]
     pub reservation: Account<'info, Reservation>,
 }
 
