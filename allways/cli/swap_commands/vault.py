@@ -21,6 +21,10 @@ from allways.cli.swap_commands.helpers import console, fail, get_cli_context, lo
 from allways.constants import TAO_TO_RAO
 from allways.vault import BondVaultClient, VaultConfigError, codec
 
+# Mirrors MIN_VOTE_ROUND_TTL in the vault contract — fail locally with a clear
+# message rather than eating an opaque ContractReverted.
+MIN_VOTE_ROUND_TTL = 100
+
 
 def _client(use_coldkey: bool = False) -> BondVaultClient:
     """The configured vault client plus its signer, failing with setup guidance if unconfigured."""
@@ -74,16 +78,21 @@ def vault_group():
 @vault_group.command('recycle', show_disclaimer=True)
 @click.option('--force', is_flag=True, help='Submit even if the pot reads as empty/unreadable.')
 def vault_recycle(force):
-    """Drain the settled fee pot into the SN7 pool (permissionless, caller pays ~0.003 τ).
+    """Drain the pot into the SN7 pool (permissionless, caller pays ~0.003 τ).
 
-    [dim]The pot only fills at true-up boundaries / exits / slash surpluses — cron this
-    at a fixed offset AFTER the true-up cadence; more often is wasted postage.[/dim]
+    [dim]The pot is settled fees PLUS any TAO sent straight to the vault address — donated
+    TAO is swept automatically, nobody can move it anywhere else. Fees only fill at true-up
+    boundaries / exits / slash surpluses; cron this at a fixed offset AFTER the true-up
+    cadence, more often is wasted postage.[/dim]
     """
     vault = _client()
 
-    pot = vault.get_accumulated_fees()
+    pot = vault.get_recyclable_pot()
     if pot is not None:
         console.print(f'  Pot: [bold]{_fmt_tao(pot)}[/bold]')
+        fees = vault.get_accumulated_fees()
+        if fees is not None and pot > fees:
+            console.print(f'  [dim]of which donated: {_fmt_tao(pot - fees)}[/dim]')
         if pot == 0 and not force:
             console.print('[yellow]Pot is empty — nothing to recycle (use --force to submit anyway)[/yellow]\n')
             return
@@ -102,11 +111,18 @@ def vault_status(miner):
     vault = _client()
 
     console.print(f'\n[bold]Vault[/bold] [dim]{vault.address}[/dim]\n')
-    pot = vault.get_accumulated_fees()
-    if pot is None:
+    fees = vault.get_accumulated_fees()
+    if fees is None:
         console.print('[yellow]Reads unavailable on this node (ContractResult decode) — write commands still work.[/yellow]\n')
         return
-    console.print(f'  Fee pot (settled, unrecycled): {_fmt_tao(pot)}')
+    console.print(f'  Fee pot (settled, unrecycled): {_fmt_tao(fees)}')
+    pot = vault.get_recyclable_pot()
+    if pot is not None:
+        console.print(f'  Donated (unattributed):        {_fmt_tao(max(pot - fees, 0))}')
+        console.print(f'  [bold]Recyclable pot (total):        {_fmt_tao(pot)}[/bold]')
+    owed = vault.get_total_collateral()
+    if owed is not None:
+        console.print(f'  Bonds owed to miners:          {_fmt_tao(owed)}')
     total = vault.get_total_recycled_fees()
     if total is not None:
         console.print(f'  Recycled to date:              {_fmt_tao(total)}')
@@ -195,7 +211,7 @@ def vault_claim_slash(swap_ref):
     _report(result, 'Claim submitted')
 
 
-# ─── Admin (owner-only) ──────────────────────────────────────────────────────
+# ─── Governance (validator quorum — there is no owner) ───────────────────────
 
 def _admin_confirm(prompt: str) -> bool:
     ctx = click.get_current_context(silent=True)
@@ -204,15 +220,38 @@ def _admin_confirm(prompt: str) -> bool:
     return click.confirm(prompt)
 
 
-def _admin_submit(label: str, args: bytes, prompt: str, ok: str, use_coldkey: bool):
-    vault = _client(use_coldkey)
-    console.print(f'  Signer: [dim]{vault.keypair.ss58_address}[/dim] (must be the vault owner)')
-    if not _admin_confirm(prompt):
+def _admin_submit(label: str, *args: bytes, confirm: str, ok_msg: str):
+    vault = _client(_ck())
+    console.print(f'  Signer: [dim]{vault.keypair.ss58_address}[/dim]')
+    if not _admin_confirm(confirm):
         console.print('[yellow]Cancelled[/yellow]')
         return
     with loading('Submitting...'):
-        result = vault.admin_call(label, args)
-    _report(result, ok)
+        result = vault.admin_call(label, *args)
+    _report(result, ok_msg)
+
+
+def _vote_submit(label: str, args, prompt: str, peer_suffix, peer_cmd: str = None):
+    """Cast one governance vote. At a single-validator set this reaches quorum and applies
+    immediately; beyond that it records a vote and prints the identical command peers must run —
+    governance rounds bind their full payload, so a differing command opens a separate round
+    instead of joining this one."""
+    vault = _client(_ck())
+    validators = vault.get_validators()
+    n = len(validators) if validators is not None else None
+    console.print(f'  Signer: [dim]{vault.keypair.ss58_address}[/dim]')
+    if n:
+        console.print(f'  Validator set: [bold]{n}[/bold]')
+    if not _admin_confirm(prompt):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+    with loading('Submitting vote...'):
+        result = vault.admin_call(label, *args)
+    _report(result, 'Vote submitted' if n != 1 else 'Applied (single-validator set)')
+    if result.ok and n and n > 1:
+        cmd = peer_cmd or f'alw vault admin {peer_suffix}'
+        console.print('  [dim]Every other validator must run exactly:[/dim]')
+        console.print(f'    [bold]{cmd}[/bold]\n')
 
 
 @vault_group.group('admin', cls=StyledGroup, show_disclaimer=True)
@@ -220,7 +259,11 @@ def _admin_submit(label: str, args: bytes, prompt: str, ok: str, use_coldkey: bo
 @click.option('--coldkey', 'use_coldkey', is_flag=True, help='Sign with the wallet coldkey instead of the hotkey.')
 @click.pass_context
 def vault_admin_group(ctx, assume_yes, use_coldkey):
-    """Vault administration (owner-signed; validator-set/config only — no fund paths)."""
+    """Vault governance — validator-signed quorum rounds.
+
+    [dim]This contract has NO owner and no admin key. Membership and config change only by a
+    unanimous vote of the current validator set, and nothing here can move a miner's funds.
+    At a single-validator set each command applies immediately.[/dim]"""
     ctx.obj = {'yes': assume_yes, 'coldkey': use_coldkey}
 
 
@@ -232,65 +275,86 @@ def _ck() -> bool:
 @vault_admin_group.command('add-validator', show_disclaimer=True)
 @click.argument('ss58')
 def admin_add_validator(ss58):
-    """Add SS58 to the vault's validator set."""
-    _admin_submit('add_validator', _account_bytes(ss58), f'Add validator {ss58}?', 'Validator added', _ck())
+    """Vote to admit SS58 to the validator set (UNANIMOUS — every current validator).
+
+    [dim]On quorum the candidate becomes PENDING; they join only once they run
+    `alw vault admin accept` themselves, which proves they hold the key.[/dim]
+    """
+    _vote_submit('vote_add_validator', [_account_bytes(ss58)], f'Vote to admit validator {ss58}?', 'add-validator ' + ss58)
+
+
+@vault_admin_group.command('accept', show_disclaimer=True)
+def admin_accept_validator():
+    """Accept your own pending admission to the validator set."""
+    _admin_submit('accept_validator', confirm='Accept your admission to the validator set?',
+                  ok_msg='Joined the validator set')
+
 
 
 @vault_admin_group.command('remove-validator', show_disclaimer=True)
 @click.argument('ss58')
 def admin_remove_validator(ss58):
-    """Remove SS58 from the vault's validator set."""
-    _admin_submit('remove_validator', _account_bytes(ss58), f'Remove validator {ss58}?', 'Validator removed', _ck())
+    """Vote to eject SS58 (every OTHER validator; refused below 3 validators).
+
+    [dim]The target is barred from voting, so a dark or compromised key can
+    still be removed by the rest of the set.[/dim]
+    """
+    _vote_submit('vote_remove_validator', [_account_bytes(ss58)], f'Vote to remove validator {ss58}?',
+                 'remove-validator ' + ss58)
 
 
-@vault_admin_group.command('set-threshold', show_disclaimer=True)
-@click.argument('percent', type=int)
-def admin_set_threshold(percent):
-    """Set the consensus threshold percent (1-100)."""
-    if not 0 < percent <= 100:
-        fail('Percent must be 1-100')
-    _admin_submit('set_consensus_threshold', codec.u8(percent), f'Set threshold to {percent}%?', 'Threshold set', _ck())
+@vault_admin_group.command('set-config', show_disclaimer=True)
+@click.option('--min-collateral', type=float, help='Minimum bond required to lock (TAO)')
+@click.option('--max-collateral', type=float, help='Maximum bond (TAO; 0 = unlimited)')
+@click.option('--threshold', type=int, help='Consensus threshold percent (1-100)')
+@click.option('--round-ttl', type=int, help='Vote-round TTL in blocks')
+def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
+    """Vote the WHOLE vault config (UNANIMOUS — every current validator).
 
+    [dim]Omitted flags keep their current on-chain value. The round binds the
+    complete resulting config, so every validator must submit the identical
+    command — it is printed for you to pass on.[/dim]
+    """
+    vault = _client()
 
-@vault_admin_group.command('set-min-collateral', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def admin_set_min_collateral(amount_tao):
-    """Set the minimum bond required to lock (in TAO)."""
-    rao = int(amount_tao * TAO_TO_RAO)
-    _admin_submit('set_min_collateral', codec.u64(rao), f'Set min collateral to {_fmt_tao(rao)}?', 'Min collateral set', _ck())
+    # Unspecified fields default to the live config so every validator's round
+    # hash matches. An unreadable config must FAIL, never be guessed at — a
+    # wrong default here would silently propose a config nobody intended.
+    current = {
+        'min': vault.get_min_collateral(),
+        'max': vault.get_max_collateral(),
+        'threshold': vault.get_consensus_threshold(),
+        'ttl': vault.get_vote_round_ttl(),
+    }
+    if any(v is None for v in current.values()):
+        fail('Cannot read the current config from this node — refusing to guess the '
+             'unspecified fields. Pass every flag explicitly, or use a node whose '
+             'contract dry-runs decode.')
 
+    new_min = int(min_collateral * TAO_TO_RAO) if min_collateral is not None else current['min']
+    new_max = int(max_collateral * TAO_TO_RAO) if max_collateral is not None else current['max']
+    new_threshold = threshold if threshold is not None else current['threshold']
+    new_ttl = round_ttl if round_ttl is not None else current['ttl']
 
-@vault_admin_group.command('set-max-collateral', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def admin_set_max_collateral(amount_tao):
-    """Set the maximum bond (in TAO; 0 = unlimited)."""
-    rao = int(amount_tao * TAO_TO_RAO)
-    _admin_submit('set_max_collateral', codec.u64(rao), f'Set max collateral to {_fmt_tao(rao)}?', 'Max collateral set', _ck())
+    if not 0 < new_threshold <= 100:
+        fail('Threshold must be 1-100')
+    if new_ttl < MIN_VOTE_ROUND_TTL:
+        fail(f'Round TTL must be >= {MIN_VOTE_ROUND_TTL} blocks (the contract refuses less)')
 
+    console.print('\n[bold]Resulting config[/bold]')
+    console.print(f'  Min collateral: {_fmt_tao(current["min"])} -> {_fmt_tao(new_min)}')
+    console.print(f'  Max collateral: {_fmt_tao(current["max"])} -> {_fmt_tao(new_max)}')
+    console.print(f'  Threshold:      {current["threshold"]}% -> {new_threshold}%')
+    console.print(f'  Round TTL:      {current["ttl"]} -> {new_ttl} blocks\n')
 
-@vault_admin_group.command('set-round-ttl', show_disclaimer=True)
-@click.argument('blocks', type=int)
-def admin_set_round_ttl(blocks):
-    """Set the vote-round TTL in blocks."""
-    if blocks <= 0:
-        fail('Blocks must be > 0')
-    _admin_submit('set_vote_round_ttl', codec.u32(blocks), f'Set round TTL to {blocks} blocks?', 'Round TTL set', _ck())
-
-
-@vault_admin_group.command('set-halted', show_disclaimer=True)
-@click.argument('halted', type=click.Choice(['true', 'false']))
-def admin_set_halted(halted):
-    """Halt or resume value ENTRY (post_collateral/lock_bond). Exit paths are never halted."""
-    flag = halted == 'true'
-    _admin_submit('set_halted', codec.boolean(flag), f'Set halted = {flag}?', f'Halted = {flag}', _ck())
-
-
-@vault_admin_group.command('transfer-ownership', show_disclaimer=True)
-@click.argument('new_owner')
-def admin_transfer_ownership(new_owner):
-    """Transfer vault ownership to NEW_OWNER (ss58). Irreversible without their cooperation."""
-    _admin_submit(
-        'transfer_ownership', _account_bytes(new_owner),
-        f'Transfer vault ownership to {new_owner}? This cannot be undone unilaterally.',
-        'Ownership transferred', _ck(),
+    peer_cmd = (
+        f'alw vault admin set-config --min-collateral {new_min / TAO_TO_RAO:g} '
+        f'--max-collateral {new_max / TAO_TO_RAO:g} --threshold {new_threshold} --round-ttl {new_ttl}'
+    )
+    _vote_submit(
+        'vote_set_config',
+        [codec.u64(new_min), codec.u64(new_max), codec.u8(new_threshold), codec.u32(new_ttl)],
+        'Vote this config?',
+        None,
+        peer_cmd=peer_cmd,
     )

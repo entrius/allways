@@ -235,8 +235,59 @@ class BondVaultClient:
     def get_total_recycled_fees(self) -> Optional[int]:
         return self._read_u64('get_total_recycled_fees')
 
+    def get_recyclable_pot(self) -> Optional[int]:
+        """What the next ``recycle_fees`` would actually drain (rao): settled fees PLUS any TAO
+        transferred straight to the vault address. Exceeds ``get_accumulated_fees`` by the donated
+        share — the pot is derived from the real balance, not from the fee counter."""
+        return self._read_u64('get_recyclable_pot')
+
+    def get_total_collateral(self) -> Optional[int]:
+        """Total bonds owed to miners — the first term of the commingling invariant, and the
+        floor the recyclable pot can never dip below."""
+        return self._read_u64('get_total_collateral')
+
+    def get_pending_slash_total(self) -> Optional[int]:
+        """Unclaimed slash reimbursements owed to users."""
+        return self._read_u64('get_pending_slash_total')
+
     def get_min_collateral(self) -> Optional[int]:
         return self._read_u64('get_min_collateral')
+
+    def get_max_collateral(self) -> Optional[int]:
+        return self._read_u64('get_max_collateral')
+
+    def get_consensus_threshold(self) -> Optional[int]:
+        reader = self._read('get_consensus_threshold')
+        try:
+            return reader.uint(1) if reader is not None else None
+        except codec.VaultCodecError:
+            return None
+
+    def get_vote_round_ttl(self) -> Optional[int]:
+        reader = self._read('get_vote_round_ttl')
+        try:
+            return reader.uint(4) if reader is not None else None
+        except codec.VaultCodecError:
+            return None
+
+    def get_validators(self) -> Optional[List[str]]:
+        """The current validator set. Its SIZE is the governance bar: add/config need every
+        member, removal every member but the target."""
+        return self._read_accounts('get_validators')
+
+    def get_pending_validators(self) -> Optional[List[str]]:
+        """Candidates a unanimous round approved, still awaiting their own ``accept_validator``.
+        They count toward no quorum until they accept."""
+        return self._read_accounts('get_pending_validators')
+
+    def _read_accounts(self, label: str) -> Optional[List[str]]:
+        reader = self._read(label)
+        if reader is None:
+            return None
+        try:
+            return [reader.account() for _ in range(reader.compact())]
+        except codec.VaultCodecError:
+            return None
 
     # ─── validator quorum rounds (the W3 relays) ─────────────────────────────
 

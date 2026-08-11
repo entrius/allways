@@ -7,12 +7,16 @@ use scale::{Decode, Encode};
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
 pub enum Error {
-    /// Caller is not the contract owner
-    NotOwner,
     /// Caller is not a registered validator
     NotValidator,
-    /// System is halted — no new bonds or locks
-    SystemHalted,
+    /// Seed/resulting validator set is empty, duplicated, or over MAX_VALIDATORS
+    InvalidValidatorSet,
+    /// Candidate is already a validator or already pending acceptance
+    AlreadyValidator,
+    /// Caller has no pending admission to accept
+    NotPendingValidator,
+    /// A validator may not vote on their own removal
+    SelfRemoval,
     /// Validator has already voted on this round
     AlreadyVoted,
     /// A pending round exists with a different hash for this key

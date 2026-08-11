@@ -13,16 +13,24 @@
 #                             cap the per-miner exposure until the set widens.
 #   threshold       66%     — 2-of-3 today; `get_required_votes` rounds up.
 #   vote_round_ttl  600     — blocks (~2 h at 12 s) a vote round stays open.
+#   validators      seed set — the ONLY way validators ever come to exist: there
+#                             is no owner and no admin key on this contract. An
+#                             empty or duplicated set FAILS the instantiation
+#                             rather than deploying a vault nobody can ever vote
+#                             on. Seed all the operators you have; the set can
+#                             only grow afterwards by unanimous vote.
 #
-# All four are owner-tunable after deploy (`alw vault admin set-*`); the point of
-# seeding them correctly is that the vault is never live at a wrong value.
+# All four numbers are changeable after deploy only by a UNANIMOUS validator round
+# (`alw vault admin set-config`); the point of seeding them correctly is that the
+# vault is never live at a wrong value.
 #
 # Usage:
 #   STAKING_HOTKEY=<ss58 registered on NETUID> URL=wss://entrypoint-finney.opentensor.ai:443 \
 #     SURI="<deployer seed>" ./deploy.sh
 #
 # After it prints the address:
-#   1. alw vault admin add-validator <ss58>   — once per validator hotkey
+#   1. alw vault admin add-validator <ss58>   — unanimous vote; the candidate then
+#                                               runs `alw vault admin accept`
 #   2. alw vault status                        — confirm bounds, threshold, validator set
 #   3. alw config set vault-address <address>  — and ship it to every validator's env
 #   4. record the address + code hash in SOLANA_BITTENSOR_SPLIT_COLLATERAL.md
@@ -34,7 +42,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.89.0-x86_64-unknown-linux-gnu}"
 
 URL="${URL:?Set URL to the target chain endpoint (e.g. wss://entrypoint-finney.opentensor.ai:443)}"
-SURI="${SURI:?Set SURI to the deployer seed — it becomes the vault owner}"
+SURI="${SURI:?Set SURI to the deployer seed — it pays for the deploy and nothing more}"
 NETUID="${NETUID:-7}"
 STAKING_HOTKEY="${STAKING_HOTKEY:?Set STAKING_HOTKEY to a hotkey registered on netuid $NETUID}"
 
@@ -42,7 +50,12 @@ STAKING_HOTKEY="${STAKING_HOTKEY:?Set STAKING_HOTKEY to a hotkey registered on n
 MIN_COLLATERAL="${MIN_COLLATERAL:-250000000}"     # 0.25 τ
 MAX_COLLATERAL="${MAX_COLLATERAL:-10000000000}"   # 10 τ
 CONSENSUS_THRESHOLD="${CONSENSUS_THRESHOLD:-66}"  # percent
-VOTE_ROUND_TTL="${VOTE_ROUND_TTL:-600}"           # blocks
+VOTE_ROUND_TTL="${VOTE_ROUND_TTL:-600}"           # blocks (contract floor: 100)
+# Comma-separated ss58 seed validator set. One is valid (the bootstrap case), but
+# note n=2 is the ONLY configuration worse than the one before it: both members
+# are required for every quorum, so one dark key freezes every locked bond with
+# no owner left to repair it. Do not hold locked bonds while below 3.
+SEED_VALIDATORS="${SEED_VALIDATORS:?Set SEED_VALIDATORS to a comma-separated ss58 list}"
 
 # Set GAS_ARGS="--skip-dry-run --gas ... --proof-size ..." on runtimes whose
 # dry-runs cargo-contract cannot decode (localnet 425; see spike0.sh).
@@ -54,6 +67,7 @@ echo "== target:         $URL (netuid $NETUID)"
 echo "== staking_hotkey: $STAKING_HOTKEY"
 echo "== bond bounds:    min $MIN_COLLATERAL rao / max $MAX_COLLATERAL rao"
 echo "== quorum:         $CONSENSUS_THRESHOLD%, round TTL $VOTE_ROUND_TTL blocks"
+echo "== seed set:       $SEED_VALIDATORS"
 read -r -p "Instantiate an IMMUTABLE vault with these values? [y/N] " ok
 [ "$ok" = "y" ] || { echo "aborted"; exit 1; }
 
@@ -64,7 +78,7 @@ echo "== [2/2] instantiate"
 # shellcheck disable=SC2086
 cargo contract instantiate --url "$URL" --suri "$SURI" \
   --args "$STAKING_HOTKEY" "$NETUID" "$MIN_COLLATERAL" "$MAX_COLLATERAL" \
-         "$CONSENSUS_THRESHOLD" "$VOTE_ROUND_TTL" \
+         "$CONSENSUS_THRESHOLD" "$VOTE_ROUND_TTL" "[$SEED_VALIDATORS]" \
   --execute --skip-confirm $GAS_ARGS --output-json \
   | tee "$OUT_DIR/instantiate.json"
 

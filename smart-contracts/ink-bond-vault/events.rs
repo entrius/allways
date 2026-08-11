@@ -88,13 +88,24 @@ pub struct SlashClaimed {
     pub amount: u128,
 }
 
-/// Fees recycled into the SN7 pool via add_stake_recycle
+/// Fees recycled into the SN7 pool via add_stake_recycle. `tao_amount` is the
+/// whole drained pot; `donated` is the share of it that arrived as unattributed
+/// TAO rather than as settled protocol fees.
 #[ink::event]
 pub struct FeesRecycled {
     pub tao_amount: u128,
+    pub donated: u128,
 }
 
-/// Validator added or removed
+/// A unanimous round approved this candidate; they join the set only once they
+/// call `accept_validator` themselves, proving they hold the key.
+#[ink::event]
+pub struct ValidatorPending {
+    #[ink(topic)]
+    pub candidate: AccountId,
+}
+
+/// Validator joined (after accepting) or was removed
 #[ink::event]
 pub struct ValidatorUpdated {
     #[ink(topic)]
@@ -102,18 +113,12 @@ pub struct ValidatorUpdated {
     pub registered: bool,
 }
 
-/// Contract configuration changed
+/// Whole config replaced by a unanimous `vote_set_config` round. Carries every
+/// field, not a delta — the round agreed on this exact tuple.
 #[ink::event]
 pub struct ConfigUpdated {
-    pub key: ink::prelude::string::String,
-    pub value: u128,
-}
-
-/// Ownership transferred
-#[ink::event]
-pub struct OwnershipTransferred {
-    #[ink(topic)]
-    pub previous_owner: AccountId,
-    #[ink(topic)]
-    pub new_owner: AccountId,
+    pub min_collateral: u128,
+    pub max_collateral: u128,
+    pub consensus_threshold_percent: u8,
+    pub vote_round_ttl: u32,
 }

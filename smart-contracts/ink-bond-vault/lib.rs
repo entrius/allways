@@ -74,20 +74,45 @@ mod allways_bond_vault {
     use super::*;
     use events::*;
     use ink::codegen::Env;
-    use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
 
     // Round-type discriminants, bound into every request hash so unlock,
-    // slash, and fee-settle rounds can never collide.
+    // slash, fee-settle, and governance rounds can never collide.
     const REQ_UNLOCK: u8 = 0;
     const REQ_SLASH: u8 = 1;
     const REQ_COLLECT: u8 = 2;
+    const REQ_ADD_VALIDATOR: u8 = 3;
+    const REQ_REMOVE_VALIDATOR: u8 = 4;
+    const REQ_CONFIG: u8 = 5;
 
     // Fee-settle batch ceiling: bounds per-entry storage writes so a quorum
     // application always fits a block. One cadence round covers ≤256 miners;
     // larger fleets split into multiple batches.
     const MAX_BATCH: usize = 256;
+
+    // Mirrors the Solana program's MAX_VALIDATORS. Bounds the per-vote set
+    // scan and stops unbounded growth on a contract that can never be fixed.
+    const MAX_VALIDATORS: usize = 16;
+
+    // Removal is refused below this — at n=2 a removal can strand the set at a
+    // single validator, and at n=1 there would be nobody left to vote at all.
+    const MIN_VALIDATORS_TO_REMOVE: usize = 3;
+
+    // Floor on the configurable round TTL. Quorum-gated config means a
+    // *unanimous* mistake could otherwise set a TTL so short that no round can
+    // ever gather its votes — unrecoverable, with no owner left to repair it.
+    const MIN_VOTE_ROUND_TTL: u32 = 100;
+
+    // Left behind by every recycle so the contract account is never reaped
+    // (subtensor ED = 500 rao). Too small only reverts a recycle — retryable,
+    // funds never at risk — so an upstream ED raise degrades benignly.
+    // Tests carry the offchain engine's own 1_000_000 floor, the same test-env
+    // accommodation EnvBalance makes.
+    #[cfg(not(test))]
+    const ED_RESERVE: Balance = 500;
+    #[cfg(test)]
+    const ED_RESERVE: Balance = 1_000_000;
 
     #[ink(storage)]
     pub struct AllwaysBondVault {
@@ -95,17 +120,23 @@ mod allways_bond_vault {
         // add_stake_recycle target — there is deliberately NO custodial
         // recycle_address fallback in this contract (the pot is ownerless).
         // No chain-ext latch either: #2560 verified live in runtime v443.
-        owner: AccountId,
+        //
+        // There is NO owner field and no admin of any kind: every knob below is
+        // changed only by a unanimous validator round. See the governance
+        // section — that absence is the point, not an omission.
         staking_hotkey: AccountId,
         netuid: u16,
-        halted: bool,
         min_collateral: Balance,
         max_collateral: Balance,
         consensus_threshold_percent: u8,
         // Blocks before an unfinished vote round expires and can be replaced.
         vote_round_ttl: u32,
-        // Whitelisted validator set — Vec for enumeration, tiny by policy.
+        // The validator set — Vec for enumeration, capped at MAX_VALIDATORS.
         validators: Vec<AccountId>,
+        // Candidates carried by a unanimous add round, awaiting their own
+        // accept_validator call. Proving key control before joining keeps a
+        // typo'd address from permanently inflating the quorum denominator.
+        pending_validators: Vec<AccountId>,
 
         // Miner bonds. `lock_state` is (locked, epoch): epoch increments on
         // every lock/unlock transition and is what the Solana mirror carries —
@@ -127,6 +158,9 @@ mod allways_bond_vault {
         // Fee-settle rounds keyed by the batch-contents hash, so a cadence
         // batch and an exit's one-entry batch can run concurrently.
         collect_request: Mapping<Hash, u64>,
+        // Governance rounds: keyed by the candidate/target account hash for
+        // membership, by the config round hash for config.
+        governance_request: Mapping<Hash, u64>,
 
         // Monotonic cumulative protocol fees settled per miner. Monotonicity
         // IS the replay protection: re-applying a batch yields zero deltas.
@@ -141,6 +175,12 @@ mod allways_bond_vault {
         // Fee pot (ledger-only accounting; see the fee-recycling design).
         accumulated_fees: Balance,
         total_recycled_fees: Balance,
+
+        // Running sums of everything the vault OWES. Every balance the contract
+        // holds above these (plus ED) is recyclable — which is what lets a plain
+        // transfer to the address become burn inventory. Keep them exact.
+        total_collateral: Balance,
+        pending_slash_total: Balance,
     }
 
     // =========================================================================
@@ -148,23 +188,9 @@ mod allways_bond_vault {
     // =========================================================================
 
     impl AllwaysBondVault {
-        fn ensure_owner(&self) -> Result<(), Error> {
-            if self.env().caller() != self.owner {
-                return Err(Error::NotOwner);
-            }
-            Ok(())
-        }
-
         fn ensure_validator(&self) -> Result<(), Error> {
             if !self.validators.contains(&self.env().caller()) {
                 return Err(Error::NotValidator);
-            }
-            Ok(())
-        }
-
-        fn ensure_not_halted(&self) -> Result<(), Error> {
-            if self.halted {
-                return Err(Error::SystemHalted);
             }
             Ok(())
         }
@@ -177,6 +203,22 @@ mod allways_bond_vault {
             let numerator = count.saturating_mul(self.consensus_threshold_percent as u32);
             let required = numerator.saturating_add(99) / 100;
             core::cmp::max(1, required)
+        }
+
+        /// Governance bar: EVERY current validator. Membership and config sit
+        /// here rather than at the consensus threshold because the config
+        /// *contains* that threshold — a majority able to lower it could
+        /// otherwise walk itself down to a quorum of one.
+        fn unanimous_votes(&self) -> u32 {
+            core::cmp::max(1, u32::try_from(self.validators.len()).unwrap_or(u32::MAX))
+        }
+
+        /// Hash of the current set, bound into every governance round so a round
+        /// opened under one set can never complete under another. Deliberately
+        /// NOT bound into slash/unlock/collect rounds: that would void every
+        /// in-flight money round on each membership change.
+        fn validator_set_hash(&self) -> Hash {
+            Self::hash_request(&self.validators)
         }
 
         /// Keccak-hash any SCALE-encodable value. Call sites pass the full
@@ -193,6 +235,17 @@ mod allways_bond_vault {
             self.lock_state.get(miner).unwrap_or((false, 0))
         }
 
+        /// Everything the vault holds that is owed to nobody: settled fees PLUS
+        /// any TAO transferred straight to the address. Derived from the real
+        /// balance, so it self-heals rather than stranding unattributed funds.
+        fn recyclable_pot(&self) -> Balance {
+            let owed = self
+                .total_collateral
+                .saturating_add(self.pending_slash_total)
+                .saturating_add(ED_RESERVE);
+            self.env().balance().saturating_sub(owed)
+        }
+
         /// AccountId → Hash (both 32 bytes) so `VaultVoteCast.subject` can
         /// carry a miner or a swap_ref through one field.
         fn account_hash(account: &AccountId) -> Hash {
@@ -201,15 +254,20 @@ mod allways_bond_vault {
             Hash::from(bytes)
         }
 
+        /// Records the caller's vote and returns the count of votes from
+        /// CURRENT validators. Filtering matters: a removed validator's vote
+        /// must stop counting, or ejecting a bad actor would leave their
+        /// in-flight votes behind against a now-lower bar — making the rounds
+        /// they opened cheaper to complete, not harder.
         fn record_vote(&mut self, request_id: u64, caller: AccountId) -> Result<u32, Error> {
             let mut voters = self.request_voters.get(request_id).unwrap_or_default();
             if voters.contains(&caller) {
                 return Err(Error::AlreadyVoted);
             }
             voters.push(caller);
-            let count = u32::try_from(voters.len()).unwrap_or(u32::MAX);
             self.request_voters.insert(request_id, &voters);
-            Ok(count)
+            let live = voters.iter().filter(|v| self.validators.contains(v)).count();
+            Ok(u32::try_from(live).unwrap_or(u32::MAX))
         }
 
         fn clear_request_data(&mut self, request_id: u64) {
@@ -246,6 +304,17 @@ mod allways_bond_vault {
             existing: Option<u64>,
             round_hash: Hash,
         ) -> Result<(u64, u32, bool), Error> {
+            self.cast_vote_with(existing, round_hash, self.get_required_votes())
+        }
+
+        /// As `cast_vote`, with an explicit bar — governance rounds pass the
+        /// unanimity count instead of the consensus threshold.
+        fn cast_vote_with(
+            &mut self,
+            existing: Option<u64>,
+            round_hash: Hash,
+            required: u32,
+        ) -> Result<(u64, u32, bool), Error> {
             let caller = self.env().caller();
             let id = match self.live_round(existing) {
                 Some(id) => {
@@ -257,11 +326,17 @@ mod allways_bond_vault {
                 None => self.new_round(round_hash),
             };
             let votes = self.record_vote(id, caller)?;
-            Ok((id, votes, votes >= self.get_required_votes()))
+            Ok((id, votes, votes >= required))
         }
     }
 
     impl AllwaysBondVault {
+        /// Fallible by design: the seed set is the ONLY way validators ever come
+        /// to exist, so a bad one is unrecoverable on an immutable contract.
+        /// An empty set would let miners bond and lock with nobody able to ever
+        /// unlock them; a duplicate would inflate the quorum denominator past
+        /// what the real signers can reach. Both brick the vault, so both fail
+        /// the deployment instead.
         #[ink(constructor)]
         pub fn new(
             staking_hotkey: AccountId,
@@ -270,17 +345,31 @@ mod allways_bond_vault {
             max_collateral: Balance,
             consensus_threshold_percent: u8,
             vote_round_ttl: u32,
-        ) -> Self {
-            Self {
-                owner: Self::env().caller(),
+            validators: Vec<AccountId>,
+        ) -> Result<Self, Error> {
+            if validators.is_empty() || validators.len() > MAX_VALIDATORS {
+                return Err(Error::InvalidValidatorSet);
+            }
+            for (i, v) in validators.iter().enumerate() {
+                if validators[i + 1..].contains(v) {
+                    return Err(Error::InvalidValidatorSet);
+                }
+            }
+            if consensus_threshold_percent == 0 || consensus_threshold_percent > 100 {
+                return Err(Error::InvalidAmount);
+            }
+            if vote_round_ttl < MIN_VOTE_ROUND_TTL {
+                return Err(Error::InvalidAmount);
+            }
+            Ok(Self {
                 staking_hotkey,
                 netuid,
-                halted: false,
                 min_collateral,
                 max_collateral,
                 consensus_threshold_percent,
                 vote_round_ttl,
-                validators: Vec::new(),
+                validators,
+                pending_validators: Vec::new(),
 
                 collateral: Mapping::default(),
                 lock_state: Mapping::default(),
@@ -292,6 +381,7 @@ mod allways_bond_vault {
                 unlock_request: Mapping::default(),
                 slash_request: Mapping::default(),
                 collect_request: Mapping::default(),
+                governance_request: Mapping::default(),
                 settled_total: Mapping::default(),
 
                 slashed: Mapping::default(),
@@ -299,7 +389,9 @@ mod allways_bond_vault {
 
                 accumulated_fees: 0,
                 total_recycled_fees: 0,
-            }
+                total_collateral: 0,
+                pending_slash_total: 0,
+            })
         }
 
         // =====================================================================
@@ -308,7 +400,6 @@ mod allways_bond_vault {
 
         #[ink(message, payable)]
         pub fn post_collateral(&mut self) -> Result<(), Error> {
-            self.ensure_not_halted()?;
             let caller = self.env().caller();
             let amount = self.env().transferred_value();
             if amount == 0 {
@@ -321,6 +412,7 @@ mod allways_bond_vault {
                 return Err(Error::ExceedsMaxCollateral);
             }
             self.collateral.insert(caller, &new_total);
+            self.total_collateral = self.total_collateral.saturating_add(amount);
 
             self.env().emit_event(CollateralPosted {
                 miner: caller,
@@ -351,6 +443,7 @@ mod allways_bond_vault {
 
             let remaining = current.saturating_sub(amount);
             self.collateral.insert(caller, &remaining);
+            self.total_collateral = self.total_collateral.saturating_sub(amount);
             self.env()
                 .transfer(caller, amount)
                 .map_err(|_| Error::TransferFailed)?;
@@ -372,7 +465,6 @@ mod allways_bond_vault {
         /// Solana as "eligible for vote_activate".
         #[ink(message)]
         pub fn lock_bond(&mut self) -> Result<(), Error> {
-            self.ensure_not_halted()?;
             let caller = self.env().caller();
             let (locked, epoch) = self.lock_of(caller);
             if locked {
@@ -492,11 +584,14 @@ mod allways_bond_vault {
 
                 self.collateral
                     .insert(miner, &current.saturating_sub(seized));
+                self.total_collateral = self.total_collateral.saturating_sub(seized);
                 self.accumulated_fees = self.accumulated_fees.saturating_add(surplus);
 
                 if reimbursed > 0 && self.env().transfer(user, reimbursed).is_err() {
                     self.pending_slashes
                         .insert(swap_ref, &(user, reimbursed));
+                    self.pending_slash_total =
+                        self.pending_slash_total.saturating_add(reimbursed);
                     self.env().emit_event(SlashPending {
                         swap_ref,
                         user,
@@ -564,6 +659,7 @@ mod allways_bond_vault {
 
                     self.collateral
                         .insert(miner, &current.saturating_sub(collected));
+                    self.total_collateral = self.total_collateral.saturating_sub(collected);
                     self.accumulated_fees = self.accumulated_fees.saturating_add(collected);
                     self.settled_total.insert(miner, &new_total);
 
@@ -591,8 +687,10 @@ mod allways_bond_vault {
             }
 
             self.pending_slashes.remove(swap_ref);
+            self.pending_slash_total = self.pending_slash_total.saturating_sub(amount);
             self.env().transfer(caller, amount).map_err(|_| {
                 self.pending_slashes.insert(swap_ref, &(user, amount));
+                self.pending_slash_total = self.pending_slash_total.saturating_add(amount);
                 Error::TransferFailed
             })?;
 
@@ -608,127 +706,209 @@ mod allways_bond_vault {
         // Fee recycling
         // =====================================================================
 
-        /// Permissionless, caller-pays. Drains the whole pot into
-        /// add_stake_recycle(staking_hotkey, netuid) — there is no other
-        /// destination and no owner path to the funds.
+        /// Permissionless, caller-pays. Drains everything the vault holds that
+        /// is owed to nobody — settled fees AND any TAO sent straight to the
+        /// address — into add_stake_recycle(staking_hotkey, netuid). There is
+        /// no other destination and no owner path to the funds.
         #[ink(message)]
         pub fn recycle_fees(&mut self) -> Result<(), Error> {
-            let fees = self.accumulated_fees;
-            if fees == 0 {
+            let pot = self.recyclable_pot();
+            if pot == 0 {
                 return Err(Error::InvalidAmount);
             }
+            let donated = pot.saturating_sub(self.accumulated_fees);
 
             // try_into is a no-op on-chain (Balance = u64) but real under the
             // test env's u128 Balance — keep it despite clippy.
             #[allow(clippy::useless_conversion)]
-            let amount: u64 = fees.try_into().map_err(|_| Error::TransferFailed)?;
+            let amount: u64 = pot.try_into().map_err(|_| Error::TransferFailed)?;
             self.env()
                 .extension()
                 .add_stake_recycle(self.staking_hotkey, self.netuid, amount)
                 .map_err(|SubtensorError::Code(c)| Error::ChainExtension(c))?;
 
-            self.accumulated_fees = 0;
-            self.total_recycled_fees = self.total_recycled_fees.saturating_add(fees);
-            self.env().emit_event(FeesRecycled { tao_amount: fees.into() });
+            // Saturating, not zeroing: an ED-clamped pot leaves the unrecycled
+            // remainder on the books instead of erasing the fee record.
+            self.accumulated_fees = self.accumulated_fees.saturating_sub(pot);
+            self.total_recycled_fees = self.total_recycled_fees.saturating_add(pot);
+            self.env().emit_event(FeesRecycled {
+                tao_amount: pot.into(),
+                donated: donated.into(),
+            });
             Ok(())
         }
 
         // =====================================================================
-        // Owner configuration (validator-set/config admin only — no fund paths)
+        // Governance — validator set + config, by validator quorum only.
+        // There is no owner and no admin key: nothing below can be reached by
+        // any single actor, and nothing anywhere in this contract can move a
+        // miner's funds except a slash/unlock quorum or the miner themselves.
         // =====================================================================
 
+        /// Carry a candidate to the pending list. UNANIMOUS: a bare majority
+        /// must never be able to pack the set with its own sybils and then vote
+        /// itself whatever it likes.
         #[ink(message)]
-        pub fn transfer_ownership(&mut self, new_owner: AccountId) -> Result<(), Error> {
-            self.ensure_owner()?;
-            let previous_owner = self.owner;
-            self.owner = new_owner;
-            self.env()
-                .emit_event(OwnershipTransferred { previous_owner, new_owner });
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn add_validator(&mut self, validator: AccountId) -> Result<(), Error> {
-            self.ensure_owner()?;
-            if !self.validators.contains(&validator) {
-                self.validators.push(validator);
+        pub fn vote_add_validator(&mut self, candidate: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+            if self.validators.contains(&candidate) || self.pending_validators.contains(&candidate) {
+                return Err(Error::AlreadyValidator);
             }
+            if self.validators.len().saturating_add(self.pending_validators.len()) >= MAX_VALIDATORS
+            {
+                return Err(Error::InvalidValidatorSet);
+            }
+
+            let round_hash =
+                Self::hash_request(&(REQ_ADD_VALIDATOR, candidate, self.validator_set_hash()));
+            let existing = self.governance_request.get(Self::account_hash(&candidate));
+            let (id, votes, quorum) =
+                self.cast_vote_with(existing, round_hash, self.unanimous_votes())?;
+            self.governance_request
+                .insert(Self::account_hash(&candidate), &id);
+
+            self.env().emit_event(VaultVoteCast {
+                validator: self.env().caller(),
+                req_type: REQ_ADD_VALIDATOR,
+                request_id: id,
+                subject: Self::account_hash(&candidate),
+                vote_count: votes,
+            });
+
+            if quorum {
+                self.clear_request_data(id);
+                self.governance_request.remove(Self::account_hash(&candidate));
+                self.pending_validators.push(candidate);
+                self.env().emit_event(ValidatorPending { candidate });
+            }
+            Ok(())
+        }
+
+        /// The candidate's own signature completes their admission — proof they
+        /// hold the key. Without it a typo'd address would join the set, count
+        /// toward every quorum, and never be able to vote.
+        #[ink(message)]
+        pub fn accept_validator(&mut self) -> Result<(), Error> {
+            let caller = self.env().caller();
+            if !self.pending_validators.contains(&caller) {
+                return Err(Error::NotPendingValidator);
+            }
+            self.pending_validators.retain(|v| v != &caller);
+            self.validators.push(caller);
             self.env().emit_event(ValidatorUpdated {
-                validator,
+                validator: caller,
                 registered: true,
             });
             Ok(())
         }
 
+        /// Eject a validator. Requires every OTHER validator — the target is
+        /// barred from voting, so a dark or compromised key can still be
+        /// removed by the rest. Refused below MIN_VALIDATORS_TO_REMOVE, since
+        /// concurrent removals could otherwise walk the set down to one.
         #[ink(message)]
-        pub fn remove_validator(&mut self, validator: AccountId) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.validators.retain(|v| v != &validator);
-            self.env().emit_event(ValidatorUpdated {
-                validator,
-                registered: false,
+        pub fn vote_remove_validator(&mut self, validator: AccountId) -> Result<(), Error> {
+            self.ensure_validator()?;
+            if self.env().caller() == validator {
+                return Err(Error::SelfRemoval);
+            }
+            if !self.validators.contains(&validator) {
+                return Err(Error::NotValidator);
+            }
+            if self.validators.len() < MIN_VALIDATORS_TO_REMOVE {
+                return Err(Error::InvalidValidatorSet);
+            }
+
+            let round_hash =
+                Self::hash_request(&(REQ_REMOVE_VALIDATOR, validator, self.validator_set_hash()));
+            let existing = self.governance_request.get(Self::account_hash(&validator));
+            // Everyone except the target.
+            let required = self.unanimous_votes().saturating_sub(1).max(1);
+            let (id, votes, quorum) = self.cast_vote_with(existing, round_hash, required)?;
+            self.governance_request
+                .insert(Self::account_hash(&validator), &id);
+
+            self.env().emit_event(VaultVoteCast {
+                validator: self.env().caller(),
+                req_type: REQ_REMOVE_VALIDATOR,
+                request_id: id,
+                subject: Self::account_hash(&validator),
+                vote_count: votes,
             });
+
+            if quorum {
+                // Re-check at APPLICATION: two rounds opened at the floor could
+                // otherwise complete in sequence and strand the set below it.
+                if self.validators.len() < MIN_VALIDATORS_TO_REMOVE {
+                    return Err(Error::InvalidValidatorSet);
+                }
+                self.clear_request_data(id);
+                self.governance_request.remove(Self::account_hash(&validator));
+                self.validators.retain(|v| v != &validator);
+                self.env().emit_event(ValidatorUpdated {
+                    validator,
+                    registered: false,
+                });
+            }
             Ok(())
         }
 
+        /// Set the whole config in one unanimous round. Whole, not delta: the
+        /// round hash binds every field, so validators agree on the RESULTING
+        /// config rather than on an edit applied to whatever they each last
+        /// read. Unanimous because this tuple contains the consensus threshold.
         #[ink(message)]
-        pub fn set_min_collateral(&mut self, amount: Balance) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.min_collateral = amount;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("min_collateral"),
-                value: amount.into(),
-            });
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn set_max_collateral(&mut self, amount: Balance) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.max_collateral = amount;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("max_collateral"),
-                value: amount.into(),
-            });
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn set_consensus_threshold(&mut self, percent: u8) -> Result<(), Error> {
-            self.ensure_owner()?;
-            if percent == 0 || percent > 100 {
+        pub fn vote_set_config(
+            &mut self,
+            min_collateral: Balance,
+            max_collateral: Balance,
+            consensus_threshold_percent: u8,
+            vote_round_ttl: u32,
+        ) -> Result<(), Error> {
+            self.ensure_validator()?;
+            if consensus_threshold_percent == 0 || consensus_threshold_percent > 100 {
                 return Err(Error::InvalidAmount);
             }
-            self.consensus_threshold_percent = percent;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("consensus_threshold_percent"),
-                value: percent as u128,
-            });
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn set_vote_round_ttl(&mut self, blocks: u32) -> Result<(), Error> {
-            self.ensure_owner()?;
-            if blocks == 0 {
+            if vote_round_ttl < MIN_VOTE_ROUND_TTL {
                 return Err(Error::InvalidAmount);
             }
-            self.vote_round_ttl = blocks;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("vote_round_ttl"),
-                value: blocks as u128,
-            });
-            Ok(())
-        }
 
-        #[ink(message)]
-        pub fn set_halted(&mut self, halted: bool) -> Result<(), Error> {
-            self.ensure_owner()?;
-            self.halted = halted;
-            self.env().emit_event(ConfigUpdated {
-                key: String::from("halted"),
-                value: halted as u128,
+            let payload = (
+                REQ_CONFIG,
+                min_collateral,
+                max_collateral,
+                consensus_threshold_percent,
+                vote_round_ttl,
+                self.validator_set_hash(),
+            );
+            let round_hash = Self::hash_request(&payload);
+            let existing = self.governance_request.get(round_hash);
+            let (id, votes, quorum) =
+                self.cast_vote_with(existing, round_hash, self.unanimous_votes())?;
+            self.governance_request.insert(round_hash, &id);
+
+            self.env().emit_event(VaultVoteCast {
+                validator: self.env().caller(),
+                req_type: REQ_CONFIG,
+                request_id: id,
+                subject: round_hash,
+                vote_count: votes,
             });
+
+            if quorum {
+                self.clear_request_data(id);
+                self.governance_request.remove(round_hash);
+                self.min_collateral = min_collateral;
+                self.max_collateral = max_collateral;
+                self.consensus_threshold_percent = consensus_threshold_percent;
+                self.vote_round_ttl = vote_round_ttl;
+                self.env().emit_event(ConfigUpdated {
+                    min_collateral: min_collateral.into(),
+                    max_collateral: max_collateral.into(),
+                    consensus_threshold_percent,
+                    vote_round_ttl,
+                });
+            }
             Ok(())
         }
 
@@ -775,14 +955,41 @@ mod allways_bond_vault {
             self.total_recycled_fees
         }
 
+        /// Exactly what the next `recycle_fees` would drain: settled fees plus
+        /// unattributed TAO. Reads ≥ `get_accumulated_fees` whenever anyone has
+        /// donated; the difference is the donated share.
+        #[ink(message)]
+        pub fn get_recyclable_pot(&self) -> Balance {
+            self.recyclable_pot()
+        }
+
+        /// Total bonds owed to miners — the commingling invariant's first term.
+        #[ink(message)]
+        pub fn get_total_collateral(&self) -> Balance {
+            self.total_collateral
+        }
+
+        /// Unclaimed slash reimbursements owed to users.
+        #[ink(message)]
+        pub fn get_pending_slash_total(&self) -> Balance {
+            self.pending_slash_total
+        }
+
         #[ink(message)]
         pub fn get_validators(&self) -> Vec<AccountId> {
             self.validators.clone()
         }
 
+        /// Candidates a unanimous round approved, still awaiting their own
+        /// `accept_validator`. They count toward no quorum until they accept.
         #[ink(message)]
-        pub fn get_owner(&self) -> AccountId {
-            self.owner
+        pub fn get_pending_validators(&self) -> Vec<AccountId> {
+            self.pending_validators.clone()
+        }
+
+        #[ink(message)]
+        pub fn get_vote_round_ttl(&self) -> u32 {
+            self.vote_round_ttl
         }
 
         #[ink(message)]
@@ -798,11 +1005,6 @@ mod allways_bond_vault {
         #[ink(message)]
         pub fn get_consensus_threshold(&self) -> u8 {
             self.consensus_threshold_percent
-        }
-
-        #[ink(message)]
-        pub fn get_halted(&self) -> bool {
-            self.halted
         }
 
         #[ink(message)]
@@ -834,36 +1036,65 @@ mod allways_bond_vault {
             ink::env::test::callee::<ink::env::DefaultEnvironment>()
         }
 
-        fn fund_contract(amount: Balance) {
+        fn contract_balance() -> Balance {
+            ink::env::test::get_account_balance::<crate::CustomEnvironment>(contract_id())
+                .unwrap_or(0)
+        }
+
+        /// The offchain engine does not credit the callee for a payable call,
+        /// so every test that pays the vault must move the balance itself —
+        /// which the recyclable pot now reads.
+        fn credit_contract(amount: Balance) {
             ink::env::test::set_account_balance::<crate::CustomEnvironment>(
                 contract_id(),
-                amount,
+                contract_balance().saturating_add(amount),
             );
         }
 
-        /// Vault with alice as owner and (django, eve) as validators,
-        /// threshold 100% ⇒ quorum = 2.
+        /// Vault seeded with (django, eve) as validators, threshold 100% ⇒
+        /// quorum = 2 and unanimity = 2. Endowed with exactly ED, as a real
+        /// instantiation is — so the pot starts at zero.
         fn new_vault() -> AllwaysBondVault {
+            seeded_vault(ink::prelude::vec![accounts().django, accounts().eve])
+        }
+
+        fn seeded_vault(validators: Vec<AccountId>) -> AllwaysBondVault {
             let acc = accounts();
             set_caller(acc.alice);
-            let mut vault = AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100);
-            vault.add_validator(acc.django).unwrap();
-            vault.add_validator(acc.eve).unwrap();
-            vault
+            ink::env::test::set_account_balance::<crate::CustomEnvironment>(
+                contract_id(),
+                ED_RESERVE,
+            );
+            AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, validators).unwrap()
         }
 
         fn post(vault: &mut AllwaysBondVault, miner: AccountId, amount: Balance) {
             set_caller(miner);
             ink::env::test::set_value_transferred::<crate::CustomEnvironment>(amount);
+            credit_contract(amount);
             vault.post_collateral().unwrap();
             ink::env::test::set_value_transferred::<crate::CustomEnvironment>(0);
+        }
+
+        /// TAO arriving with no claim against it — a plain transfer to the
+        /// address, which calls no code.
+        fn donate_raw(amount: Balance) {
+            credit_contract(amount);
+        }
+
+        /// Stands in for the balance the real chain extension moves out; the
+        /// mock cannot do it itself (see MockRecycleExt).
+        fn debit_contract(amount: Balance) {
+            ink::env::test::set_account_balance::<crate::CustomEnvironment>(
+                contract_id(),
+                contract_balance().saturating_sub(amount),
+            );
         }
 
         #[ink::test]
         fn lock_blocks_withdraw_until_quorum_unlock() {
             let acc = accounts();
             let mut vault = new_vault();
-            fund_contract(1_000_000);
             post(&mut vault, acc.bob, 5_000);
 
             set_caller(acc.bob);
@@ -912,7 +1143,6 @@ mod allways_bond_vault {
         fn slash_reimburses_user_and_credits_surplus() {
             let acc = accounts();
             let mut vault = new_vault();
-            fund_contract(1_000_000);
             post(&mut vault, acc.bob, 5_000);
 
             let swap_ref = Hash::from([7u8; 32]);
@@ -964,7 +1194,6 @@ mod allways_bond_vault {
         fn seize_clamps_to_collateral() {
             let acc = accounts();
             let mut vault = new_vault();
-            fund_contract(1_000_000);
             post(&mut vault, acc.bob, 1_500);
 
             let swap_ref = Hash::from([3u8; 32]);
@@ -1068,7 +1297,7 @@ mod allways_bond_vault {
         }
 
         #[ink::test]
-        fn batch_settle_validates_size_and_ignores_halt() {
+        fn batch_settle_validates_batch_size() {
             let acc = accounts();
             let mut vault = new_vault();
             post(&mut vault, acc.bob, 5_000);
@@ -1086,9 +1315,6 @@ mod allways_bond_vault {
                 Err(Error::InvalidBatch)
             );
 
-            // Halt gates entry, never exit: settlement runs while halted.
-            set_caller(acc.alice);
-            vault.set_halted(true).unwrap();
             let batch = ink::prelude::vec![(acc.bob, 100u128)];
             for validator in [acc.django, acc.eve] {
                 set_caller(validator);
@@ -1097,12 +1323,232 @@ mod allways_bond_vault {
             assert_eq!(vault.get_settled_total(acc.bob), 100);
         }
 
+        // ── governance ───────────────────────────────────────────────────────
+
+        #[ink::test]
+        fn constructor_refuses_a_set_that_would_brick_the_vault() {
+            let acc = accounts();
+            set_caller(acc.alice);
+            // Empty: miners could bond and lock with nobody able to unlock them.
+            assert_eq!(
+                AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, Vec::new())
+                    .map(|_| ()),
+                Err(Error::InvalidValidatorSet)
+            );
+            // Duplicate: inflates the denominator past what the signers can reach.
+            let dupes = ink::prelude::vec![acc.django, acc.eve, acc.django];
+            assert_eq!(
+                AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, dupes).map(|_| ()),
+                Err(Error::InvalidValidatorSet)
+            );
+            // A TTL below the floor could leave rounds unable to gather votes.
+            let one = ink::prelude::vec![acc.django];
+            assert_eq!(
+                AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 1, one.clone())
+                    .map(|_| ()),
+                Err(Error::InvalidAmount)
+            );
+            assert!(
+                AllwaysBondVault::new(acc.frank, 7, MIN_COLLATERAL, 0, 100, 100, one).is_ok()
+            );
+        }
+
+        /// The bootstrap ramp: a lone seed validator adds the second alone,
+        /// after which both are required.
+        #[ink::test]
+        fn ramp_from_one_validator_needs_unanimity_at_every_step() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+
+            set_caller(acc.django);
+            vault.vote_add_validator(acc.eve).unwrap();
+            // Approved but NOT yet a validator — eve must prove the key first.
+            assert_eq!(vault.get_validators(), ink::prelude::vec![acc.django]);
+            assert_eq!(vault.get_pending_validators(), ink::prelude::vec![acc.eve]);
+            set_caller(acc.eve);
+            vault.accept_validator().unwrap();
+            assert_eq!(vault.get_validators(), ink::prelude::vec![acc.django, acc.eve]);
+
+            // At n=2 one vote is no longer enough to add a third.
+            set_caller(acc.django);
+            vault.vote_add_validator(acc.charlie).unwrap();
+            assert!(vault.get_pending_validators().is_empty());
+            set_caller(acc.eve);
+            vault.vote_add_validator(acc.charlie).unwrap();
+            assert_eq!(vault.get_pending_validators(), ink::prelude::vec![acc.charlie]);
+        }
+
+        #[ink::test]
+        fn accept_is_required_and_only_by_the_candidate() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+            set_caller(acc.django);
+            vault.vote_add_validator(acc.eve).unwrap();
+
+            // A bystander cannot claim someone else's admission.
+            set_caller(acc.charlie);
+            assert_eq!(vault.accept_validator(), Err(Error::NotPendingValidator));
+            // Nor can a pending candidate vote before accepting.
+            set_caller(acc.eve);
+            assert_eq!(vault.vote_add_validator(acc.charlie), Err(Error::NotValidator));
+            vault.accept_validator().unwrap();
+            assert_eq!(vault.accept_validator(), Err(Error::NotPendingValidator));
+        }
+
+        #[ink::test]
+        fn removal_excludes_the_target_and_holds_the_floor() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+
+            // The target may not vote itself out of the tally.
+            set_caller(acc.charlie);
+            assert_eq!(vault.vote_remove_validator(acc.charlie), Err(Error::SelfRemoval));
+
+            // The other two are enough — charlie's consent is not needed.
+            set_caller(acc.django);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            assert_eq!(vault.get_validators().len(), 3);
+            set_caller(acc.eve);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            assert_eq!(vault.get_validators(), ink::prelude::vec![acc.django, acc.eve]);
+
+            // At n=2 removal is refused outright — it could strand the set at one.
+            set_caller(acc.django);
+            assert_eq!(
+                vault.vote_remove_validator(acc.eve),
+                Err(Error::InvalidValidatorSet)
+            );
+        }
+
+        /// A membership change must void in-flight governance rounds, or one
+        /// opened under a larger set could complete against a smaller one.
+        #[ink::test]
+        fn membership_rounds_are_bound_to_the_set_they_opened_under() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+
+            set_caller(acc.django);
+            vault.vote_add_validator(acc.frank).unwrap();
+
+            // Set changes underneath the open round.
+            set_caller(acc.django);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            set_caller(acc.eve);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            assert_eq!(vault.get_validators().len(), 2);
+
+            // The stale add round no longer matches: it conflicts, not counts.
+            set_caller(acc.eve);
+            assert_eq!(vault.vote_add_validator(acc.frank), Err(Error::PendingConflict));
+        }
+
+        /// Ejecting a validator must neutralise their in-flight votes — not
+        /// leave them behind against a now-lower bar.
+        #[ink::test]
+        fn a_removed_validators_votes_stop_counting() {
+            let acc = accounts();
+            let mut vault =
+                seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+            post(&mut vault, acc.bob, 5_000);
+
+            // charlie opens a slash round and votes (1 of 2 needed at n=3).
+            let swap_ref = Hash::from([21u8; 32]);
+            set_caller(acc.charlie);
+            vault.vote_slash(acc.bob, swap_ref, 1_000, acc.frank, 0).unwrap();
+
+            set_caller(acc.django);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            set_caller(acc.eve);
+            vault.vote_remove_validator(acc.charlie).unwrap();
+            assert_eq!(vault.get_validators().len(), 2);
+
+            // n=2 needs 2 votes; charlie's stale vote is discounted, so django
+            // alone must NOT complete the slash charlie started.
+            set_caller(acc.django);
+            vault.vote_slash(acc.bob, swap_ref, 1_000, acc.frank, 0).unwrap();
+            assert!(!vault.is_slashed(swap_ref));
+            assert_eq!(vault.get_collateral(acc.bob), 5_000);
+        }
+
+        #[ink::test]
+        fn config_round_is_unanimous_and_validated() {
+            let acc = accounts();
+            let mut vault = new_vault();
+
+            set_caller(acc.django);
+            assert_eq!(vault.vote_set_config(1, 2, 0, 600), Err(Error::InvalidAmount));
+            assert_eq!(vault.vote_set_config(1, 2, 101, 600), Err(Error::InvalidAmount));
+            // Below the TTL floor: a unanimous mistake must not be able to
+            // starve every future round of the time to gather votes.
+            assert_eq!(
+                vault.vote_set_config(1, 2, 66, MIN_VOTE_ROUND_TTL - 1),
+                Err(Error::InvalidAmount)
+            );
+
+            vault.vote_set_config(500, 9_000, 66, 600).unwrap();
+            assert_eq!(vault.get_min_collateral(), MIN_COLLATERAL);
+            set_caller(acc.eve);
+            vault.vote_set_config(500, 9_000, 66, 600).unwrap();
+            assert_eq!(vault.get_min_collateral(), 500);
+            assert_eq!(vault.get_max_collateral(), 9_000);
+            assert_eq!(vault.get_consensus_threshold(), 66);
+            assert_eq!(vault.get_vote_round_ttl(), 600);
+        }
+
+        #[ink::test]
+        fn config_rounds_agree_on_the_whole_tuple_not_a_delta() {
+            let acc = accounts();
+            let mut vault = new_vault();
+            set_caller(acc.django);
+            vault.vote_set_config(500, 9_000, 66, 600).unwrap();
+
+            // eve votes a DIFFERENT resulting config. Rounds are keyed by the
+            // contents hash, so this opens its own round rather than joining
+            // django's — divergent proposals never merge, and neither reaches
+            // unanimity. (Keying by contents also stops one validator parking a
+            // junk round that blocks every other proposal until it expires.)
+            set_caller(acc.eve);
+            vault.vote_set_config(500, 9_000, 51, 600).unwrap();
+            assert_eq!(vault.get_min_collateral(), MIN_COLLATERAL);
+            assert_eq!(vault.get_consensus_threshold(), 100);
+
+            // Agreeing on django's exact tuple is what applies it.
+            vault.vote_set_config(500, 9_000, 66, 600).unwrap();
+            assert_eq!(vault.get_min_collateral(), 500);
+            assert_eq!(vault.get_consensus_threshold(), 66);
+        }
+
+        #[ink::test]
+        fn non_validators_cannot_touch_governance() {
+            let acc = accounts();
+            let mut vault = new_vault();
+            set_caller(acc.alice); // the deployer — no longer special in any way
+            assert_eq!(vault.vote_add_validator(acc.frank), Err(Error::NotValidator));
+            assert_eq!(vault.vote_remove_validator(acc.eve), Err(Error::NotValidator));
+            assert_eq!(vault.vote_set_config(1, 2, 66, 600), Err(Error::NotValidator));
+        }
+
+        #[ink::test]
+        fn duplicate_admission_is_refused() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
+            set_caller(acc.django);
+            assert_eq!(vault.vote_add_validator(acc.django), Err(Error::AlreadyValidator));
+            vault.vote_add_validator(acc.eve).unwrap();
+            assert_eq!(vault.vote_add_validator(acc.eve), Err(Error::AlreadyValidator));
+        }
+
         /// Mock of the subtensor extension so recycle can run offchain.
         struct MockRecycleExt;
         impl ink::env::test::ChainExtension for MockRecycleExt {
             fn ext_id(&self) -> u16 {
                 0x1000
             }
+            /// Cannot debit the contract here — re-entering the test engine
+            /// from inside an extension panics on its RefCell — so tests that
+            /// care about the post-recycle balance call `debit_contract`.
             fn call(&mut self, _func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
                 scale::Encode::encode_to(&0u64, output);
                 0
@@ -1114,7 +1560,6 @@ mod allways_bond_vault {
             ink::env::test::register_chain_extension(MockRecycleExt);
             let acc = accounts();
             let mut vault = new_vault();
-            fund_contract(1_000_000);
             post(&mut vault, acc.bob, 5_000);
 
             // Slash with zero reimbursement fills the pot.
@@ -1132,7 +1577,122 @@ mod allways_bond_vault {
             assert_eq!(vault.get_accumulated_fees(), 0);
             assert_eq!(vault.get_total_recycled_fees(), 1_000);
             // Empty pot refuses a second drain.
+            debit_contract(1_000);
             assert_eq!(vault.recycle_fees(), Err(Error::InvalidAmount));
         }
+
+        /// The property the whole donation design rests on: a pot derived from
+        /// the real balance must never be able to reach money that is owed.
+        #[ink::test]
+        fn recycle_can_never_reach_collateral_or_pending_claims() {
+            ink::env::test::register_chain_extension(MockRecycleExt);
+            let acc = accounts();
+            let mut vault = new_vault();
+            post(&mut vault, acc.bob, 5_000);
+            post(&mut vault, acc.charlie, 4_000);
+
+            // Bonds only, no fees and no donations ⇒ nothing is recyclable.
+            assert_eq!(vault.get_recyclable_pot(), 0);
+            assert_eq!(vault.recycle_fees(), Err(Error::InvalidAmount));
+
+            // A fully-reimbursed slash pays the user out of the balance and
+            // leaves no surplus, so the pot stays shut even as bonds move.
+            let swap_ref = Hash::from([11u8; 32]);
+            for validator in [acc.django, acc.eve] {
+                set_caller(validator);
+                vault
+                    .vote_slash(acc.bob, swap_ref, 1_000, acc.frank, 1_000)
+                    .unwrap();
+            }
+            assert_eq!(vault.get_total_collateral(), 8_000);
+            assert_eq!(vault.get_recyclable_pot(), 0);
+            assert_eq!(vault.recycle_fees(), Err(Error::InvalidAmount));
+        }
+
+        #[ink::test]
+        fn plain_transfer_to_the_address_is_swept_into_the_next_recycle() {
+            ink::env::test::register_chain_extension(MockRecycleExt);
+            let acc = accounts();
+            let mut vault = new_vault();
+            post(&mut vault, acc.bob, 5_000);
+
+            // 2 TAO arrives as a bare transfer — no code ran, no event, and the
+            // fee counter knows nothing about it.
+            donate_raw(2_000);
+            assert_eq!(vault.get_accumulated_fees(), 0);
+            assert_eq!(vault.get_recyclable_pot(), 2_000);
+
+            set_caller(acc.charlie);
+            vault.recycle_fees().unwrap();
+            assert_eq!(vault.get_total_recycled_fees(), 2_000);
+            debit_contract(2_000);
+            assert_eq!(vault.get_recyclable_pot(), 0);
+            // The bond it was commingled with is untouched.
+            assert_eq!(vault.get_collateral(acc.bob), 5_000);
+            assert_eq!(vault.get_total_collateral(), 5_000);
+        }
+
+        #[ink::test]
+        fn donations_and_fees_recycle_together() {
+            ink::env::test::register_chain_extension(MockRecycleExt);
+            let acc = accounts();
+            let mut vault = new_vault();
+            post(&mut vault, acc.bob, 5_000);
+
+            let batch = ink::prelude::vec![(acc.bob, 300u128)];
+            for validator in [acc.django, acc.eve] {
+                set_caller(validator);
+                vault.vote_collect_fees_batch(batch.clone()).unwrap();
+            }
+            assert_eq!(vault.get_accumulated_fees(), 300);
+
+            set_caller(acc.charlie);
+            donate_raw(700);
+
+            // 300 settled fees + 700 donated drain as one pot.
+            assert_eq!(vault.get_recyclable_pot(), 1_000);
+            vault.recycle_fees().unwrap();
+            assert_eq!(vault.get_accumulated_fees(), 0);
+            assert_eq!(vault.get_total_recycled_fees(), 1_000);
+            assert_eq!(vault.get_collateral(acc.bob), 4_700);
+        }
+
+
+        /// `total_collateral` is what stands between a sweep and miner funds,
+        /// so it must equal the mapping through every debit path.
+        #[ink::test]
+        fn total_collateral_tracks_the_mapping_through_every_path() {
+            let acc = accounts();
+            let mut vault = new_vault();
+            post(&mut vault, acc.bob, 5_000);
+            post(&mut vault, acc.charlie, 4_000);
+            post(&mut vault, acc.bob, 1_000);
+
+            let swap_ref = Hash::from([13u8; 32]);
+            for validator in [acc.django, acc.eve] {
+                set_caller(validator);
+                vault
+                    .vote_slash(acc.bob, swap_ref, 2_000, acc.eve, 1_500)
+                    .unwrap();
+            }
+            let batch = ink::prelude::vec![(acc.charlie, 400u128)];
+            for validator in [acc.django, acc.eve] {
+                set_caller(validator);
+                vault.vote_collect_fees_batch(batch.clone()).unwrap();
+            }
+            set_caller(acc.charlie);
+            vault.withdraw_collateral(600).unwrap();
+
+            let summed = vault.get_collateral(acc.bob) + vault.get_collateral(acc.charlie);
+            assert_eq!(vault.get_total_collateral(), summed);
+            // And the invariant the design record states, in code.
+            assert!(
+                contract_balance()
+                    >= vault.get_total_collateral()
+                        + vault.get_accumulated_fees()
+                        + vault.get_pending_slash_total()
+            );
+        }
+
     }
 }
