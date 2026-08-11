@@ -312,12 +312,20 @@ class _RoutingClient:
     def __init__(self, sol_rate=10 * 10**18, tao_rate=11 * 10**18, tao_purse=10**11, tao_locked=True):
         self.quotes = {
             'sol': SimpleNamespace(
-                miner='m1', from_chain='sol', to_chain='tao', rate=sol_rate,
-                collateral_chain='sol', miner_from_addr='',
+                miner='m1',
+                from_chain='sol',
+                to_chain='tao',
+                rate=sol_rate,
+                collateral_chain='sol',
+                miner_from_addr='',
             ),
             'tao': SimpleNamespace(
-                miner='m1', from_chain='sol', to_chain='tao', rate=tao_rate,
-                collateral_chain='tao', miner_from_addr='',
+                miner='m1',
+                from_chain='sol',
+                to_chain='tao',
+                rate=tao_rate,
+                collateral_chain='tao',
+                miner_from_addr='',
             ),
         }
         self.tao_purse = tao_purse
@@ -337,9 +345,7 @@ class _RoutingClient:
         return SimpleNamespace(effective_balance=self.tao_purse, locked=self.tao_locked, epoch=1)
 
     def get_config(self):
-        return SimpleNamespace(
-            min_swap_amount=0, max_swap_amount=0, tao_min_swap_amount=0, tao_max_swap_amount=0
-        )
+        return SimpleNamespace(min_swap_amount=0, max_swap_amount=0, tao_min_swap_amount=0, tao_max_swap_amount=0)
 
     def get_pool(self, miner):
         return None
@@ -416,8 +422,14 @@ def test_the_routed_bid_names_the_backing_it_won():
     )
     with patch('allways.validator.reserve_engine.resolve_miner_pubkey', return_value='m1'):
         res = reserve_on_behalf(
-            validator, 'hk', 'sol', 'tao', '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF',
-            'user-sol', 'user-tao', 10**9,
+            validator,
+            'hk',
+            'sol',
+            'tao',
+            '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF',
+            'user-sol',
+            'user-tao',
+            10**9,
         )
     assert res.ok, res.reason
     assert client.bids == ['tao'], 'a bid on the wrong backing lands on a different offer entirely'

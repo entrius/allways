@@ -14,7 +14,11 @@ from allways.vault.client import resolve_metadata_path, resolve_vault_address
 
 METADATA = (
     Path(__file__).resolve().parents[1]
-    / 'smart-contracts' / 'ink-bond-vault' / 'target' / 'ink' / 'allways_bond_vault.json'
+    / 'smart-contracts'
+    / 'ink-bond-vault'
+    / 'target'
+    / 'ink'
+    / 'allways_bond_vault.json'
 )
 
 ALICE = codec.account_ss58(bytes([1] * 32))
@@ -154,8 +158,7 @@ def test_an_event_payload_decodes_in_either_node_shape(meta):
 
 
 def test_another_contracts_event_at_the_same_address_is_ignored(meta):
-    sub = _EventSub([{'module_id': 'Contracts', 'event_id': 'Called',
-                      'attributes': {'contract': ALICE}, 'topics': []}])
+    sub = _EventSub([{'module_id': 'Contracts', 'event_id': 'Called', 'attributes': {'contract': ALICE}, 'topics': []}])
     assert BondVaultClient(sub, ALICE, metadata=meta).poll_events(1, 1) == []
 
 

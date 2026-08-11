@@ -49,7 +49,9 @@ def _report(result, ok_msg: str):
         # pallet-contracts surfaces a contract Err as a ContractReverted
         # dispatch error; name it when we can extract it.
         if result.reverted:
-            console.print('[yellow]The vault rejected the call (contract reverted) — e.g. empty pot, locked bond, or insufficient balance.[/yellow]')
+            console.print(
+                '[yellow]The vault rejected the call (contract reverted) — e.g. empty pot, locked bond, or insufficient balance.[/yellow]'
+            )
         else:
             console.print(f'[red]Call failed[/red]{f" [dim]({result.error})[/dim]" if result.error else ""}')
     else:
@@ -64,6 +66,7 @@ def _fmt_tao(rao: int) -> str:
 
 
 # ─── Command group ───────────────────────────────────────────────────────────
+
 
 @click.group('vault', cls=StyledGroup, show_disclaimer=True)
 def vault_group():
@@ -113,7 +116,9 @@ def vault_status(miner):
     console.print(f'\n[bold]Vault[/bold] [dim]{vault.address}[/dim]\n')
     fees = vault.get_accumulated_fees()
     if fees is None:
-        console.print('[yellow]Reads unavailable on this node (ContractResult decode) — write commands still work.[/yellow]\n')
+        console.print(
+            '[yellow]Reads unavailable on this node (ContractResult decode) — write commands still work.[/yellow]\n'
+        )
         return
     console.print(f'  Fee pot (settled, unrecycled): {_fmt_tao(fees)}')
     pot = vault.get_recyclable_pot()
@@ -213,6 +218,7 @@ def vault_claim_slash(swap_ref):
 
 # ─── Governance (validator quorum — there is no owner) ───────────────────────
 
+
 def _admin_confirm(prompt: str) -> bool:
     ctx = click.get_current_context(silent=True)
     if (ctx is not None and ctx.obj and ctx.obj.get('yes')) or os.environ.get('ALW_ASSUME_YES'):
@@ -280,15 +286,17 @@ def admin_add_validator(ss58):
     [dim]On quorum the candidate becomes PENDING; they join only once they run
     `alw vault admin accept` themselves, which proves they hold the key.[/dim]
     """
-    _vote_submit('vote_add_validator', [_account_bytes(ss58)], f'Vote to admit validator {ss58}?', 'add-validator ' + ss58)
+    _vote_submit(
+        'vote_add_validator', [_account_bytes(ss58)], f'Vote to admit validator {ss58}?', 'add-validator ' + ss58
+    )
 
 
 @vault_admin_group.command('accept', show_disclaimer=True)
 def admin_accept_validator():
     """Accept your own pending admission to the validator set."""
-    _admin_submit('accept_validator', confirm='Accept your admission to the validator set?',
-                  ok_msg='Joined the validator set')
-
+    _admin_submit(
+        'accept_validator', confirm='Accept your admission to the validator set?', ok_msg='Joined the validator set'
+    )
 
 
 @vault_admin_group.command('remove-validator', show_disclaimer=True)
@@ -299,8 +307,9 @@ def admin_remove_validator(ss58):
     [dim]The target is barred from voting, so a dark or compromised key can
     still be removed by the rest of the set.[/dim]
     """
-    _vote_submit('vote_remove_validator', [_account_bytes(ss58)], f'Vote to remove validator {ss58}?',
-                 'remove-validator ' + ss58)
+    _vote_submit(
+        'vote_remove_validator', [_account_bytes(ss58)], f'Vote to remove validator {ss58}?', 'remove-validator ' + ss58
+    )
 
 
 @vault_admin_group.command('set-config', show_disclaimer=True)
@@ -327,9 +336,11 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
         'ttl': vault.get_vote_round_ttl(),
     }
     if any(v is None for v in current.values()):
-        fail('Cannot read the current config from this node — refusing to guess the '
-             'unspecified fields. Pass every flag explicitly, or use a node whose '
-             'contract dry-runs decode.')
+        fail(
+            'Cannot read the current config from this node — refusing to guess the '
+            'unspecified fields. Pass every flag explicitly, or use a node whose '
+            'contract dry-runs decode.'
+        )
 
     new_min = int(min_collateral * TAO_TO_RAO) if min_collateral is not None else current['min']
     new_max = int(max_collateral * TAO_TO_RAO) if max_collateral is not None else current['max']

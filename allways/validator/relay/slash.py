@@ -121,9 +121,7 @@ def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
         relay.note_vote(f'slash:{swap_key}', now)
         return True
 
-    result = relay.vault.vote_slash(
-        hotkey, swap_key, int(row['penalty']), row['user_addr'], int(row['reimbursement'])
-    )
+    result = relay.vault.vote_slash(hotkey, swap_key, int(row['penalty']), row['user_addr'], int(row['reimbursement']))
     relay.note_vote(f'slash:{swap_key}', now)
     if result.ok:
         bt.logging.info(f'relay: vote_slash cast for {hotkey[:8]} swap {swap_key[:16]}')

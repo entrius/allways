@@ -140,9 +140,7 @@ class FakeSolana:
 @pytest.fixture(autouse=True)
 def _attribution_from_chain():
     """`build_attribution` re-scans the Binding PDAs; the fakes answer it from `attributions`."""
-    with patch(
-        'allways.validator.relay.engine.build_attribution', lambda client: dict(client.attributions)
-    ):
+    with patch('allways.validator.relay.engine.build_attribution', lambda client: dict(client.attributions)):
         yield
 
 

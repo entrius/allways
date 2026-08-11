@@ -39,8 +39,8 @@ from allways.utils.rate import apply_fee_deduction, directional_rate, is_executa
 # The failure guarantee each backing carries. It differs in TIMING, not in whether you are made
 # whole — say that plainly rather than making a taker infer it from the asset name.
 GUARANTEE = {
-    'sol': 'instant SOL refund from the miner\'s on-chain collateral',
-    'tao': 'TAO reimbursement from the miner\'s bond, shortly after the timeout',
+    'sol': "instant SOL refund from the miner's on-chain collateral",
+    'tao': "TAO reimbursement from the miner's bond, shortly after the timeout",
 }
 
 
@@ -209,7 +209,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     console.print(table)
     if len({c.backing for c, _ in viable}) > 1:
         console.print(
-            '[dim]Backing is the miner\'s bond, and it sets what you get if they fail to deliver:\n'
+            "[dim]Backing is the miner's bond, and it sets what you get if they fail to deliver:\n"
             f'  sol-backed — {GUARANTEE["sol"]}\n'
             f'  tao-backed — {GUARANTEE["tao"]}[/dim]'
         )

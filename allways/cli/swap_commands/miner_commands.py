@@ -107,9 +107,9 @@ def miner_status(pubkey: str):
     console.print(table)
     if att is not None:
         console.print(
-            '[dim]TAO purse is the validators\' attested EFFECTIVE bond — vault gross minus accrued'
+            "[dim]TAO purse is the validators' attested EFFECTIVE bond — vault gross minus accrued"
             ' fees and voted slashes.\nIt is deliberately lower than `alw vault status`, which prints'
-            ' the vault\'s gross counter.[/dim]'
+            " the vault's gross counter.[/dim]"
         )
     console.print()
 
@@ -296,8 +296,9 @@ def miner_activate(backing: str):
         console.print('[dim]  - Hotkey registered on this subnet (btcli subnets register)[/dim]')
         for line in activation_prerequisites(backing):
             console.print(f'[dim]  - {line}[/dim]')
-        console.print('[dim]  - Quotes come AFTER activation: alw miner post/quotes needs the purse'
-                      ' already serving[/dim]')
+        console.print(
+            '[dim]  - Quotes come AFTER activation: alw miner post/quotes needs the purse already serving[/dim]'
+        )
         console.print('[dim]Run `alw miner status` to see which are missing.[/dim]')
     elif accepted > 0:
         console.print('[dim]Votes submitted but quorum not yet reached. Check status with: alw miner status[/dim]')

@@ -196,8 +196,7 @@ class VaultMetadata:
         self.events: Dict[str, EventSpec] = {}
         for e in spec.get('spec', {}).get('events', []):
             args = tuple(
-                EventArg(a['label'], _display_name(a['type']), bool(a.get('indexed')))
-                for a in e.get('args', [])
+                EventArg(a['label'], _display_name(a['type']), bool(a.get('indexed'))) for a in e.get('args', [])
             )
             topic = e.get('signature_topic')
             self.events[e['label']] = EventSpec(e['label'], args, topic.lower() if topic else None)

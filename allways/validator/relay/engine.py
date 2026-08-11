@@ -162,9 +162,7 @@ class BondRelay:
         if not addr:
             return
         try:
-            self.store.record_relay_swap(
-                _hex(swap.swap_key), str(swap.miner), backing, addr, int(self.clock())
-            )
+            self.store.record_relay_swap(_hex(swap.swap_key), str(swap.miner), backing, addr, int(self.clock()))
         except Exception as e:
             bt.logging.warning(f'relay: could not snapshot swap facts: {e}')
 

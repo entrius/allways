@@ -80,9 +80,7 @@ def bond_attestation_pda(miner, chain: str, program_id: Optional[Pubkey] = None)
 def attestation_round_pda(miner, chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
     """The reusable per-(miner, backing chain) attestation round — a composite target, so it can't go
     through `vote_round_pda` (which takes a single 32-byte one)."""
-    return _derive(
-        [b'vote', bytes([REQ_SET_ATTESTATION]), _pk_bytes(miner), chain.encode()], program_id
-    )
+    return _derive([b'vote', bytes([REQ_SET_ATTESTATION]), _pk_bytes(miner), chain.encode()], program_id)
 
 
 def reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
