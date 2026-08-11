@@ -48,7 +48,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.89.0-x86_64-unknown-linux-gnu}"
 
 URL="${URL:?Set URL to the target chain endpoint (e.g. wss://entrypoint-finney.opentensor.ai:443)}"
-SURI="${SURI:?Set SURI to the deployer seed — it pays for the deploy and nothing more}"
+# Prompt silently if not passed — keeps the deployer seed out of shell history and the env of the
+# calling shell. It still reaches cargo-contract as --suri (unavoidable); this only removes history.
+if [ -z "${SURI:-}" ]; then
+  read -rs -p "Deployer seed (hidden — the account that pays the deploy, nothing more): " SURI
+  echo
+fi
+[ -n "${SURI:-}" ] || { echo "no deployer seed provided; aborting"; exit 1; }
 NETUID="${NETUID:-7}"
 STAKING_HOTKEY="${STAKING_HOTKEY:?Set STAKING_HOTKEY to a hotkey registered on netuid $NETUID}"
 
