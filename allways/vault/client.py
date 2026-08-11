@@ -370,7 +370,8 @@ class BondVaultClient:
         )
 
     def admin_call(self, label: str, *args: bytes, keypair=None) -> VaultCallResult:
-        """Owner-only config/validator-set setters. No admin path touches funds."""
+        """Raw governance call by label. There is no owner: every one of these is a quorum
+        round, and no governance path touches miner funds."""
         return self.submit(self.metadata.call(label, *args), keypair=keypair)
 
     # ─── events ──────────────────────────────────────────────────────────────

@@ -64,6 +64,11 @@ def _fmt_tao(rao: int) -> str:
     return f'{rao / TAO_TO_RAO:.9f} τ'
 
 
+def _fmt_max(rao: int) -> str:
+    """0 is UNLIMITED in the contract, not 'closed' — never print it as a bare bound."""
+    return 'UNLIMITED (0)' if rao == 0 else _fmt_tao(rao)
+
+
 # ─── Command group ───────────────────────────────────────────────────────────
 
 @click.group('vault', cls=StyledGroup, show_disclaimer=True)
@@ -377,9 +382,19 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
 
     console.print('\n[bold]Resulting config[/bold]')
     console.print(f'  Min collateral: {_fmt_tao(current["min"])} -> {_fmt_tao(new_min)}')
-    console.print(f'  Max collateral: {_fmt_tao(current["max"])} -> {_fmt_tao(new_max)}')
+    console.print(f'  Max collateral: {_fmt_max(current["max"])} -> {_fmt_max(new_max)}')
     console.print(f'  Threshold:      {current["threshold"]}% -> {new_threshold}%')
     console.print(f'  Round TTL:      {current["ttl"]} -> {new_ttl} blocks\n')
+
+    # 0 is the contract's UNLIMITED sentinel, so a validator meaning "stop new
+    # bonds" would be voting the exact opposite. Make them say it out loud.
+    if new_max == 0:
+        console.print('  [yellow]max-collateral 0 means UNLIMITED, not closed: miners may bond '
+                      'any amount, and a compromised quorum could fabricate slashes against all '
+                      'of it. To restrict bonding, vote a small positive bound.[/yellow]\n')
+        if not _admin_confirm('Vote a config that leaves max collateral UNLIMITED?'):
+            console.print('[yellow]Cancelled[/yellow]')
+            return
 
     peer_cmd = (
         f'alw vault admin set-config --min-collateral {new_min / TAO_TO_RAO:g} '

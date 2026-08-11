@@ -22,8 +22,9 @@
 #                             only grow afterwards by unanimous vote.
 #
 # All four numbers are changeable after deploy only by a UNANIMOUS validator round
-# (`alw vault admin set-config`); the point of seeding them correctly is that the
-# vault is never live at a wrong value.
+# (`alw vault admin set-config`), as are the staking hotkey and netuid (`alw vault
+# admin set-recycle-target`); the point of seeding them correctly is that the vault
+# is never live at a wrong value.
 #
 # Usage:
 #   STAKING_HOTKEY=<ss58 registered on NETUID> URL=wss://entrypoint-finney.opentensor.ai:443 \
@@ -31,7 +32,11 @@
 #
 # After it prints the address:
 #   1. alw vault admin add-validator <ss58>   — unanimous vote; the candidate then
-#                                               runs `alw vault admin accept`
+#                                               runs `alw vault admin accept` WITHIN
+#                                               vote_round_ttl blocks of the approving
+#                                               vote, and before the set changes again
+#                                               — the approval expires otherwise and
+#                                               the set must vote them in afresh
 #   2. alw vault status                        — confirm bounds, threshold, validator set
 #   3. alw config set vault-address <address>  — and ship it to every validator's env
 #   4. record the address + code hash in SOLANA_BITTENSOR_SPLIT_COLLATERAL.md
@@ -49,8 +54,8 @@ STAKING_HOTKEY="${STAKING_HOTKEY:?Set STAKING_HOTKEY to a hotkey registered on n
 
 # Amounts in rao (1 τ = 1e9). Overridable, but every override is a policy change.
 MIN_COLLATERAL="${MIN_COLLATERAL:-250000000}"     # 0.25 τ
-MAX_COLLATERAL="${MAX_COLLATERAL:-10000000000}"   # 10 τ
-CONSENSUS_THRESHOLD="${CONSENSUS_THRESHOLD:-66}"  # percent
+MAX_COLLATERAL="${MAX_COLLATERAL:-10000000000}"   # 10 τ (0 would mean UNLIMITED)
+CONSENSUS_THRESHOLD="${CONSENSUS_THRESHOLD:-66}"  # percent (contract floor: 51)
 VOTE_ROUND_TTL="${VOTE_ROUND_TTL:-600}"           # blocks (contract floor: 100)
 # Comma-separated ss58 seed validator set. One is valid (the bootstrap case), but
 # note n=2 is the ONLY configuration worse than the one before it: both members

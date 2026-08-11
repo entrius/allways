@@ -28,14 +28,17 @@ pub struct BondLockChanged {
     pub epoch: u64,
 }
 
-/// A validator voted on an unlock, slash, or fee-settle round.
-/// `subject` identifies the round's target through one 32-byte field:
-/// the miner (unlock), the swap_ref (slash), or the batch hash (collect).
+/// A validator voted on a money or governance round. `subject` identifies the
+/// round's target through one 32-byte field: the miner (unlock), the
+/// candidate/target account (membership), or the round hash (slash, collect,
+/// config, recycle target).
 #[ink::event]
 pub struct VaultVoteCast {
     #[ink(topic)]
     pub validator: AccountId,
-    /// REQ_UNLOCK = 0 | REQ_SLASH = 1 | REQ_COLLECT = 2
+    /// REQ_UNLOCK = 0 | REQ_SLASH = 1 | REQ_COLLECT = 2 |
+    /// REQ_ADD_VALIDATOR = 3 | REQ_REMOVE_VALIDATOR = 4 | REQ_CONFIG = 5 |
+    /// REQ_RECYCLE_TARGET = 6
     pub req_type: u8,
     pub request_id: u64,
     #[ink(topic)]
