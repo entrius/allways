@@ -12,7 +12,7 @@ import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, MIN_SUCCESSFUL_SWAPS
-from allways.validator.scoring import build_eligibility, is_eligible
+from allways.validator.scoring import build_eligibility, direction_eligible, is_eligible
 
 
 def _hotkey():
@@ -109,29 +109,51 @@ def _ns(successful, failed, settling_until=0):
     return SimpleNamespace(successful_swaps=successful, failed_swaps=failed, settling_until=settling_until)
 
 
+def _ns_hub(successful, failed, tao_settling_until=0):
+    # Per-hub array shape (v3.1): slot 0 = sol, slot 1 = tao.
+    return SimpleNamespace(
+        successful_swaps=successful, failed_swaps=failed, settling_until=[0, tao_settling_until] + [0] * 6
+    )
+
+
 def test_is_eligible_boundaries():
     assert is_eligible(_ns(MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS))
     assert not is_eligible(_ns(MIN_SUCCESSFUL_SWAPS - 1, 0))
     assert not is_eligible(_ns(99, MAX_FAILED_SWAPS + 1))
 
 
-def test_a_settling_miner_earns_nothing():
-    """A pending off-chain seizure is not a rewardable state: the same window the
-    contract refuses new entry over also pays zero. Self-clearing at the deadline —
-    no crank re-enables the miner."""
-    assert not is_eligible(_ns(50, 0, settling_until=2_000), now=1_999)
-    assert is_eligible(_ns(50, 0, settling_until=2_000), now=2_000)
-    assert is_eligible(_ns(50, 0, settling_until=0), now=1_999)
+def test_a_tao_settle_zeroes_only_tao_directions():
+    """v3.1: a pending TAO seizure is not a rewardable state ON ITS HUB — the same window the
+    contract refuses new TAO entry over pays that hub zero, while the SOL hub keeps earning.
+    Self-clearing at the deadline — no crank re-enables the hub."""
+    settling = _ns_hub(50, 0, tao_settling_until=2_000)
+    # A direction whose only hub is TAO pays nothing while the seizure settles...
+    assert not direction_eligible(settling, 'tao', 'btc', 1_999)
+    assert direction_eligible(settling, 'tao', 'btc', 2_000)
+    # ...while a SOL-hub direction keeps earning throughout.
+    assert direction_eligible(settling, 'btc', 'sol', 1_999)
+    # A hub↔hub direction earns while EITHER purse is clean.
+    assert direction_eligible(settling, 'sol', 'tao', 1_999)
+    # Strikes stay global: struck out ⇒ no direction earns, settling or not.
+    struck = _ns_hub(50, MAX_FAILED_SWAPS + 1)
+    assert not direction_eligible(struck, 'btc', 'sol', 1_999)
 
 
-def test_settling_exclusion_reaches_the_eligibility_map():
-    """The gate has to bite through ``build_eligibility``, not just the helper —
-    that map is what the reward math multiplies by."""
+def test_the_pre_v31_scalar_settling_shape_still_gates():
+    """Mixed-version tolerance: a scalar `settling_until` (pre-v3.1 decode) reads as the global
+    exclusion it always was."""
+    assert not direction_eligible(_ns(50, 0, settling_until=2_000), 'btc', 'sol', 1_999)
+    assert direction_eligible(_ns(50, 0, settling_until=2_000), 'btc', 'sol', 2_000)
+
+
+def test_strike_gate_reaches_the_eligibility_map():
+    """The global gate has to bite through ``build_eligibility``, not just the helper —
+    that map is what the trace log reports."""
     m1, m2 = SolKeypair().pubkey(), SolKeypair().pubkey()
     hk1, hk2 = _hotkey(), _hotkey()
     client = _Client(
         bindings=[_binding(m1, hk1), _binding(m2, hk2)],
-        states=[_miner_state(m1, 50, 0, settling_until=2_000), _miner_state(m2, 50, 0)],
+        states=[_miner_state(m1, 50, MAX_FAILED_SWAPS + 1), _miner_state(m2, 50, 0)],
     )
     metagraph = SimpleNamespace(hotkeys=[hk1.ss58_address, hk2.ss58_address])
     assert build_eligibility(client, metagraph, now=1_999) == {

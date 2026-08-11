@@ -42,6 +42,7 @@ from allways.constants import (
     required_collateral,
 )
 from allways.solana.layouts import lock_max
+from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
@@ -173,21 +174,41 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
 
 
 def is_eligible(miner_state, now: Optional[int] = None) -> bool:
-    """Flat binary crown gate off the on-chain ``MinerState`` counters (B3.3):
+    """The GLOBAL strike gate off the on-chain ``MinerState`` counters (B3.3):
     eligible iff the miner has at least ``MIN_SUCCESSFUL_SWAPS`` successes and at
-    most ``MAX_FAILED_SWAPS`` failures. Replaces ``success_rate³ × credibility``.
+    most ``MAX_FAILED_SWAPS`` failures — counted across every hub (one reputation).
 
-    Plus the settlement exclusion: while ``now < settling_until`` a penalty is
-    still working its way to the miner's bond on the backing chain, and a pending
-    slash earns nothing. Same window the contract refuses entry over
-    (``backing::check_entry_gates``), so a miner frozen out of new work is not
-    simultaneously being paid for it."""
-    ts = int(time.time()) if now is None else now
+    The settlement exclusion moved per-hub in v3.1: see ``direction_eligible``,
+    which zeroes only the settling hub's contribution instead of the whole miner."""
+    del now  # strikes are time-free; kept in the signature for its many call sites
     return (
         int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
         and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
-        and ts >= lock_max(miner_state.settling_until)
     )
+
+
+def hub_free(miner_state, backing: str, now: int) -> bool:
+    """Whether this hub's penalty-settlement window has passed. Mirrors the contract's per-hub
+    ``check_entry_gates`` (v3.1 reversed the whole-miner freeze), tolerating the pre-v3.1 scalar
+    shape so mixed-version reads stay safe."""
+    bit = BACKING_BITS.get(backing)
+    settling = getattr(miner_state, 'settling_until', 0)
+    if bit is None or not isinstance(settling, (list, tuple)):
+        return now >= lock_max(settling)
+    idx = bit.bit_length() - 1
+    return now >= int(settling[idx]) if idx < len(settling) else True
+
+
+def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int) -> bool:
+    """Per-direction gate: the global strikes AND a serving hub that is not mid-settle. A spoke
+    pair names exactly one hub; a hub↔hub direction keeps earning while EITHER purse is clean (its
+    clean-hub quotes keep serving — the settling hub's quotes are entry-gated on-chain anyway)."""
+    if not is_eligible(miner_state, now):
+        return False
+    hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
+    if not hubs:
+        return True
+    return any(hub_free(miner_state, hub, now) for hub in hubs)
 
 
 def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, object]:
@@ -342,6 +363,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # state the ingest lost — before the replay below reads those tables.
     live_states = live_miner_states(self.solana_client, self.metagraph)
     self.event_index.reconcile_live_state(live_states, now=current_time)
+    # The global (strike) view feeds the trace log; rows gate per direction so a TAO settle zeroes
+    # only TAO-hub contributions while SOL rows keep earning (v3.1).
     eligibility = {hk: is_eligible(ms, current_time) for hk, ms in live_states.items()}
 
     direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
@@ -404,7 +427,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
-            eligibility=eligibility,
+            eligibility={
+                hk: direction_eligible(ms, from_chain, to_chain, current_time)
+                for hk, ms in live_states.items()
+            },
         )
         for row in rows:
             uid = hotkey_to_uid.get(row.hotkey)
@@ -496,7 +522,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     ts = int(time.time()) if at_time is None else at_time
     window_start, window_end = scoring_window_bounds(ts, self.last_scored_time)
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
-    eligibility = build_eligibility(self.solana_client, self.metagraph, now=ts)
+    live_states = live_miner_states(self.solana_client, self.metagraph)
     try:
         min_swap_amount = int(self.solana_config_cache.min_swap_amount())
         max_swap_amount = int(self.solana_config_cache.max_swap_amount())
@@ -527,7 +553,9 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
-            eligibility=eligibility,
+            eligibility={
+                hk: direction_eligible(ms, from_chain, to_chain, ts) for hk, ms in live_states.items()
+            },
         )
         rows.extend(dir_rows)
     return miner_score_tuples(rows, ts)
