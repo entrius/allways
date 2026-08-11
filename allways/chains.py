@@ -129,12 +129,33 @@ CHAIN_ARBUSDC = ChainDefinition(
     asset_locator='0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
 )
 
+CHAIN_HYPE = ChainDefinition(
+    id='hype',
+    name='Hyperliquid',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='HYPE',
+    networks=('mainnet', 'testnet'),
+    testnet_network='testnet',
+    # ~1s small blocks (transfers never need the 60s big blocks — those carry >2M gas).
+    seconds_per_block=1,
+    # HyperBFT finalizes the block sequence on inclusion — no reorgs to outrun. 2 is a
+    # one-block margin against an endpoint serving a head its consensus hasn't sealed yet.
+    min_confirmations=2,
+    # Rate sanity floor, not an economic guarantee: 0.0001 HYPE covers a 21k-gas transfer
+    # below ~4.7 gwei — miners price real gas into their quotes.
+    min_onchain_amount=100_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
     'sol': CHAIN_SOL,
     'eth': CHAIN_ETH,
     'arbusdc': CHAIN_ARBUSDC,
+    'hype': CHAIN_HYPE,
 }
 
 
