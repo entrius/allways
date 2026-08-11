@@ -37,7 +37,7 @@ pub fn handler(ctx: Context<Deactivate>, backing: Option<String>) -> Result<()> 
     require!(ms.active, ErrorCode::MinerNotActive);
     require!(ms.active_backings & dropped != 0, ErrorCode::MinerNotActive);
     require!(!ms.has_active_swap, ErrorCode::MinerHasActiveSwap);
-    require!(now >= ms.busy_until, ErrorCode::MinerBusy);
+    require!(now >= ms.busy_any_until(), ErrorCode::MinerBusy);
 
     // One MinerBackingChanged per purse actually going dark, whether this is a partial exit or the
     // full one — a scorer replaying the mask must see the same events either way.

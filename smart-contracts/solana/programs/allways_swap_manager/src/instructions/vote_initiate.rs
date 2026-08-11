@@ -137,8 +137,9 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         swap.timeout_at = timeout_at;
         swap.max_extend_at = max_extend_at;
 
-        ctx.accounts.miner_state.has_active_swap = true;
-        ctx.accounts.miner_state.busy_until = timeout_at; // stay busy through the swap deadline
+        let bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
+        ctx.accounts.miner_state.set_swap(bit, true);
+        ctx.accounts.miner_state.set_busy(bit, timeout_at); // hub stays busy through the swap deadline
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         ctx.accounts.reservation.claimed_swap_key = [0u8; 32];
         reset_round(&mut ctx.accounts.vote_round);

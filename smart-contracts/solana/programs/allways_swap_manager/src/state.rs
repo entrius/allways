@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_TX_LEN, MAX_VALIDATORS};
+use crate::constants::{MAX_ADDR_LEN, MAX_BACKING_SLOTS, MAX_CHAIN_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
 /// A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the
 /// stake-weight seam consumed ONLY by the reservation-lottery draw; consensus stays count-based.
@@ -111,15 +111,21 @@ pub struct MinerState {
     /// Per-backing activation bitmask (`BACKING_BIT_*`). A deficient purse disables only its own
     /// quotes, not the miner (D2).
     pub active_backings: u8,
-    /// Whether the miner currently has an in-flight swap.
+    /// Whether the miner has an in-flight swap on ANY hub — the OR view of `active_swap_backings`,
+    /// written only by `set_swap` (like `active`/`set_backing`), kept so pre-v3.1 readers work unchanged.
     pub has_active_swap: bool,
-    /// Unix ts the miner is busy until (open pool, held reservation, or in-flight swap). Self-clearing
-    /// (`now >= busy_until` = free); the non-bypassable busy lock for deactivate/withdraw_collateral.
-    pub busy_until: i64,
-    /// Unix ts a non-locally-settled penalty is still settling on the backing chain (0 = clear). The
-    /// ENTRY lock, read only by finalize/vote_initiate — `busy_until` is the exit lock and entry paths
-    /// never read it, so the two must stay separate fields.
-    pub settling_until: i64,
+    /// Per-hub in-flight-swap bitmask (`BACKING_BIT_*`): v3.1 allows one live swap PER hub, so the
+    /// bool above is no longer the lock — this mask is.
+    pub active_swap_backings: u8,
+    /// Per-hub exit locks (unix ts), indexed by backing-bit position (`backing_slot`): open pool, held
+    /// reservation, or in-flight swap on that hub. Self-clearing; read by deactivate/withdraw.
+    pub busy_until: [i64; MAX_BACKING_SLOTS],
+    /// Per-hub ENTRY locks: a non-locally-settled penalty still settling on that hub's backing chain
+    /// (0 = clear). Read only by finalize/vote_initiate gates; exit paths never read these.
+    pub settling_until: [i64; MAX_BACKING_SLOTS],
+    /// Collateral already obligated to in-flight swaps per hub, in the backing's own smallest unit.
+    /// Reserved at initiate quorum, released at confirm/timeout — entry gates check net of this.
+    pub reserved_collateral: [u64; MAX_BACKING_SLOTS],
     /// Unix timestamp of last deactivation (0 = never). Gates the withdrawal cooldown.
     pub deactivation_at: i64,
     /// Lifetime swaps completed (confirm_swap quorum). Monotonic. Off-chain emissions warm-up gate:
@@ -149,6 +155,63 @@ impl MinerState {
     pub fn clear_backings(&mut self) {
         self.active_backings = 0;
         self.active = false;
+    }
+
+    /// Array index for a single backing bit — bit position, shared by every per-hub array.
+    pub fn backing_slot(bit: u8) -> usize {
+        debug_assert!(bit != 0 && bit & (bit - 1) == 0, "backing_slot takes a single bit");
+        bit.trailing_zeros() as usize
+    }
+
+    /// Set or clear one hub's in-flight-swap bit. `has_active_swap` is re-derived here and nowhere
+    /// else, so the OR-view invariant has no path to drift. Returns the new OR view.
+    pub fn set_swap(&mut self, bit: u8, on: bool) -> bool {
+        if on {
+            self.active_swap_backings |= bit;
+        } else {
+            self.active_swap_backings &= !bit;
+        }
+        self.has_active_swap = self.active_swap_backings != 0;
+        self.has_active_swap
+    }
+
+    /// Whether this hub has an in-flight swap.
+    pub fn swap_on(&self, bit: u8) -> bool {
+        self.active_swap_backings & bit != 0
+    }
+
+    pub fn busy_slot(&self, bit: u8) -> i64 {
+        self.busy_until[Self::backing_slot(bit)]
+    }
+
+    /// Overwrite one hub's exit lock — for sites that own the hub's whole timeline (open, settle,
+    /// free). Extensions must use `extend_busy` so they can never shorten a later obligation.
+    pub fn set_busy(&mut self, bit: u8, until: i64) {
+        self.busy_until[Self::backing_slot(bit)] = until;
+    }
+
+    /// Forward-only exit-lock write: the slot only ever moves later.
+    pub fn extend_busy(&mut self, bit: u8, until: i64) {
+        let slot = Self::backing_slot(bit);
+        self.busy_until[slot] = self.busy_until[slot].max(until);
+    }
+
+    /// The latest exit lock across every hub — the global busy view (pre-v3.1 `busy_until`).
+    pub fn busy_any_until(&self) -> i64 {
+        self.busy_until.iter().copied().max().unwrap_or(0)
+    }
+
+    pub fn settling_slot(&self, bit: u8) -> i64 {
+        self.settling_until[Self::backing_slot(bit)]
+    }
+
+    pub fn set_settling(&mut self, bit: u8, until: i64) {
+        self.settling_until[Self::backing_slot(bit)] = until;
+    }
+
+    /// The latest entry lock across every hub — the global settling view (pre-v3.1 `settling_until`).
+    pub fn settling_any_until(&self) -> i64 {
+        self.settling_until.iter().copied().max().unwrap_or(0)
     }
 }
 
@@ -468,4 +531,80 @@ pub struct Pool {
     pub requests: Vec<Request>,
     /// Stored PDA bump.
     pub bump: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{BACKING_BIT_SOL, BACKING_BIT_TAO};
+
+    fn miner() -> MinerState {
+        MinerState {
+            miner: Pubkey::default(),
+            collateral: 0,
+            active: true,
+            active_backings: BACKING_BIT_SOL | BACKING_BIT_TAO,
+            has_active_swap: false,
+            active_swap_backings: 0,
+            busy_until: [0; MAX_BACKING_SLOTS],
+            settling_until: [0; MAX_BACKING_SLOTS],
+            reserved_collateral: [0; MAX_BACKING_SLOTS],
+            deactivation_at: 0,
+            successful_swaps: 0,
+            failed_swaps: 0,
+            bump: 255,
+        }
+    }
+
+    #[test]
+    fn backing_slot_is_the_bit_position() {
+        assert_eq!(MinerState::backing_slot(BACKING_BIT_SOL), 0);
+        assert_eq!(MinerState::backing_slot(BACKING_BIT_TAO), 1);
+        assert_eq!(MinerState::backing_slot(1 << 7), 7);
+    }
+
+    #[test]
+    fn set_swap_keeps_the_or_view_true_while_any_hub_is_in_flight() {
+        // The OR view must track the mask exactly — a TAO settle can't read as "miner free" while a
+        // SOL swap is still live, and vice versa.
+        let mut ms = miner();
+        assert!(ms.set_swap(BACKING_BIT_SOL, true));
+        assert!(ms.set_swap(BACKING_BIT_TAO, true));
+        assert!(ms.set_swap(BACKING_BIT_TAO, false), "SOL still in flight");
+        assert!(ms.swap_on(BACKING_BIT_SOL) && !ms.swap_on(BACKING_BIT_TAO));
+        assert!(!ms.set_swap(BACKING_BIT_SOL, false), "all clear");
+        assert!(!ms.has_active_swap);
+    }
+
+    #[test]
+    fn busy_locks_are_per_hub_and_the_any_view_is_the_max() {
+        let mut ms = miner();
+        ms.set_busy(BACKING_BIT_SOL, 1_000);
+        ms.set_busy(BACKING_BIT_TAO, 2_000);
+        assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 1_000);
+        assert_eq!(ms.busy_slot(BACKING_BIT_TAO), 2_000);
+        // The exit guards read the LATEST obligation, so settling one hub never unlocks the other.
+        assert_eq!(ms.busy_any_until(), 2_000);
+        ms.set_busy(BACKING_BIT_TAO, 0);
+        assert_eq!(ms.busy_any_until(), 1_000);
+    }
+
+    #[test]
+    fn extend_busy_never_shortens_a_lock() {
+        let mut ms = miner();
+        ms.set_busy(BACKING_BIT_SOL, 5_000);
+        ms.extend_busy(BACKING_BIT_SOL, 4_000);
+        assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 5_000, "earlier target must not shorten");
+        ms.extend_busy(BACKING_BIT_SOL, 6_000);
+        assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 6_000);
+    }
+
+    #[test]
+    fn settling_locks_are_per_hub_and_the_any_view_is_the_max() {
+        let mut ms = miner();
+        ms.set_settling(BACKING_BIT_TAO, 3_000);
+        assert_eq!(ms.settling_slot(BACKING_BIT_TAO), 3_000);
+        assert_eq!(ms.settling_slot(BACKING_BIT_SOL), 0);
+        assert_eq!(ms.settling_any_until(), 3_000);
+    }
 }

@@ -14,7 +14,20 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 13
+CONFIG_VERSION = 14
+
+# Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
+# `active_backings` bit, indexed by bit position.
+MAX_BACKING_SLOTS = 8
+
+
+def lock_max(value) -> int:
+    """Latest deadline in a per-hub lock array — the global busy/settling view. Tolerates the
+    pre-v3.1 scalar shape so synthetic fixtures and mixed-version reads stay comparable."""
+    if isinstance(value, (list, tuple)):
+        return max((int(v) for v in value), default=0)
+    return int(value or 0)
+
 
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
@@ -65,13 +78,16 @@ Treasury = CStruct('total' / U64, 'bump' / U8)
 MinerState = CStruct(
     'miner' / Pubkey32,
     'collateral' / U64,
-    # `active` is the OR view of `active_backings` (W2 per-hub activation); `settling_until` is the
-    # entry lock a non-"sol" timeout sets beside the `busy_until` exit lock.
+    # `active`/`has_active_swap` are OR views of their masks (W2 activation, v3.1 per-hub swaps).
+    # The lock arrays are per-hub, indexed by backing-bit position; `settling_until` slots are the
+    # entry locks a non-"sol" timeout sets beside the `busy_until` exit locks.
     'active' / Bool,
     'active_backings' / U8,
     'has_active_swap' / Bool,
-    'busy_until' / I64,
-    'settling_until' / I64,
+    'active_swap_backings' / U8,
+    'busy_until' / I64[MAX_BACKING_SLOTS],
+    'settling_until' / I64[MAX_BACKING_SLOTS],
+    'reserved_collateral' / U64[MAX_BACKING_SLOTS],
     'deactivation_at' / I64,
     'successful_swaps' / U32,
     'failed_swaps' / U32,

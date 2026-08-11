@@ -24,6 +24,7 @@ from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import TAO_TO_RAO
 from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
+from allways.solana.layouts import lock_max
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_BITS
 from allways.utils.rate import directional_rate
 
@@ -348,8 +349,8 @@ def miner_deactivate(backing: str):
         if ms.has_active_swap:
             console.print('[dim]Wait for it to complete or time out, then try again.[/dim]')
             fail('Cannot deactivate: you have an active swap.')
-        if ms.busy_until > now:
-            remaining = ms.busy_until - now
+        if lock_max(ms.busy_until) > now:
+            remaining = lock_max(ms.busy_until) - now
             fail(f'Cannot deactivate: you are busy (open pool / held reservation), ~{remaining}s left.')
     except SolanaClientError as e:
         fail(f'Failed to read miner state: {e}')

@@ -156,10 +156,11 @@ pub fn handler(
         (r.from_chain.clone(), r.to_chain.clone(), r.reserved_until)
     };
 
-    // Tighten the busy lock to the filled reservation's actual life. The bid set it conservatively to
-    // cover the whole finalize window; now that we've filled, `now + ttl` is exact (never shorter than
-    // reserved_until, so no live-reservation hole).
-    ctx.accounts.miner_state.busy_until = reserved_until;
+    // Tighten the hub's busy lock to the filled reservation's actual life. The bid set it
+    // conservatively to cover the whole finalize window; now that we've filled, `now + ttl` is exact
+    // (never shorter than reserved_until, so no live-reservation hole).
+    let bit = backing::backing_bit(&ctx.accounts.reservation.collateral_chain)?;
+    ctx.accounts.miner_state.set_busy(bit, reserved_until);
 
     emit!(ReservationFilled {
         miner: miner_key,

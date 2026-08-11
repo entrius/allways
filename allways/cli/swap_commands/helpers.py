@@ -20,6 +20,7 @@ from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_con
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.solana import pdas
 from allways.solana.client import SolanaClientError
+from allways.solana.layouts import lock_max
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
 
 ALLWAYS_DIR = Path.home() / '.allways'
@@ -335,7 +336,7 @@ def miner_runtime_status(state, reservation, now: int) -> str:
         and bytes(getattr(reservation, 'claimed_swap_key', ZERO_SWAP_KEY)) == ZERO_SWAP_KEY
     ):
         return 'reserved'
-    if int(getattr(state, 'busy_until', 0)) > now:
+    if lock_max(getattr(state, 'busy_until', 0)) > now:
         return 'cooldown'
     return 'available'
 

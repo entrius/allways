@@ -455,14 +455,36 @@ fn set_reservation_backing(svm: &mut LiteSVM, miner: &Pubkey, backing: &str) {
 }
 fn set_swap_backing(svm: &mut LiteSVM, key: &[u8; 32], backing: &str) {
     let mut s = swap_acct(svm, key);
+    let miner = s.miner;
     s.collateral_chain = backing.to_string();
     let mut buf = Vec::new();
     s.try_serialize(&mut buf).unwrap();
     overwrite(svm, swap_pda(key), buf);
+    // Re-home the miner's per-hub swap bit + busy slot too, so the backdoor edit reads as "this swap
+    // was always backed there" — what vote_initiate would have written for that backing. An
+    // unsupported backing has no bit to re-home to; those tests only need the Swap field flipped.
+    let Ok(new_bit) = allways_swap_manager::backing::backing_bit(backing) else {
+        return;
+    };
+    let mut ms = miner_state(svm, &miner);
+    if ms.active_swap_backings != new_bit {
+        let busy = ms.busy_any_until();
+        for (bit, _) in allways_swap_manager::constants::BACKINGS {
+            if ms.active_swap_backings & bit != 0 {
+                ms.set_swap(bit, false);
+                ms.set_busy(bit, 0);
+            }
+        }
+        ms.set_swap(new_bit, true);
+        ms.set_busy(new_bit, busy);
+        let mut buf = Vec::new();
+        ms.try_serialize(&mut buf).unwrap();
+        overwrite(svm, miner_pda(&miner), buf);
+    }
 }
 fn set_settling_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
     let mut ms = miner_state(svm, miner);
-    ms.settling_until = until;
+    ms.set_settling(BACKING_BIT_TAO, until);
     let mut buf = Vec::new();
     ms.try_serialize(&mut buf).unwrap();
     overwrite(svm, miner_pda(miner), buf);
@@ -839,8 +861,8 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
 
     let ms = miner_state(&svm, &m);
     let settled_at = timeout_ts + SETTLEMENT_GRACE_SECS;
-    assert_eq!(ms.busy_until, settled_at, "exit lock");
-    assert_eq!(ms.settling_until, settled_at, "entry lock — a separate field, same deadline");
+    assert_eq!(ms.busy_slot(BACKING_BIT_TAO), settled_at, "exit lock");
+    assert_eq!(ms.settling_slot(BACKING_BIT_TAO), settled_at, "entry lock — a separate field, same deadline");
 
     // New work is refused while the penalty is still settling on the backing chain — at the first
     // door, the permissionless pool open, so no fresh contest can even be started.
@@ -906,7 +928,7 @@ fn test_a_sol_only_miner_is_untouched_by_the_settle_gate() {
     // miner and a locally-settled timeout never writes it, so the whole SOL lifecycle is unaffected.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
-    assert_eq!(miner_state(&svm, &m).settling_until, 0, "nothing has ever settled off-chain here");
+    assert_eq!(miner_state(&svm, &m).settling_any_until(), 0, "nothing has ever settled off-chain here");
 
     draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
     send(
@@ -926,7 +948,7 @@ fn test_a_sol_only_miner_is_untouched_by_the_settle_gate() {
     let key = swap_key("soltx2");
     send(&mut svm, timeout_ix(&vals[0].pubkey(), &m, key), &vals[0].pubkey(), &vals[0]).expect("t0");
     send(&mut svm, timeout_ix(&vals[1].pubkey(), &m, key), &vals[1].pubkey(), &vals[1]).expect("t1");
-    assert_eq!(miner_state(&svm, &m).settling_until, 0, "a local seizure owes nothing later");
+    assert_eq!(miner_state(&svm, &m).settling_any_until(), 0, "a local seizure owes nothing later");
 }
 
 // --- per-hub activation ------------------------------------------------------------------------
@@ -1207,9 +1229,12 @@ fn test_migrate_miner_state_carries_active_into_the_sol_bit_and_is_idempotent() 
     let ms = miner_state(&svm, &m);
     assert_eq!(ms.active_backings, BACKING_BIT_SOL, "the legacy bool WAS the sol purse");
     assert!(ms.active, "OR view unchanged — no re-activation vote needed at the upgrade");
-    assert_eq!(ms.settling_until, 0);
+    assert_eq!(ms.settling_any_until(), 0);
     assert_eq!(ms.collateral, live.collateral);
-    assert_eq!(ms.busy_until, 42);
+    // The global v10 scalar is broadcast into every hub slot — the any-view carries it verbatim.
+    assert_eq!(ms.busy_any_until(), 42);
+    assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 42);
+    assert_eq!(ms.busy_slot(BACKING_BIT_TAO), 42);
     assert_eq!(ms.deactivation_at, 7);
     assert_eq!(ms.successful_swaps, 5);
     assert_eq!(ms.failed_swaps, 2);
@@ -1217,6 +1242,81 @@ fn test_migrate_miner_state_carries_active_into_the_sol_bit_and_is_idempotent() 
     // Idempotent: a second crank must not wipe the bits the first one seeded.
     send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin).expect("migrate again");
     assert_eq!(miner_state(&svm, &m).active_backings, BACKING_BIT_SOL);
+}
+
+/// The v13 `MinerState` body (global scalar locks, no per-hub arrays) — the shape the v3 testnet
+/// deployment wrote and the v14 crank grows.
+#[derive(AnchorSerialize)]
+struct MinerStateV13 {
+    miner: Pubkey,
+    collateral: u64,
+    active: bool,
+    active_backings: u8,
+    has_active_swap: bool,
+    busy_until: i64,
+    settling_until: i64,
+    deactivation_at: i64,
+    successful_swaps: u32,
+    failed_swaps: u32,
+    bump: u8,
+}
+
+#[test]
+fn test_migrate_miner_state_broadcasts_v13_scalars_into_every_hub_slot() {
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    let live = miner_state(&svm, &m);
+    let legacy = MinerStateV13 {
+        miner: m,
+        collateral: live.collateral,
+        active: true,
+        active_backings: BACKING_BIT_SOL | BACKING_BIT_TAO,
+        has_active_swap: false,
+        busy_until: 42,
+        settling_until: 9,
+        deactivation_at: 7,
+        successful_swaps: 5,
+        failed_swaps: 2,
+        bump: live.bump,
+    };
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    downgrade(&mut svm, miner_pda(&m), &MinerState::DISCRIMINATOR, body);
+
+    send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin).expect("migrate");
+    let ms = miner_state(&svm, &m);
+    // Mask + counters carry verbatim; the global scalars land in every slot (conservative — the max
+    // view is identical, each hub honors the old global lock until it expires).
+    assert_eq!(ms.active_backings, BACKING_BIT_SOL | BACKING_BIT_TAO);
+    assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 42);
+    assert_eq!(ms.busy_slot(BACKING_BIT_TAO), 42);
+    assert_eq!(ms.settling_slot(BACKING_BIT_SOL), 9);
+    assert_eq!(ms.settling_slot(BACKING_BIT_TAO), 9);
+    assert_eq!(ms.active_swap_backings, 0, "drained upgrade ⇒ no in-flight bits");
+    assert_eq!(ms.reserved_collateral, [0; 8]);
+    assert_eq!(ms.successful_swaps, 5);
+    assert_eq!(ms.failed_swaps, 2);
+
+    // Idempotent — a second crank is a no-op on the already-grown account.
+    send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin).expect("again");
+    assert_eq!(miner_state(&svm, &m).busy_slot(BACKING_BIT_TAO), 42);
+}
+
+#[test]
+fn test_migrate_config_stamps_a_v13_config_to_v14_in_place() {
+    let (mut svm, admin, _vals, _miner) = setup();
+    // A v13 Config is the LIVE layout with an older version stamp — no mirror needed.
+    let mut cfg = config_acct(&svm);
+    cfg.version = 13;
+    cfg.tao_min_collateral = 777; // sentinel: the stamp path must not re-seed W1/W2 fields
+    let mut buf = Vec::new();
+    cfg.try_serialize(&mut buf).unwrap();
+    overwrite(&mut svm, config_pda(), buf);
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
+    let cfg = config_acct(&svm);
+    assert_eq!(cfg.version, CONFIG_VERSION);
+    assert_eq!(cfg.tao_min_collateral, 777, "v13 path stamps the version and touches nothing else");
 }
 
 #[test]

@@ -62,10 +62,10 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v13: W2b quote-level backing —
-/// `collateral_chain` on MinerQuote (and in its seeds) + Pool, per-backing pool entry, partial exit.
-/// v12 = W2 bond attestation; v11 = W1 split-collateral seam; v10 = A4 source-replay via freshness.
-pub const CONFIG_VERSION: u32 = 13;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v14: v3.1 per-hub swap
+/// concurrency — per-hub transient state on MinerState, per-hub Pool/Reservation seeds. v13 = W2b
+/// quote-level backing; v12 = W2 bond attestation; v11 = W1 seam; v10 = A4 freshness replay.
+pub const CONFIG_VERSION: u32 = 14;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -122,6 +122,10 @@ pub const BACKINGS: [(u8, &str); 2] = [
     (BACKING_BIT_SOL, BACKING_CHAIN_SOL),
     (BACKING_BIT_TAO, BACKING_CHAIN_TAO),
 ];
+
+/// Width of the per-hub transient arrays on `MinerState` (busy/settling/reserved) — one slot per
+/// possible `active_backings` bit, indexed by bit position (`MinerState::backing_slot`).
+pub const MAX_BACKING_SLOTS: usize = 8;
 
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value

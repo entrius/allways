@@ -201,9 +201,10 @@ pub fn handler(
         // Busy from the moment the pool opens: covers the window + the finalize window + the eventual
         // reservation TTL. Set conservatively here so the draw/finalize never SHORTEN it — otherwise a
         // miner would read as free during the finalize window while holding an about-to-fill reservation.
-        ctx.accounts.miner_state.busy_until = closes_at
+        let busy_target = closes_at
             .saturating_add(ctx.accounts.config.finalize_window_secs)
             .saturating_add(ctx.accounts.config.reservation_ttl_secs);
+        ctx.accounts.miner_state.set_busy(bit, busy_target);
 
         let pool = &mut ctx.accounts.pool;
         pool.miner = miner_key;

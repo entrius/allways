@@ -1,19 +1,24 @@
-//! v3 upgrade cranks. A v10 account is too short AND laid out differently, so the live types can't
+//! Upgrade cranks. A legacy account is shorter AND laid out differently, so the live types can't
 //! parse it: each crank reads it through a frozen mirror of the OLD layout, rebuilds it in the new one,
 //! and grows the allocation. Safe to re-run — gated on a marker the crank itself moves, moving no funds.
+//! v14 accepts BOTH from-versions: v10 (mainnet, never took v3) and v13 (testnet, v3 deployed).
 
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
 
 use crate::constants::{
-    ATTEST_MAX_AGE_SECS, BACKING_BIT_SOL, CONFIG_SEED, CONFIG_VERSION, MINER_SEED,
-    SETTLEMENT_GRACE_SECS, TAO_MAX_SWAP_AMOUNT_RAO, TAO_MIN_COLLATERAL_RAO, TAO_MIN_SWAP_AMOUNT_RAO,
+    ATTEST_MAX_AGE_SECS, BACKING_BIT_SOL, CONFIG_SEED, CONFIG_VERSION, MAX_BACKING_SLOTS,
+    MINER_SEED, SETTLEMENT_GRACE_SECS, TAO_MAX_SWAP_AMOUNT_RAO, TAO_MIN_COLLATERAL_RAO,
+    TAO_MIN_SWAP_AMOUNT_RAO,
 };
 use crate::error::ErrorCode;
 use crate::state::{Config, MinerState, ValidatorInfo};
 
-/// The last deployed schema version — the only one these cranks accept as input.
-const MIGRATE_FROM_VERSION: u32 = 10;
+/// The pre-v3 deployed schema — the oldest input these cranks accept.
+const MIGRATE_FROM_V10: u32 = 10;
+/// The v3 split-collateral schema — same `Config` layout as v14 (only `MinerState` grew), so its
+/// config crank is a version stamp and its miner-state crank a layout grow.
+const MIGRATE_FROM_V13: u32 = 13;
 /// Byte offset of `Config.version` (discriminator + `admin`). Stable in every version, which is what
 /// lets the crank read the marker before committing to a layout.
 const CONFIG_VERSION_OFFSET: usize = 8 + 32;
@@ -43,13 +48,30 @@ struct ConfigV10 {
 }
 
 /// `MinerState` as the v10 program wrote it: no `active_backings`, no `settling_until`.
-#[derive(AnchorDeserialize)]
+#[derive(AnchorDeserialize, InitSpace)]
 struct MinerStateV10 {
     miner: Pubkey,
     collateral: u64,
     active: bool,
     has_active_swap: bool,
     busy_until: i64,
+    deactivation_at: i64,
+    successful_swaps: u32,
+    failed_swaps: u32,
+    bump: u8,
+}
+
+/// `MinerState` as the v13 program wrote it: global scalar locks, no per-hub arrays. Field order is
+/// the contract — do not reorder to match the live struct.
+#[derive(AnchorDeserialize, InitSpace)]
+struct MinerStateV13 {
+    miner: Pubkey,
+    collateral: u64,
+    active: bool,
+    active_backings: u8,
+    has_active_swap: bool,
+    busy_until: i64,
+    settling_until: i64,
     deactivation_at: i64,
     successful_swaps: u32,
     failed_swaps: u32,
@@ -68,6 +90,13 @@ pub struct MigrateConfig<'info> {
     pub config: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+/// The two accepted input shapes, decided by the stored version marker.
+enum LegacyConfig {
+    V10(ConfigV10),
+    /// v13's `Config` layout is identical to v14's — parsed with the live type.
+    V13(Config),
 }
 
 pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
@@ -93,14 +122,32 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
             msg!("config already at v{}", CONFIG_VERSION);
             return Ok(());
         }
-        require!(
-            version == MIGRATE_FROM_VERSION,
-            ErrorCode::InvalidAccountForMigration
-        );
-        let legacy = ConfigV10::deserialize(&mut &data[8..])?;
-        // The offset read and the parsed field must agree, or the layout mirror above has drifted.
-        require!(legacy.version == version, ErrorCode::InvalidAccountForMigration);
-        legacy
+        if version == MIGRATE_FROM_V13 {
+            LegacyConfig::V13(Config::deserialize(&mut &data[8..])?)
+        } else {
+            require!(
+                version == MIGRATE_FROM_V10,
+                ErrorCode::InvalidAccountForMigration
+            );
+            let legacy = ConfigV10::deserialize(&mut &data[8..])?;
+            // The offset read and the parsed field must agree, or the layout mirror above has drifted.
+            require!(legacy.version == version, ErrorCode::InvalidAccountForMigration);
+            LegacyConfig::V10(legacy)
+        }
+    };
+
+    let from_version = match &legacy {
+        LegacyConfig::V10(_) => MIGRATE_FROM_V10,
+        LegacyConfig::V13(_) => MIGRATE_FROM_V13,
+    };
+    let legacy = match legacy {
+        LegacyConfig::V13(mut cfg) => {
+            cfg.version = CONFIG_VERSION;
+            write_account(&info, &cfg)?;
+            msg!("config migrated v{} -> v{}", from_version, CONFIG_VERSION);
+            return Ok(());
+        }
+        LegacyConfig::V10(legacy) => legacy,
     };
 
     let migrated = Config {
@@ -140,7 +187,7 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         &ctx.accounts.system_program,
     )?;
     write_account(&info, &migrated)?;
-    msg!("config migrated v{} -> v{}", MIGRATE_FROM_VERSION, CONFIG_VERSION);
+    msg!("config migrated v{} -> v{}", from_version, CONFIG_VERSION);
     Ok(())
 }
 
@@ -164,11 +211,19 @@ pub struct MigrateMinerState<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Broadcast a global scalar lock into every per-hub slot — conservative: the max view is identical,
+/// and each hub honors the old global lock until it expires.
+fn broadcast(v: i64) -> [i64; MAX_BACKING_SLOTS] {
+    [v; MAX_BACKING_SLOTS]
+}
+
 pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
     let info = ctx.accounts.miner_state.to_account_info();
     let target_len = 8 + MinerState::INIT_SPACE;
+    const V10_LEN: usize = 8 + MinerStateV10::INIT_SPACE;
+    const V13_LEN: usize = 8 + MinerStateV13::INIT_SPACE;
 
-    let legacy = {
+    let migrated = {
         let data = info.try_borrow_data()?;
         require!(
             info.owner == &crate::ID && data.len() >= 8,
@@ -178,29 +233,53 @@ pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
             data[..8] == MinerState::DISCRIMINATOR[..],
             ErrorCode::InvalidAccountForMigration
         );
-        // MinerState carries no version, so the allocation length is the marker: only a migrated
-        // account is this long.
+        // MinerState carries no version, so the allocation length is the marker — it names the source
+        // layout exactly (v10 and v13 differ by 9 bytes; only a migrated account reaches target_len).
         if data.len() >= target_len {
             msg!("miner state already migrated: {}", ctx.accounts.miner.key());
             return Ok(());
         }
-        MinerStateV10::deserialize(&mut &data[8..])?
-    };
-
-    let migrated = MinerState {
-        miner: legacy.miner,
-        collateral: legacy.collateral,
-        active: legacy.active,
-        // The legacy bool WAS the SOL purse's activation — carry it across as that bit so the OR view
-        // is unchanged for every miner and no re-activation vote is needed at the upgrade.
-        active_backings: if legacy.active { BACKING_BIT_SOL } else { 0 },
-        has_active_swap: legacy.has_active_swap,
-        busy_until: legacy.busy_until,
-        settling_until: 0,
-        deactivation_at: legacy.deactivation_at,
-        successful_swaps: legacy.successful_swaps,
-        failed_swaps: legacy.failed_swaps,
-        bump: legacy.bump,
+        if data.len() == V13_LEN {
+            let legacy = MinerStateV13::deserialize(&mut &data[8..])?;
+            MinerState {
+                miner: legacy.miner,
+                collateral: legacy.collateral,
+                active: legacy.active,
+                active_backings: legacy.active_backings,
+                has_active_swap: legacy.has_active_swap,
+                // The runbook drains before upgrading, so this is ~always 0. If a swap somehow
+                // survives, every active hub is marked in-flight — conservative, never permissive.
+                active_swap_backings: if legacy.has_active_swap { legacy.active_backings } else { 0 },
+                busy_until: broadcast(legacy.busy_until),
+                settling_until: broadcast(legacy.settling_until),
+                reserved_collateral: [0; MAX_BACKING_SLOTS],
+                deactivation_at: legacy.deactivation_at,
+                successful_swaps: legacy.successful_swaps,
+                failed_swaps: legacy.failed_swaps,
+                bump: legacy.bump,
+            }
+        } else if data.len() == V10_LEN {
+            let legacy = MinerStateV10::deserialize(&mut &data[8..])?;
+            MinerState {
+                miner: legacy.miner,
+                collateral: legacy.collateral,
+                active: legacy.active,
+                // The legacy bool WAS the SOL purse's activation — carry it across as that bit so the
+                // OR view is unchanged for every miner and no re-activation vote is needed.
+                active_backings: if legacy.active { BACKING_BIT_SOL } else { 0 },
+                has_active_swap: legacy.has_active_swap,
+                active_swap_backings: if legacy.has_active_swap { BACKING_BIT_SOL } else { 0 },
+                busy_until: broadcast(legacy.busy_until),
+                settling_until: [0; MAX_BACKING_SLOTS],
+                reserved_collateral: [0; MAX_BACKING_SLOTS],
+                deactivation_at: legacy.deactivation_at,
+                successful_swaps: legacy.successful_swaps,
+                failed_swaps: legacy.failed_swaps,
+                bump: legacy.bump,
+            }
+        } else {
+            return err!(ErrorCode::InvalidAccountForMigration);
+        }
     };
 
     grow_to(&info, target_len, &ctx.accounts.admin, &ctx.accounts.system_program)?;

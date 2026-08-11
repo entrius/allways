@@ -46,8 +46,9 @@ pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
         r.router
     };
 
-    // Free the miner now (the bid set busy_until far ahead to cover a finalize that never came).
-    ctx.accounts.miner_state.busy_until = now;
+    // Free the hub now (the bid set its busy slot far ahead to cover a finalize that never came).
+    let bit = crate::backing::backing_bit(&ctx.accounts.reservation.collateral_chain)?;
+    ctx.accounts.miner_state.set_busy(bit, now);
 
     let r = &mut ctx.accounts.reservation;
     r.router = Pubkey::default();

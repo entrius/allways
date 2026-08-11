@@ -36,8 +36,10 @@ def test_minerstate_roundtrip():
         'active': True,
         'active_backings': 1,
         'has_active_swap': False,
-        'busy_until': 1_700_000_500,
-        'settling_until': 0,
+        'active_swap_backings': 0,
+        'busy_until': [1_700_000_500] + [0] * 7,
+        'settling_until': [0] * 8,
+        'reserved_collateral': [0] * 8,
         'deactivation_at': 0,
         'successful_swaps': 3,
         'failed_swaps': 1,
@@ -45,7 +47,8 @@ def test_minerstate_roundtrip():
     }
     p = _roundtrip(layouts.MinerState, v)
     assert p.collateral == v['collateral'] and p.active is True and p.successful_swaps == 3
-    assert p.active_backings == 1 and p.settling_until == 0
+    assert p.active_backings == 1 and layouts.lock_max(p.settling_until) == 0
+    assert layouts.lock_max(p.busy_until) == 1_700_000_500
 
 
 def test_reservation_roundtrip_u128_rate_and_strings():

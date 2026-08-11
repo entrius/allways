@@ -41,6 +41,7 @@ from allways.constants import (
     SWAP_OUTCOME_RETENTION_SECS,
     required_collateral,
 )
+from allways.solana.layouts import lock_max
 from allways.utils.rate import is_executable_rate, min_executable_sol_leg
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
@@ -185,7 +186,7 @@ def is_eligible(miner_state, now: Optional[int] = None) -> bool:
     return (
         int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS
         and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
-        and ts >= int(miner_state.settling_until)
+        and ts >= lock_max(miner_state.settling_until)
     )
 
 

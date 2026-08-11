@@ -64,7 +64,8 @@ pub fn handler(
         .min(swap.max_extend_at);
     if target > swap.timeout_at {
         swap.timeout_at = target;
-        ctx.accounts.miner_state.busy_until = ctx.accounts.miner_state.busy_until.max(target);
+        let bit = crate::backing::backing_bit(&swap.collateral_chain)?;
+        ctx.accounts.miner_state.extend_busy(bit, target);
         emit!(FulfillmentGraceApplied { swap_key, miner, timeout_at: target });
     }
 

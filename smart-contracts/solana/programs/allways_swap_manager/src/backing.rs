@@ -143,7 +143,7 @@ pub fn check_entry_gates(
     // A pending seizure freezes the WHOLE miner: it owes money nobody has taken yet. Zero for a
     // SOL-only miner and for locally-settled timeouts (those seize atomically), so the SOL path meets
     // this gate only when a TAO slash really is outstanding.
-    require!(now >= miner_state.settling_until, ErrorCode::MinerSettling);
+    require!(now >= miner_state.settling_any_until(), ErrorCode::MinerSettling);
     // The fuse stays non-local: it is an attestation-freshness question, and a locally-settled
     // backing reads no attestation.
     if settles_locally(collateral_chain) {
@@ -165,8 +165,10 @@ mod tests {
             active: true,
             active_backings: BACKING_BIT_SOL,
             has_active_swap: false,
-            busy_until: 0,
-            settling_until: 0,
+            active_swap_backings: 0,
+            busy_until: [0; crate::constants::MAX_BACKING_SLOTS],
+            settling_until: [0; crate::constants::MAX_BACKING_SLOTS],
+            reserved_collateral: [0; crate::constants::MAX_BACKING_SLOTS],
             deactivation_at: 0,
             successful_swaps: 0,
             failed_swaps: 0,
@@ -309,7 +311,7 @@ mod tests {
         // The two gates are independent: proving the relay alive must not also clear busy-until-settled.
         let cfg = config_with(1_000, ATTEST_MAX_AGE_SECS);
         let mut settling = miner_with(7);
-        settling.settling_until = 2_000;
+        settling.set_settling(BACKING_BIT_TAO, 2_000);
         assert!(check_entry_gates(&cfg, &settling, "tao", 1_999).is_err());
         assert!(check_entry_gates(&cfg, &settling, "tao", 2_000).is_ok());
     }
@@ -320,7 +322,7 @@ mod tests {
         // locally-settling early return, so it applies to a SOL-backed open as well.
         let cfg = config_with(1_000, ATTEST_MAX_AGE_SECS);
         let mut settling = miner_with(7);
-        settling.settling_until = 2_000;
+        settling.set_settling(BACKING_BIT_TAO, 2_000);
         assert!(check_entry_gates(&cfg, &settling, "sol", 1_999).is_err());
         assert!(check_entry_gates(&cfg, &settling, "sol", 2_000).is_ok());
         // And it costs an unencumbered SOL-only miner nothing: settling_until is 0 for them, and a

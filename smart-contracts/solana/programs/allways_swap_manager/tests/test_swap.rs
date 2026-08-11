@@ -670,7 +670,7 @@ fn test_fulfill_near_deadline_grants_confirmation_grace() {
     assert_eq!(s.timeout_at, expected, "timeout slid to now + dest conf window");
     assert_eq!(s.status, SwapStatus::Fulfilled);
     assert_eq!(
-        miner_state(&svm, &miner.pubkey()).busy_until,
+        miner_state(&svm, &miner.pubkey()).busy_any_until(),
         expected,
         "busy lock follows the extended deadline"
     );

@@ -374,10 +374,32 @@ fn set_reservation_backing(svm: &mut LiteSVM, miner: &Pubkey, backing: &str) {
 }
 fn set_swap_backing(svm: &mut LiteSVM, key: &[u8; 32], backing: &str) {
     let mut s = swap_acct(svm, key);
+    let miner = s.miner;
     s.collateral_chain = backing.to_string();
     let mut buf = Vec::new();
     s.try_serialize(&mut buf).unwrap();
     overwrite(svm, swap_pda(key), buf);
+    // Re-home the miner's per-hub swap bit + busy slot too, so the backdoor edit reads as "this swap
+    // was always backed there" — what vote_initiate would have written for that backing. An
+    // unsupported backing has no bit to re-home to; those tests only need the Swap field flipped.
+    let Ok(new_bit) = allways_swap_manager::backing::backing_bit(backing) else {
+        return;
+    };
+    let mut ms = miner_state(svm, &miner);
+    if ms.active_swap_backings != new_bit {
+        let busy = ms.busy_any_until();
+        for (bit, _) in allways_swap_manager::constants::BACKINGS {
+            if ms.active_swap_backings & bit != 0 {
+                ms.set_swap(bit, false);
+                ms.set_busy(bit, 0);
+            }
+        }
+        ms.set_swap(new_bit, true);
+        ms.set_busy(new_bit, busy);
+        let mut buf = Vec::new();
+        ms.try_serialize(&mut buf).unwrap();
+        overwrite(svm, miner_pda(&miner), buf);
+    }
 }
 
 /// Standard-alphabet base64 decode — just enough for `Program data:` log lines.
@@ -530,7 +552,7 @@ fn test_sol_backed_timeout_still_slashes_refunds_and_frees() {
         "lamports left the miner's vault"
     );
     assert!(!ms.has_active_swap);
-    assert_eq!(ms.busy_until, 0, "locally settled ⇒ miner freed immediately, no grace");
+    assert_eq!(ms.busy_any_until(), 0, "locally settled ⇒ miner freed immediately, no grace");
     assert_eq!(ms.failed_swaps, 1);
 
     let ev = timed_out_event(&logs);
@@ -572,7 +594,7 @@ fn test_non_sol_backed_timeout_is_verdict_only_and_holds_the_miner() {
     );
     assert!(!ms.has_active_swap, "the swap is over");
     assert_eq!(
-        ms.busy_until,
+        ms.busy_any_until(),
         timeout_ts + SETTLEMENT_GRACE_SECS,
         "busy until the backing chain settles"
     );

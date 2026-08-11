@@ -34,7 +34,7 @@ pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
     let collateral = ctx.accounts.miner_state.collateral;
     let active = ctx.accounts.miner_state.active;
     let has_active_swap = ctx.accounts.miner_state.has_active_swap;
-    let busy_until = ctx.accounts.miner_state.busy_until;
+    let busy_until = ctx.accounts.miner_state.busy_any_until();
     let deactivation_at = ctx.accounts.miner_state.deactivation_at;
 
     require!(!active, ErrorCode::MinerActive);

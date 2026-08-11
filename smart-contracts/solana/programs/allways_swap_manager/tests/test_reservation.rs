@@ -647,7 +647,7 @@ fn set_min_swap_ix(admin: &Pubkey, amount: u64) -> Instruction {
 }
 fn busy_until(svm: &LiteSVM, miner: &Pubkey) -> i64 {
     let a = svm.get_account(&miner_pda(miner)).unwrap();
-    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_until
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_any_until()
 }
 fn collateral(svm: &LiteSVM, miner: &Pubkey) -> u64 {
     let a = svm.get_account(&miner_pda(miner)).unwrap();

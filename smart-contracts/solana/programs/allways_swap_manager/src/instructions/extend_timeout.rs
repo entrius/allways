@@ -50,7 +50,9 @@ pub fn handler(ctx: Context<ExtendTimeout>, swap_key: [u8; 32], target_at: i64) 
     require!(target_at <= swap.max_extend_at, ErrorCode::ExtensionExceedsCeiling);
 
     swap.timeout_at = target_at;
-    ctx.accounts.miner_state.busy_until = target_at;
+    // Forward-only on the hub's own slot: an extension may never shorten another obligation's lock.
+    let bit = crate::backing::backing_bit(&swap.collateral_chain)?;
+    ctx.accounts.miner_state.extend_busy(bit, target_at);
 
     emit!(SwapTimeoutExtended {
         swap_key,

@@ -45,7 +45,9 @@ pub fn handler(ctx: Context<ExtendReservation>, target_at: i64) -> Result<()> {
     require!(target_at <= resv.max_extend_at, ErrorCode::ExtensionExceedsCeiling);
 
     resv.reserved_until = target_at;
-    ctx.accounts.miner_state.busy_until = target_at;
+    // Forward-only on the hub's own slot: an extension may never shorten another obligation's lock.
+    let bit = crate::backing::backing_bit(&resv.collateral_chain)?;
+    ctx.accounts.miner_state.extend_busy(bit, target_at);
 
     emit!(ReservationExtended {
         miner: ctx.accounts.miner.key(),

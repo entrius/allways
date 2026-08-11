@@ -114,24 +114,25 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         // The refund is a policy step, deliberately separable from the verdict above: a locally-backed
         // swap settles here and now (apply_penalty still clamps to available collateral as a safety
         // net); any other backing gets the verdict only, and the seizure is a quorum on its own chain.
+        let bit = crate::backing::backing_bit(&collateral_chain)?;
         let slash = if settles_here {
             let slash = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, penalty, now)?;
             if slash > 0 {
                 ctx.accounts.collateral_vault.to_account_info().sub_lamports(slash)?;
                 ctx.accounts.user.to_account_info().add_lamports(slash)?;
             }
-            ctx.accounts.miner_state.busy_until = 0;
+            ctx.accounts.miner_state.set_busy(bit, 0);
             slash
         } else {
-            // Busy-until-settled: freeing the miner now would let a new swap open against a bond that
+            // Busy-until-settled: freeing the hub now would let a new swap open against a bond that
             // still owes this penalty. Two locks, because they gate opposite doors — `busy_until` blocks
             // the exit (deactivate/withdraw), `settling_until` blocks new entries (finalize/initiate).
             let settled_at = now.saturating_add(ctx.accounts.config.settlement_grace_secs);
-            ctx.accounts.miner_state.busy_until = settled_at;
-            ctx.accounts.miner_state.settling_until = settled_at;
+            ctx.accounts.miner_state.set_busy(bit, settled_at);
+            ctx.accounts.miner_state.set_settling(bit, settled_at);
             0
         };
-        ctx.accounts.miner_state.has_active_swap = false;
+        ctx.accounts.miner_state.set_swap(bit, false);
         ctx.accounts.miner_state.failed_swaps =
             ctx.accounts.miner_state.failed_swaps.saturating_add(1);
 

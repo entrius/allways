@@ -53,7 +53,7 @@ pub fn handler(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
     // in-flight swap). Mirrors self-`deactivate` and keeps the "busy ⟹ active" invariant that
     // open_or_request + resolve_pool rely on (review #3 / user req).
     require!(!ctx.accounts.miner_state.has_active_swap, ErrorCode::MinerHasActiveSwap);
-    require!(now >= ctx.accounts.miner_state.busy_until, ErrorCode::MinerBusy);
+    require!(now >= ctx.accounts.miner_state.busy_any_until(), ErrorCode::MinerBusy);
 
     let miner_key = ctx.accounts.miner.key();
     let bound = backing_request_hash(REQ_DEACTIVATE, &miner_key, &backing);

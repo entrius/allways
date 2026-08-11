@@ -347,7 +347,7 @@ fn swap(svm: &LiteSVM, from_tx_hash: &str) -> Swap {
 }
 fn busy_until(svm: &LiteSVM, m: &Pubkey) -> i64 {
     let a = svm.get_account(&miner_pda(m)).unwrap();
-    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_until
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_any_until()
 }
 
 /// init + 3 validators + active miner + a confirmed reservation, clock at BASE_TS. The reservation

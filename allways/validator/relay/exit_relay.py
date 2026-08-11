@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import bittensor as bt
 
 from allways import dev_signal
+from allways.solana.layouts import lock_max
 from allways.vault import codec
 
 # Mirrors the vault's MAX_BATCH. Chunking is deterministic (sorted, fixed size), so a fleet that
@@ -90,7 +91,7 @@ def _quiescence(relay, miner: str, now: int) -> Tuple[bool, str]:
         return False, 'swap still in flight'
     grace = relay.cfg.quiescence_grace_secs
     for field in ('busy_until', 'settling_until'):
-        until = int(getattr(ms, field, 0) or 0)
+        until = lock_max(getattr(ms, field, 0))
         if now < until + grace:
             return False, f'{field} not past (+{until + grace - now}s)'
     if relay.store.open_relay_slashes(relay.backing, miner):

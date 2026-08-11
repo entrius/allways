@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO
 from allways.solana.client import SolanaClientError
+from allways.solana.layouts import lock_max
 
 # Lamport gas buffer kept free on the Solana keypair so a post/withdraw tx never fails on fees.
 SOLANA_FEE_BUFFER_LAMPORTS = 5_000
@@ -139,7 +140,7 @@ def collateral_withdraw(amount: float | None, yes: bool):
         if ms.has_active_swap:
             fail('Cannot withdraw while miner has an active swap.')
 
-        if ms.busy_until > now:
+        if lock_max(ms.busy_until) > now:
             fail('Cannot withdraw while miner is busy (open pool / held reservation).')
 
         if ms.deactivation_at > 0:
