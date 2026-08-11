@@ -121,8 +121,10 @@ pub fn handler(
         ctx.accounts.miner_state.active_backings & bit != 0,
         ErrorCode::MinerNotActive
     );
+    // One swap per HUB (v3.1): only this backing's slot must be free — a busy or settling other hub
+    // draws on a different pot and doesn't contend.
     require!(
-        !ctx.accounts.miner_state.has_active_swap,
+        !ctx.accounts.miner_state.swap_on(bit),
         ErrorCode::MinerHasActiveSwap
     );
     // Fuse + busy-until-settled for a backing that settles elsewhere; both no-ops for "sol".

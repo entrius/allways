@@ -8,8 +8,8 @@ use crate::events::{MinerBackingChanged, MinerDeactivated};
 use crate::state::{Config, MinerState, VoteRound};
 
 /// A validator votes to force-deactivate ONE of a miner's backings (the #616 floor sweep, per purse).
-/// On quorum that bit is cleared; the miner keeps trading on any backing still lit. The busy guards stay
-/// GLOBAL — one swap at a time spans purses, so a miner mid-commitment is off limits on every backing.
+/// On quorum that bit is cleared; the miner keeps trading on any backing still lit. The busy guards are
+/// per-hub (v3.1): only the TARGETED backing must be idle — another hub's commitment is its own lock.
 #[derive(Accounts)]
 #[instruction(backing: String)]
 pub struct VoteDeactivate<'info> {
@@ -49,11 +49,11 @@ pub fn handler(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
         ctx.accounts.miner_state.active_backings & bit != 0,
         ErrorCode::MinerNotActive
     );
-    // Only an idle miner can be deactivated — never one mid-commitment (open pool / held reservation /
+    // Only an idle HUB can be deactivated — never one mid-commitment (open pool / held reservation /
     // in-flight swap). Mirrors self-`deactivate` and keeps the "busy ⟹ active" invariant that
     // open_or_request + resolve_pool rely on (review #3 / user req).
-    require!(!ctx.accounts.miner_state.has_active_swap, ErrorCode::MinerHasActiveSwap);
-    require!(now >= ctx.accounts.miner_state.busy_any_until(), ErrorCode::MinerBusy);
+    require!(!ctx.accounts.miner_state.swap_on(bit), ErrorCode::MinerHasActiveSwap);
+    require!(now >= ctx.accounts.miner_state.busy_slot(bit), ErrorCode::MinerBusy);
 
     let miner_key = ctx.accounts.miner.key();
     let bound = backing_request_hash(REQ_DEACTIVATE, &miner_key, &backing);

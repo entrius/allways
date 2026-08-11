@@ -1,13 +1,14 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{COLLATERAL_SEED, CONFIG_SEED, MINER_SEED};
+use crate::constants::{BACKING_BIT_SOL, COLLATERAL_SEED, CONFIG_SEED, MINER_SEED};
 use crate::error::ErrorCode;
 use crate::events::CollateralWithdrawn;
 use crate::state::{CollateralVault, Config, MinerState};
 
-/// Miner withdraws SOL collateral from their own collateral vault back to their wallet. Guards: miner
-/// must be inactive, have no in-flight swap, not be busy, and (if deactivated) be past the
-/// post-deactivation cooldown (2x fulfillment timeout). Lamports move vault -> miner (program-owned).
+/// Miner withdraws SOL collateral from their own collateral vault back to their wallet. Guards are
+/// SOL-hub-scoped (v3.1): the SOL purse must be dark, its hub free (no in-flight SOL swap, past its
+/// busy slot), and (if deactivated) past the cooldown (2x fulfillment timeout). A live TAO purse no
+/// longer blocks this — SOL collateral backs nothing there. Lamports move vault -> miner.
 #[derive(Accounts)]
 pub struct WithdrawCollateral<'info> {
     #[account(mut)]
@@ -32,18 +33,18 @@ pub fn handler(ctx: Context<WithdrawCollateral>, amount: u64) -> Result<()> {
     require!(amount > 0, ErrorCode::InvalidAmount);
 
     let collateral = ctx.accounts.miner_state.collateral;
-    let active = ctx.accounts.miner_state.active;
-    let has_active_swap = ctx.accounts.miner_state.has_active_swap;
-    let busy_until = ctx.accounts.miner_state.busy_any_until();
+    let sol_active = ctx.accounts.miner_state.active_backings & BACKING_BIT_SOL != 0;
+    let sol_swap = ctx.accounts.miner_state.swap_on(BACKING_BIT_SOL);
+    let busy_until = ctx.accounts.miner_state.busy_slot(BACKING_BIT_SOL);
     let deactivation_at = ctx.accounts.miner_state.deactivation_at;
 
-    require!(!active, ErrorCode::MinerActive);
-    require!(!has_active_swap, ErrorCode::MinerHasActiveSwap);
+    require!(!sol_active, ErrorCode::MinerActive);
+    require!(!sol_swap, ErrorCode::MinerHasActiveSwap);
     require!(amount <= collateral, ErrorCode::InsufficientCollateral);
 
     let now = Clock::get()?.unix_timestamp;
 
-    // Cannot withdraw while busy (open pool / held reservation) — read from state, non-bypassable.
+    // Cannot withdraw while the SOL hub is busy (open pool / held reservation) — non-bypassable.
     require!(now >= busy_until, ErrorCode::MinerBusy);
 
     // Post-deactivation cooldown: wait 2× fulfillment timeout before pulling collateral.

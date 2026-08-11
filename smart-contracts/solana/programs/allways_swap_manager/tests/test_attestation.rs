@@ -926,11 +926,17 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
     assert_eq!(ms.busy_slot(BACKING_BIT_TAO), settled_at, "exit lock");
     assert_eq!(ms.settling_slot(BACKING_BIT_TAO), settled_at, "entry lock — a separate field, same deadline");
 
-    // New work is refused while the penalty is still settling on the backing chain — at the first
-    // door, the permissionless pool open, so no fresh contest can even be started.
+    // New TAO work is refused while the penalty is still settling on the backing chain — at the fill
+    // door, so no fresh TAO obligation can start against a bond that still owes this one.
     beat_heartbeat(&mut svm, &vals);
-    let err = send(&mut svm, open_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO), &vals[0].pubkey(), &vals[0])
-        .expect_err("still settling");
+    draw_tao_backed(&mut svm, &vals[0], &m);
+    let err = send(
+        &mut svm,
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect_err("still settling");
     assert!(err.contains("MinerSettling"), "{err}");
 
     // Past the grace it clears itself — no crank, no second write.
@@ -944,36 +950,26 @@ fn test_non_sol_timeout_sets_both_locks_and_settling_blocks_entry() {
         &vals[0],
     )
     .expect("settled ⇒ entry reopens");
+
+    // The SOL hub was open for business throughout — a fresh SOL contest starts fine (v3.1: the
+    // settle gate is the TAO hub's own, not a whole-miner freeze).
+    send(&mut svm, open_ix(&vals[1].pubkey(), &m, SPOKE_FROM, SPOKE_TO), &vals[1].pubkey(), &vals[1])
+        .expect("sol door never closed");
 }
 
 #[test]
-fn test_a_pending_off_chain_settlement_freezes_the_sol_path_too() {
-    // A pending seizure freezes the WHOLE miner: an outstanding TAO slash is money the miner owes that
-    // nobody has taken yet, so it must not be able to open fresh SOL work in the meantime either.
+fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
+    // The v3.1 flagship: one miner, one swap PER hub, both in flight at once, reached entirely
+    // through the public path (tao contest on the tao hub — no backdoor). Covers the busy-lock
+    // acceptance criterion: the first settle must not unlock the hub still mid-obligation.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
-    let settled_at = BASE_TS + 100_000;
+    let attest_key = Some(attest_pda(&m, TAO));
+    light_tao_purse(&mut svm, &vals, &miner, required_collateral(TAO_AMOUNT as u64));
+    beat_heartbeat(&mut svm, &vals);
+    attest(&mut svm, &vals, &m, required_collateral(TAO_AMOUNT as u64), true, 1);
 
-    // Draw first, so both SOL doors can be tried against the same outstanding settlement.
-    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
-    set_settling_until(&mut svm, &m, settled_at);
-
-    let err = send(
-        &mut svm,
-        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
-        &vals[0].pubkey(),
-        &vals[0],
-    )
-    .expect_err("sol-backed finalize while a TAO seizure is outstanding");
-    assert!(err.contains("MinerSettling"), "{err}");
-
-    // And the user-triggered door, which has no validator in the loop at all.
-    let err = send(&mut svm, open_ix(&vals[1].pubkey(), &m, SPOKE_FROM, SPOKE_TO), &vals[1].pubkey(), &vals[1])
-        .expect_err("sol-backed pool open while a TAO seizure is outstanding");
-    assert!(err.contains("MinerSettling"), "{err}");
-
-    // Self-clearing, like the TAO side: past the grace the same fill goes through, no crank.
-    set_clock(&mut svm, settled_at);
+    // SOL swap to Active (spoke pair, sol hub).
     draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
     send(
         &mut svm,
@@ -981,7 +977,109 @@ fn test_a_pending_off_chain_settlement_freezes_the_sol_path_too() {
         &vals[0].pubkey(),
         &vals[0],
     )
-    .expect("settled ⇒ SOL entry reopens");
+    .expect("finalize sol");
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &m, "solleg"), &vals[0].pubkey(), &vals[0]).expect("claim sol");
+    let sol_initiated = now_ts(&svm);
+    send(&mut svm, initiate_ix(&vals[0].pubkey(), &m, "solleg", None), &vals[0].pubkey(), &vals[0]).expect("s0");
+    send(&mut svm, initiate_ix(&vals[1].pubkey(), &m, "solleg", None), &vals[1].pubkey(), &vals[1]).expect("s1");
+
+    // TAO swap to Active CONCURRENTLY (hub pair, tao hub) — the sol swap in flight blocks nothing.
+    let now = now_ts(&svm);
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("tao contest opens beside a live sol swap");
+    set_clock(&mut svm, now + POOL_WINDOW_SECS + 1);
+    arm_and_resolve_b(&mut svm, &vals[0], &m, TAO);
+    send(
+        &mut svm,
+        finalize_ix_b(TAO, &vals[0].pubkey(), &m, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT, attest_key),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("finalize tao");
+    send(&mut svm, claim_ix_b(TAO, &vals[0].pubkey(), &m, "taoleg"), &vals[0].pubkey(), &vals[0]).expect("claim tao");
+    let tao_initiated = now_ts(&svm);
+    send(&mut svm, initiate_ix_b(TAO, &vals[0].pubkey(), &m, "taoleg", attest_key), &vals[0].pubkey(), &vals[0])
+        .expect("t0");
+    send(&mut svm, initiate_ix_b(TAO, &vals[1].pubkey(), &m, "taoleg", attest_key), &vals[1].pubkey(), &vals[1])
+        .expect("t1");
+
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_swap_backings, BACKING_BIT_SOL | BACKING_BIT_TAO, "one live swap per hub");
+    assert!(ms.has_active_swap);
+
+    // Both overdue. The TAO verdict lands first — verdict-only, busy-until-settled on ITS hub.
+    let overdue = tao_initiated.max(sol_initiated) + TIMEOUT_SECS + 1;
+    set_clock(&mut svm, overdue);
+    let timeout = |v: &Keypair, tx: &str| {
+        let key = swap_key(tx);
+        Instruction::new_with_bytes(
+            pid(),
+            &allways_swap_manager::instruction::TimeoutSwap { swap_key: key }.data(),
+            allways_swap_manager::accounts::TimeoutSwap {
+                validator: v.pubkey(),
+                config: config_pda(),
+                miner: m,
+                miner_state: miner_pda(&m),
+                collateral_vault: collateral_vault_pda(&m),
+                user: LOTTERY_USER,
+                swap: swap_pda(&key),
+                vote_round: vote_pda(REQ_TIMEOUT, &key),
+                system_program: SYSTEM_PROGRAM,
+            }
+            .to_account_metas(None),
+        )
+    };
+    send(&mut svm, timeout(&vals[0], "taoleg"), &vals[0].pubkey(), &vals[0]).expect("tt0");
+    send(&mut svm, timeout(&vals[1], "taoleg"), &vals[1].pubkey(), &vals[1]).expect("tt1");
+
+    // NO unlock mid-obligation: the TAO settle must not free the sol hub, whose swap is still live.
+    let ms = miner_state(&svm, &m);
+    assert!(ms.swap_on(BACKING_BIT_SOL), "sol swap still in flight after the tao settle");
+    assert!(!ms.swap_on(BACKING_BIT_TAO));
+    let err = send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).unwrap_err();
+    assert!(err.contains("MinerHasActiveSwap"), "sol exit refused mid-obligation, got: {err}");
+
+    // The SOL verdict lands: local 1.1× slash straight to the user, sol hub freed instantly.
+    let user_before = svm.get_account(&LOTTERY_USER).map(|a| a.lamports).unwrap_or(0);
+    send(&mut svm, timeout(&vals[0], "solleg"), &vals[0].pubkey(), &vals[0]).expect("st0");
+    send(&mut svm, timeout(&vals[1], "solleg"), &vals[1].pubkey(), &vals[1]).expect("st1");
+    assert_eq!(
+        svm.get_account(&LOTTERY_USER).unwrap().lamports - user_before,
+        required_collateral(SOL_AMOUNT),
+        "sol user made whole in full — the concurrent tao failure cost them nothing"
+    );
+
+    let ms = miner_state(&svm, &m);
+    assert!(!ms.has_active_swap, "both obligations settled");
+    assert_eq!(ms.failed_swaps, 2, "strikes stay GLOBAL across hubs");
+
+    // Per-hub exit: the sol hub is free NOW; the tao hub stays locked until its grace passes.
+    send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("sol exits mid-tao-settle");
+    let err = send(&mut svm, self_deactivate_ix(&m, None), &m, &miner).unwrap_err();
+    assert!(err.contains("MinerBusy"), "tao exit still owes its settlement window, got: {err}");
+    set_clock(&mut svm, overdue + SETTLEMENT_GRACE_SECS + 1);
+    send(&mut svm, self_deactivate_ix(&m, None), &m, &miner).expect("tao exits after its grace");
+    assert_eq!(miner_state(&svm, &m).active_backings, 0);
+}
+
+#[test]
+fn test_a_pending_tao_settlement_leaves_the_sol_path_open() {
+    // v3.1 reverses the v3 whole-miner freeze: the outstanding slash is the TAO bond's debt, and the
+    // SOL pot neither owes nor backs it — SOL fills proceed while the seizure settles.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let settled_at = BASE_TS + 100_000;
+
+    draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
+    set_settling_until(&mut svm, &m, settled_at);
+
+    send(
+        &mut svm,
+        finalize_ix(&vals[0].pubkey(), &m, SOL_AMOUNT, 1_333_333_333, SOL_AMOUNT as u128, None),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect("sol-backed finalize proceeds while the TAO seizure settles — its pot owes nothing");
 }
 
 #[test]

@@ -7,8 +7,9 @@ use crate::events::{MinerBackingChanged, MinerDeactivated};
 use crate::state::MinerState;
 
 /// Miner self-deactivation (no consensus), either of ONE purse or of all of them. Guards read entirely
-/// from `MinerState` (the mandatory account) so they can't be skipped: caller is the miner, no in-flight
-/// swap, and past `busy_until` — all global, because one-swap-at-a-time spans purses.
+/// from `MinerState` (the mandatory account) so they can't be skipped: caller is the miner, and every
+/// DROPPED hub must be free (no in-flight swap, past its busy slot) — per-hub since v3.1, so a busy
+/// TAO hub doesn't pin the SOL exit.
 #[derive(Accounts)]
 pub struct Deactivate<'info> {
     pub miner: Signer<'info>,
@@ -36,8 +37,15 @@ pub fn handler(ctx: Context<Deactivate>, backing: Option<String>) -> Result<()> 
     let ms = &mut ctx.accounts.miner_state;
     require!(ms.active, ErrorCode::MinerNotActive);
     require!(ms.active_backings & dropped != 0, ErrorCode::MinerNotActive);
-    require!(!ms.has_active_swap, ErrorCode::MinerHasActiveSwap);
-    require!(now >= ms.busy_any_until(), ErrorCode::MinerBusy);
+    // Per-hub exit: every DROPPED hub must have cleared its own last obligation. Hubs the miner keeps
+    // may stay busy — their locks guard their own eventual exit, not this one.
+    for (bit, _) in crate::constants::BACKINGS {
+        if dropped & bit == 0 {
+            continue;
+        }
+        require!(!ms.swap_on(bit), ErrorCode::MinerHasActiveSwap);
+        require!(now >= ms.busy_slot(bit), ErrorCode::MinerBusy);
+    }
 
     // One MinerBackingChanged per purse actually going dark, whether this is a partial exit or the
     // full one — a scorer replaying the mask must see the same events either way.
