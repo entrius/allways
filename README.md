@@ -59,6 +59,44 @@ alw --help
 - **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
 - **CLI**: User interface for posting pairs, managing collateral, and executing swaps
 
+## Miner Onboarding
+
+Bond, then activate, then quote — in that order, for either backing. A quote is a promise that
+one specific bond answers for, so `set_quote` refuses a purse you are not already serving
+(`MinerNotActive`). Quoting before activation is rejected, not queued.
+
+**SOL-backed** (collateral held on Solana):
+
+```bash
+alw miner bind-hotkey                          # bind your hotkey to your Solana pubkey (once)
+alw collateral deposit <SOL>                   # fund the local purse
+alw miner activate                             # validators vote you active
+alw miner post sol <addr> btc <addr> <rate>    # quote
+```
+
+**TAO-backed** (bond held in the Bittensor vault). Same order; the bond lives on another chain,
+so activation waits on validators mirroring it to Solana rather than on a local read:
+
+```bash
+alw miner bind-hotkey                          # the vault keys bonds by hotkey, joined via this binding
+alw vault post-collateral <TAO>                # bond into the vault (signed by the hotkey)
+alw vault lock                                 # enter service — only a LOCKED bond is attested
+                                               # validators mirror the bond and activate the TAO purse
+alw miner post sol <addr> tao <addr> <rate> --backing tao
+```
+
+`alw miner status` shows the required bond and whether each purse is serving yet.
+
+**What a TAO-backed quote guarantees.** If the miner fails to deliver, the user is reimbursed in
+TAO from the miner's bond, shortly after the timeout. That differs from a SOL-backed quote in
+timing only: a SOL refund is instant because the collateral sits beside the swap, while the TAO
+reimbursement waits for validators to carry the timeout verdict to the vault and reach quorum
+there. Either way the user is made whole out of the bond that backed the quote.
+
+**Leaving.** A locked bond is not withdrawable on demand. Deactivate the purse
+(`alw miner deactivate --backing tao`), let in-flight swaps and their timeout windows drain, and
+validators unlock the bond once nothing is owed on it — then `alw vault withdraw` succeeds.
+
 ## Validator Storage Layout
 
 Validator state lives in `~/.allways/validator/state.db` (SQLite, WAL mode).
