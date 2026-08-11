@@ -317,8 +317,24 @@ def load_miner_book(client, with_reservation: bool = True) -> List[MinerBookEntr
         )
         entry.state = safe_read(lambda m=entry.miner: client.get_miner_state(m), what='read miner state')
         if with_reservation:
-            entry.reservation = safe_read(lambda m=entry.miner: client.get_reservation(m), what='read reservation')
+            entry.reservation = safe_read(
+                lambda m=entry.miner: freshest_reservation(client, m), what='read reservation'
+            )
     return book
+
+
+def freshest_reservation(client, miner):
+    """The most-alive reservation across the miner's per-hub slots (v3.1) — the one whose hold or
+    finalize window reaches furthest, so status views don't miss a tao-hub seat."""
+    best, best_at = None, -1
+    for hub in pdas.BACKING_BITS:
+        r = client.get_reservation(miner, hub)
+        if r is None:
+            continue
+        at = max(int(getattr(r, 'reserved_until', 0) or 0), int(getattr(r, 'finalize_by', 0) or 0))
+        if at > best_at:
+            best, best_at = r, at
+    return best
 
 
 def miner_runtime_status(state, reservation, now: int) -> str:

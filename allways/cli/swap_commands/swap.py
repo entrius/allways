@@ -48,6 +48,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
+from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
 from allways.synapses import SwapReserveSynapse
@@ -73,11 +74,11 @@ class PoolContention(NamedTuple):
     rate: int = 0
 
 
-def _pool_contention(client, miner, cfg) -> PoolContention:
+def _pool_contention(client, miner, cfg, backing) -> PoolContention:
     """Best-effort read of the miner's pool. Visibility only — never raises, so a decode/RPC hiccup
     can't block a bid; on any surprise it reports 'not open' and the taker proceeds as before."""
     try:
-        pool = client.get_pool(miner)
+        pool = client.get_pool(miner, backing)
         now = int(time.time())
         if int(getattr(pool, 'opened_at', 0)) == 0 or now > int(getattr(pool, 'closes_at', 0)):
             return PoolContention(False, 0, 0, 0)
@@ -111,12 +112,12 @@ _SEND_MARGIN_SECS = 180
 _BENIGN_CRANK_NAMES = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests', 'AlreadyFilled')
 
 
-def _self_crank_resolve(client, miner) -> None:
+def _self_crank_resolve(client, miner, backing) -> None:
     """Permissionless arm-then-draw crank. An unrouted taker cranks its own pool so the draw never
     waits on validator liveness. Benign races (window not closed, seed slot not produced yet, already
     resolved/filled) are expected and retried on the next poll."""
     try:
-        client.resolve_pool(miner)
+        client.resolve_pool(miner, backing)
     except TransientRpcError:
         return  # RPC hiccup while nudging the pool — the poll loop re-cranks and re-reads the real
         # outcome (the reservation). If this resolve_pool actually landed, the next pass sees the seat.
@@ -145,26 +146,26 @@ def _drawn_unfilled(resv) -> bool:
     return int(resv.reserved_until) == 0 and int(resv.created_at) == 0 and int(resv.finalize_by) > time.time()
 
 
-def _poll_drawn(client, miner, user, timeout_secs: int):
+def _poll_drawn(client, miner, user, timeout_secs: int, backing: str):
     """Poll until THIS taker's bid draws its UNFILLED reservation, self-cranking `resolve_pool` each
     pass. Returns the drawn reservation, or None on timeout / if a different router won the seat."""
     us = str(user)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        _self_crank_resolve(client, miner)
-        resv = client.get_reservation(miner)
+        _self_crank_resolve(client, miner, backing)
+        resv = client.get_reservation(miner, backing)
         if _drawn_unfilled(resv):
             return resv if str(resv.router) == us else None  # seated: us, or someone else won
         time.sleep(3)
     return None
 
 
-def _lost_seat_to(client, miner, user) -> Optional[str]:
+def _lost_seat_to(client, miner, user, backing: str) -> Optional[str]:
     """Best-effort: after `_poll_drawn` returns None, tell the two failure modes apart. Returns the
     winning router (as a string) if a *different* taker holds the freshly-drawn seat — i.e. you lost
     the draw — or None if no seat is drawn yet (the draw simply didn't resolve in the window)."""
     try:
-        resv = client.get_reservation(miner)
+        resv = client.get_reservation(miner, backing)
     except Exception:  # noqa: BLE001 - message quality only; fall back to the generic reason
         return None
     if _drawn_unfilled(resv) and str(resv.router) != str(user):
@@ -172,12 +173,12 @@ def _lost_seat_to(client, miner, user) -> Optional[str]:
     return None
 
 
-def _poll_reservation(client, miner, timeout_secs: int):
+def _poll_reservation(client, miner, timeout_secs: int, backing: str):
     """Poll until a live, unclaimed Reservation exists — the shared ``live_unclaimed`` predicate (same
     one `post-tx` uses). Post-finalize the reservation is live; this guards against a lagging read."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        resv = client.get_reservation(miner)
+        resv = client.get_reservation(miner, backing)
         if live_unclaimed(resv):
             return resv
         time.sleep(3)
@@ -294,12 +295,14 @@ def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_wi
 
 def _poll_routed_reservation(client, miner, user, timeout_secs: int):
     """Poll until the router's win goes LIVE (finalized). Returns the live reservation as soon as one
-    exists — the caller checks whether it pins OUR pubkey (won) or another user's (lost the pick)."""
+    exists — the caller checks whether it pins OUR pubkey (won) or another user's (lost the pick).
+    The ROUTER chose the backing (pool join or best offer), so every hub's slot is scanned."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        resv = client.get_reservation(miner)
-        if live_unclaimed(resv):
-            return resv
+        for hub in pdas.BACKING_BITS:
+            resv = client.get_reservation(miner, hub)
+            if live_unclaimed(resv):
+                return resv
         time.sleep(3)
     return None
 
@@ -434,14 +437,14 @@ def swap_now_command(
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
     # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
-    existing = client.get_reservation(cand.miner)
+    existing = client.get_reservation(cand.miner, cand.backing)
     resume_live = live_unclaimed(existing) and str(getattr(existing, 'user', '')) == str(user)
     resume_drawn = not resume_live and _drawn_unfilled(existing) and str(getattr(existing, 'router', '')) == str(user)
     resuming = resume_live or resume_drawn
 
     # Pool contention — surface it BEFORE the fee-charging entry so the taker isn't entering blind into
     # an already-open, contested round (skipped when resuming, since no new entry is placed).
-    contention = _pool_contention(client, cand.miner, cfg)
+    contention = _pool_contention(client, cand.miner, cfg, cand.backing)
 
     # Every fill in an open round settles at the round's PINNED rate — preview that, not the live
     # quote (which can drift after the pool opened and would show a receive the fill won't honor).
@@ -907,9 +910,9 @@ def _reserve_self_represented(
         console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
 
         # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
-        drawn = _poll_drawn(client, miner, user, timeout_secs=pool_window + 120)
+        drawn = _poll_drawn(client, miner, user, timeout_secs=pool_window + 120, backing=backing)
         if drawn is None:
-            winner = _lost_seat_to(client, miner, user)
+            winner = _lost_seat_to(client, miner, user, backing)
             if winner:
                 fail(
                     f'  You lost the draw — the seat went to [dim]{winner[:8]}…[/dim]. Your reservation fee is '
@@ -938,7 +941,7 @@ def _reserve_self_represented(
         if reason is None:
             raise
         fail(f'  Finalize rejected: {reason}. Do NOT send funds; re-run shortly.')
-    resv = _poll_reservation(client, miner, timeout_secs=30)
+    resv = _poll_reservation(client, miner, timeout_secs=30, backing=backing)
     if resv is None or str(resv.user) != str(user):
         fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
     return resv

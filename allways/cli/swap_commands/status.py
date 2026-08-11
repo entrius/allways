@@ -13,6 +13,7 @@ from allways.cli.swap_commands.helpers import (
     ZERO_SWAP_KEY,
     console,
     fail,
+    freshest_reservation,
     from_lamports,
     get_effective_config,
     get_solana_cli_context,
@@ -109,7 +110,7 @@ def status_command(miner_pk, as_json):
             miner_key = Pubkey.from_string(resv_miner)
         except (ValueError, TypeError):
             fail(f'Invalid --miner pubkey: {resv_miner}')
-        resv = safe_read(lambda: client.get_reservation(miner_key), what='read reservation')
+        resv = safe_read(lambda: freshest_reservation(client, miner_key), what='read reservation')
 
     if as_json:
         out = {

@@ -53,7 +53,7 @@ def test_poll_skips_stale_leftover_and_waits_for_the_fresh_draw():
     client = MagicMock()
     client.get_reservation.side_effect = [stale, stale, fresh]
     with patch('allways.cli.swap_commands.swap.time.sleep'):
-        got = _poll_reservation(client, 'miner', timeout_secs=100)
+        got = _poll_reservation(client, 'miner', timeout_secs=100, backing='sol')
     assert got is fresh  # never the stale leftover
     assert client.get_reservation.call_count == 3
 
@@ -63,7 +63,7 @@ def test_poll_times_out_rather_than_returning_a_stale_reservation():
     client = MagicMock()
     client.get_reservation.return_value = _resv(now - 5)  # always stale/expired
     with patch('allways.cli.swap_commands.swap.time.sleep'):
-        got = _poll_reservation(client, 'miner', timeout_secs=0.05)
+        got = _poll_reservation(client, 'miner', timeout_secs=0.05, backing='sol')
     assert got is None  # would rather time out than green-light a send against a stale reservation
 
 
@@ -84,7 +84,7 @@ def test_self_crank_swallows_a_transient_rpc_fault():
     is the exact fault (getSignatureStatuses -32603 mid-crank) that crashed the first mainnet BTC swap."""
     client = MagicMock()
     client.resolve_pool.side_effect = TransientRpcError('getSignatureStatuses: -32603 Internal error')
-    _self_crank_resolve(client, 'miner')  # must NOT raise
+    _self_crank_resolve(client, 'miner', 'sol')  # must NOT raise
 
 
 def test_poll_drawn_self_heals_when_the_crank_keeps_flaking_but_the_seat_is_drawn():
@@ -101,7 +101,7 @@ def test_poll_drawn_self_heals_when_the_crank_keeps_flaking_but_the_seat_is_draw
     client.resolve_pool.side_effect = TransientRpcError('boom')  # crank flakes on every pass
     client.get_reservation.side_effect = [None, drawn]  # not drawn yet, then drawn to us
     with patch('allways.cli.swap_commands.swap.time.sleep'):
-        got = _poll_drawn(client, 'miner', us, timeout_secs=100)
+        got = _poll_drawn(client, 'miner', us, timeout_secs=100, backing='sol')
     assert got is drawn
 
 
@@ -175,7 +175,7 @@ def _crank_raising(err_text):
 
     client = MagicMock()
     client.resolve_pool.side_effect = RuntimeError(err_text)
-    _self_crank_resolve(client, 'miner-pubkey')  # must NOT raise
+    _self_crank_resolve(client, 'miner-pubkey', 'sol')  # must NOT raise
 
 
 def test_crank_swallows_benign_race_by_name():
@@ -199,7 +199,7 @@ def test_crank_reraises_a_real_error():
     # a non-benign failure (e.g. MinerReserved 6022) must still propagate
     client.resolve_pool.side_effect = RuntimeError("tx 5abc failed: {'InstructionError': [0, {'Custom': 6022}]}")
     with pytest.raises(RuntimeError):
-        _self_crank_resolve(client, 'miner-pubkey')
+        _self_crank_resolve(client, 'miner-pubkey', 'sol')
 
 
 # ── pool-contention visibility (feat): surface a contested/already-open pool + the lost-draw reason ──
@@ -226,7 +226,7 @@ def test_pool_contention_reports_an_open_uniform_pool():
     now = int(time.time())
     client = MagicMock()
     client.get_pool.return_value = _pool(now - 10, now + 40, [_A, _B])  # 2 takers, still in window
-    c = _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]))
+    c = _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol')
     assert c.is_open and c.bidders == 2 and c.weighted_rivals == 0
     assert 30 <= c.closes_in <= 40
 
@@ -238,7 +238,7 @@ def test_pool_contention_flags_a_weighted_validator_rival():
     client = MagicMock()
     client.get_pool.return_value = _pool(now - 5, now + 30, [_V, _B])
     cfg = types.SimpleNamespace(validators=[types.SimpleNamespace(key=_V, weight=100)])
-    c = _pool_contention(client, 'miner', cfg)
+    c = _pool_contention(client, 'miner', cfg, 'sol')
     assert c.is_open and c.bidders == 2 and c.weighted_rivals == 1  # the validator dominates the draw
 
 
@@ -248,7 +248,7 @@ def test_pool_contention_treats_a_closed_window_as_not_open():
     now = int(time.time())
     client = MagicMock()
     client.get_pool.return_value = _pool(now - 100, now - 40, [_A])  # window already passed
-    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[])).is_open is False
+    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol').is_open is False
 
 
 def test_pool_contention_never_raises_on_a_bad_read():
@@ -256,7 +256,7 @@ def test_pool_contention_never_raises_on_a_bad_read():
 
     client = MagicMock()
     client.get_pool.side_effect = RuntimeError('rpc down')  # must degrade to "not open", never crash a bid
-    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[])).is_open is False
+    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol').is_open is False
 
 
 def test_lost_seat_to_names_the_rival_that_won_the_draw():
@@ -269,7 +269,7 @@ def test_lost_seat_to_names_the_rival_that_won_the_draw():
     client.get_reservation.return_value = types.SimpleNamespace(
         reserved_until=0, created_at=0, finalize_by=now + 100, router='RIVAL'
     )
-    assert _lost_seat_to(client, 'miner', 'ME') == 'RIVAL'
+    assert _lost_seat_to(client, 'miner', 'ME', 'sol') == 'RIVAL'
 
 
 def test_lost_seat_to_is_none_when_no_seat_is_drawn_yet():
@@ -281,7 +281,7 @@ def test_lost_seat_to_is_none_when_no_seat_is_drawn_yet():
     client.get_reservation.return_value = types.SimpleNamespace(
         reserved_until=0, created_at=0, finalize_by=now - 100, router='RIVAL'
     )
-    assert _lost_seat_to(client, 'miner', 'ME') is None
+    assert _lost_seat_to(client, 'miner', 'ME', 'sol') is None
 
 
 # ── resumability: recover an already-held seat instead of paying for a second bid ────────────────────
