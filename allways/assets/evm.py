@@ -104,8 +104,8 @@ class EvmChain(Chain):
     addresses, EIP-191 ownership proofs, tip reads.
 
     One behavior class for the whole family; per-network facts come from the `EvmNetwork`
-    config row, env wiring from ``env_prefix`` (the hosted asset's prefix until a second
-    asset shares the instance — the chain then earns its own env identity).
+    config row, env wiring from ``env_prefix`` — the NETWORK's identity, so every asset on
+    a network reads one {PREFIX}_NETWORK and one ladder and they cannot disagree.
 
     Addresses are hex and case-insensitive (EIP-55 is a display checksum), so every
     comparison goes through ``normalize_address`` (lowercase) — on-chain strings keep

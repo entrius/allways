@@ -46,6 +46,17 @@ class TestGetChain:
             assert re.fullmatch(r'[a-z0-9]{1,10}', chain_id), chain_id
             assert chain.id == chain_id
 
+    def test_one_row_per_env_prefix_owns_the_network_setting(self):
+        """env_prefix names the NETWORK, so assets sharing one share its {PREFIX}_NETWORK.
+        Exactly one of them may declare ``networks`` — two would render duplicate CLI rows
+        writing the same env var, and a second asset on a network must carry networks=()."""
+        owners: dict[str, list[str]] = {}
+        for chain in SUPPORTED_CHAINS.values():
+            if chain.networks:
+                owners.setdefault(chain.env_prefix, []).append(chain.id)
+        for prefix, ids in owners.items():
+            assert len(ids) == 1, f'{prefix}_NETWORK is declared by more than one row: {ids}'
+
     def test_layered_fields_default_none_for_native_assets(self):
         for chain_id in ('btc', 'tao', 'sol', 'eth', 'hype'):
             assert get_chain_def(chain_id).host_chain is None
