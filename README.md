@@ -68,8 +68,8 @@ one specific bond answers for, so `set_quote` refuses a purse you are not alread
 **SOL-backed** (collateral held on Solana):
 
 ```bash
+alw collateral deposit <SOL>                   # fund the local purse (bind-hotkey needs it — see below)
 alw miner bind-hotkey                          # bind your hotkey to your Solana pubkey (once)
-alw collateral deposit <SOL>                   # fund the local purse
 alw miner activate                             # validators vote you active
 alw miner post sol <addr> btc <addr> <rate>    # quote
 ```
@@ -78,6 +78,7 @@ alw miner post sol <addr> btc <addr> <rate>    # quote
 so activation waits on validators mirroring it to Solana rather than on a local read:
 
 ```bash
+alw collateral deposit 0.1                     # one-time identity deposit — see the note below
 alw miner bind-hotkey                          # the vault keys bonds by hotkey, joined via this binding
 alw vault post-collateral <TAO>                # bond into the vault (signed by the hotkey)
 alw vault lock                                 # enter service — only a LOCKED bond is attested
@@ -92,6 +93,15 @@ one purse is funded and not yet serving — which is every step of the order abo
 bond has yet to be mirrored: retry rather than wait on the request.
 
 `alw miner status` shows the required bond and whether each purse is serving yet.
+
+**A TAO-only miner still posts a small SOL deposit — once.** `bind-hotkey` requires a live local
+collateral stake (`min_collateral`, currently 0.1 SOL) — which is why the deposit comes first in both
+recipes above — because binding a hotkey is what claims that identity on Solana and the deposit is the
+anti-squat cost of the claim. Since the vault keys bonds by
+hotkey and validators join them to your Solana pubkey through that binding, a TAO-backed miner needs
+the binding to set rates or be credited for its swaps — so it needs the deposit too. That is the whole
+of it: the SOL purse never has to be activated, it posts no quotes, and it backs nothing. Withdraw it
+by deactivating and waiting out the cooldown, the same as any SOL collateral.
 
 **What a TAO-backed quote guarantees.** If the miner fails to deliver, the user is reimbursed in
 TAO from the miner's bond, shortly after the timeout. That differs from a SOL-backed quote in
