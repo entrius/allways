@@ -29,6 +29,22 @@ def lock_max(value) -> int:
     return int(value or 0)
 
 
+def hub_swap_on(state, bit: int) -> bool:
+    """Whether ONE hub has an in-flight swap — its `active_swap_backings` bit (v3.1 per-hub state).
+    Mirrors the contract's ``MinerState::swap_on`` so a preflight matches the gate, not the OR view."""
+    return bool(int(getattr(state, 'active_swap_backings', 0) or 0) & bit)
+
+
+def hub_busy_until(state, bit: int) -> int:
+    """ONE hub's busy deadline from the per-hub ``busy_until`` array (contract ``busy_slot``), indexed
+    by bit position. Tolerates the pre-v3.1 scalar shape (the OR view) so mixed-version reads stay safe."""
+    arr = getattr(state, 'busy_until', 0)
+    if isinstance(arr, (list, tuple)):
+        idx = max(bit.bit_length() - 1, 0)
+        return int(arr[idx]) if idx < len(arr) else 0
+    return int(arr or 0)
+
+
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)

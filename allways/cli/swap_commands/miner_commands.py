@@ -26,7 +26,7 @@ from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import TAO_TO_RAO
 from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
-from allways.solana.layouts import lock_max
+from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_BITS
 from allways.utils.rate import directional_rate
 
@@ -337,22 +337,25 @@ def miner_deactivate(backing: str):
         if backing not in BACKING_BITS:
             fail(f'--backing must be one of: {", ".join(BACKING_BITS)} (got "{backing}")')
 
-    # Pre-flight: the program guards deactivate() on no-active-swap + past busy_until (both global —
-    # one swap at a time spans purses).
+    # Pre-flight mirrors deactivate()'s per-hub gate (v3.1): a --backing exit only needs THAT hub
+    # idle; the full exit needs every hub idle (the OR view). Match the contract, never exceed it.
     try:
         now = int(time.time())
         ms = client.get_miner_state(pubkey)
         if ms is None or not ms.active:
             console.print('[yellow]Miner is not active.[/yellow]\n')
             return
-        if backing is not None and not int(ms.active_backings) & BACKING_BITS[backing]:
+        bit = BACKING_BITS[backing] if backing is not None else None
+        if bit is not None and not int(ms.active_backings) & bit:
             console.print(f'[yellow]Your {backing.upper()} purse is already not serving.[/yellow]\n')
             return
-        if ms.has_active_swap:
+        swapping = hub_swap_on(ms, bit) if bit is not None else ms.has_active_swap
+        busy_until = hub_busy_until(ms, bit) if bit is not None else lock_max(ms.busy_until)
+        if swapping:
             console.print('[dim]Wait for it to complete or time out, then try again.[/dim]')
             fail('Cannot deactivate: you have an active swap.')
-        if lock_max(ms.busy_until) > now:
-            remaining = lock_max(ms.busy_until) - now
+        if busy_until > now:
+            remaining = busy_until - now
             fail(f'Cannot deactivate: you are busy (open pool / held reservation), ~{remaining}s left.')
     except SolanaClientError as e:
         fail(f'Failed to read miner state: {e}')

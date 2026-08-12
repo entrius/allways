@@ -16,16 +16,21 @@ MINER_A = Pubkey.new_unique()
 MINER_B = Pubkey.new_unique()
 
 
-def miner_state(miner, collateral, active=True, has_active_swap=False, busy_until=0, active_backings=None):
-    # Real MinerState carries a per-hub mask; default to the SOL bit for a live miner.
+def miner_state(
+    miner, collateral, active=True, has_active_swap=False, busy_until=0, active_backings=None, active_swap_backings=None
+):
+    # Real MinerState carries per-hub masks; default the active/swap masks to the SOL bit.
     if active_backings is None:
         active_backings = pdas.BACKING_BIT_SOL if active else 0
+    if active_swap_backings is None:
+        active_swap_backings = active_backings if has_active_swap else 0
     return SimpleNamespace(
         miner=bytes(miner),
         collateral=collateral,
         active=active,
         active_backings=active_backings,
         has_active_swap=has_active_swap,
+        active_swap_backings=active_swap_backings,
         busy_until=busy_until,
     )
 
@@ -187,6 +192,25 @@ class TestPerHubFloors:
         assert client.calls['get_all'] == 2
         assert client.vote_backings == [(str(MINER_A), 'tao')]
 
+    def test_busy_sibling_hub_does_not_defer_the_deficient_kick(self):
+        # V-4: a SOL swap in flight (OR-view has_active_swap=True) must NOT defer a TAO kick — the
+        # contract's vote_deactivate gate is per-hub, so only the TAO hub's own lock matters.
+        client = FakeClient(
+            {
+                str(MINER_A): miner_state(
+                    MINER_A,
+                    FLOOR,  # SOL fine
+                    active_backings=SOL_BIT | TAO_BIT,
+                    has_active_swap=True,
+                    active_swap_backings=SOL_BIT,  # the swap is on SOL, not TAO
+                )
+            },
+            bonds={(str(MINER_A), 'tao'): bond(1_000_000_000)},  # TAO under floor
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.vote_backings == [(str(MINER_A), 'tao')]
+
 
 class TestPending:
     def test_busy_miner_retried_after_interval_not_before(self):
@@ -201,6 +225,7 @@ class TestPending:
         assert client.calls['get_miner_state'] == 0
 
         state.has_active_swap = False  # swap resolved on-chain
+        state.active_swap_backings = 0
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
         assert client.calls['get_miner_state'] == 1
@@ -235,6 +260,7 @@ class TestPending:
         sweep.step(FLOOR)
 
         state.has_active_swap = False
+        state.active_swap_backings = 0
         state.collateral = FLOOR  # posted collateral to comply instead
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
@@ -280,6 +306,7 @@ class TestRpcFailure:
 
         for ms in client.states.values():
             ms.has_active_swap = False
+            ms.active_swap_backings = 0
         client.fail_state_for = {str(MINER_A)}
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)

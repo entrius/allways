@@ -20,7 +20,7 @@ from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_con
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO
 from allways.solana import pdas
 from allways.solana.client import SolanaClientError
-from allways.solana.layouts import lock_max
+from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
 
 ALLWAYS_DIR = Path.home() / '.allways'
@@ -340,14 +340,19 @@ def freshest_reservation(client, miner):
     return best
 
 
-def miner_runtime_status(state, reservation, now: int) -> str:
+def miner_runtime_status(state, reservation, now: int, backing: Optional[str] = None) -> str:
     """Collapse on-chain miner state into one runtime label the taker views sort/filter on.
 
-    offline (not registered / inactive) → in-swap → reserved (live reservation, no deposit claimed yet) →
-    cooldown (busy) → available."""
+    With `backing`, the offline/in-swap/cooldown labels read THAT hub's own state (v3.1), so a SOL
+    swap never paints a still-free TAO purse busy; without it, the OR view for the whole miner."""
     if state is None or not state.active:
         return 'offline'
-    if state.has_active_swap:
+    bit = pdas.BACKING_BITS.get(backing) if backing else None
+    if bit is not None and not int(getattr(state, 'active_backings', 0) or 0) & bit:
+        return 'offline'
+    in_swap = hub_swap_on(state, bit) if bit is not None else state.has_active_swap
+    busy_until = hub_busy_until(state, bit) if bit is not None else lock_max(getattr(state, 'busy_until', 0))
+    if in_swap:
         return 'in-swap'
     if (
         reservation is not None
@@ -355,7 +360,7 @@ def miner_runtime_status(state, reservation, now: int) -> str:
         and bytes(getattr(reservation, 'claimed_swap_key', ZERO_SWAP_KEY)) == ZERO_SWAP_KEY
     ):
         return 'reserved'
-    if lock_max(getattr(state, 'busy_until', 0)) > now:
+    if busy_until > now:
         return 'cooldown'
     return 'available'
 

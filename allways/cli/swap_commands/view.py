@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
     backing_label,
     console,
     fail,
+    freshest_reservation,
     from_lamports,
     get_solana_cli_context,
     load_miner_book,
@@ -561,7 +562,8 @@ def view_reservation(miner_pk, as_json):
         fail(f'Invalid miner pubkey: {target}')
 
     _, client = get_solana_cli_context(need_keypair=False)
-    resv = safe_read(lambda: client.get_reservation(miner), what='read reservation')
+    # Scan every per-hub slot, not just the SOL default — a TAO-only seat must show (v3.1).
+    resv = safe_read(lambda: freshest_reservation(client, miner), what='read reservation')
 
     if resv is None:
         if as_json:

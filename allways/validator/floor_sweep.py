@@ -24,7 +24,7 @@ from solders.pubkey import Pubkey
 
 from allways.solana import pdas
 from allways.solana.client import benign_marker
-from allways.solana.layouts import lock_max
+from allways.solana.layouts import hub_busy_until, hub_swap_on
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -104,8 +104,10 @@ class CollateralFloorSweep:
             backing = self._deficient_backing(miner, ms, floors)
             if backing is None:
                 return True
-            # The contract rejects kicks on busy miners; retry once they idle.
-            if ms.has_active_swap or now < lock_max(ms.busy_until):
+            # The contract rejects a kick only while THIS hub is busy (v3.1 per-hub gate); a
+            # sibling swap on another purse must not defer it. Retry once this hub idles.
+            bit = pdas.BACKING_BITS[backing]
+            if hub_swap_on(ms, bit) or now < hub_busy_until(ms, bit):
                 return False
             if self._read_only:
                 bt.logging.info(f'floor sweep: WOULD vote_deactivate {miner} on {backing} (watch mode)')
