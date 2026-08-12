@@ -320,3 +320,16 @@ pub struct ValidatorWeightsUpdated {
 pub struct HaltSet {
     pub halted: bool,
 }
+
+/// A pre-collateral-chain (v10-layout) `Swap` that survived an upgrade was decoded and terminated.
+/// Break-glass only: emits the frozen terms so the off-chain relay reconciles the SOL settlement and
+/// frees the miner through the existing slash path; the undecodable PDA itself is reaped here.
+#[event]
+pub struct LegacySwapClosed {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    pub user: Pubkey,
+    /// Swap size in lamports (the v10 layout is implicitly SOL-backed).
+    pub collateral_amount: u64,
+    pub from_tx_hash: String,
+}

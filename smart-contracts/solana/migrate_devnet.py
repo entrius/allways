@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""v10 → v13 migration driver (run AFTER `solana program deploy` upgrades the program).
+"""v10 → v14 migration driver (run AFTER `solana program deploy` upgrades the program).
 
 Signs with the Config admin (= dev-asm on devnet, which is also the upgrade authority). Order matters:
 migrate_config MUST run first (an unmigrated v10 Config can't deserialize under the new layout, so
 migrate_miner_state — which loads Account<Config> — is unrunnable until then). All cranks are idempotent.
-Legacy Pool/Reservation are closed so the next open_or_request recreates them fresh under v13.
+Legacy Pool/Reservation are closed so the next open_or_request recreates them fresh under v14.
+
+Drain gate: v3 changed the `Swap` byte layout, so a Swap that outlives the upgrade is undecodable by the
+new program (neither timeout nor confirm can close it). The upgrade must land with ZERO live Swaps — halt
+the program and drain every swap first. This driver refuses to migrate while any Swap PDA remains.
 
   cd smart-contracts/solana
   RPC=https://api.devnet.solana.com ADMIN=~/.config/solana/dev-asm.json \
@@ -46,6 +50,16 @@ def main():
     addrset = {a for a, _ in accts}
     print(f'miners: {len(miners)}')
 
+    # Drain gate — no upgrade may migrate state while a live Swap exists: v3 changed the Swap layout,
+    # so a survivor is undecodable and its collateral strands. Abort (dry-run included) until it's 0.
+    live_swaps = [a for a, d in accts if bytes(d[:8]) == disc('Swap')]
+    if live_swaps:
+        print(f'  ABORT: {len(live_swaps)} live Swap PDA(s) remain — halt and drain before upgrading.')
+        for a in live_swaps:
+            print(f'    swap {a}')
+        return
+    print('swap drain gate: 0 live Swaps — clear to migrate.')
+
     def run(label, fn):
         if dry:
             print(f'  [dry] would {label}')
@@ -67,8 +81,8 @@ def main():
     if not dry:
         v = c.get_config().version
         print(f'  Config.version now: {v}')
-        if v != 13:
-            print('  ABORT: config did not reach v13; not migrating miners.')
+        if v != 14:
+            print('  ABORT: config did not reach v14; not migrating miners.')
             return
 
     # 2. migrate_miner_state per miner.

@@ -2231,3 +2231,139 @@ fn test_the_legacy_initiate_round_closer_refunds_the_caller() {
     // Refund lands on the caller (net of the tx fee it paid).
     assert!(svm.get_account(&caller).unwrap().lamports > before, "caller got the rent back");
 }
+
+// --- F6: the legacy-Swap terminal (v10 layout, implicit SOL backing) --------------------------
+
+/// `Swap` as the v10 program wrote it — no `collateral_chain`. Field order is the frozen contract.
+#[derive(AnchorSerialize)]
+struct SwapV10 {
+    user: Pubkey,
+    miner: Pubkey,
+    from_chain: String,
+    to_chain: String,
+    user_from_addr: String,
+    user_to_addr: String,
+    miner_from_addr: String,
+    miner_to_addr: String,
+    rate: u128,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+    from_tx_hash: String,
+    from_tx_block: u32,
+    to_tx_hash: String,
+    to_tx_block: u32,
+    status: allways_swap_manager::state::SwapStatus,
+    initiated_at: i64,
+    timeout_at: i64,
+    max_extend_at: i64,
+    fulfilled_at: i64,
+    bump: u8,
+}
+
+fn plant_raw_account(svm: &mut LiteSVM, pda: Pubkey, data: Vec<u8>) {
+    let lamports = svm.minimum_balance_for_rent_exemption(data.len());
+    svm.set_account(
+        pda,
+        Account { lamports, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+}
+
+fn close_legacy_swap_ix(admin: &Pubkey, user: &Pubkey, key: [u8; 32]) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseLegacySwap { swap_key: key }.data(),
+        allways_swap_manager::accounts::CloseLegacySwap {
+            admin: *admin,
+            config: config_pda(),
+            user: *user,
+            swap: swap_pda(&key),
+        }
+        .to_account_metas(None),
+    )
+}
+
+#[test]
+fn test_close_legacy_swap_decodes_a_v10_layout_and_reaps_it() {
+    // A Swap that outlived the upgrade at the v10 layout (no collateral_chain) is undecodable by the
+    // live type — timeout/confirm both fail on it. The break-glass closer decodes the frozen layout
+    // and reaps the PDA, handing its rent to the wronged user.
+    let (mut svm, admin, _vals, miner) = setup();
+    let user = Keypair::new().pubkey();
+    let key = swap_key("legacy_from_tx");
+    let legacy = SwapV10 {
+        user,
+        miner: miner.pubkey(),
+        from_chain: SOL.into(),
+        to_chain: SPOKE_FROM.into(),
+        user_from_addr: "uFrom".into(),
+        user_to_addr: "uTo".into(),
+        miner_from_addr: MINER_FROM.into(),
+        miner_to_addr: MINER_TO.into(),
+        rate: RATE,
+        collateral_amount: 2_000_000_000,
+        from_amount: 2_000_000_000,
+        to_amount: 1,
+        from_tx_hash: "legacy_from_tx".into(),
+        from_tx_block: 800_000,
+        to_tx_hash: String::new(),
+        to_tx_block: 0,
+        status: allways_swap_manager::state::SwapStatus::Active,
+        initiated_at: BASE_TS,
+        timeout_at: BASE_TS + 3_600,
+        max_extend_at: BASE_TS + 7_200,
+        fulfilled_at: 0,
+        bump: 255,
+    };
+    let mut data = Swap::DISCRIMINATOR.to_vec();
+    legacy.serialize(&mut data).unwrap();
+    plant_raw_account(&mut svm, swap_pda(&key), data);
+
+    let user_before = svm.get_account(&user).map(|a| a.lamports).unwrap_or(0);
+    send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, key), &admin.pubkey(), &admin)
+        .expect("decode + reap the v10 swap");
+    assert!(is_closed(&svm, &swap_pda(&key)), "the undecodable swap PDA is handed back to the system");
+    assert!(svm.get_account(&user).map(|a| a.lamports).unwrap_or(0) > user_before, "rent refunded to user");
+}
+
+#[test]
+fn test_close_legacy_swap_refuses_a_current_layout_swap() {
+    // A current-layout Swap decodes with the live type and already has timeout/confirm — the closer
+    // must refuse it so it only ever reaps a genuinely undecodable legacy account.
+    let (mut svm, admin, _vals, miner) = setup();
+    let user = Keypair::new().pubkey();
+    let key = swap_key("current_from_tx");
+    let live = Swap {
+        user,
+        miner: miner.pubkey(),
+        from_chain: SOL.into(),
+        to_chain: SPOKE_FROM.into(),
+        user_from_addr: "uFrom".into(),
+        user_to_addr: "uTo".into(),
+        miner_from_addr: MINER_FROM.into(),
+        miner_to_addr: MINER_TO.into(),
+        rate: RATE,
+        collateral_chain: SOL.into(),
+        collateral_amount: 2_000_000_000,
+        from_amount: 2_000_000_000,
+        to_amount: 1,
+        from_tx_hash: "current_from_tx".into(),
+        from_tx_block: 800_000,
+        to_tx_hash: String::new(),
+        to_tx_block: 0,
+        status: allways_swap_manager::state::SwapStatus::Active,
+        initiated_at: BASE_TS,
+        timeout_at: BASE_TS + 3_600,
+        max_extend_at: BASE_TS + 7_200,
+        fulfilled_at: 0,
+        bump: 255,
+    };
+    let mut data = Vec::new();
+    live.try_serialize(&mut data).unwrap();
+    plant_raw_account(&mut svm, swap_pda(&key), data);
+
+    let err = send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, key), &admin.pubkey(), &admin)
+        .expect_err("a current-layout swap has a live terminal path");
+    assert!(err.contains("InvalidAccountForMigration"), "{err}");
+}
