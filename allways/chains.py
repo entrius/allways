@@ -182,6 +182,27 @@ CHAIN_BNB = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_AVAX = ChainDefinition(
+    id='avax',
+    name='Avalanche',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='AVAX',
+    host_chain='avalanche',
+    networks=('mainnet', 'fuji'),
+    testnet_network='fuji',
+    # ~1.1s measured on C-Chain mainnet; the integer floor is 1, as on Arbitrum.
+    seconds_per_block=1,
+    # Snowman accepts a block irreversibly, so finality IS inclusion — there is no reorg
+    # depth to outrun. 2 is a one-block margin against an endpoint serving an unaccepted head.
+    min_confirmations=2,
+    # Rate sanity floor, not an economic guarantee: 0.001 AVAX covers a 21k-gas transfer below
+    # ~47 gwei — a congested C-Chain level, ~1000x the quiet base fee its dynamic fee floats at.
+    min_onchain_amount=1_000_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -190,6 +211,7 @@ SUPPORTED_CHAINS = {
     'arbusdc': CHAIN_ARBUSDC,
     'hype': CHAIN_HYPE,
     'bnb': CHAIN_BNB,
+    'avax': CHAIN_AVAX,
 }
 
 

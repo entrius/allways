@@ -108,12 +108,32 @@ BSC = EvmNetwork(
     },
 )
 
+AVALANCHE = EvmNetwork(
+    label='Avalanche',
+    chain_ids={'mainnet': 43_114, 'fuji': 43_113},
+    # Ava Labs' gateway leads because it is the only rung serving historical eth_getCode, which
+    # delivery_refused probes on every overdue swap — publicnode prunes state, drpc times out.
+    rpc_urls={
+        'mainnet': (
+            'https://api.avax.network/ext/bc/C/rpc',
+            'https://avalanche-c-chain-rpc.publicnode.com',
+            'https://avalanche.drpc.org',
+        ),
+        'fuji': (
+            'https://api.avax-test.network/ext/bc/C/rpc',
+            'https://avalanche-fuji-c-chain-rpc.publicnode.com',
+            'https://avalanche-fuji.drpc.org',
+        ),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
     'arbitrum': ARBITRUM,
     'hyperliquid': HYPERLIQUID,
     'bsc': BSC,
+    'avalanche': AVALANCHE,
 }
 
 
