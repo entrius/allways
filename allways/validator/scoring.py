@@ -203,7 +203,15 @@ def hub_free(miner_state, backing: str, now: int) -> bool:
 def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int) -> bool:
     """Per-direction gate: the global strikes AND a serving hub that is not mid-settle. A spoke
     pair names exactly one hub; a hub↔hub direction keeps earning while EITHER purse is clean (its
-    clean-hub quotes keep serving — the settling hub's quotes are entry-gated on-chain anyway)."""
+    clean-hub quotes keep serving — the settling hub's quotes are entry-gated on-chain anyway).
+
+    V-2 (deferred): the ``any(hub_free)`` is inert on the one shipped hub↔hub direction (sol↔tao).
+    A miner mid-TAO-settle stays fully eligible there via the clean SOL hub, so its TAO share is not
+    zeroed — the charter's "zero only the TAO share" needs backing-aware score ROWS (ships with the
+    deferred per-hub capacity work), NOT an ``any``→``all`` flip (that would over-punish the honest
+    SOL share). Accepted for now: on-chain ``check_entry_gates`` still blocks new TAO swaps mid-settle,
+    so the only leak is scoring credit during that window. MUST be fixed before any TAO-only (no SOL
+    co-hub) direction ships. See tests/test_eligibility.py::test_tao_share_of_hub_hub_..._xfail."""
     if not is_eligible(miner_state, now):
         return False
     hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]

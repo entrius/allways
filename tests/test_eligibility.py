@@ -9,6 +9,7 @@ counters are attributed to actual hotkey ss58 addresses before the gate runs.
 from types import SimpleNamespace
 
 import bittensor as bt
+import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, MIN_SUCCESSFUL_SWAPS
@@ -137,6 +138,22 @@ def test_a_tao_settle_zeroes_only_tao_directions():
     # Strikes stay global: struck out ⇒ no direction earns, settling or not.
     struck = _ns_hub(50, MAX_FAILED_SWAPS + 1)
     assert not direction_eligible(struck, 'btc', 'sol', 1_999)
+
+
+@pytest.mark.xfail(
+    reason='V-2 deferred: zeroing only the TAO share of the sol↔tao hub↔hub direction mid-settle '
+    'needs backing-aware score rows (ships with per-hub capacity). direction_eligible is '
+    'whole-direction, so there is no per-backing gate yet — an any→all flip would wrongly zero the '
+    'honest SOL share. Fix before any TAO-only (no SOL co-hub) direction ships.',
+    strict=True,
+)
+def test_tao_share_of_hub_hub_direction_is_zeroed_mid_settle_xfail():
+    """Documents the deferred gap: on sol↔tao a TAO-settling miner should earn its SOL-backed share
+    but NOT its TAO-backed share. That requires a per-backing eligibility the code does not expose,
+    so this asserts the intended shape and is expected to fail until backing-aware rows land."""
+    settling = _ns_hub(50, 0, tao_settling_until=2_000)
+    assert direction_eligible(settling, 'sol', 'tao', 1_999, backing='tao') is False  # TAO share excluded
+    assert direction_eligible(settling, 'sol', 'tao', 1_999, backing='sol') is True  # SOL share earns
 
 
 def test_the_pre_v31_scalar_settling_shape_still_gates():
