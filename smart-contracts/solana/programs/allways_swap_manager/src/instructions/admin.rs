@@ -124,6 +124,20 @@ pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     Ok(())
 }
 
+/// Retire the current bond vault's epoch namespace. Call once per vault replacement, BEFORE relayers
+/// point at the new vault: they compose this into the attestation epoch's high half, so the new
+/// vault's epochs outrank everything the retired one could produce. Increment-only — a decrement
+/// would let a stale round from a retired vault satisfy the monotonic guard again.
+pub fn bump_vault_generation(ctx: Context<AdminConfig>) -> Result<()> {
+    let config = &mut ctx.accounts.config;
+    config.vault_generation = config
+        .vault_generation
+        .checked_add(1)
+        .ok_or(ErrorCode::Overflow)?;
+    msg!("vault_generation = {}", config.vault_generation);
+    Ok(())
+}
+
 pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
     crate::validate::settlement_grace(secs)?;
     ctx.accounts.config.settlement_grace_secs = secs;

@@ -202,6 +202,7 @@ mod tests {
             weights_update_min_interval_secs: 0,
             max_total_extension_secs: 0,
             bump: 255,
+            vault_generation: 0,
         }
     }
 

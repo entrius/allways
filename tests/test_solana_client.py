@@ -154,9 +154,11 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'weights_update_min_interval_secs': 0,
         'max_total_extension_secs': 5400,
         'bump': 1,
+        'vault_generation': 3,
     }
     p = _roundtrip(layouts.Config, v)
     assert p.version == 12 and len(p.validators) == 1 and p.validators[0].weight == 7
+    assert p.vault_generation == 3
 
 
 def test_bond_attestation_roundtrip():

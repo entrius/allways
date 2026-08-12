@@ -240,6 +240,16 @@ class BondRelay:
                 # fact rather than a snapshot. The exit sequence takes it from here.
                 self.arm_exit(miner)
 
+    def vault_generation(self) -> Optional[int]:
+        """The config's attestation-epoch namespace. None when unreadable: composing against a
+        guessed generation would either land in a retired namespace or be refused as stale, and
+        "unknown" must never be spelled as 0 — same contract as an unreadable vault read."""
+        try:
+            return int(getattr(self._config_fn(), 'vault_generation', 0) or 0)
+        except Exception as e:
+            bt.logging.warning(f'relay: vault generation read failed: {e}')
+            return None
+
     def mark_dirty(self, miner: str) -> None:
         self._dirty.add(str(miner))
 

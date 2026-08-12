@@ -1,7 +1,7 @@
 //! Upgrade cranks. A legacy account is shorter AND laid out differently, so the live types can't
 //! parse it: each crank reads it through a frozen mirror of the OLD layout, rebuilds it in the new one,
 //! and grows the allocation. Safe to re-run — gated on a marker the crank itself moves, moving no funds.
-//! v14 accepts BOTH from-versions: v10 (mainnet, never took v3) and v13 (testnet, v3 deployed).
+//! v15 accepts THREE from-versions: v10 (mainnet, never took v3), v13 (testnet, v3 deployed) and v14.
 
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
@@ -19,6 +19,8 @@ const MIGRATE_FROM_V10: u32 = 10;
 /// The v3 split-collateral schema — same `Config` layout as v14 (only `MinerState` grew), so its
 /// config crank is a version stamp and its miner-state crank a layout grow.
 const MIGRATE_FROM_V13: u32 = 13;
+/// v14 is the per-hub schema; v15 appends `vault_generation`.
+const MIGRATE_FROM_V14: u32 = 14;
 /// Byte offset of `Config.version` (discriminator + `admin`). Stable in every version, which is what
 /// lets the crank read the marker before committing to a layout.
 const CONFIG_VERSION_OFFSET: usize = 8 + 32;
@@ -92,11 +94,41 @@ pub struct MigrateConfig<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// The two accepted input shapes, decided by the stored version marker.
+/// `Config` as the v13 AND v14 programs wrote it — the two share a layout (v3.1 stamped the version
+/// without adding a field). v15 appends `vault_generation`. Field order is the contract.
+#[derive(AnchorDeserialize)]
+struct ConfigV14 {
+    admin: Pubkey,
+    version: u32,
+    min_collateral: u64,
+    max_collateral: u64,
+    fulfillment_timeout_secs: i64,
+    min_swap_amount: u64,
+    max_swap_amount: u64,
+    tao_min_swap_amount: u64,
+    tao_max_swap_amount: u64,
+    tao_min_collateral: u64,
+    settlement_grace_secs: i64,
+    last_attest_heartbeat: i64,
+    attest_max_age_secs: i64,
+    reservation_ttl_secs: i64,
+    consensus_threshold_percent: u8,
+    validators: Vec<ValidatorInfo>,
+    last_weights_update: i64,
+    halted: bool,
+    reservation_fee_lamports: u64,
+    pool_window_secs: i64,
+    finalize_window_secs: i64,
+    weights_update_min_interval_secs: i64,
+    max_total_extension_secs: i64,
+    bump: u8,
+}
+
+/// The accepted input shapes, decided by the stored version marker.
 enum LegacyConfig {
     V10(ConfigV10),
-    /// v13's `Config` layout is identical to v14's — parsed with the live type.
-    V13(Config),
+    /// v13 and v14 share a layout, so one frozen mirror parses both.
+    V14(ConfigV14),
 }
 
 pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
@@ -122,8 +154,8 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
             msg!("config already at v{}", CONFIG_VERSION);
             return Ok(());
         }
-        if version == MIGRATE_FROM_V13 {
-            LegacyConfig::V13(Config::deserialize(&mut &data[8..])?)
+        if version == MIGRATE_FROM_V13 || version == MIGRATE_FROM_V14 {
+            LegacyConfig::V14(ConfigV14::deserialize(&mut &data[8..])?)
         } else {
             require!(
                 version == MIGRATE_FROM_V10,
@@ -138,12 +170,46 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
 
     let from_version = match &legacy {
         LegacyConfig::V10(_) => MIGRATE_FROM_V10,
-        LegacyConfig::V13(_) => MIGRATE_FROM_V13,
+        LegacyConfig::V14(cfg) => cfg.version,
     };
     let legacy = match legacy {
-        LegacyConfig::V13(mut cfg) => {
-            cfg.version = CONFIG_VERSION;
-            write_account(&info, &cfg)?;
+        // v13/v14 -> v15 appends `vault_generation`, so the account grows by 8 bytes. Generation 0
+        // is correct: the epochs already attested came from the vault in service when they landed.
+        LegacyConfig::V14(cfg) => {
+            let migrated = Config {
+                admin: cfg.admin,
+                version: CONFIG_VERSION,
+                min_collateral: cfg.min_collateral,
+                max_collateral: cfg.max_collateral,
+                fulfillment_timeout_secs: cfg.fulfillment_timeout_secs,
+                min_swap_amount: cfg.min_swap_amount,
+                max_swap_amount: cfg.max_swap_amount,
+                tao_min_swap_amount: cfg.tao_min_swap_amount,
+                tao_max_swap_amount: cfg.tao_max_swap_amount,
+                tao_min_collateral: cfg.tao_min_collateral,
+                settlement_grace_secs: cfg.settlement_grace_secs,
+                last_attest_heartbeat: cfg.last_attest_heartbeat,
+                attest_max_age_secs: cfg.attest_max_age_secs,
+                reservation_ttl_secs: cfg.reservation_ttl_secs,
+                consensus_threshold_percent: cfg.consensus_threshold_percent,
+                validators: cfg.validators,
+                last_weights_update: cfg.last_weights_update,
+                halted: cfg.halted,
+                reservation_fee_lamports: cfg.reservation_fee_lamports,
+                pool_window_secs: cfg.pool_window_secs,
+                finalize_window_secs: cfg.finalize_window_secs,
+                weights_update_min_interval_secs: cfg.weights_update_min_interval_secs,
+                max_total_extension_secs: cfg.max_total_extension_secs,
+                bump: cfg.bump,
+                vault_generation: 0,
+            };
+            grow_to(
+                &info,
+                8 + Config::INIT_SPACE,
+                &ctx.accounts.admin,
+                &ctx.accounts.system_program,
+            )?;
+            write_account(&info, &migrated)?;
             msg!("config migrated v{} -> v{}", from_version, CONFIG_VERSION);
             return Ok(());
         }
@@ -178,6 +244,7 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         weights_update_min_interval_secs: legacy.weights_update_min_interval_secs,
         max_total_extension_secs: legacy.max_total_extension_secs,
         bump: legacy.bump,
+        vault_generation: 0,
     };
 
     grow_to(

@@ -646,6 +646,18 @@ fn attest(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, bal: u64, locked:
         .expect("attest 1");
 }
 
+/// The relayer's epoch composition, mirrored: vault generation in the high 32 bits, the vault's own
+/// lock epoch in the low 32.
+fn compose(generation: u64, lock_epoch: u64) -> u64 {
+    (generation << 32) | lock_epoch
+}
+
+/// First vote only — enough to surface a guard the handler checks per vote.
+fn attest_err(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, bal: u64, locked: bool, epoch: u64) -> String {
+    send(svm, attest_ix(&vals[0].pubkey(), miner, TAO, bal, locked, epoch), &vals[0].pubkey(), &vals[0])
+        .expect_err("expected the attestation to be refused")
+}
+
 fn arm_and_resolve(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
     arm_and_resolve_b(svm, val, miner, SOL)
 }
@@ -1425,6 +1437,35 @@ struct ConfigV10 {
     fulfillment_timeout_secs: i64,
     min_swap_amount: u64,
     max_swap_amount: u64,
+    reservation_ttl_secs: i64,
+    consensus_threshold_percent: u8,
+    validators: Vec<ValidatorInfo>,
+    last_weights_update: i64,
+    halted: bool,
+    reservation_fee_lamports: u64,
+    pool_window_secs: i64,
+    finalize_window_secs: i64,
+    weights_update_min_interval_secs: i64,
+    max_total_extension_secs: i64,
+    bump: u8,
+}
+
+/// The v14 `Config` body — everything v15 has except the trailing `vault_generation`.
+#[derive(AnchorSerialize)]
+struct ConfigV14 {
+    admin: Pubkey,
+    version: u32,
+    min_collateral: u64,
+    max_collateral: u64,
+    fulfillment_timeout_secs: i64,
+    min_swap_amount: u64,
+    max_swap_amount: u64,
+    tao_min_swap_amount: u64,
+    tao_max_swap_amount: u64,
+    tao_min_collateral: u64,
+    settlement_grace_secs: i64,
+    last_attest_heartbeat: i64,
+    attest_max_age_secs: i64,
     reservation_ttl_secs: i64,
     consensus_threshold_percent: u8,
     validators: Vec<ValidatorInfo>,
@@ -2518,4 +2559,113 @@ fn test_close_legacy_swap_refuses_a_tight_unpadded_v10_buffer() {
     let err = send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, &miner.pubkey(), key), &admin.pubkey(), &admin)
         .expect_err("a tight buffer is not a real on-chain v10 account");
     assert!(err.contains("InvalidAccountForMigration"), "{err}");
+}
+
+/// A replacement vault restarts its lock epochs at 0, which the monotonic guard would read as stale
+/// forever — miners could never re-attest against the new vault. Relayers compose the config's
+/// generation into the epoch's high half; this proves the bump is what makes those epochs outrank
+/// everything the retired vault could produce.
+#[test]
+fn test_vault_generation_bump_unblocks_a_replacement_vault() {
+    let (mut svm, admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    assert_eq!(config_acct(&svm).vault_generation, 0, "starts in generation 0");
+
+    // The retired vault got to lock epoch 7.
+    let old = compose(0, 7);
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, old);
+    assert_eq!(attestation_acct(&svm, &m, TAO).epoch, old);
+
+    // A fresh vault's first lock is epoch 1 — stale against the stored epoch while still generation 0.
+    let err = attest_err(&mut svm, &vals, &m, 5_000_000_000, true, compose(0, 1));
+    assert!(err.contains("AttestationEpochStale"), "{err}");
+
+    send(
+        &mut svm,
+        admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+        &admin.pubkey(),
+        &admin,
+    )
+    .expect("bump");
+    assert_eq!(config_acct(&svm).vault_generation, 1);
+
+    // Same lock epoch 1, now in generation 1 — it outranks the retired vault's epoch 7.
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, compose(1, 1));
+    let a = attestation_acct(&svm, &m, TAO);
+    assert_eq!(a.epoch, compose(1, 1));
+    assert!(a.locked, "the new vault's bond is attested locked");
+}
+
+#[test]
+fn test_vault_generation_bump_is_admin_only_and_increment_only() {
+    let (mut svm, admin, vals, _m) = setup();
+    let err = send(
+        &mut svm,
+        admin_ix(&vals[0].pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+        &vals[0].pubkey(),
+        &vals[0],
+    )
+    .expect_err("a validator is not the admin");
+    assert!(err.contains("ConstraintHasOne") || err.contains("has_one"), "{err}");
+
+    for expected in 1..=3u64 {
+        send(
+            &mut svm,
+            admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+            &admin.pubkey(),
+            &admin,
+        )
+        .expect("bump");
+        assert_eq!(config_acct(&svm).vault_generation, expected, "monotonic, never resettable");
+    }
+}
+
+/// v14 -> v15 appends `vault_generation`; every field the v14 program owned must survive verbatim.
+#[test]
+fn test_migrate_config_v14_to_v15_appends_the_generation() {
+    let (mut svm, admin, vals, _m) = setup();
+    let live = config_acct(&svm);
+    let legacy = ConfigV14 {
+        admin: admin.pubkey(),
+        version: 14,
+        min_collateral: live.min_collateral,
+        max_collateral: live.max_collateral,
+        fulfillment_timeout_secs: live.fulfillment_timeout_secs,
+        min_swap_amount: live.min_swap_amount,
+        max_swap_amount: live.max_swap_amount,
+        tao_min_swap_amount: live.tao_min_swap_amount,
+        tao_max_swap_amount: live.tao_max_swap_amount,
+        tao_min_collateral: live.tao_min_collateral,
+        settlement_grace_secs: live.settlement_grace_secs,
+        last_attest_heartbeat: 4242,
+        attest_max_age_secs: live.attest_max_age_secs,
+        reservation_ttl_secs: live.reservation_ttl_secs,
+        consensus_threshold_percent: live.consensus_threshold_percent,
+        validators: live.validators.clone(),
+        last_weights_update: 99,
+        halted: true,
+        reservation_fee_lamports: live.reservation_fee_lamports,
+        pool_window_secs: live.pool_window_secs,
+        finalize_window_secs: live.finalize_window_secs,
+        weights_update_min_interval_secs: live.weights_update_min_interval_secs,
+        max_total_extension_secs: live.max_total_extension_secs,
+        bump: live.bump,
+    };
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    let short_len = 8 + body.len();
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
+    let cfg = config_acct(&svm);
+    assert_eq!(cfg.version, CONFIG_VERSION);
+    assert_eq!(cfg.vault_generation, 0, "the epochs already attested came from the vault in service");
+    // The heartbeat and halt flag are the ones that would strand the subnet if a migration reset them.
+    assert_eq!(cfg.last_attest_heartbeat, 4242);
+    assert!(cfg.halted);
+    assert_eq!(cfg.last_weights_update, 99);
+    assert_eq!(cfg.validators.len(), vals.len());
+    assert_eq!(cfg.tao_min_collateral, live.tao_min_collateral);
+    assert_eq!(cfg.max_total_extension_secs, live.max_total_extension_secs);
+    assert!(svm.get_account(&config_pda()).unwrap().data.len() > short_len, "grown by the new field");
 }
