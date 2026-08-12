@@ -801,6 +801,24 @@ _STATUS_NOTE = {
 }
 
 
+def _swap_verdict(client, key: bytes):
+    """Read the closing verdict (SwapCompleted/SwapTimedOut) off the swap PDA's final tx, newest
+    first. None when unresolvable (RPC hiccup, reaped claim) — callers must stay neutral then."""
+    from allways.solana import pdas
+    from allways.solana.events import decode_event
+
+    try:
+        pda = pdas.swap_pda(key, client.program_id)
+        for entry in client.rpc.get_signatures_for_address(pda, limit=3):
+            for raw in client.get_event_logs(entry['signature']):
+                ev = decode_event(raw)
+                if ev is not None and ev[0] in ('SwapCompleted', 'SwapTimedOut'):
+                    return ev
+    except Exception:
+        return None
+    return None
+
+
 def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 900) -> None:
     """Watch a just-relayed swap to a terminal state, printing transitions. A closed account is the
     SUCCESS signal (swaps close on settle) — so once we've seen it live, its disappearance reads as
@@ -825,9 +843,30 @@ def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 90
                 if status == 'Fulfilled':
                     seen_fulfilled = True
             elif seen_live:
-                console.print(
-                    f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
-                )
+                # Closed ≠ delivered: a timeout closes the account too (the fix for reading it as
+                # success). Pull the closing event for the honest message; stay neutral if unreadable.
+                verdict = _swap_verdict(client, key)
+                if verdict is not None and verdict[0] == 'SwapTimedOut':
+                    ev = verdict[1]
+                    chain = str(ev.collateral_chain)
+                    amt = int(ev.reimbursement) / 10 ** get_chain_def(chain).decimals
+                    # 'sol' settles in the closing tx itself; other backings pay out via the vault
+                    # relay a few minutes later — don't claim money moved before it has.
+                    paid = 'You were reimbursed' if chain == NUMERAIRE_CHAIN else 'You are being reimbursed'
+                    console.print(
+                        f'[red]  ✗ MINER FAILED[/red] — it never delivered, and was slashed. {paid} '
+                        f'[bold]{amt:g} {chain.upper()}[/bold] from its bond '
+                        f'(your full payout + penalty) to [cyan]{ev.payee}[/cyan].'
+                    )
+                elif verdict is not None and verdict[0] == 'SwapCompleted':
+                    console.print(
+                        f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
+                    )
+                else:
+                    console.print(
+                        f'[yellow]  Swap closed on-chain[/yellow] — verdict unreadable from here; '
+                        f'check your {to_chain.upper()} balance or `alw view swap {swap_key_hex}`.'
+                    )
                 return
             time.sleep(4)
     except KeyboardInterrupt:

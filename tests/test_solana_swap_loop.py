@@ -535,8 +535,8 @@ class VoteRecordingClient:
     def has_voted(self, req_type, target, voter):
         return self.already_voted
 
-    def vote_initiate(self, swap_key, miner):
-        self.calls.append(('vote_initiate', swap_key, miner))
+    def vote_initiate(self, swap_key, miner, backing='sol'):
+        self.calls.append(('vote_initiate', swap_key, miner, backing))
 
     def confirm_swap(self, swap_key, miner, from_chain, to_chain):
         self.calls.append(('confirm_swap', swap_key, miner, from_chain, to_chain))
@@ -552,12 +552,14 @@ def test_run_once_casts_votes_per_decision():
         ('pk3', make_swap(status='Fulfilled', key=b'\x03' * 32)),
     ]
     swaps[1][1].user = 'USERPK'  # timeout vote needs the user pubkey
+    swaps[0][1].collateral_chain = 'tao'  # regression: the initiate vote must carry the swap's backing
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = VoteRecordingClient(swaps)
     loop = SolanaSwapLoop(client, providers, fee_divisor=100)
     loop.run_once(now=1500)
     kinds = [c[0] for c in client.calls]
     assert kinds == ['vote_initiate', 'timeout_swap', 'confirm_swap']
+    assert client.calls[0][3] == 'tao'  # not the 'sol' default — a tao swap voted as sol dies AttestationMissing
 
 
 def test_run_once_skips_already_voted():

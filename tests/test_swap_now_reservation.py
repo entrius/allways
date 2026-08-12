@@ -390,24 +390,53 @@ def test_can_send_from_gates_on_signer(monkeypatch):
     assert p.can_send_from('PINNED') is False
 
 
-def test_watch_swap_reports_completed_after_close(monkeypatch):
-    """A swap account that disappears AFTER we've seen it live must read as COMPLETED, never the
-    bare 'never existed' message (the fast-close scare)."""
-    from unittest.mock import MagicMock, patch
+def _run_watch(client, verdict):
+    """Drive _watch_swap over a live-once-then-closed swap with a stubbed closing verdict."""
+    from unittest.mock import patch
 
     from allways.cli.swap_commands import swap as swap_mod
+
+    out = []
+    with (
+        patch('allways.cli.swap_commands.swap.time.sleep'),
+        patch('allways.cli.swap_commands.swap._swap_verdict', lambda *_a: verdict),
+        patch.object(swap_mod.console, 'print', lambda *a, **k: out.append(' '.join(str(x) for x in a))),
+    ):
+        swap_mod._watch_swap(client, 'ab' * 32, 'tao')
+    return ' '.join(out)
+
+
+def _live_once_client():
+    from unittest.mock import MagicMock
 
     active = types.SimpleNamespace(status=type('Active', (), {})())
     client = MagicMock()
     client.get_swap.side_effect = [active, None]  # live once, then closed
-    out = []
-    with (
-        patch('allways.cli.swap_commands.swap.time.sleep'),
-        patch.object(swap_mod.console, 'print', lambda *a, **k: out.append(' '.join(str(x) for x in a))),
-    ):
-        swap_mod._watch_swap(client, 'ab' * 32, 'tao')
-    joined = ' '.join(out)
+    return client
+
+
+def test_watch_swap_reports_completed_after_close(monkeypatch):
+    """A close whose verdict is SwapCompleted reads as COMPLETED, never the bare 'never existed'
+    message (the fast-close scare)."""
+    joined = _run_watch(_live_once_client(), ('SwapCompleted', types.SimpleNamespace()))
     assert 'COMPLETED' in joined and 'never existed' not in joined
+
+
+def test_watch_swap_reports_timeout_as_failure_not_delivery(monkeypatch):
+    """A close whose verdict is SwapTimedOut must NOT read as 'delivered' — the real failure test
+    printed '✓ COMPLETED' for a slashed miner. It names the reimbursement, its chain, and the payee."""
+    ev = types.SimpleNamespace(collateral_chain='tao', reimbursement=198000000, payee='5Fpayee')
+    joined = _run_watch(_live_once_client(), ('SwapTimedOut', ev))
+    assert 'MINER FAILED' in joined and 'COMPLETED' not in joined
+    assert '0.198 TAO' in joined and '5Fpayee' in joined
+    assert 'being reimbursed' in joined  # tao pays via the vault relay — not yet moved at close
+
+
+def test_watch_swap_close_with_unreadable_verdict_stays_neutral(monkeypatch):
+    """RPC hiccup / reaped claim → no verdict. Say the swap closed and point at `alw view swap`;
+    never claim delivery that can't be shown."""
+    joined = _run_watch(_live_once_client(), None)
+    assert 'closed on-chain' in joined and 'COMPLETED' not in joined and 'MINER FAILED' not in joined
 
 
 # ── manual-path deadline notice ─────────────────────────────────────────────
