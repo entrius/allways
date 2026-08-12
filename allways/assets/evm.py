@@ -133,6 +133,9 @@ BASE = EvmNetwork(
     rpc_urls={
         # publicnode is deliberately absent: its free Base mainnet endpoint 403s every
         # eth_getTransactionReceipt as an "archive request", so it can never settle a leg.
+        # The official gateways rate-limit under load (429s observed on mainnet.base.org),
+        # which makes an absent tx raise instead of resolving; operators running volume
+        # should point {PREFIX}_RPC_URLS at a keyed endpoint, as on Hyperliquid.
         'mainnet': ('https://mainnet.base.org', 'https://base.drpc.org'),
         'sepolia': ('https://sepolia.base.org', 'https://base-sepolia.drpc.org'),
     },

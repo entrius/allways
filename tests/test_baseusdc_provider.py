@@ -26,6 +26,10 @@ TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' 
 TEST_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
 
 CONTRACT = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'  # Circle USDC, Base Sepolia
+# Circle-verified native USDC on Base mainnet (developers.circle.com) — symbol 'USDC', name
+# 'USD Coin'. Pinned as a literal: a transposed character yields a DIFFERENT REAL TOKEN, which
+# has code and so passes every other gate, and miners would pay in an asset nobody asked for.
+MAINNET_CONTRACT = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 # Bridged USD Base Coin — a different contract paying a well-formed Transfer nobody asked for.
 USDBC = '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA'
 SENDER = '0x' + '11' * 20
@@ -130,7 +134,7 @@ class TestNetworkAndContract:
             monkeypatch.delenv(var, raising=False)
         p = BaseUsdc()
         assert (p.chain.network, p.chain.chain_id) == ('mainnet', 8_453)
-        assert p.token_contract == CHAIN_BASEUSDC.asset_locator
+        assert p.token_contract == CHAIN_BASEUSDC.asset_locator == MAINNET_CONTRACT
         # Native Circle USDC, not the bridged USD Base Coin deployed on the same network.
         assert p.token_contract.lower() != USDBC.lower()
 
