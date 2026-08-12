@@ -265,8 +265,10 @@ CHAIN_CRO = ChainDefinition(
     host_chain='cronos',
     networks=('mainnet', 'testnet'),
     testnet_network='testnet',
-    # 0.4749s measured over the last 100k mainnet blocks; 1 is the integer floor, so every derived
-    # bound is conservative in wall time, never short.
+    # 0.4749s measured over the last 100k mainnet blocks; 1 is the integer floor. Flooring up is
+    # safe where the value is MULTIPLIED (the extension target overestimates the wait) but not
+    # where a window is DIVIDED out of it: the 300s scan lookback lands at ~142s of wall time and
+    # delivery_refused's 120-block cap at ~57s. See the SCAN_LOOKBACK_SECS note in assets/evm.py.
     seconds_per_block=1,
     # Cronos is Ethermint on CometBFT: a block commits only with >2/3 pre-commits and no fork-choice
     # rule can revert it, so finality IS inclusion — there is no reorg depth to outrun, as on
