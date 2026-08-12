@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from allways.constants import (
     EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
-    NUMERAIRE_CHAIN,
+    HUB_CHAINS,
 )
 
 
@@ -178,19 +178,16 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     Determines the rate unit: rate is always 'dest per 1 source' in this ordering.
 
     Ordering rules (priority):
-    1. The hub (`NUMERAIRE_CHAIN`) is always the canonical SOURCE, so every launch pair reads uniformly as
-       'dest per 1 hub' (e.g. TAO per SOL, BTC per SOL).
-    2. Else if TAO is in the pair, TAO is dest — legacy denomination for non-hub pairs.
-    3. Else alphabetical — deterministic fallback (e.g. BTC-ETH).
+    1. The pair's hub leg is always the canonical SOURCE, so every launch pair reads uniformly as
+       'dest per 1 hub' (e.g. TAO per SOL, ETH per TAO). ``HUB_CHAINS`` order breaks a hub↔hub
+       pair: sol↔tao stays SOL-anchored (grandfathered — stored quotes keep their convention).
+    2. Else alphabetical — deterministic fallback for spoke↔spoke (never a valid swap pair).
     """
-    if chain_a == NUMERAIRE_CHAIN:
-        return (chain_a, chain_b)
-    if chain_b == NUMERAIRE_CHAIN:
-        return (chain_b, chain_a)
-    if chain_b == 'tao':
-        return (chain_a, chain_b)
-    if chain_a == 'tao':
-        return (chain_b, chain_a)
+    for hub in HUB_CHAINS:
+        if chain_a == hub:
+            return (chain_a, chain_b)
+        if chain_b == hub:
+            return (chain_b, chain_a)
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)
 
 

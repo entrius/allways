@@ -7,8 +7,9 @@ use crate::events::SwapTimedOut;
 use crate::penalty::apply_penalty;
 use crate::state::{CollateralVault, Config, MinerState, Swap, SwapStatus, VoteRound};
 
-/// Validators time out a swap whose deadline passed. On quorum the miner's collateral is slashed and
-/// refunded to the user (collateral vault -> user), the miner is freed, and the Swap is closed.
+/// Validators time out a swap whose deadline passed. On quorum the Swap is closed and, for a
+/// locally-backed swap ("sol"), the miner's collateral is slashed and refunded to the user (collateral
+/// vault -> user) and the miner freed. Any other backing gets the verdict only — see the handler.
 #[derive(Accounts)]
 #[instruction(swap_key: [u8; 32])]
 pub struct TimeoutSwap<'info> {
@@ -86,22 +87,55 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         let collateral_amount = ctx.accounts.swap.collateral_amount;
         let miner = ctx.accounts.swap.miner;
         let min_collateral = ctx.accounts.config.min_collateral;
+        let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
 
         // v2 #4: a failed swap is penalized at the over-collateralization multiplier (1.10×), and
         // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
-        // guard + one-swap-at-a-time invariant guarantee the miner can cover it; apply_penalty still
-        // clamps to available collateral as a safety net.
+        // guard + one-swap-at-a-time invariant guarantee the miner can cover it.
         let penalty = crate::constants::required_collateral(collateral_amount);
+        let settles_here = crate::backing::settles_locally(&collateral_chain);
 
-        let slash = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, penalty, now)?;
+        // Whom the backing chain owes, read off the Swap while it is still open (it closes below and
+        // the addresses live nowhere else after that) — so a validator that never saw this swap live
+        // can still relay the seizure. Empty here: that refund already reached `swap.user`.
+        let payee = if settles_here {
+            String::new()
+        } else {
+            let s = &ctx.accounts.swap;
+            crate::backing::collateral_leg_user_addr(
+                &collateral_chain,
+                &s.from_chain,
+                &s.user_from_addr,
+                &s.to_chain,
+                &s.user_to_addr,
+            )
+        };
 
-        // Refund the slashed collateral to the user (miner's collateral vault → user, native lamports).
-        if slash > 0 {
-            ctx.accounts.collateral_vault.to_account_info().sub_lamports(slash)?;
-            ctx.accounts.user.to_account_info().add_lamports(slash)?;
-        }
-        ctx.accounts.miner_state.has_active_swap = false;
-        ctx.accounts.miner_state.busy_until = 0;
+        // The refund is a policy step, deliberately separable from the verdict above: a locally-backed
+        // swap settles here and now (apply_penalty still clamps to available collateral as a safety
+        // net); any other backing gets the verdict only, and the seizure is a quorum on its own chain.
+        let bit = crate::backing::backing_bit(&collateral_chain)?;
+        let slash = if settles_here {
+            let slash = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, penalty, now)?;
+            if slash > 0 {
+                ctx.accounts.collateral_vault.to_account_info().sub_lamports(slash)?;
+                ctx.accounts.user.to_account_info().add_lamports(slash)?;
+            }
+            ctx.accounts.miner_state.set_busy(bit, 0);
+            slash
+        } else {
+            // Busy-until-settled: freeing the hub now would let a new swap open against a bond that
+            // still owes this penalty. Two locks, because they gate opposite doors — `busy_until` blocks
+            // the exit (deactivate/withdraw), `settling_until` blocks new entries (finalize/initiate).
+            let settled_at = now.saturating_add(ctx.accounts.config.settlement_grace_secs);
+            ctx.accounts.miner_state.set_busy(bit, settled_at);
+            ctx.accounts.miner_state.set_settling(bit, settled_at);
+            0
+        };
+        ctx.accounts.miner_state.set_swap(bit, false);
+        // The obligation ends with the verdict either way: locally the slash just moved, and for a
+        // vaulted backing the debit is already pessimistically netted into the attestation.
+        ctx.accounts.miner_state.release_reserved(bit, penalty);
         ctx.accounts.miner_state.failed_swaps =
             ctx.accounts.miner_state.failed_swaps.saturating_add(1);
 
@@ -112,11 +146,19 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         ctx.accounts.vote_round.close(ctx.accounts.validator.to_account_info())?;
         ctx.accounts.swap.close(ctx.accounts.validator.to_account_info())?;
 
+        // Absolute figures, both of them: they ARE the vault's `vote_slash(miner, swap_ref, penalty,
+        // user, reimbursement)` arguments, so the relayer carries the verdict without reading state.
+        // Locally settled swaps report what actually moved; the rest report what the bond owes.
+        let reimbursement = if settles_here { slash } else { penalty };
         emit!(SwapTimedOut {
             swap_key,
             miner,
             collateral_amount,
             slash,
+            collateral_chain,
+            penalty,
+            reimbursement,
+            payee,
         });
     }
     Ok(())

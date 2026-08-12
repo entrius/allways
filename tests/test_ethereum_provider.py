@@ -579,13 +579,24 @@ class TestSendResilience:
         assert 'broadcast failed' in provider.last_send_error
 
     def test_prior_broadcast_in_mempool_is_reused_not_resent(self, provider):
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
         # No eth_sendRawTransaction in the map: a resend attempt would fail the test.
         rpc_stub(provider, dict(SEND_RESPONSES, eth_getTransactionByHash={'hash': TX}))
         assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
 
+    def test_same_to_amount_concurrent_payouts_both_pay(self, provider):
+        # Fund-safety #2 (v3.1): dedup keys on the SWAP, not the payout shape. A prior broadcast for
+        # swap A must not be handed to concurrent swap B with the identical (to, amount) — B gets a
+        # FRESH broadcast, so both users are paid.
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 'swap-a', 95)
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_getTransactionByHash={'hash': TX}))
+        result = provider.send_amount(RECIPIENT, 10**15, dedup_key='swap-b')
+        assert result is not None and result[0] != TX, 'swap B must broadcast its own tx'
+        # Swap A retrying still reuses ITS tx.
+        assert provider.send_amount(RECIPIENT, 10**15, dedup_key='swap-a') == (TX, 0)
+
     def test_settled_prior_broadcast_is_reused(self, provider):
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
         rpc_stub(
             provider,
             dict(
@@ -599,7 +610,7 @@ class TestSendResilience:
     def test_reverted_prior_broadcast_clears_and_sends_fresh(self, provider):
         # A reverted tx moved no funds — reusing its hash would hand the validator a
         # rejected leg forever. It must clear and allow a fresh send.
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
         rpc_stub(
             provider,
             dict(
@@ -615,13 +626,13 @@ class TestSendResilience:
     def test_prior_broadcast_outside_window_is_pruned_not_reused(self, provider):
         # Head 100, seen at 60 → beyond SCAN_LOOKBACK_BLOCKS: a later same-amount swap must
         # never resolve to an earlier swap's consumed tx (freshness would slash the miner).
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 60)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 60)
         rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32))
         assert provider.send_amount(RECIPIENT, 10**15) == ('0x' + 'cc' * 32, 0)
         assert TX not in provider.broadcasted_txids
 
     def test_mined_prior_with_unavailable_receipt_blocks_send(self, provider):
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
         rpc_stub(
             provider,
             dict(
@@ -637,7 +648,7 @@ class TestSendResilience:
         def boom(params):
             raise ConnectionError('down')
 
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, 95)
+        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
         rpc_stub(provider, dict(SEND_RESPONSES, eth_getTransactionByHash=boom))
         assert provider.send_amount(RECIPIENT, 10**15) is None
         assert 'double send' in provider.last_send_error
@@ -651,7 +662,7 @@ class TestSendResilience:
         assert 'chain head' in provider.last_send_error
 
     def test_prior_broadcast_to_other_dest_does_not_interfere(self, provider):
-        provider.broadcasted_txids[TX] = ('0x' + '22' * 20, 10**15, 95)
+        provider.broadcasted_txids[TX] = ('0x' + '22' * 20, 10**15, '', 95)
         rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32))
         result = provider.send_amount(RECIPIENT, 10**15)
         assert result == ('0x' + 'cc' * 32, 0)

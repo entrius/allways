@@ -15,7 +15,7 @@ from solders.keypair import Keypair
 from allways.cli.swap_commands.collateral import collateral_group
 from allways.cli.swap_commands.miner_commands import miner_group
 from allways.cli.swap_commands.pair import post_pair
-from allways.constants import RATE_PRECISION
+from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
 
 
 def _config(**over):
@@ -31,8 +31,11 @@ def _config(**over):
 
 
 def _state(**over):
+    # `active_backings` is the per-purse mask; `active` is its OR view. Default: both purses lit, so
+    # a fixture only has to think about backings when the test is about backings.
     base = dict(
         active=False,
+        active_backings=BACKING_BIT_SOL | BACKING_BIT_TAO,
         has_active_swap=False,
         busy_until=0,
         deactivation_at=0,
@@ -101,7 +104,7 @@ def test_deactivate_calls_self_deactivate():
         with patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)):
             res = CliRunner().invoke(miner_group, ['deactivate'])
     assert res.exit_code == 0, res.output
-    c.deactivate.assert_called_once_with()
+    c.deactivate.assert_called_once_with(backing=None)
 
 
 def test_bind_hotkey_signs_and_binds():
@@ -146,12 +149,16 @@ def test_post_pair_calls_set_quote_with_scaled_rate():
         # btc bc1qsrc tao 5dst 345 (same effective price both directions)
         res = CliRunner().invoke(post_pair, ['btc', 'bc1qsrc', 'tao', '5dst', '345', '--yes'])
     assert res.exit_code == 0, res.output
-    # Two directions posted (rate + counter both canonical 345), rate scaled by RATE_PRECISION.
+    # Two directions posted. TAO is the pair's hub → canonical order is tao→btc and the
+    # stored rate is 'BTC per 1 TAO': the directional 345 TAO/BTC becomes 1/345, floored
+    # to RATE_SIG_FIGS at the preview seam. Addresses follow the normalization swap.
     assert c.set_quote.call_count == 2
+    canonical_fixed = 2898500000000000  # int(1/345 × 1e18) floored to 5 sig figs
     first = c.set_quote.call_args_list[0].args
-    assert first[4] == int(345 * RATE_PRECISION)
-    # forward direction keeps src addr on from-leg, dst addr on to-leg
-    assert (first[0], first[1], first[2], first[3]) == ('btc', 'tao', 'bc1qsrc', '5dst')
+    assert first[4] == canonical_fixed
+    assert (first[0], first[1], first[2], first[3]) == ('tao', 'btc', '5dst', 'bc1qsrc')
+    # btc<->tao has exactly one hub leg, so the backing is inferred silently — no --backing needed.
+    assert c.set_quote.call_args_list[0].kwargs['backing'] == 'tao'
 
 
 def test_post_pair_directional_counter_rate_posts_canonical():
@@ -162,12 +169,16 @@ def test_post_pair_directional_counter_rate_posts_canonical():
         patch('allways.cli.swap_commands.pair.get_solana_cli_context', return_value=({}, c)),
         patch('allways.cli.swap_commands.pair.write_rate_posted_flag'),
     ):
-        # COUNTER_RATE is directional (BTC per 1 TAO); the chain stores canonical (TAO per 1 BTC).
+        # Each rate is directional for its own leg (345 TAO per BTC; 0.003 BTC per TAO); the chain
+        # stores canonical 'BTC per 1 TAO' (TAO is the hub). Normalization posts tao→btc first.
         res = CliRunner().invoke(post_pair, ['btc', 'bc1qsrc', 'tao', '5dst', '345', '0.003', '--yes'])
     assert res.exit_code == 0, res.output
+    first = c.set_quote.call_args_list[0].args
+    assert (first[0], first[1]) == ('tao', 'btc')
+    assert first[4] == 3 * 10**15  # 0.003 is already canonical for the tao→btc leg
     counter = c.set_quote.call_args_list[1].args
-    assert (counter[0], counter[1]) == ('tao', 'btc')
-    assert counter[4] == 33333 * 10**16  # 1/0.003 = 333.33…, floored to 5 sig figs
+    assert (counter[0], counter[1]) == ('btc', 'tao')
+    assert counter[4] == 2898500000000000  # 1/345, floored to 5 sig figs
 
 
 def test_post_pair_rejects_inverted_counter_rate():

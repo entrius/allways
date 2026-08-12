@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Tuple
 
 from allways.chains import canonical_pair, get_chain_def
-from allways.constants import NUMERAIRE_CHAIN, RATE_PRECISION, RATE_SIG_FIGS
+from allways.constants import RATE_PRECISION, RATE_SIG_FIGS, hub_leg
 
 if TYPE_CHECKING:
     from allways.solana.client import SolanaSwap
@@ -166,87 +166,89 @@ def is_executable_rate(
     rate: float,
     from_chain: str,
     to_chain: str,
-    min_swap_lamports: int,
-    max_swap_lamports: int,
+    min_swap_hub: int,
+    max_swap_hub: int,
 ) -> bool:
     """True iff the rate is fundably routable in its declared direction.
 
     Crown-eligibility gate against rates that no user can route. ``rate`` is the CANONICAL
-    number every caller stores and feeds — spoke per 1 SOL — in BOTH directions. The on-chain
-    swap bounds (``min_swap_amount``/``max_swap_amount``) constrain the **SOL leg**
-    (``collateral_amount``), so SOL is the bounded asset and ``min_swap_lamports``/
-    ``max_swap_lamports`` are SOL lamports. Routable means a spoke source >= the spoke's
-    ``min_onchain_amount`` maps a SOL leg into ``[min, max]``.
+    number every caller stores and feeds — spoke per 1 hub — in BOTH directions. The on-chain
+    swap bounds constrain the pair's **hub leg** (``collateral_amount``: SOL lamports under the
+    SOL bounds for a SOL-hub pair, rao under the TAO bounds for a TAO-hub pair — callers pass
+    the hub leg's own bounds, see ``hub_bounds``). Routable means a spoke source >= the spoke's
+    ``min_onchain_amount`` maps a hub leg into ``[min, max]``.
 
-    Both directions reduce to the same spoke-side question. X→SOL: an absurdly LOW canonical
+    Both directions reduce to the same spoke-side question. X→hub: an absurdly LOW canonical
     rate (the crown-squat — lowest wins that sort) makes even 1 smallest-unit of spoke
-    overshoot ``max``, so nothing routes. SOL→X: the SOL leg is the source and trivially fits,
+    overshoot ``max``, so nothing routes. hub→X: the hub leg is the source and trivially fits,
     but the symmetric spoke-side check keeps the executable spectrum bounded.
 
     A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 →
-    permissive. Non-SOL pairs (no SOL leg) have no bound to enforce → permissive.
+    permissive. Pairs with no hub leg have no bound to enforce → permissive.
     """
     if not math.isfinite(rate) or rate <= 0:
         return False
-    if min_swap_lamports <= 0 and max_swap_lamports <= 0:
+    if min_swap_hub <= 0 and max_swap_hub <= 0:
+        return True
+    hub = hub_leg(from_chain, to_chain)
+    if hub is None:
+        # No hub leg → no bounded asset to enforce against.
         return True
 
-    def _has_integer_routable_source(sol_per_source: float, src_chain: str) -> bool:
-        # For a "src → sol" leg: is there a src amount that is fundable on-chain (>= the
-        # chain's min_onchain_amount) whose SOL leg lands in bounds?
-        # sol_lamports = source_units × sol_per_source × 10**(sol_dec - src_dec).
+    def _has_integer_routable_source(hub_per_source: float, src_chain: str) -> bool:
+        # For a "src → hub" leg: is there a src amount that is fundable on-chain (>= the
+        # chain's min_onchain_amount) whose hub leg lands in bounds?
+        # hub_units = source_units × hub_per_source × 10**(hub_dec - src_dec).
         src = get_chain_def(src_chain)
-        decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
-        denom = sol_per_source * decimal_factor
+        decimal_factor = 10 ** (get_chain_def(hub).decimals - src.decimals)
+        denom = hub_per_source * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return False
         # Floor at the source chain's dust/existential minimum: a rate whose only in-bounds source is
         # below it (e.g. 1 sat) is unfundable, so unexecutable.
-        lo = max(1, min_swap_lamports) / denom
+        lo = max(1, min_swap_hub) / denom
         if not math.isfinite(lo):
             # The rate is beyond float routing math (e.g. float-max canonical) — sentinel.
             return False
         min_source = max(src.min_onchain_amount, math.ceil(lo))
-        if max_swap_lamports <= 0:
+        if max_swap_hub <= 0:
             return True
-        max_source = math.floor(max_swap_lamports / denom)
+        max_source = math.floor(max_swap_hub / denom)
         return min_source <= max_source
 
-    # Callers feed canonical spoke-per-SOL; the source-side check wants SOL-per-spoke — invert.
+    # Callers feed canonical spoke-per-hub; the source-side check wants hub-per-spoke — invert.
     # (The X→SOL branch used to pass the canonical rate through uninverted: the F1 orientation
     # defect, which made any real spoke dust floor unroutable at rate² error.)
-    if to_chain == NUMERAIRE_CHAIN:
+    if to_chain == hub:
         return _has_integer_routable_source(1.0 / rate, from_chain)
-    if from_chain == NUMERAIRE_CHAIN and to_chain != NUMERAIRE_CHAIN:
-        return _has_integer_routable_source(1.0 / rate, to_chain)
-
-    # Non-SOL pairs have no SOL-leg bound to enforce.
-    return True
+    return _has_integer_routable_source(1.0 / rate, to_chain)
 
 
-def min_executable_sol_leg(
+def min_executable_hub_leg(
     rate: float,
     from_chain: str,
     to_chain: str,
-    min_swap_lamports: int,
-    max_swap_lamports: int,
+    min_swap_hub: int,
+    max_swap_hub: int,
 ) -> int:
-    """Smallest SOL leg (lamports) the rate produces among in-band fundable swaps.
+    """Smallest hub leg (hub smallest-units) the rate produces among in-band fundable swaps.
 
-    Shares band math with is_executable_rate; SOL is the bounded asset (``collateral_amount``). Returns 0 when
-    no in-band fundable swap exists (rate unexecutable) — caller treats as "no constraint".
+    Shares band math with is_executable_rate; the pair's hub leg is the bounded asset
+    (``collateral_amount``). Returns 0 when no in-band fundable swap exists (rate unexecutable)
+    — caller treats as "no constraint".
     """
-    if not is_executable_rate(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports):
+    if not is_executable_rate(rate, from_chain, to_chain, min_swap_hub, max_swap_hub):
         return 0
-    if from_chain == NUMERAIRE_CHAIN:
-        return max(get_chain_def(NUMERAIRE_CHAIN).min_onchain_amount, max(0, min_swap_lamports))
-    if to_chain == NUMERAIRE_CHAIN:
+    hub = hub_leg(from_chain, to_chain)
+    if from_chain == hub:
+        return max(get_chain_def(hub).min_onchain_amount, max(0, min_swap_hub))
+    if to_chain == hub:
         src = get_chain_def(from_chain)
-        decimal_factor = 10 ** (get_chain_def(NUMERAIRE_CHAIN).decimals - src.decimals)
-        # Same orientation as the gate: canonical spoke-per-SOL in, SOL-per-spoke for the math.
+        decimal_factor = 10 ** (get_chain_def(hub).decimals - src.decimals)
+        # Same orientation as the gate: canonical spoke-per-hub in, hub-per-spoke for the math.
         denom = (1.0 / rate) * decimal_factor
         if not math.isfinite(denom) or denom <= 0:
             return 0
-        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_lamports) / denom))
+        min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_hub) / denom))
         return int(min_source * denom)
     return 0

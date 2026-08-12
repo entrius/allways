@@ -206,5 +206,47 @@ class TestSentCacheCleanup:
         assert reader.sent['9a'] == SentSwap('legacy-tx', 999, marked_fulfilled=False, timeout_at=0)
 
 
+class TestTotalObligationGate:
+    """v3.1: one swap per hub means several payouts can be owed at once — a send must clear the
+    wallet's TOTAL live obligation on its chain, with first-come priority."""
+
+    def _dual(self, balance: int):
+        provider = MagicMock()
+        provider.get_balance.return_value = balance
+        f = make_fulfiller(my_addresses={'tao': '5miner'})
+        f.providers = {'tao': provider}
+        earlier = make_swap(sid=1, to_amount=400_000_000)
+        earlier.initiated_at = 900
+        later = make_swap(sid=2, to_amount=400_000_000)
+        later.initiated_at = 1000
+        f.note_active_swaps([earlier, later])
+        # 99% of the pinned amount is what actually leaves the wallet per swap.
+        payout = 396_000_000
+        return f, earlier, later, payout
+
+    def test_later_send_defers_when_the_wallet_cannot_cover_both(self):
+        f, earlier, later, payout = self._dual(balance=500_000_000)
+        # The EARLIER swap outranks nothing — it always passes.
+        assert f.unfunded_obligation_reason(earlier, payout) is None
+        # The LATER one must not starve it: wallet holds one payout, owes two.
+        assert f.unfunded_obligation_reason(later, payout) is not None
+
+    def test_later_send_proceeds_once_the_wallet_covers_both(self):
+        f, _earlier, later, payout = self._dual(balance=900_000_000)
+        assert f.unfunded_obligation_reason(later, payout) is None
+
+    def test_already_sent_obligations_do_not_double_count(self):
+        f, earlier, later, payout = self._dual(balance=500_000_000)
+        f.sent[earlier.key_hex] = SentSwap('tx', 1, marked_fulfilled=False, timeout_at=5000)
+        assert f.unfunded_obligation_reason(later, payout) is None
+
+    def test_single_obligation_never_reads_the_balance(self):
+        f, earlier, _later, payout = self._dual(balance=0)
+        f.note_active_swaps([earlier])
+        # No concurrent peer → the provider's own send preflight owns the check.
+        assert f.unfunded_obligation_reason(earlier, payout) is None
+        f.providers['tao'].get_balance.assert_not_called()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

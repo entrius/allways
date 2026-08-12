@@ -1,14 +1,14 @@
-"""SOL-numéraire quoting — the uniform rate convention + a one-price-per-chain miner helper.
+"""Hub-numéraire quoting — the uniform rate convention + a one-price-per-chain miner helper.
 
-THE CONVENTION (canonical, formalized): every rate is **"X per 1 SOL"** — the price of one SOL in the other
-asset. SOL is the hub (`canonical_pair` makes it the canonical source), so for every launch pair the stored
-`MinerQuote.rate` reads the same way: BTC per SOL, TAO per SOL. A miner therefore needs only ONE number per
-chain (its SOL price), not a rate per direction — both directions of a pair derive from it. Reverse direction
-is the reciprocal, applied on-chain via `is_reverse`.
+THE CONVENTION (canonical, formalized): every rate is **"X per 1 hub"** — the price of one hub unit in the
+other asset. The pair's hub leg is `canonical_pair`'s canonical source, so every stored `MinerQuote.rate`
+reads the same way: BTC per SOL, TAO per SOL, ETH per TAO. A miner therefore needs only ONE number per
+spoke (its hub price), not a rate per direction — both directions of a pair derive from it. Reverse
+direction is the reciprocal, applied on-chain via `is_reverse`.
 
-`derive_sol_numeraire_quotes` turns `{chain: (price_X_per_sol, address)}` into the per-direction quote specs.
-An optional symmetric `spread_bps` gives the miner margin both ways (sol→X posted a touch low, X→sol a touch
-high); `spread_bps=0` posts the zero-margin mid.
+`derive_hub_numeraire_quotes` turns `{chain: (price_X_per_hub, address)}` into the per-direction quote
+specs for one hub. An optional symmetric `spread_bps` gives the miner margin both ways (hub→X posted a
+touch low, X→hub a touch high); `spread_bps=0` posts the zero-margin mid.
 """
 
 import time
@@ -20,15 +20,18 @@ import click
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
+    backing_label,
     console,
     fail,
     get_cli_context,
     get_solana_cli_context,
     loading,
     quote_update_fee_lamports,
+    resolve_quote_backing,
+    safe_read,
 )
 from allways.cli.swap_commands.pair import write_rate_posted_flag
-from allways.constants import LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
+from allways.constants import HUB_CHAINS, LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
 from allways.solana.client import SolanaClientError
 from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
 
@@ -39,79 +42,101 @@ class QuoteSpec:
     to_chain: str
     from_addr: str  # miner's address on from_chain
     to_addr: str  # miner's address on to_chain
-    rate: float  # canonical 'dest per 1 SOL' display rate
+    rate: float  # canonical 'dest per 1 hub' display rate
 
 
-def derive_sol_numeraire_quotes(
-    sol_address: str,
+def derive_hub_numeraire_quotes(
+    hub: str,
+    hub_address: str,
     chain_specs: Dict[str, Tuple[float, str]],
     spread_bps: int = 0,
 ) -> List[QuoteSpec]:
-    """Derive both directions of every sol<->X pair from one price per chain.
+    """Derive both directions of every hub<->X pair from one price per chain.
 
-    ``chain_specs``: ``{chain: (price_X_per_sol, miner_X_address)}``. ``spread_bps`` is a symmetric margin:
-    sol→X is posted at ``price*(1-s)`` (miner returns slightly less X), X→sol at ``price*(1+s)`` (miner
-    returns slightly less SOL); both are stored as the canonical 'X per SOL' rate. 0 = zero-margin mid.
+    ``chain_specs``: ``{chain: (price_X_per_hub, miner_X_address)}``. ``spread_bps`` is a symmetric margin:
+    hub→X is posted at ``price*(1-s)`` (miner returns slightly less X), X→hub at ``price*(1+s)`` (miner
+    returns slightly less hub); both are stored as the canonical 'X per hub' rate. 0 = zero-margin mid.
     """
     s = spread_bps / 10_000
     specs: List[QuoteSpec] = []
     for chain, (price, addr) in chain_specs.items():
-        if chain == NUMERAIRE_CHAIN or price <= 0:
+        if chain == hub or price <= 0:
             continue
-        specs.append(QuoteSpec(NUMERAIRE_CHAIN, chain, sol_address, addr, price * (1 - s)))  # hub -> X
-        specs.append(QuoteSpec(chain, NUMERAIRE_CHAIN, addr, sol_address, price * (1 + s)))  # X -> hub
+        specs.append(QuoteSpec(hub, chain, hub_address, addr, price * (1 - s)))  # hub -> X
+        specs.append(QuoteSpec(chain, hub, addr, hub_address, price * (1 + s)))  # X -> hub
     return specs
 
 
-def _hub_addr_kw() -> str:
-    return f'{NUMERAIRE_CHAIN}_address'
+def _addr_kw(chain: str) -> str:
+    return f'{chain}_address'
 
 
 def quote_options(f):
-    """Attach the hub-address flag plus a ``--<spoke>-price`` / ``--<spoke>-address`` pair for every
+    """Attach the SOL-address flag plus a ``--<spoke>-price`` / ``--<spoke>-address`` pair for every
     launch spoke. Registry-derived from ``LAUNCH_SPOKES`` — add a spoke there and its flags appear
     here automatically, with no hand-typed per-chain options. Every flag stays explicit, so posting
-    quotes is fully scriptable (``--yes`` skips the confirm)."""
-    hub = NUMERAIRE_CHAIN.upper()
+    quotes is fully scriptable (``--yes`` skips the confirm). Under ``--hub tao`` the prices read
+    'X per 1 TAO' and ``--tao-address`` is the hub leg."""
     for spoke in reversed(LAUNCH_SPOKES):  # reversed: decorators stack bottom-up, so this restores registry order
         f = click.option(f'--{spoke}-address', default=None, help=f'Your {spoke.upper()} address.')(f)
         f = click.option(
             f'--{spoke}-price',
             type=FINITE_FLOAT,
             default=None,
-            help=f'{spoke.upper()} per 1 {hub} (0/omit to skip {spoke.upper()}).',
+            help=f'{spoke.upper()} per 1 hub unit (0/omit to skip {spoke.upper()}).',
         )(f)
     return click.option(
-        f'--{NUMERAIRE_CHAIN}-address', _hub_addr_kw(), default=None, help=f'Your {hub} address (the hub leg).'
+        f'--{NUMERAIRE_CHAIN}-address',
+        _addr_kw(NUMERAIRE_CHAIN),
+        default=None,
+        help=f'Your {NUMERAIRE_CHAIN.upper()} address (the hub leg under --hub sol).',
     )(f)
 
 
 def _example() -> str:
     """A concrete, copy-pasteable usage line built from the current registry (not hand-typed)."""
-    flags = ' '.join(f'--{s}-price <{s}-per-{NUMERAIRE_CHAIN}> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
+    flags = ' '.join(f'--{s}-price <{s}-per-hub> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
     return f'alw miner quotes --{NUMERAIRE_CHAIN}-address <{NUMERAIRE_CHAIN}> {flags} --spread 50'
 
 
 @click.command('quotes', cls=StyledCommand)
 @quote_options
 @click.option('--spread', 'spread_bps', type=int, default=0, help='Symmetric margin in bps (0 = mid).')
+@click.option(
+    '--hub',
+    'hub',
+    type=click.Choice(HUB_CHAINS),
+    default=NUMERAIRE_CHAIN,
+    help='Hub leg these pairs anchor on; prices read "X per 1 <hub>". Default sol.',
+)
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Collateral purse backing these quotes (sol|tao). Inferred when only one of yours qualifies.',
+)
 @click.option('--dry-run', 'dry_run', is_flag=True, help='Preview quotes + churn fees; post nothing.')
 @click.option('--yes', 'yes', is_flag=True, help='Skip confirmation.')
-def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
-    """Publish every hub pair from one price per chain (the 'X per 1 SOL' convention).
+def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
+    """Publish every pair of one hub from one price per chain (the 'X per 1 hub' convention).
 
     One --<spoke>-price + --<spoke>-address pair per launch spoke; give as many or as few as you
-    like. Both directions of each pair derive from that single price.
+    like. Both directions of each pair derive from that single price. --hub tao anchors the pairs
+    on TAO instead of SOL (--tao-address becomes the hub leg; run once per hub you quote).
 
     \b
     Example:
         {example}
     """
-    sol_address = spoke_opts.get(_hub_addr_kw())
+    hub_address = spoke_opts.get(_addr_kw(hub))
     chain_specs: Dict[str, Tuple[float, str]] = {}
     for spoke in LAUNCH_SPOKES:
         price = spoke_opts.get(f'{spoke}_price')
         addr = spoke_opts.get(f'{spoke}_address')
+        if spoke == hub:
+            if price:
+                fail(f'--{spoke}-price conflicts with --hub {hub} — {spoke.upper()} is the hub leg, not a spoke.')
+            continue
         if not price or price <= 0:
             continue
         if not addr:
@@ -119,23 +144,32 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
         chain_specs[spoke] = (price, addr)
     if not chain_specs:
         fail('Nothing to post — give at least one --<chain>-price/--<chain>-address.')
-    if not sol_address:
-        fail(f'--{NUMERAIRE_CHAIN}-address is required.')
+    if not hub_address:
+        fail(f'--{hub}-address is required (the hub leg).')
 
     _, wallet, _, _ = get_cli_context(need_client=False)
     _, client = get_solana_cli_context()
     miner = client.keypair.pubkey()
     now = int(time.time())
 
-    specs = derive_sol_numeraire_quotes(sol_address, chain_specs, spread_bps)
+    specs = derive_hub_numeraire_quotes(hub, hub_address, chain_specs, spread_bps)
+
+    # Every pair here is hub<->spoke through the numeraire, so each resolves independently: sol<->tao
+    # is the one that can go either way and will demand --backing from a dual-purse miner.
+    miner_state = safe_read(lambda: client.get_miner_state(miner), what='read miner state')
+    backings = {
+        (sp.from_chain, sp.to_chain): resolve_quote_backing(miner_state, sp.from_chain, sp.to_chain, backing)
+        for sp in specs
+    }
 
     # Show each direction's current rate + the churn fee this update will incur (per-direction,
     # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
-    hub = NUMERAIRE_CHAIN.upper()
-    console.print(f'\n[bold]{hub}-numéraire quotes[/bold]  [dim](X per 1 {hub})[/dim]\n')
+    hub_up = hub.upper()
+    console.print(f'\n[bold]{hub_up}-numéraire quotes[/bold]  [dim](X per 1 {hub_up})[/dim]\n')
     total_fee = 0
     for sp in specs:
-        cur = client.get_quote(miner, sp.from_chain, sp.to_chain)
+        b = backings[(sp.from_chain, sp.to_chain)]
+        cur = client.get_quote(miner, sp.from_chain, sp.to_chain, b)
         if cur is None:
             note = '[dim]new — free[/dim]'
         else:
@@ -151,7 +185,10 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
             else:
                 note = f'[dim]free (was {was:g})[/dim]'
         disp = quantize_rate_display(sp.rate)  # mirror the on-chain floor so preview == stored
-        console.print(f'  {sp.from_chain.upper()} → {sp.to_chain.upper()}: [green]{disp:g}[/green]   {note}')
+        console.print(
+            f'  {sp.from_chain.upper()} → {sp.to_chain.upper()} [cyan]{backing_label(b)}[/cyan]: '
+            f'[green]{disp:g}[/green]   {note}'
+        )
 
     if total_fee:
         console.print(
@@ -177,6 +214,7 @@ def quotes_command(spread_bps, dry_run, yes, **spoke_opts):
                     sp.to_addr,
                     quantize_rate_fixed(int(sp.rate * RATE_PRECISION)),
                     0,
+                    backing=backings[(sp.from_chain, sp.to_chain)],
                 )
             posted += 1
         except SolanaClientError as e:

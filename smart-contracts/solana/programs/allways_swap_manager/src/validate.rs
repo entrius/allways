@@ -4,8 +4,9 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    FINALIZE_WINDOW_SECS_MAX, FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX,
-    MAX_TOTAL_EXTENSION_SECS_MIN, RESERVATION_FEE_LAMPORTS_MIN,
+    ATTEST_MAX_AGE_SECS_MAX, ATTEST_MAX_AGE_SECS_MIN, FINALIZE_WINDOW_SECS_MAX,
+    FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX, MAX_TOTAL_EXTENSION_SECS_MIN,
+    RESERVATION_FEE_LAMPORTS_MIN, SETTLEMENT_GRACE_SECS_MAX, SETTLEMENT_GRACE_SECS_MIN,
 };
 use crate::error::ErrorCode;
 
@@ -86,6 +87,33 @@ pub fn swap_bounds(min: u64, max: u64) -> Result<()> {
 /// Collateral bounds must not be contradictory (max 0 = no cap).
 pub fn collateral_bounds(min: u64, max: u64) -> Result<()> {
     require!(max == 0 || min <= max, ErrorCode::InvalidBounds);
+    Ok(())
+}
+
+/// Settlement grace for a non-locally-backed timeout, clamped to [1 min, 2 h]: long enough for a relay
+/// round trip, short enough that a stalled relay can't park a miner indefinitely.
+pub fn settlement_grace(secs: i64) -> Result<()> {
+    require!(
+        (SETTLEMENT_GRACE_SECS_MIN..=SETTLEMENT_GRACE_SECS_MAX).contains(&secs),
+        ErrorCode::InvalidAmount
+    );
+    Ok(())
+}
+
+/// Attested bond floor for activating a non-local backing. Never zero, for the same reason
+/// `min_swap_amount` isn't: a zero floor lets a dust bond activate a purse the guards then trust.
+pub fn remote_min_collateral(amount: u64) -> Result<()> {
+    require!(amount > 0, ErrorCode::InvalidAmount);
+    Ok(())
+}
+
+/// Dead-man fuse max-age, clamped to [1 h, 48 h]: below one heartbeat interval it fuses constantly;
+/// above two days it isn't a circuit breaker any more.
+pub fn attest_max_age(secs: i64) -> Result<()> {
+    require!(
+        (ATTEST_MAX_AGE_SECS_MIN..=ATTEST_MAX_AGE_SECS_MAX).contains(&secs),
+        ErrorCode::InvalidAmount
+    );
     Ok(())
 }
 

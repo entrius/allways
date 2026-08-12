@@ -18,6 +18,7 @@ import pytest
 from solders.keypair import Keypair
 
 from allways.solana.client import AllwaysSolanaClient
+from allways.solana.layouts import CONFIG_VERSION
 from allways.solana.rpc import SolanaRpc
 
 pytestmark = pytest.mark.integration
@@ -99,7 +100,7 @@ def test_b0_round_trip(client):
         reservation_ttl_secs=1_800,
     )
     cfg = client.get_config()
-    assert cfg.version == 10
+    assert cfg.version == CONFIG_VERSION
     assert cfg.consensus_threshold_percent == 66
     assert cfg.admin == me
     assert cfg.halted is False
@@ -114,12 +115,19 @@ def test_b0_round_trip(client):
     # get_collateral_lamports returns exactly the tracked field — not vault lamports (rent-inclusive).
     assert client.get_collateral_lamports(me) == 5_000_000
 
-    # set_quote -> MinerQuote (u128 fixed-point rate)
+    # set_quote -> MinerQuote (u128 fixed-point rate). A quote names the purse that answers for it, so
+    # the SOL purse has to be lit first: this keypair is its own (sole) validator, and at a 66%
+    # threshold one vote is quorum.
+    client.add_validator(me, 1)
+    client.vote_activate(me, backing='sol')
+    assert client.get_miner_state(me).active is True
+
     rate = 15 * 10**17  # 1.5 * RATE_PRECISION
-    client.set_quote('BTC', 'SOL', 'minerBTCaddr', 'minerSOLaddr', rate, 1_000)
-    q = client.get_quote(me, 'BTC', 'SOL')
+    client.set_quote('btc', 'sol', 'minerBTCaddr', 'minerSOLaddr', rate, 1_000, backing='sol')
+    q = client.get_quote(me, 'btc', 'sol', 'sol')
     assert q.rate == rate
-    assert q.from_chain == 'BTC' and q.to_chain == 'SOL'
+    assert q.from_chain == 'btc' and q.to_chain == 'sol'
+    assert q.collateral_chain == 'sol'
     assert q.miner_from_addr == 'minerBTCaddr' and q.liquidity == 1_000
 
     # bind_hotkey -> Binding + set-once HotkeyBinding

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use solana_keccak_hasher::hashv;
 
-use crate::constants::{MAX_VALIDATORS, REQ_SET_WEIGHTS, VOTE_ROUND_TTL_SECS};
+use crate::constants::{MAX_VALIDATORS, REQ_SET_ATTESTATION, REQ_SET_WEIGHTS, VOTE_ROUND_TTL_SECS};
 use crate::error::ErrorCode;
 use crate::state::{Config, ValidatorInfo, VoteRound};
 
@@ -31,6 +31,34 @@ pub fn weights_hash(validators: &[ValidatorInfo], weights: &[u64]) -> [u8; 32] {
     }
     let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
     hashv(&refs).to_bytes()
+}
+
+/// Bound hash for a round keyed by (request type, miner, backing chain) — activate/deactivate, whose
+/// round PDA seeds carry only the miner. Without the backing in the hash, a validator voting
+/// activate("sol") would co-count toward a quorum that activates "tao".
+pub fn backing_request_hash(request_type: u8, miner: &Pubkey, backing: &str) -> [u8; 32] {
+    hashv(&[&[request_type], miner.as_ref(), backing.as_bytes()]).to_bytes()
+}
+
+/// Bound hash for a bond-attestation round: binds the FULL payload, since none of the values being
+/// written live in the round's seeds. Two validators attesting different balances must land on
+/// different hashes and conflict, never co-count into one quorum that writes whichever arrived first.
+pub fn attestation_hash(
+    miner: &Pubkey,
+    chain: &str,
+    effective_balance: u64,
+    locked: bool,
+    epoch: u64,
+) -> [u8; 32] {
+    hashv(&[
+        &[REQ_SET_ATTESTATION],
+        miner.as_ref(),
+        chain.as_bytes(),
+        &effective_balance.to_le_bytes(),
+        &[locked as u8],
+        &epoch.to_le_bytes(),
+    ])
+    .to_bytes()
 }
 
 /// Assert `validator` is whitelisted — for consensus-free validator actions (deadline extensions)

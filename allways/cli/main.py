@@ -205,6 +205,7 @@ VALID_CONFIG_KEYS = (
     'network',
     'netuid',
     'program-id',
+    'vault-address',
     'solana-rpc',
     'solana-network',
     'solana-keypair',

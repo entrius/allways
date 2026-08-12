@@ -127,11 +127,12 @@ def _activate_miner(admin, validators, rate_int):
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
     collateral = required_collateral(MAX_SWAP_RAO)  # 1.1 × max_swap → capacity_factor 1.0
     mclient.post_collateral(collateral)
-    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', rate_int, 1_000)
     hk = _hotkey()
     mclient.bind_hotkey(bytes.fromhex(hk.public_key.hex()), hk.sign(bytes(miner.pubkey())))
     validators[0].vote_activate(miner.pubkey())
     validators[1].vote_activate(miner.pubkey())  # quorum → MinerActivated
+    # Quote after activation (W2b): the declared purse must already be lit.
+    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', rate_int, 1_000)
     return miner, hk, collateral
 
 
@@ -188,8 +189,8 @@ def test_scoring_round_off_solana_events(env):
         window_start=now - 600,
         window_end=now + 60,
         rewardable_hotkeys={hka, hkb, hks},
-        min_swap_lamports=MIN_SWAP_RAO,
-        max_swap_lamports=MAX_SWAP_RAO,
+        min_swap_hub=MIN_SWAP_RAO,
+        max_swap_hub=MAX_SWAP_RAO,
     )
     assert set(crown) == {hka}
     assert crown[hka] > 0

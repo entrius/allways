@@ -8,3 +8,6 @@ target/
 data/
 .claude/
 .vscode/
+
+# vault ABI is a build artifact under target/ but the relayer/client need it in the image
+!smart-contracts/ink-bond-vault/target/ink/allways_bond_vault.json

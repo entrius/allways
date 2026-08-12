@@ -45,14 +45,20 @@ pub struct ResolvePool<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [POOL_SEED, miner.key().as_ref()], bump = pool.bump)]
+    /// Self-referential seed: the pool's own pinned backing names its (miner, hub) address, so no
+    /// backing argument is needed — the address either matches the stored chain or fails to resolve.
+    #[account(
+        mut,
+        seeds = [POOL_SEED, miner.key().as_ref(), pool.collateral_chain.as_bytes()],
+        bump = pool.bump,
+    )]
     pub pool: Account<'info, Pool>,
 
     #[account(
         init_if_needed,
         payer = caller,
         space = 8 + Reservation::INIT_SPACE,
-        seeds = [RESV_SEED, miner.key().as_ref()],
+        seeds = [RESV_SEED, miner.key().as_ref(), pool.collateral_chain.as_bytes()],
         bump,
     )]
     pub reservation: Account<'info, Reservation>,
@@ -132,7 +138,11 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     if ctx.accounts.pool.seed_slot == 0 {
         let seed_slot = cur_slot.saturating_add(SEED_SLOT_DELAY_SLOTS);
         ctx.accounts.pool.seed_slot = seed_slot;
-        emit!(PoolDrawArmed { miner: miner_key, seed_slot });
+        emit!(PoolDrawArmed {
+            miner: miner_key,
+            seed_slot,
+            collateral_chain: ctx.accounts.pool.collateral_chain.clone(),
+        });
         return Ok(());
     }
 
@@ -150,7 +160,11 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
             // could have waited for.
             let seed_slot = cur_slot.saturating_add(SEED_SLOT_DELAY_SLOTS);
             ctx.accounts.pool.seed_slot = seed_slot;
-            emit!(PoolDrawArmed { miner: miner_key, seed_slot });
+            emit!(PoolDrawArmed {
+                miner: miner_key,
+                seed_slot,
+                collateral_chain: ctx.accounts.pool.collateral_chain.clone(),
+            });
             return Ok(());
         }
     };
@@ -178,11 +192,12 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     let req_count = ctx.accounts.pool.requests.len() as u8;
 
     // Pinned miner-quote snapshot from the pool.
-    let (from_chain, to_chain, miner_from_addr, miner_to_addr, rate) = {
+    let (from_chain, to_chain, collateral_chain, miner_from_addr, miner_to_addr, rate) = {
         let p = &ctx.accounts.pool;
         (
             p.from_chain.clone(),
             p.to_chain.clone(),
+            p.collateral_chain.clone(),
             p.miner_from_addr.clone(),
             p.miner_to_addr.clone(),
             p.rate,
@@ -198,6 +213,9 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.router = winner_router; // the ONLY signer allowed to finalize
     r.from_chain = from_chain; // pinned pair — the finalize collateral bind reads from_chain
     r.to_chain = to_chain;
+    // Backing pinned at the draw, immutable from here (finalize + claim only read it) — carried from
+    // the quote the pool opened against, so the purse the miner offered is the purse that answers.
+    r.collateral_chain = collateral_chain.clone();
     r.miner_from_addr = miner_from_addr;
     r.miner_to_addr = miner_to_addr;
     r.rate = rate;
@@ -231,6 +249,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         miner: miner_key,
         winner: winner_router,
         requests: req_count,
+        collateral_chain,
     });
     Ok(())
 }

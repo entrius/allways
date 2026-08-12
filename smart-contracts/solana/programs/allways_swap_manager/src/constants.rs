@@ -18,7 +18,8 @@ pub const MINER_SEED: &[u8] = b"miner";
 #[constant]
 pub const VOTE_SEED: &[u8] = b"vote";
 
-/// PDA seed prefix for a confirmed reservation (`seeds = [RESV_SEED, miner_pubkey]`).
+/// PDA seed prefix for a confirmed reservation (`seeds = [RESV_SEED, miner_pubkey, backing]`) —
+/// one slot per (miner, hub) since v3.1, so each hub's contest holds only its own slot.
 #[constant]
 pub const RESV_SEED: &[u8] = b"resv";
 
@@ -47,7 +48,8 @@ pub const BIND_SEED: &[u8] = b"bind";
 #[constant]
 pub const HOTKEY_BIND_SEED: &[u8] = b"hkbind";
 
-/// PDA seed prefix for a per-miner reservation-lottery pool (`seeds = [POOL_SEED, miner]`).
+/// PDA seed prefix for a reservation-lottery pool (`seeds = [POOL_SEED, miner, backing]`) —
+/// one contest slot per (miner, hub) since v3.1.
 #[constant]
 pub const POOL_SEED: &[u8] = b"pool";
 
@@ -56,10 +58,16 @@ pub const POOL_SEED: &[u8] = b"pool";
 #[constant]
 pub const TREASURY_SEED: &[u8] = b"treasury";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v10: A4 source-replay via
-/// freshness — removed the permanent `TxMarker`, added `Reservation.created_at` as the source bound.
-/// v9 = A5 binding; v8 = scoring read-surface + #493 extensions; see git history for v2–v9.
-pub const CONFIG_VERSION: u32 = 10;
+/// PDA seed prefix for a miner's bond attestation on one backing chain
+/// (`seeds = [ATTEST_SEED, miner_pubkey, chain_id]`). One per (miner, hub) — the quorum's assertion
+/// about a bond this program cannot read.
+#[constant]
+pub const ATTEST_SEED: &[u8] = b"attest";
+
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v14: v3.1 per-hub swap
+/// concurrency — per-hub transient state on MinerState, per-hub Pool/Reservation seeds. v13 = W2b
+/// quote-level backing; v12 = W2 bond attestation; v11 = W1 seam; v10 = A4 freshness replay.
+pub const CONFIG_VERSION: u32 = 14;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -75,6 +83,10 @@ pub const REQ_CONFIRM: u8 = 6;
 pub const REQ_TIMEOUT: u8 = 7;
 /// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
+/// Per-(miner, backing chain) round writing a `BondAttestation`.
+pub const REQ_SET_ATTESTATION: u8 = 9;
+/// Global round bumping `Config.last_attest_heartbeat` (the dead-man fuse's liveness signal).
+pub const REQ_ATTEST_HEARTBEAT: u8 = 10;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
 /// each) ahead, so the seed slot never lands in the window of the leader who included the arming tx.
@@ -88,11 +100,34 @@ pub const MAX_ADDR_LEN: usize = 80;
 pub const MAX_CHAIN_LEN: usize = 16;
 pub const MAX_TX_LEN: usize = 128;
 
-/// The collateral currency for the SOL-collateral module (this program). `finalize_reservation` binds
-/// `collateral_amount` to the leg denominated in this chain: `collateral_amount == (from_chain ==
-/// NUMERAIRE_CHAIN ? from_amount : to_amount)`. NOT a global "every swap must have a SOL leg" rule —
-/// it scopes the bind to SOL-collateralized swaps, so a future TAO-collateral module is an added branch.
+/// The default collateral currency: the backing every reservation is pinned to at the draw. The
+/// finalize bind then sizes `collateral_amount` against whichever leg the pinned backing names — a
+/// per-swap lookup, NOT a global "every swap must have a SOL leg" rule.
 pub const NUMERAIRE_CHAIN: &str = "sol";
+
+/// Backing (collateral) chain ids, lowercase like every other chain id at intake. "sol" is the local
+/// per-miner vault this program custodies; "tao" is the Bittensor bond vault, whose purse read lands
+/// in W2 — until then `backing::backing_purse` refuses it. A new hub is a new id, never a new branch.
+pub const BACKING_CHAIN_SOL: &str = NUMERAIRE_CHAIN;
+pub const BACKING_CHAIN_TAO: &str = "tao";
+
+/// One bit per backing in `MinerState.active_backings` — a miner activates each purse separately, so a
+/// deficient bond disables only its own quotes. 8 hubs before a program upgrade (realistic ceiling ~4).
+/// The legacy `active` bool is the OR of these bits; see `MinerState::set_backing`.
+pub const BACKING_BIT_SOL: u8 = 1 << 0;
+pub const BACKING_BIT_TAO: u8 = 1 << 1;
+
+/// Every known backing as `(bit, chain id)` — the one enumeration of the registry, for the rare code
+/// that must walk the whole mask rather than answer about one backing (a full self-exit emitting one
+/// event per purse). A new hub is a new row here and a new match arm in `backing.rs`; nothing else.
+pub const BACKINGS: [(u8, &str); 2] = [
+    (BACKING_BIT_SOL, BACKING_CHAIN_SOL),
+    (BACKING_BIT_TAO, BACKING_CHAIN_TAO),
+];
+
+/// Width of the per-hub transient arrays on `MinerState` (busy/settling/reserved) — one slot per
+/// possible `active_backings` bit, indexed by bit position (`MinerState::backing_slot`).
+pub const MAX_BACKING_SLOTS: usize = 8;
 
 /// Fixed-point scale for the miner rate: the stored `rate` integer = display_rate × RATE_PRECISION
 /// (e.g. "345" TAO/BTC → `345 × 1e18`). Matches the off-chain `RATE_PRECISION`, so the stored value
@@ -235,6 +270,50 @@ pub const DEFAULT_FULFILLMENT_TIMEOUT_SECS: i64 = 600; // 10 min
 /// Canonical deploy value for `reservation_ttl_secs` — 10 min (mirrors ink!). Same model as the
 /// fulfillment timeout: a tight base, extended while the source tx confirms.
 pub const DEFAULT_RESERVATION_TTL_SECS: i64 = 600; // 10 min
+
+/// Deploy TAO-backed swap-size bounds, in rao (`Config.tao_min/max_swap_amount`; 0 max = unbounded).
+/// Min = the fee-meaningfulness floor (a 1% fee on 0.1 τ dwarfs ~0.0002 τ of settlement postage).
+/// Max = a deliberately conservative 1 τ start while the quorum that can slash bonds is small.
+pub const TAO_MIN_SWAP_AMOUNT_RAO: u64 = 100_000_000; // 0.1 τ
+pub const TAO_MAX_SWAP_AMOUNT_RAO: u64 = 1_000_000_000; // 1 τ — raised via set_tao_swap_bounds
+
+// Same rules the setters enforce (validate::min_swap_amount / swap_bounds), checked at compile time so
+// the seed can't be a value a later setter would reject.
+const _: () = assert!(
+    TAO_MIN_SWAP_AMOUNT_RAO >= 1_000
+        && (TAO_MAX_SWAP_AMOUNT_RAO == 0 || TAO_MIN_SWAP_AMOUNT_RAO <= TAO_MAX_SWAP_AMOUNT_RAO),
+    "seed TAO swap bounds must satisfy the min-swap floor and be non-contradictory"
+);
+
+/// Initial `Config.settlement_grace_secs` — how long a non-locally-backed timeout keeps the miner busy
+/// while the penalty settles on the backing chain (verdict here, seizure there). Runtime-tunable within
+/// [MIN, MAX]; 15 min covers a relay round trip with headroom.
+pub const SETTLEMENT_GRACE_SECS: i64 = 900;
+pub const SETTLEMENT_GRACE_SECS_MIN: i64 = 60;
+pub const SETTLEMENT_GRACE_SECS_MAX: i64 = 7_200; // 2 h — a stuck relay must not hold a miner longer
+
+const _: () = assert!(
+    SETTLEMENT_GRACE_SECS >= SETTLEMENT_GRACE_SECS_MIN
+        && SETTLEMENT_GRACE_SECS <= SETTLEMENT_GRACE_SECS_MAX,
+    "SETTLEMENT_GRACE_SECS must be within [1 min, 2 h]"
+);
+
+/// Deploy `Config.tao_min_collateral` — the attested effective bond (rao) a miner must hold to
+/// activate its TAO backing, the rao twin of the lamport `min_collateral`. Anchored to the smallest
+/// bond that can serve one min swap: 1.1 × TAO_MIN_SWAP_AMOUNT_RAO = 0.11 τ, floored up to 0.25 τ.
+pub const TAO_MIN_COLLATERAL_RAO: u64 = 250_000_000; // 0.25 τ
+
+/// Initial `Config.attest_max_age_secs` — the dead-man fuse: TAO-backed entry (finalize/initiate) is
+/// refused once the global attestation heartbeat is older than this. A circuit breaker, not a cadence,
+/// so it sits at ≥2× the 12–24 h heartbeat interval. Runtime-tunable within [MIN, MAX].
+pub const ATTEST_MAX_AGE_SECS: i64 = 86_400; // 24 h
+pub const ATTEST_MAX_AGE_SECS_MIN: i64 = 3_600; // 1 h — below one heartbeat interval it fuses constantly
+pub const ATTEST_MAX_AGE_SECS_MAX: i64 = 172_800; // 48 h — past this it stops being a circuit breaker
+
+const _: () = assert!(
+    ATTEST_MAX_AGE_SECS >= ATTEST_MAX_AGE_SECS_MIN && ATTEST_MAX_AGE_SECS <= ATTEST_MAX_AGE_SECS_MAX,
+    "ATTEST_MAX_AGE_SECS must be within [1 h, 48 h]"
+);
 
 /// Total seconds a reservation/swap deadline may be slid forward across all extensions, frozen into
 /// each at creation as `deadline + this`. Seeds `Config.max_total_extension_secs`; runtime-tunable

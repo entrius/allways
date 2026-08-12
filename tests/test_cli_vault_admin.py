@@ -1,0 +1,91 @@
+"""Vault governance CLI — the guards that stop a validator voting the opposite of what they mean."""
+
+from unittest.mock import MagicMock
+
+from click.testing import CliRunner
+
+from allways.cli.swap_commands import vault as vault_cli
+from allways.vault.client import VaultCallResult
+
+VALIDATORS = ['5Django', '5Eve']
+HOTKEY = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
+
+
+def _client(monkeypatch, **over):
+    client = MagicMock()
+    client.keypair.ss58_address = '5Signer'
+    client.get_validators.return_value = VALIDATORS
+    client.get_min_collateral.return_value = 250_000_000
+    client.get_max_collateral.return_value = 10_000_000_000
+    client.get_consensus_threshold.return_value = 66
+    client.get_vote_round_ttl.return_value = 600
+    client.get_staking_hotkey.return_value = HOTKEY
+    client.get_netuid.return_value = 7
+    client.admin_call.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
+    for key, value in over.items():
+        getattr(client, key).return_value = value
+    monkeypatch.setattr(vault_cli, '_client', lambda use_coldkey=False: client)
+    return client
+
+
+def _run(args, stdin=None):
+    return CliRunner().invoke(vault_cli.vault_admin_group, args, input=stdin)
+
+
+def test_a_sub_majority_threshold_is_refused_before_it_reaches_the_chain(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-config', '--threshold', '50'])
+    assert result.exit_code != 0
+    assert '51' in result.output
+    client.admin_call.assert_not_called()
+
+
+def test_the_majority_floor_itself_is_accepted(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-config', '--threshold', '51'])
+    assert result.exit_code == 0
+    client.admin_call.assert_called_once()
+
+
+def test_max_collateral_zero_is_named_as_unlimited_and_gated(monkeypatch):
+    """0 is the contract's UNLIMITED sentinel: a validator meaning "close the vault" would
+    otherwise be voting the exact opposite, unanimously."""
+    client = _client(monkeypatch)
+    result = _run(['set-config', '--max-collateral', '0'], stdin='n\n')
+    assert 'UNLIMITED' in result.output
+    client.admin_call.assert_not_called()
+
+
+def test_declining_the_unlimited_prompt_submits_nothing(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['set-config', '--max-collateral', '0'], stdin='n\n')
+    assert 'Cancelled' in result.output
+    client.admin_call.assert_not_called()
+
+
+def test_a_positive_max_collateral_needs_no_unlimited_prompt(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-config', '--max-collateral', '5'])
+    assert 'UNLIMITED' not in result.output
+    client.admin_call.assert_called_once()
+
+
+def test_set_recycle_target_votes_both_fields_and_prints_the_peer_command(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-recycle-target', HOTKEY, '9'])
+    assert result.exit_code == 0
+    label, hotkey_arg, netuid_arg = client.admin_call.call_args.args
+    assert label == 'vote_set_recycle_target'
+    assert len(hotkey_arg) == 32
+    assert netuid_arg == (9).to_bytes(2, 'little')
+    # Every other validator must run the identical command or they open their own round.
+    # (Normalised: rich wraps the printed command to the terminal width.)
+    printed = ' '.join(result.output.split())
+    assert f'set-recycle-target {HOTKEY} 9' in printed
+
+
+def test_set_recycle_target_refuses_a_malformed_address(monkeypatch):
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-recycle-target', 'not-an-address', '9'])
+    assert result.exit_code != 0
+    client.admin_call.assert_not_called()

@@ -21,6 +21,8 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
@@ -57,13 +59,17 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
-fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
-    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes(), b.as_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
@@ -146,13 +152,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner.as_ref()),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -164,6 +171,7 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         &allways_swap_manager::instruction::SetQuote {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
@@ -172,7 +180,8 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            miner_state: miner_pda(miner),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -185,6 +194,7 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -192,7 +202,8 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            attestation: None,
             pool: pool_pda(miner),
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
@@ -220,6 +231,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            attestation: None,
         }
         .to_account_metas(None),
     )
@@ -273,8 +285,9 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -334,7 +347,7 @@ fn swap(svm: &LiteSVM, from_tx_hash: &str) -> Swap {
 }
 fn busy_until(svm: &LiteSVM, m: &Pubkey) -> i64 {
     let a = svm.get_account(&miner_pda(m)).unwrap();
-    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_until
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_any_until()
 }
 
 /// init + 3 validators + active miner + a confirmed reservation, clock at BASE_TS. The reservation
@@ -359,9 +372,10 @@ fn setup() -> (LiteSVM, Vec<Keypair>, Keypair) {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), COLLATERAL), &miner.pubkey(), &miner).expect("post");
-    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+    // Activate BEFORE quoting: W2b's set_quote refuses a quote whose backing the miner isn't serving.
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
 
     let setup_ts = BASE_TS - 100;
     set_clock(&mut svm, setup_ts);

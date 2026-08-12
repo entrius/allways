@@ -18,6 +18,8 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYS: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const BASE_TS: i64 = 1_700_000_000;
@@ -44,13 +46,17 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
-fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
-    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes(), b.as_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 fn swap_pda(k: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", k], &pid()).0
@@ -132,8 +138,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
 
     let activate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
-            &allways_swap_manager::instruction::VoteActivate {}.data(),
-            allways_swap_manager::accounts::VoteActivate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(0, miner.pubkey().as_ref()), system_program: SYS }.to_account_metas(None),
+            &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
+            allways_swap_manager::accounts::VoteActivate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), vote_round: vote_pda(0, miner.pubkey().as_ref()), attestation: None, system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("activate");
     };
     activate(&mut svm, &vals[0]);
@@ -141,13 +147,13 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
 
     // Reservation via the lottery (set quote → open → warp past window → resolve; sole entrant wins).
     send(&mut svm, Instruction::new_with_bytes(pid(),
-        &allways_swap_manager::instruction::SetQuote { from_chain: "btc".to_string(), to_chain: "sol".to_string(), miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: 1_000_000_000_000_000_000, liquidity: 1 }.data(),
-        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), quote: quote_pda(&miner.pubkey(), "btc", "sol"), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
+        &allways_swap_manager::instruction::SetQuote { from_chain: "btc".to_string(), to_chain: "sol".to_string(), collateral_chain: BACKING.to_string(), miner_from_addr: "mBTC".to_string(), miner_to_addr: "mSOL".to_string(), rate: 1_000_000_000_000_000_000, liquidity: 1 }.data(),
+        allways_swap_manager::accounts::SetQuote { miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "btc", "sol", BACKING), treasury: treasury_pda(), system_program: SYS }.to_account_metas(None),
     ), &miner.pubkey(), &miner).expect("set_quote");
     let pool_user = Keypair::new().pubkey();
     send(&mut svm, Instruction::new_with_bytes(pid(),
-        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "btc".to_string(), to_chain: "sol".to_string() }.data(),
-        allways_swap_manager::accounts::OpenOrRequest { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "btc", "sol"), pool: pool_pda(&miner.pubkey()), treasury: treasury_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
+        &allways_swap_manager::instruction::OpenOrRequest { from_chain: "btc".to_string(), to_chain: "sol".to_string(), collateral_chain: BACKING.to_string() }.data(),
+        allways_swap_manager::accounts::OpenOrRequest { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), quote: quote_pda(&miner.pubkey(), "btc", "sol", BACKING), attestation: None, pool: pool_pda(&miner.pubkey()), treasury: treasury_pda(), reservation: resv_pda(&miner.pubkey()), system_program: SYS }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("open");
     set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
     // resolve_pool is two-phase: arm the draw on a future slot, produce it, then draw.
@@ -164,7 +170,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128 }.data(),
-        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()) }.to_account_metas(None),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("finalize");
 
     let key = skey("tx1");
@@ -176,7 +182,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     let initiate = |svm: &mut LiteSVM, v: &Keypair| {
         send(svm, Instruction::new_with_bytes(pid(),
             &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
-            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, miner.pubkey().as_ref()), swap: swap_pda(&key), system_program: SYS }.to_account_metas(None),
+            allways_swap_manager::accounts::VoteInitiate { validator: v.pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), vote_round: vote_pda(2, &key), swap: swap_pda(&key), attestation: None, system_program: SYS }.to_account_metas(None),
         ), &v.pubkey(), v).expect("initiate");
     };
     initiate(&mut svm, &vals[0]);

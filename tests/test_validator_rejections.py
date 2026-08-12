@@ -181,3 +181,46 @@ def test_miner_activate_unregistered():
 def test_returns_rejectioninfo_dataclass():
     info = render_and_aggregate(_silent_console(), [])
     assert isinstance(info, RejectionInfo)
+
+
+# ---- per-purse activation (W3.2) ----------------------------------------------------------
+
+
+def _reason(text: str) -> RejectionInfo:
+    return render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=text)])
+
+
+def test_already_active_names_the_purse_not_the_miner():
+    # Purses activate separately, so "your miner is already active" would be a lie to a miner
+    # asking for its second one. The rule follows the per-purse reason the validator now sends.
+    info = _reason('Purse already active: TAO')
+    assert info.category == 'already_active'
+    assert info.deterministic is True and 'purse' in info.headline.lower()
+
+
+def test_every_bond_refusal_lands_on_one_rule_and_stays_retryable():
+    # These clear on their own once the relay catches up, so none of them may read as terminal.
+    for reason in (
+        'Bond attestation for your TAO purse is missing. Validators mirror the vault on their own cadence.',
+        'Bond attestation is stale — it asserts lock epoch 3, the TAO vault is at 4.',
+        'Bond attestation is fused off — the TAO heartbeat is 90000s old (max 86400s).',
+        'Bond is not locked on the TAO vault (the attestation has yet to catch up).',
+        'Bond relay not configured on this validator, so it cannot verify your TAO bond.',
+    ):
+        info = _reason(reason)
+        assert info.category == 'bond_not_ready', reason
+        assert info.deterministic is False and reason.split('—')[0].strip() in info.headline
+
+
+def test_an_unknown_backing_keeps_its_own_category():
+    # Must not fall into the bond rule: naming a backing this subnet doesn't have is the miner's
+    # typo to fix, not a wait-for-the-relay.
+    info = _reason('Unknown backing "btc" — this subnet backs: sol, tao')
+    assert info.category == 'unknown_backing'
+    assert info.deterministic is True and 'btc' in info.headline
+
+
+def test_the_sol_collateral_refusal_is_untouched():
+    info = _reason('Insufficient collateral: 10 < 1000000')
+    assert info.category == 'insufficient_collateral'
+    assert info.deterministic is True and 'alw collateral deposit' in info.headline

@@ -13,9 +13,9 @@ from rich.text import Text
 from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
+    backing_label,
     console,
     fail,
-    from_lamports,
     get_solana_cli_context,
     load_miner_book,
     print_json,
@@ -24,14 +24,24 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
+    backing_purse,
+    bounds_from_config,
     compute_intake_amounts,
+    hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
     to_smallest_units,
 )
-from allways.constants import FEE_DIVISOR
+from allways.constants import FEE_DIVISOR, hub_leg
 from allways.utils.rate import apply_fee_deduction, directional_rate, is_executable_rate
+
+# The failure guarantee each backing carries. It differs in TIMING, not in whether you are made
+# whole — say that plainly rather than making a taker infer it from the asset name.
+GUARANTEE = {
+    'sol': "instant SOL refund from the miner's on-chain collateral",
+    'tao': "TAO reimbursement from the miner's bond, shortly after the timeout",
+}
 
 
 def _prompt_or_fail(value, prompt_text, opt, cast=str):
@@ -70,15 +80,15 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     to_chain = to_chain.lower()
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
-    if from_chain == to_chain or 'sol' not in (from_chain, to_chain):
-        fail('A swap must have a SOL leg (sol<->btc or sol<->tao) and two distinct chains.')
+    if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
+        fail('A swap must have a hub leg (SOL or TAO, e.g. sol<->btc or tao<->eth) and two distinct chains.')
     if amount <= 0:
         fail('--amount must be positive.')
 
     _, client = get_solana_cli_context(need_keypair=False)
     cfg = safe_read(lambda: client.get_config(), what='read config')
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    bounds = bounds_from_config(cfg) if cfg else {}
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
 
     from_amount = to_smallest_units(amount, from_chain)
     to_dec = get_chain_def(to_chain).decimals
@@ -91,8 +101,19 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
             continue
         for q in e.quotes:
             if q.from_chain == from_chain and q.to_chain == to_chain:
+                backing = getattr(q, 'collateral_chain', None) or 'sol'
+                # The purse the contract will check for THIS offer — local lamports for a
+                # sol-backed quote, the attested effective bond for any other.
+                purse = backing_purse(client, q.miner, e.state, backing)
+                if purse is None:
+                    continue
                 candidates.append(
-                    MinerCandidate(miner=q.miner, rate_display=rate_display_from_fixed(q.rate), collateral=e.collateral)
+                    MinerCandidate(
+                        miner=q.miner,
+                        rate_display=rate_display_from_fixed(q.rate),
+                        collateral=purse,
+                        backing=backing,
+                    )
                 )
 
     # Build the viable set with the same guards the contract enforces, and identify the best offer.
@@ -104,15 +125,19 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
             continue
         if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
             continue
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display)
+        try:
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
+        except ValueError:
+            continue
         if amts.to_amount <= 0:
             continue
-        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, min_swap, max_swap)
+        lo, hi = bounds.get(c.backing, (min_swap, max_swap))
+        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, lo, hi, c.backing)
         if not ok:
             continue
         viable.append((c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR)))
 
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     best_miner = str(best[0].miner) if best else None
 
     if as_json:
@@ -128,8 +153,14 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
                         'miner': str(c.miner),
                         'rate': directional_rate(from_chain, to_chain, c.rate_display),
                         'rate_unit': f'{to_chain.upper()} per {from_chain.upper()}',
+                        # What you are owed if the miner fails: SOL refunds instantly, TAO is
+                        # reimbursed from the miner's bond shortly after the timeout.
+                        'backing': c.backing,
+                        'guarantee': GUARANTEE[c.backing] if c.backing in GUARANTEE else 'see docs',
                         'receive': recv / 10**to_dec,
-                        'collateral_sol': from_lamports(c.collateral),
+                        # The purse is in the BACKING asset's own units, not always SOL.
+                        'collateral': c.collateral / 10 ** get_chain_def(c.backing).decimals,
+                        'collateral_unit': c.backing.upper(),
                         'best': str(c.miner) == best_miner,
                     }
                     for c, recv in sorted(viable, key=lambda x: x[1], reverse=True)
@@ -162,6 +193,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         show_header=True,
     )
     table.add_column('Miner', style='cyan')
+    table.add_column('Backing', style='cyan')
     table.add_column(f'Rate ({to_chain.upper()}/{from_chain.upper()})', style='white', justify='right')
     table.add_column(f'You receive ({to_chain.upper()})', style='green', justify='right')
     table.add_column('Collateral', justify='right')
@@ -170,10 +202,17 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
         is_best = str(c.miner) == best_miner
         table.add_row(
             Text(str(c.miner)[:12] + '…', style='bold cyan' if is_best else 'cyan'),
+            backing_label(c.backing),
             directional_rate(from_chain, to_chain, c.rate_display),
             f'{recv / 10**to_dec:.8g}',
-            f'{from_lamports(c.collateral):.2f} SOL',
+            f'{c.collateral / 10 ** get_chain_def(c.backing).decimals:.2f} {c.backing.upper()}',
             '★ best' if is_best else '',
         )
     console.print(table)
+    if len({c.backing for c, _ in viable}) > 1:
+        console.print(
+            "[dim]Backing is the miner's bond, and it sets what you get if they fail to deliver:\n"
+            f'  sol-backed — {GUARANTEE["sol"]}\n'
+            f'  tao-backed — {GUARANTEE["tao"]}[/dim]'
+        )
     console.print('[dim]Preview only — run `alw swap now` to originate a reservation.[/dim]')

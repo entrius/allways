@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 import numpy as np
 
-from allways.chains import canonical_pair
+from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
     RECYCLE_UID,
-    TAO_TO_RAO,
+    hub_leg,
 )
-from allways.utils.rate import min_executable_sol_leg
+from allways.utils.rate import min_executable_hub_leg
 
 if TYPE_CHECKING:
     from allways.validator.scoring import DirectionTrace
@@ -56,8 +56,7 @@ def log_scoring_trace(
     distributed: float,
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
-    min_swap_lamports: int = 0,
-    max_swap_lamports: int = 0,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -110,8 +109,7 @@ def log_scoring_trace(
             direction_traces,
             recycle_uid,
             collaterals,
-            min_swap_lamports,
-            max_swap_lamports,
+            swap_bounds,
             covered=crown_holders,
         )
     )
@@ -135,8 +133,7 @@ def non_earner_lines(
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_lamports: int = 0,
-    max_swap_lamports: int = 0,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
     covered: Optional[Set[str]] = None,
 ) -> List[str]:
     collaterals = collaterals or {}
@@ -161,7 +158,7 @@ def non_earner_lines(
             continue
         eligible = eligibility.get(hk, False)
         reason = diagnose_non_earner(
-            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, min_swap_lamports, max_swap_lamports
+            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, swap_bounds
         )
         out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_s=0 reason="{reason}" eligible={eligible}')
         if len(out) >= NON_EARNER_LINE_CAP:
@@ -176,15 +173,15 @@ def diagnose_non_earner(
     ever_active: Set[str],
     direction_traces: Dict[Tuple[str, str], DirectionTrace],
     collaterals: Optional[Dict[str, int]] = None,
-    min_swap_lamports: int = 0,
-    max_swap_lamports: int = 0,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> str:
-    """Best-effort reason a miner earned no crown. Direction-aware: tao→btc is
-    lower-rate-wins, btc→tao higher-wins, so "outbid" only fires when the
+    """Best-effort reason a miner earned no crown. Direction-aware: btc→sol is
+    lower-rate-wins, sol→btc higher-wins, so "outbid" only fires when the
     miner's own rate is genuinely worse than the winner's. A rate that is at
     least as good as the winner's but still earned nothing was excluded by the
     capacity / can_fund collateral gate — report that, not "outbid"."""
     collaterals = collaterals or {}
+    swap_bounds = swap_bounds or {}
     if not latest_rates:
         return 'no_rate_posted'
     if hotkey not in ever_active:
@@ -204,16 +201,21 @@ def diagnose_non_earner(
         if not competitive:
             outbid_parts.append(f'{from_c}→{to_c}: own={own:g} vs best={best:g}')
             continue
+        # A funding diagnosis only makes sense where the SOL collateral events ARE the
+        # direction's purse (sol-hub); a tao-hub direction runs purse-neutral in scoring.
+        hub = hub_leg(from_c, to_c)
+        if hub != 'sol':
+            return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
         # Rate is at least as good as the winner's, yet earned nothing — a
         # qualification gate dropped this miner. Collateral is the usual cause.
         if hotkey not in collaterals:
             return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
-        min_leg = min_executable_sol_leg(own, from_c, to_c, min_swap_lamports, max_swap_lamports)
+        min_swap_hub, max_swap_hub = swap_bounds.get(hub, (0, 0))
+        min_leg = min_executable_hub_leg(own, from_c, to_c, min_swap_hub, max_swap_hub)
         have = collaterals[hotkey]
         if min_leg > 0 and have < min_leg:
-            return (
-                f'insufficient_collateral ({from_c}→{to_c}: have={have / TAO_TO_RAO:g}t need={min_leg / TAO_TO_RAO:g}t)'
-            )
+            scale = 10 ** get_chain_def(hub).decimals
+            return f'insufficient_collateral ({from_c}→{to_c}: have={have / scale:g} need={min_leg / scale:g} {hub})'
         # Competitive and funded — lost to a tie split, busy, or active-flag timing.
         return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
 

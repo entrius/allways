@@ -24,6 +24,8 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 const REQ_ACTIVATE: u8 = 0;
@@ -54,13 +56,17 @@ fn vote_pda(req: u8, m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], m.as_ref()], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
-fn quote_pda(m: &Pubkey, f: &str, t: &str) -> Pubkey {
-    Pubkey::find_program_address(&[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes()], &pid()).0
+fn quote_pda(m: &Pubkey, f: &str, t: &str, b: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"quote", m.as_ref(), f.as_bytes(), t.as_bytes(), b.as_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 
 fn set_clock(svm: &mut LiteSVM, ts: i64) {
@@ -156,13 +162,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -174,6 +181,7 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
         &allways_swap_manager::instruction::SetQuote {
             from_chain: f.to_string(),
             to_chain: t.to_string(),
+            collateral_chain: BACKING.to_string(),
             miner_from_addr: mfrom.to_string(),
             miner_to_addr: mto.to_string(),
             rate,
@@ -182,7 +190,8 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
-            quote: quote_pda(miner, f, t),
+            miner_state: miner_pda(miner),
+            quote: quote_pda(miner, f, t, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -196,6 +205,7 @@ fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: f.to_string(),
             to_chain: t.to_string(),
+            collateral_chain: BACKING.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -203,7 +213,8 @@ fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            quote: quote_pda(miner, f, t),
+            quote: quote_pda(miner, f, t, BACKING),
+            attestation: None,
             pool: pool_pda(miner),
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
@@ -241,6 +252,7 @@ fn finalize_ix(
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            attestation: None,
         }
         .to_account_metas(None),
     )
@@ -295,7 +307,7 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
 fn deactivate_ix(miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::Deactivate {}.data(),
+        &allways_swap_manager::instruction::Deactivate { backing: None }.data(),
         allways_swap_manager::accounts::Deactivate {
             miner: *miner,
             miner_state: miner_pda(miner),
@@ -343,9 +355,10 @@ fn setup(min_swap: u64, max_swap: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypa
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&miner.pubkey(), 10_000_000_000), &miner.pubkey(), &miner).expect("post");
-    send(&mut svm, set_quote_ix(&miner.pubkey(), "btc", "sol", MFROM, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
+    // Activate BEFORE quoting: W2b's set_quote refuses a quote whose backing the miner isn't serving.
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "btc", "sol", MFROM, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
     (svm, admin, vals, miner)
 }
 
@@ -397,11 +410,11 @@ fn test_repeat_bid_is_idempotent() {
 #[test]
 fn test_pair_mismatch_rejected() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
-    // Miner also quotes BTC→TAO so that quote account exists for the join attempt.
-    send(&mut svm, set_quote_ix(&miner.pubkey(), "btc", "tao", MFROM, "minerTAOaddr", 2_000_000_000_000_000_000), &miner.pubkey(), &miner).expect("quote2");
+    // Miner also quotes TAO→SOL (same SOL backing) so that quote account exists for the join attempt.
+    send(&mut svm, set_quote_ix(&miner.pubkey(), "tao", "sol", "minerTAOaddr", MTO, 2_000_000_000_000_000_000), &miner.pubkey(), &miner).expect("quote2");
     let _user = Keypair::new().pubkey();
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open BTC/SOL");
-    let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "tao"), &vals[1].pubkey(), &vals[1]);
+    let mism = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "tao", "sol"), &vals[1].pubkey(), &vals[1]);
     assert!(mism.is_err(), "joining with a different pair than the pinned one must be rejected");
 }
 
@@ -502,13 +515,18 @@ fn test_amount_bounds_fire_at_finalize() {
 
 #[test]
 fn test_requires_active_miner() {
+    // A miner that WAS active — collateral posted, activated, quote standing — and then left. The
+    // quote outlives the activation (self-deactivate doesn't reap quotes), so this exercises
+    // open_or_request's own purse gate rather than set_quote's.
     let (mut svm, _admin, vals, _miner) = setup(0, 0);
-    // an inactive miner that posted collateral + a quote but was never activated
     let inactive = Keypair::new();
     svm.airdrop(&inactive.pubkey(), 100_000_000_000).unwrap();
     send(&mut svm, post_ix(&inactive.pubkey(), 1_000_000_000), &inactive.pubkey(), &inactive).expect("post");
+    send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &inactive.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
+    send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &inactive.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
     send(&mut svm, set_quote_ix(&inactive.pubkey(), "btc", "sol", MFROM, MTO, RATE), &inactive.pubkey(), &inactive).expect("quote");
-    let _user = Keypair::new().pubkey();
+    send(&mut svm, deactivate_ix(&inactive.pubkey()), &inactive.pubkey(), &inactive).expect("deactivate");
+
     let res = send(&mut svm, open_ix(&vals[0].pubkey(), &inactive.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]);
     assert!(res.is_err(), "inactive miner cannot be pooled");
 }
@@ -522,13 +540,14 @@ fn test_open_rejects_legacy_uppercase_quote() {
     use anchor_lang::AccountSerialize;
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let (pda, bump) = Pubkey::find_program_address(
-        &[b"quote", miner.pubkey().as_ref(), "SOL".as_bytes(), "btc".as_bytes()],
+        &[b"quote", miner.pubkey().as_ref(), "SOL".as_bytes(), "btc".as_bytes(), BACKING.as_bytes()],
         &pid(),
     );
     let legacy = MinerQuote {
         miner: miner.pubkey(),
         from_chain: "SOL".into(),
         to_chain: "btc".into(),
+        collateral_chain: BACKING.into(),
         miner_from_addr: MFROM.into(),
         miner_to_addr: MTO.into(),
         rate: RATE,
@@ -600,7 +619,7 @@ const REQ_DEACTIVATE: u8 = 5;
 fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteDeactivate {}.data(),
+        &allways_swap_manager::instruction::VoteDeactivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteDeactivate {
             validator: *validator,
             config: config_pda(),
@@ -628,7 +647,7 @@ fn set_min_swap_ix(admin: &Pubkey, amount: u64) -> Instruction {
 }
 fn busy_until(svm: &LiteSVM, miner: &Pubkey) -> i64 {
     let a = svm.get_account(&miner_pda(miner)).unwrap();
-    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_until
+    MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().busy_any_until()
 }
 fn collateral(svm: &LiteSVM, miner: &Pubkey) -> u64 {
     let a = svm.get_account(&miner_pda(miner)).unwrap();

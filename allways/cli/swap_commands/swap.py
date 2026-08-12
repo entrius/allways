@@ -37,8 +37,10 @@ from allways.cli.swap_commands.helpers import (
     loading,
 )
 from allways.cli.swap_commands.swap_intake import (
+    bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
@@ -46,7 +48,8 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, hub_leg
+from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
 from allways.synapses import SwapReserveSynapse
@@ -72,11 +75,11 @@ class PoolContention(NamedTuple):
     rate: int = 0
 
 
-def _pool_contention(client, miner, cfg) -> PoolContention:
+def _pool_contention(client, miner, cfg, backing) -> PoolContention:
     """Best-effort read of the miner's pool. Visibility only — never raises, so a decode/RPC hiccup
     can't block a bid; on any surprise it reports 'not open' and the taker proceeds as before."""
     try:
-        pool = client.get_pool(miner)
+        pool = client.get_pool(miner, backing)
         now = int(time.time())
         if int(getattr(pool, 'opened_at', 0)) == 0 or now > int(getattr(pool, 'closes_at', 0)):
             return PoolContention(False, 0, 0, 0)
@@ -110,12 +113,12 @@ _SEND_MARGIN_SECS = 180
 _BENIGN_CRANK_NAMES = ('SeedSlotNotYetProduced', 'PoolNotClosed', 'NoRequests', 'AlreadyFilled')
 
 
-def _self_crank_resolve(client, miner) -> None:
+def _self_crank_resolve(client, miner, backing) -> None:
     """Permissionless arm-then-draw crank. An unrouted taker cranks its own pool so the draw never
     waits on validator liveness. Benign races (window not closed, seed slot not produced yet, already
     resolved/filled) are expected and retried on the next poll."""
     try:
-        client.resolve_pool(miner)
+        client.resolve_pool(miner, backing)
     except TransientRpcError:
         return  # RPC hiccup while nudging the pool — the poll loop re-cranks and re-reads the real
         # outcome (the reservation). If this resolve_pool actually landed, the next pass sees the seat.
@@ -144,26 +147,26 @@ def _drawn_unfilled(resv) -> bool:
     return int(resv.reserved_until) == 0 and int(resv.created_at) == 0 and int(resv.finalize_by) > time.time()
 
 
-def _poll_drawn(client, miner, user, timeout_secs: int):
+def _poll_drawn(client, miner, user, timeout_secs: int, backing: str):
     """Poll until THIS taker's bid draws its UNFILLED reservation, self-cranking `resolve_pool` each
     pass. Returns the drawn reservation, or None on timeout / if a different router won the seat."""
     us = str(user)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        _self_crank_resolve(client, miner)
-        resv = client.get_reservation(miner)
+        _self_crank_resolve(client, miner, backing)
+        resv = client.get_reservation(miner, backing)
         if _drawn_unfilled(resv):
             return resv if str(resv.router) == us else None  # seated: us, or someone else won
         time.sleep(3)
     return None
 
 
-def _lost_seat_to(client, miner, user) -> Optional[str]:
+def _lost_seat_to(client, miner, user, backing: str) -> Optional[str]:
     """Best-effort: after `_poll_drawn` returns None, tell the two failure modes apart. Returns the
     winning router (as a string) if a *different* taker holds the freshly-drawn seat — i.e. you lost
     the draw — or None if no seat is drawn yet (the draw simply didn't resolve in the window)."""
     try:
-        resv = client.get_reservation(miner)
+        resv = client.get_reservation(miner, backing)
     except Exception:  # noqa: BLE001 - message quality only; fall back to the generic reason
         return None
     if _drawn_unfilled(resv) and str(resv.router) != str(user):
@@ -171,12 +174,12 @@ def _lost_seat_to(client, miner, user) -> Optional[str]:
     return None
 
 
-def _poll_reservation(client, miner, timeout_secs: int):
+def _poll_reservation(client, miner, timeout_secs: int, backing: str):
     """Poll until a live, unclaimed Reservation exists — the shared ``live_unclaimed`` predicate (same
     one `post-tx` uses). Post-finalize the reservation is live; this guards against a lagging read."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        resv = client.get_reservation(miner)
+        resv = client.get_reservation(miner, backing)
         if live_unclaimed(resv):
             return resv
         time.sleep(3)
@@ -191,7 +194,7 @@ def _net_receive(to_amount: int, to_chain: str) -> float:
     return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
 
 
-def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap):
+def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds=None):
     """Resolve an explicit --miner pubkey against the same gates auto-select uses. Hard-fails with
     the specific reason — never silently falls back to another miner."""
     chosen = next((p for p in viable if str(p[0].miner) == miner_opt), None)
@@ -200,8 +203,9 @@ def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amou
     cand = next((c for c in candidates if str(c.miner) == miner_opt), None)
     if cand is None:
         fail(f'Miner {miner_opt[:8]}… is not active or not quoting {from_chain}->{to_chain}.')
-    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
-    _, reason = swap_viable(amts.collateral_amount, cand.collateral, min_swap, max_swap)
+    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
+    lo, hi = (bounds or {}).get(cand.backing, (min_swap, max_swap))
+    _, reason = swap_viable(amts.collateral_amount, cand.collateral, lo, hi, cand.backing)
     fail(f'Miner {miner_opt[:8]}… cannot take this swap: {reason or "rate not executable"}.')
 
 
@@ -210,14 +214,15 @@ def _pick_intake(viable, from_chain, to_chain):
     if not sys.stdin.isatty():
         fail('Bare --miner needs a terminal; pass --miner <pubkey> when scripting.')
     ranked = sorted(viable, key=lambda p: p[1].to_amount, reverse=True)
-    sol_decimals = get_chain_def(NUMERAIRE_CHAIN).decimals
     console.print(f'\n  Miners quoting {from_chain.upper()}->{to_chain.upper()} (best first):')
     for i, (c, amts) in enumerate(ranked, 1):
         rate_disp = directional_rate(from_chain, to_chain, c.rate_display)
+        # The purse is in the BACKING's own unit (lamports for sol, rao for tao) — label it as such.
+        purse = c.collateral / 10 ** get_chain_def(c.backing).decimals
         console.print(
             f'  [{i}] [dim]{c.miner}[/dim]  rate {rate_disp} {to_chain.upper()}/{from_chain.upper()}'
             f'  receive ~[cyan]{_net_receive(amts.to_amount, to_chain):.8g} {to_chain.upper()}[/cyan]'
-            f'  collateral {c.collateral / 10**sol_decimals:g} SOL'
+            f'  collateral {purse:g} {c.backing.upper()}'
         )
     idx = click.prompt('  Miner #', type=click.IntRange(1, len(ranked)))
     return ranked[idx - 1]
@@ -292,12 +297,14 @@ def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_wi
 
 def _poll_routed_reservation(client, miner, user, timeout_secs: int):
     """Poll until the router's win goes LIVE (finalized). Returns the live reservation as soon as one
-    exists — the caller checks whether it pins OUR pubkey (won) or another user's (lost the pick)."""
+    exists — the caller checks whether it pins OUR pubkey (won) or another user's (lost the pick).
+    The ROUTER chose the backing (pool join or best offer), so every hub's slot is scanned."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        resv = client.get_reservation(miner)
-        if live_unclaimed(resv):
-            return resv
+        for hub in pdas.BACKING_BITS:
+            resv = client.get_reservation(miner, hub)
+            if live_unclaimed(resv):
+                return resv
         time.sleep(3)
     return None
 
@@ -369,8 +376,8 @@ def swap_now_command(
     to_chain = (to_chain_opt or '').lower()
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
-    if from_chain == to_chain or NUMERAIRE_CHAIN not in (from_chain, to_chain):
-        fail(f'A launch swap must have a {NUMERAIRE_CHAIN.upper()} leg (every pair is hub<->spoke).')
+    if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
+        fail('A swap must have a hub leg (SOL or TAO) and two distinct chains — spoke<->spoke has no market.')
     if amount_opt is None:
         amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=float)
     if amount_opt is None or amount_opt <= 0:
@@ -394,8 +401,8 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
 
     cfg = client.get_config()
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0)) if cfg else 0
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0)) if cfg else 0
+    bounds = bounds_from_config(cfg) if cfg else {}
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
     finalize_window = int(getattr(cfg, 'finalize_window_secs', 150)) if cfg else 150
 
@@ -404,7 +411,7 @@ def swap_now_command(
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
     if miner_opt:
-        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if not viable:
             fail('No miner can fund an executable swap for that amount within bounds.')
         best_to = max(p[1].to_amount for p in viable)
@@ -412,7 +419,7 @@ def swap_now_command(
             cand, amts = _pick_intake(viable, from_chain, to_chain)
         else:
             cand, amts = _named_intake(
-                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap
+                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds
             )
         if amts.to_amount < best_to * (1 - MINER_RATE_WARN_FRACTION):
             pct = (1 - amts.to_amount / best_to) * 100
@@ -421,7 +428,7 @@ def swap_now_command(
                 f'(~{_net_receive(best_to, to_chain):.8g} {to_chain.upper()}).'
             )
     else:
-        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap)
+        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if best is None:
             fail('No miner can fund an executable swap for that amount within bounds.')
         cand, amts = best
@@ -432,14 +439,14 @@ def swap_now_command(
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
     # reused per-miner reservation makes `swap now` idempotent for THIS taker — recover it, don't re-bid.
-    existing = client.get_reservation(cand.miner)
+    existing = client.get_reservation(cand.miner, cand.backing)
     resume_live = live_unclaimed(existing) and str(getattr(existing, 'user', '')) == str(user)
     resume_drawn = not resume_live and _drawn_unfilled(existing) and str(getattr(existing, 'router', '')) == str(user)
     resuming = resume_live or resume_drawn
 
     # Pool contention — surface it BEFORE the fee-charging entry so the taker isn't entering blind into
     # an already-open, contested round (skipped when resuming, since no new entry is placed).
-    contention = _pool_contention(client, cand.miner, cfg)
+    contention = _pool_contention(client, cand.miner, cfg, cand.backing)
 
     # Every fill in an open round settles at the round's PINNED rate — preview that, not the live
     # quote (which can drift after the pool opened and would show a receive the fill won't honor).
@@ -530,6 +537,7 @@ def swap_now_command(
                 from_amount,
                 pool_window,
                 drawn=None,
+                backing=cand.backing,
             )
     else:
         resv = _reserve_self_represented(
@@ -543,6 +551,7 @@ def swap_now_command(
             from_amount,
             pool_window,
             drawn=existing if resume_drawn else None,
+            backing=cand.backing,
         )
     recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
     console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
@@ -620,35 +629,35 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
 
     Self-represented flows have no validator to gate for them (F7), so mirror the
-    validator's reserve gates locally: the taker's receive address must be well-formed and
-    accept the dest asset, and the miner's receive address must accept the source funds
-    (T18). The source-address probe is a courtesy warning only — a frozen source just means
-    the deposit fails and the reservation lapses unclaimed."""
-    spoke = to_chain if from_chain == NUMERAIRE_CHAIN else from_chain
-    provider = _gate_provider(spoke, client, config)
-    if provider is None:
-        return
-    if spoke == to_chain:
+    validator's reserve gates locally, one leg at a time (a non-SOL hub pair has two screenable
+    legs): the taker's receive address must be well-formed and accept the dest asset, and the
+    miner's receive address must accept the source funds (T18). The source-address probe is a
+    courtesy warning only — a frozen source just means the deposit fails and the reservation
+    lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
+    dest_provider = _gate_provider(to_chain, client, config)
+    if dest_provider is not None:
         # Format first — offline, and a malformed address can never be delivered to.
-        if not provider.chain.is_valid_address(receive_addr):
+        if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display)
-        if not provider.can_deliver_to(receive_addr, amts.to_amount):
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
+        if not dest_provider.can_deliver_to(receive_addr, amts.to_amount):
             fail(
                 f'  Your receive address cannot accept {to_chain.upper()} right now '
                 '(frozen or transfers paused). No funds moved.'
             )
+    src_provider = _gate_provider(from_chain, client, config)
+    if src_provider is None:
         return
-    quote = client.get_quote(cand.miner, from_chain, to_chain)
+    quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
     if miner_addr and (
-        not provider.chain.is_valid_address(miner_addr) or not provider.can_deliver_to(miner_addr, from_amount)
+        not src_provider.chain.is_valid_address(miner_addr) or not src_provider.can_deliver_to(miner_addr, from_amount)
     ):
         fail(
             f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
             '— pick another miner (--miner). No funds moved.'
         )
-    if user_from_addr and not provider.can_deliver_to(user_from_addr, from_amount):
+    if user_from_addr and not src_provider.can_deliver_to(user_from_addr, from_amount):
         console.print(
             f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '
             '(frozen?). If the deposit fails, the reservation lapses unclaimed.[/yellow]'
@@ -797,6 +806,24 @@ _STATUS_NOTE = {
 }
 
 
+def _swap_verdict(client, key: bytes):
+    """Read the closing verdict (SwapCompleted/SwapTimedOut) off the swap PDA's final tx, newest
+    first. None when unresolvable (RPC hiccup, reaped claim) — callers must stay neutral then."""
+    from allways.solana import pdas
+    from allways.solana.events import decode_event
+
+    try:
+        pda = pdas.swap_pda(key, client.program_id)
+        for entry in client.rpc.get_signatures_for_address(pda, limit=3):
+            for raw in client.get_event_logs(entry['signature']):
+                ev = decode_event(raw)
+                if ev is not None and ev[0] in ('SwapCompleted', 'SwapTimedOut'):
+                    return ev
+    except Exception:
+        return None
+    return None
+
+
 def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 900) -> None:
     """Watch a just-relayed swap to a terminal state, printing transitions. A closed account is the
     SUCCESS signal (swaps close on settle) — so once we've seen it live, its disappearance reads as
@@ -821,9 +848,30 @@ def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 90
                 if status == 'Fulfilled':
                     seen_fulfilled = True
             elif seen_live:
-                console.print(
-                    f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
-                )
+                # Closed ≠ delivered: a timeout closes the account too (the fix for reading it as
+                # success). Pull the closing event for the honest message; stay neutral if unreadable.
+                verdict = _swap_verdict(client, key)
+                if verdict is not None and verdict[0] == 'SwapTimedOut':
+                    ev = verdict[1]
+                    chain = str(ev.collateral_chain)
+                    amt = int(ev.reimbursement) / 10 ** get_chain_def(chain).decimals
+                    # 'sol' settles in the closing tx itself; other backings pay out via the vault
+                    # relay a few minutes later — don't claim money moved before it has.
+                    paid = 'You were reimbursed' if chain == NUMERAIRE_CHAIN else 'You are being reimbursed'
+                    console.print(
+                        f'[red]  ✗ MINER FAILED[/red] — it never delivered, and was slashed. {paid} '
+                        f'[bold]{amt:g} {chain.upper()}[/bold] from its bond '
+                        f'(your full payout + penalty) to [cyan]{ev.payee}[/cyan].'
+                    )
+                elif verdict is not None and verdict[0] == 'SwapCompleted':
+                    console.print(
+                        f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
+                    )
+                else:
+                    console.print(
+                        f'[yellow]  Swap closed on-chain[/yellow] — verdict unreadable from here; '
+                        f'check your {to_chain.upper()} balance or `alw view swap {swap_key_hex}`.'
+                    )
                 return
             time.sleep(4)
     except KeyboardInterrupt:
@@ -834,7 +882,17 @@ def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 90
 
 
 def _reserve_self_represented(
-    client, miner, user, user_from_addr, user_to_addr, from_chain, to_chain, from_amount, pool_window, drawn=None
+    client,
+    miner,
+    user,
+    user_from_addr,
+    user_to_addr,
+    from_chain,
+    to_chain,
+    from_amount,
+    pool_window,
+    drawn=None,
+    backing=NUMERAIRE_CHAIN,
 ):
     """Self-represented phases 1-3: bid (unless resuming a ``drawn`` seat), self-crank the draw, and
     finalize against the PINNED rate. Returns the live reservation or ``fail``s with send-safety
@@ -845,7 +903,7 @@ def _reserve_self_represented(
         # Phase 1 — BID (pair only; no taker, no amounts). A contract rejection (miner busy,
         # already reserved, …) is a normal outcome — fail with its message, never a traceback.
         try:
-            sig = client.open_or_request(miner, from_chain, to_chain)
+            sig = client.open_or_request(miner, from_chain, to_chain, backing)
         except Exception as e:
             reason = contract_reject_reason(e)
             if reason is None:
@@ -854,9 +912,9 @@ def _reserve_self_represented(
         console.print(f'[green]  Bid placed[/green] (tx {sig[:16]}…). Cranking the draw…')
 
         # Phase 2 — self-crank the draw until we're seated (unfilled reservation, router == us).
-        drawn = _poll_drawn(client, miner, user, timeout_secs=pool_window + 120)
+        drawn = _poll_drawn(client, miner, user, timeout_secs=pool_window + 120, backing=backing)
         if drawn is None:
-            winner = _lost_seat_to(client, miner, user)
+            winner = _lost_seat_to(client, miner, user, backing)
             if winner:
                 fail(
                     f'  You lost the draw — the seat went to [dim]{winner[:8]}…[/dim]. Your reservation fee is '
@@ -868,7 +926,7 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate))
+    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing)
     try:
         client.finalize_reservation(
             miner,
@@ -878,13 +936,14 @@ def _reserve_self_represented(
             fill.collateral_amount,
             fill.from_amount,
             fill.to_amount,
+            backing,
         )
     except Exception as e:
         reason = contract_reject_reason(e)
         if reason is None:
             raise
         fail(f'  Finalize rejected: {reason}. Do NOT send funds; re-run shortly.')
-    resv = _poll_reservation(client, miner, timeout_secs=30)
+    resv = _poll_reservation(client, miner, timeout_secs=30, backing=backing)
     if resv is None or str(resv.user) != str(user):
         fail('  Finalize did not produce a live reservation for you. Do NOT send funds; re-run.')
     return resv

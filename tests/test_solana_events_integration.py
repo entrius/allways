@@ -104,10 +104,11 @@ def test_ingest_decodes_emitted_events(env):
     _airdrop(miner.pubkey(), 10)
     mclient = AllwaysSolanaClient(RPC, keypair=miner)
     mclient.post_collateral(5_000_000)  # → CollateralPosted
-    mclient.set_quote('btc', 'tao', 'minerBTC', 'minerTAO', 345 * 10**18, 1_000)  # → QuoteSet
 
     validators[0].vote_activate(miner.pubkey())
     validators[1].vote_activate(miner.pubkey())  # quorum → MinerActivated
+    # QuoteSet comes after activation now: set_quote requires the declared purse to be lit (W2b).
+    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', 345 * 10**18, 1_000)  # → QuoteSet
 
     records, cursor = SolanaEventIngest(admin).poll(until_sig=None)
     by_name = {}

@@ -1,10 +1,12 @@
 use anchor_lang::prelude::*;
 
-use crate::consensus::{record_vote, reset_round, swap_request_hash};
-use crate::constants::{CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED};
+use crate::consensus::{record_vote, swap_request_hash};
+use crate::constants::{
+    ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
-use crate::state::{Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
+use crate::state::{BondAttestation, Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
 /// quorum, promote the swap to `Active` — where the miner's obligation (`timeout_at`) begins. All terms
@@ -30,14 +32,20 @@ pub struct VoteInitiate<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump,
+    )]
     pub reservation: Box<Account<'info, Reservation>>,
 
+    /// Keyed by swap_key like the confirm/timeout rounds (v3.1): per-hub for free (a swap pins its
+    /// backing), and closable at quorum since the unique seed is never reused.
     #[account(
         init_if_needed,
         payer = validator,
         space = 8 + VoteRound::INIT_SPACE,
-        seeds = [VOTE_SEED, &[REQ_INITIATE], miner.key().as_ref()],
+        seeds = [VOTE_SEED, &[REQ_INITIATE], swap_key.as_ref()],
         bump,
     )]
     pub vote_round: Account<'info, VoteRound>,
@@ -50,6 +58,13 @@ pub struct VoteInitiate<'info> {
         has_one = miner,
     )]
     pub swap: Box<Account<'info, Swap>>,
+
+    /// The bond attestation for the swap's pinned backing — required for any backing but "sol".
+    #[account(
+        seeds = [ATTEST_SEED, miner.key().as_ref(), swap.collateral_chain.as_bytes()],
+        bump,
+    )]
+    pub attestation: Option<Box<Account<'info, BondAttestation>>>,
 
     pub system_program: Program<'info, System>,
 }
@@ -76,9 +91,25 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         // Self-dealing backstop (finalize_reservation is the primary guard; this also covers
         // reservations filled before that guard deployed).
         require!(ctx.accounts.swap.user != ctx.accounts.swap.miner, ErrorCode::SelfSwapNotAllowed);
-        // Obligation gate: miner must hold the over-collateralization requirement before being bound.
+        // Re-check the entry fuse: the heartbeat can go stale, or a penalty can land, between the fill
+        // and the attestation — and this is the last gate before the miner is obligated.
+        crate::backing::check_entry_gates(
+            &ctx.accounts.config,
+            &ctx.accounts.miner_state,
+            &ctx.accounts.swap.collateral_chain,
+            now,
+        )?;
+        // Obligation gate: the miner must hold the over-collateralization requirement in the purse the
+        // swap pinned as its backing (same leg-lookup discipline as finalize), NET of what in-flight
+        // obligations already reserve, before being bound.
+        let purse = crate::backing::backing_purse(
+            &ctx.accounts.swap.collateral_chain,
+            &ctx.accounts.miner_state,
+            ctx.accounts.attestation.as_deref().map(|a| &**a),
+        )?;
+        let hub_bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
         require!(
-            ctx.accounts.miner_state.collateral
+            purse.saturating_sub(ctx.accounts.miner_state.reserved(hub_bit))
                 >= crate::constants::required_collateral(ctx.accounts.swap.collateral_amount),
             ErrorCode::InsufficientCollateral
         );
@@ -108,6 +139,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         let collateral_amount = ctx.accounts.swap.collateral_amount;
         let from_amount = ctx.accounts.swap.from_amount;
         let to_amount = ctx.accounts.swap.to_amount;
+        let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
 
         let swap = &mut ctx.accounts.swap;
         swap.status = SwapStatus::Active;
@@ -115,11 +147,20 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         swap.timeout_at = timeout_at;
         swap.max_extend_at = max_extend_at;
 
-        ctx.accounts.miner_state.has_active_swap = true;
-        ctx.accounts.miner_state.busy_until = timeout_at; // stay busy through the swap deadline
+        let bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
+        ctx.accounts.miner_state.set_swap(bit, true);
+        ctx.accounts.miner_state.set_busy(bit, timeout_at); // hub stays busy through the swap deadline
+        // Reserve the obligation now that it binds; released at confirm/timeout quorum. Every
+        // obligation terminates via an instruction, so the sum can never leak via a passive expiry.
+        ctx.accounts
+            .miner_state
+            .add_reserved(bit, crate::constants::required_collateral(collateral_amount))?;
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         ctx.accounts.reservation.claimed_swap_key = [0u8; 32];
-        reset_round(&mut ctx.accounts.vote_round);
+        // Unique swap_key seed → the round is never reused; close it and refund rent, like the
+        // confirm/timeout rounds. A straggler's late vote reverts on the NotPending status gate
+        // above before it could re-create the round.
+        ctx.accounts.vote_round.close(ctx.accounts.validator.to_account_info())?;
 
         emit!(SwapInitiated {
             swap_key,
@@ -129,6 +170,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             from_amount,
             to_amount,
             initiated_at: now,
+            collateral_chain,
         });
     }
     Ok(())

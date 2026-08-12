@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from allways.cli.swap_commands.swap import swap_now_command
+from allways.cli.swap_commands.swap_intake import MinerCandidate
 
 USER = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
 ROUTER = '5DtUJ9ytbeCMjovFieNwaxxqRP3DzT6iQPnZTyKmi3n6iXey'
@@ -54,7 +55,9 @@ AXON = types.SimpleNamespace(ip='1.2.3.4', port=8091, ip_type=4, version=0, cold
 
 def _run(client, *, argv_extra=(), responses=None, axon=AXON, config=None, confirm_input=None):
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    # The real dataclass, not a look-alike: a fake that drifts from MinerCandidate stops testing
+    # the wiring it is supposed to lock.
+    cand = MinerCandidate(miner='miner-pk', rate_display='0.0021', collateral=10**10)
     argv = ['--from', 'btc', '--to', 'sol', '--amount', '0.00005', '--from-address', 'tb1qsource']
     argv += ['--receive-address', USER, *argv_extra]
     info = types.SimpleNamespace(headline='router unreachable', accepted=0)
@@ -255,7 +258,9 @@ def test_stale_cached_axon_refreshes_once_then_succeeds():
     rejected = types.SimpleNamespace(accepted=False, rejection_reason=None, pool_closes_at=0)
     client = _client([None, _live_resv()])
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
-    cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10)
+    # The real dataclass, not a look-alike: a fake that drifts from MinerCandidate stops testing
+    # the wiring it is supposed to lock.
+    cand = MinerCandidate(miner='miner-pk', rate_display='0.0021', collateral=10**10)
     argv = ['--from', 'btc', '--to', 'sol', '--amount', '0.00005', '--from-address', 'tb1qsource']
     argv += ['--receive-address', USER, '--router', ROUTER, '--yes']
     info = types.SimpleNamespace(headline='no response', accepted=0)

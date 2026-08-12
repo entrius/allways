@@ -1,0 +1,3721 @@
+{
+  "source": {
+    "hash": "0xde32f2e9cded0f300e77c0431b07d8b68d52c93d30d31126b6efb831d2494bd0",
+    "language": "ink! 5.1.1",
+    "compiler": "rustc 1.89.0",
+    "build_info": {
+      "build_mode": "Release",
+      "cargo_contract_version": "5.0.3",
+      "rust_toolchain": "stable-x86_64-unknown-linux-gnu",
+      "wasm_opt_settings": {
+        "keep_debug_symbols": false,
+        "optimization_passes": "Z"
+      }
+    }
+  },
+  "contract": {
+    "name": "allways_bond_vault",
+    "version": "0.1.0",
+    "authors": [
+      "Allways"
+    ]
+  },
+  "image": null,
+  "spec": {
+    "constructors": [
+      {
+        "args": [
+          {
+            "label": "staking_hotkey",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "label": "netuid",
+            "type": {
+              "displayName": [
+                "u16"
+              ],
+              "type": 3
+            }
+          },
+          {
+            "label": "min_collateral",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "label": "max_collateral",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "label": "consensus_threshold_percent",
+            "type": {
+              "displayName": [
+                "u8"
+              ],
+              "type": 2
+            }
+          },
+          {
+            "label": "vote_round_ttl",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          },
+          {
+            "label": "validators",
+            "type": {
+              "displayName": [
+                "Vec"
+              ],
+              "type": 6
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          "Fallible by design: the seed set is the ONLY way validators ever come",
+          "to exist, so a bad one is unrecoverable on an immutable contract.",
+          "An empty set would let miners bond and lock with nobody able to ever",
+          "unlock them; a duplicate would inflate the quorum denominator past",
+          "what the real signers can reach. Both brick the vault, so both fail",
+          "the deployment instead."
+        ],
+        "label": "new",
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink_primitives",
+            "ConstructorResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x9bae9d5e"
+      }
+    ],
+    "docs": [],
+    "environment": {
+      "accountId": {
+        "displayName": [
+          "AccountId"
+        ],
+        "type": 0
+      },
+      "balance": {
+        "displayName": [
+          "Balance"
+        ],
+        "type": 4
+      },
+      "blockNumber": {
+        "displayName": [
+          "BlockNumber"
+        ],
+        "type": 5
+      },
+      "chainExtension": {
+        "displayName": [
+          "ChainExtension"
+        ],
+        "type": 68
+      },
+      "hash": {
+        "displayName": [
+          "Hash"
+        ],
+        "type": 9
+      },
+      "maxEventTopics": 4,
+      "staticBufferSize": 16384,
+      "timestamp": {
+        "displayName": [
+          "Timestamp"
+        ],
+        "type": 4
+      }
+    },
+    "events": [
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "total",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Miner posted TAO into the vault"
+        ],
+        "label": "CollateralPosted",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xac8a40d8f433a5c3b074e1744178ffb9ebfc02a848c5ee67deb0f0c3168380f9"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "remaining",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Miner withdrew TAO from the vault (only possible while unlocked)"
+        ],
+        "label": "CollateralWithdrawn",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x6a46470e2aaa52796db9914077c36a38e0b60fa14fdd29ebc522e6c8e47b2e22"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "locked",
+            "type": {
+              "displayName": [
+                "bool"
+              ],
+              "type": 15
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "epoch",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 4
+            }
+          }
+        ],
+        "docs": [
+          "Lock transition. `locked = true` is miner-initiated (`lock_bond`);",
+          "`locked = false` comes from a `vote_unlock` quorum."
+        ],
+        "label": "BondLockChanged",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x08fd1ceaaffd8d4d45e709836d8c40bac75197947993cc8fed1e7efe49aa5ece"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "validator",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [
+              "REQ_UNLOCK = 0 | REQ_SLASH = 1 | REQ_COLLECT = 2 |",
+              "REQ_ADD_VALIDATOR = 3 | REQ_REMOVE_VALIDATOR = 4 | REQ_CONFIG = 5 |",
+              "REQ_RECYCLE_TARGET = 6"
+            ],
+            "indexed": false,
+            "label": "req_type",
+            "type": {
+              "displayName": [
+                "u8"
+              ],
+              "type": 2
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "request_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "subject",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "vote_count",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "docs": [
+          "A validator voted on a money or governance round. `subject` identifies the",
+          "round's target through one 32-byte field: the miner (unlock), the",
+          "candidate/target account (membership), or the round hash (slash, collect,",
+          "config, recycle target)."
+        ],
+        "label": "VaultVoteCast",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x05519cde5539536ad39f7b2a6c95f91ffeeddc06eadfc54c68ce05b9e2ee49c4"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "collected",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "new_cumulative",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "shortfall",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "One miner's fees settled onto the vault's books (per entry of a",
+          "vote_collect_fees_batch quorum). `shortfall` > 0 means the bond couldn't",
+          "cover the owed delta (eaten by a slash) and the difference was written off."
+        ],
+        "label": "FeesSettled",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x2af8c05b5dcc94a37febfd1fa9e5274bebf23e0e6426d8030d673d3567cb825f"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "seized",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "reimbursed",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "surplus",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Slash applied on quorum. `seized = min(penalty, collateral)`;",
+          "`reimbursed + surplus == seized`."
+        ],
+        "label": "MinerSlashed",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xa5e075c312bf76bbfcfa3f9716511dad383882bf097271ba6c036e7234f08436"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "user",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Direct reimbursement transfer failed; parked for `claim_slash`"
+        ],
+        "label": "SlashPending",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xe82a67cdc478ee28b09c48f34f28661f87d7fa52f7271a055223c07cd7492511"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "user",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "User claimed a parked reimbursement"
+        ],
+        "label": "SlashClaimed",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x2696b479469e85724e7b82b8445c1a4689793c0b98c024e6cef0ed945c544ce5"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "tao_amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "donated",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Fees recycled into the SN7 pool via add_stake_recycle. `tao_amount` is the",
+          "whole drained pot; `donated` is the share of it that arrived as unattributed",
+          "TAO rather than as settled protocol fees."
+        ],
+        "label": "FeesRecycled",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x140677419dfec5d77e40f512d2b24eb14290022274937ccfe70f7e2d8f12f333"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "candidate",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "expires_at",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "docs": [
+          "A unanimous round approved this candidate; they join the set only once they",
+          "call `accept_validator` themselves, proving they hold the key. Past",
+          "`expires_at` — or after any set change — the approval is void."
+        ],
+        "label": "ValidatorPending",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xfe0b776631193a5e023fd211b84181cc079952677c4d9a473f694f61ae434922"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "validator",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "registered",
+            "type": {
+              "displayName": [
+                "bool"
+              ],
+              "type": 15
+            }
+          }
+        ],
+        "docs": [
+          "Validator joined (after accepting) or was removed"
+        ],
+        "label": "ValidatorUpdated",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xa196d9e279715a236c224752aaa4e5b3876155c0a9a33e6efd4d0374981d5484"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "staking_hotkey",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "netuid",
+            "type": {
+              "displayName": [
+                "u16"
+              ],
+              "type": 3
+            }
+          }
+        ],
+        "docs": [
+          "The `add_stake_recycle` destination, moved by a unanimous",
+          "`vote_set_recycle_target` round. Both fields move together."
+        ],
+        "label": "RecycleTargetUpdated",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xd86f261c41e7018ed140894f4e231d60e12a3c10f003fdf48c146dc17ce80ba2"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "min_collateral",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "max_collateral",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "consensus_threshold_percent",
+            "type": {
+              "displayName": [
+                "u8"
+              ],
+              "type": 2
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "vote_round_ttl",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "docs": [
+          "Whole config replaced by a unanimous `vote_set_config` round. Carries every",
+          "field, not a delta — the round agreed on this exact tuple."
+        ],
+        "label": "ConfigUpdated",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xe28a9a3b8eb4767017c0ddb9bff629fa2b00aa477f572645b9f20e62b8a42c95"
+      }
+    ],
+    "lang_error": {
+      "displayName": [
+        "ink",
+        "LangError"
+      ],
+      "type": 55
+    },
+    "messages": [
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "post_collateral",
+        "mutates": true,
+        "payable": true,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x31b3f423"
+      },
+      {
+        "args": [
+          {
+            "label": "amount",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Withdraw is refused while locked — the only path back to unlocked",
+          " is deactivating on Solana and a validator `vote_unlock` quorum, so",
+          " this single check carries the whole cross-chain invariant."
+        ],
+        "label": "withdraw_collateral",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xe098e62d"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Miner-initiated lock — locking yourself is always safe, so no",
+          " quorum. A locked bond ≥ min_collateral is what the mirror relays to",
+          " Solana as \"eligible for vote_activate\"."
+        ],
+        "label": "lock_bond",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x97086d1f"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "label": "epoch",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 4
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Validator-quorum unlock. Preconditions live off-chain: validators",
+          " only vote once the miner is deactivated on Solana AND fully",
+          " quiescent (no in-flight swaps, timeout windows past, every slash",
+          " verdict applied here). The epoch is hash-bound into the round so a",
+          " stale round can never unlock a re-locked bond."
+        ],
+        "label": "vote_unlock",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xa0e72e51"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "label": "penalty",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "label": "user",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "label": "reimbursement",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Apply a slash verdict relayed from Solana. `swap_ref` is the Solana",
+          " swap key (32 bytes); the round hash binds every argument so all",
+          " validators must relay the identical verdict, and it KEYS the round",
+          " too — a junk verdict opens its own round instead of parking the",
+          " swap_ref's for a TTL, and the `slashed` marker still allows exactly",
+          " one application ever. On quorum: seize",
+          " min(penalty, collateral), reimburse the wronged user (push, with a",
+          " pull fallback via claim_slash so a failed transfer can't revert the",
+          " quorum application), credit any surplus to the fee pot."
+        ],
+        "label": "vote_slash",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xad38980b"
+      },
+      {
+        "args": [
+          {
+            "label": "entries",
+            "type": {
+              "displayName": [
+                "Vec"
+              ],
+              "type": 56
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Settle accrued protocol fees onto the vault's books — the relayed",
+          " half of the fee pipeline (validators compute totals from Solana",
+          " swap history). `entries` = (miner, cumulative_total): monotonic",
+          " per-miner totals, so stale entries no-op and replay is harmless.",
+          " Rounds are keyed by the batch-contents hash: a cadence batch and an",
+          " exit's one-entry batch can run concurrently. Collected amounts are",
+          " clamped to remaining collateral; any shortfall (bond eaten by a",
+          " slash below owed fees) is written off and reported in the event so",
+          " settlement can never wedge an exit. Deliberately NOT halt-gated:",
+          " settlement is exit-path (halt gates entry, never exit)."
+        ],
+        "label": "vote_collect_fees_batch",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x02e3fcfb"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Claim a reimbursement whose direct push transfer failed."
+        ],
+        "label": "claim_slash",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xcf3c3dd9"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Permissionless, caller-pays. Drains everything the vault holds that",
+          " is owed to nobody — settled fees AND any TAO sent straight to the",
+          " address — into add_stake_recycle(staking_hotkey, netuid). There is",
+          " no other destination and no owner path to the funds."
+        ],
+        "label": "recycle_fees",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x97756ea1"
+      },
+      {
+        "args": [
+          {
+            "label": "candidate",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Carry a candidate to the pending list. UNANIMOUS: a bare majority",
+          " must never be able to pack the set with its own sybils and then vote",
+          " itself whatever it likes."
+        ],
+        "label": "vote_add_validator",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x4d992e4a"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " The candidate's own signature completes their admission — proof they",
+          " hold the key. Without it a typo'd address would join the set, count",
+          " toward every quorum, and never be able to vote.",
+          "",
+          " Bounded by the round TTL and the approving set: a candidate who sits",
+          " on an approval cannot surface later and land in a set that never",
+          " agreed to them, holding every money quorum hostage."
+        ],
+        "label": "accept_validator",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xb01b0215"
+      },
+      {
+        "args": [
+          {
+            "label": "validator",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Eject a validator. Requires every OTHER validator — the target is",
+          " barred from voting, so a dark or compromised key can still be",
+          " removed by the rest. Refused below MIN_VALIDATORS_TO_REMOVE, since",
+          " concurrent removals could otherwise walk the set down to one."
+        ],
+        "label": "vote_remove_validator",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0x0cdaacdb"
+      },
+      {
+        "args": [
+          {
+            "label": "min_collateral",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "label": "max_collateral",
+            "type": {
+              "displayName": [
+                "Balance"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "label": "consensus_threshold_percent",
+            "type": {
+              "displayName": [
+                "u8"
+              ],
+              "type": 2
+            }
+          },
+          {
+            "label": "vote_round_ttl",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Set the whole config in one unanimous round. Whole, not delta: the",
+          " round hash binds every field, so validators agree on the RESULTING",
+          " config rather than on an edit applied to whatever they each last",
+          " read. Unanimous because this tuple contains the consensus threshold."
+        ],
+        "label": "vote_set_config",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xe93fc522"
+      },
+      {
+        "args": [
+          {
+            "label": "staking_hotkey",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "label": "netuid",
+            "type": {
+              "displayName": [
+                "u16"
+              ],
+              "type": 3
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Move the `add_stake_recycle` destination in one unanimous round.",
+          " A hotkey that stops being stakeable (swap_hotkey, deregistration, an",
+          " upstream rule change) would otherwise revert every recycle forever,",
+          " with no owner and no upgrade path to repair it. Hotkey and netuid",
+          " move together: a hotkey is only registered on some subnets."
+        ],
+        "label": "vote_set_recycle_target",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 52
+        },
+        "selector": "0xb0e46fd8"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "get_collateral",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0xf48343ad"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " (locked, epoch) — exactly the tuple the mirror relays to Solana",
+          " alongside the balance."
+        ],
+        "label": "get_lock_state",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 58
+        },
+        "selector": "0xf1b50845"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "is_slashed",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 59
+        },
+        "selector": "0x6206fdce"
+      },
+      {
+        "args": [
+          {
+            "label": "swap_ref",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "get_pending_slash",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 60
+        },
+        "selector": "0x48c78c4a"
+      },
+      {
+        "args": [
+          {
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          }
+        ],
+        "default": false,
+        "docs": [
+          " Cumulative protocol fees settled for this miner (the vault-side",
+          " half of the monotonic total the relayer tracks)."
+        ],
+        "label": "get_settled_total",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x213c6186"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_accumulated_fees",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0xbf3b5d4e"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_total_recycled_fees",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x9910e939"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Exactly what the next `recycle_fees` would drain: settled fees plus",
+          " unattributed TAO. Reads ≥ `get_accumulated_fees` whenever anyone has",
+          " donated; the difference is the donated share."
+        ],
+        "label": "get_recyclable_pot",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x533bf982"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Total bonds owed to miners — the commingling invariant's first term."
+        ],
+        "label": "get_total_collateral",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x207bfc0a"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Unclaimed slash reimbursements owed to users."
+        ],
+        "label": "get_pending_slash_total",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0xc95c472c"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_validators",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 62
+        },
+        "selector": "0xa28acf8e"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          " Candidates a unanimous round approved and who can still accept —",
+          " expired or set-voided admissions are omitted, since neither can ever",
+          " join. They count toward no quorum until they accept."
+        ],
+        "label": "get_pending_validators",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 62
+        },
+        "selector": "0xec0daaa9"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_vote_round_ttl",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 63
+        },
+        "selector": "0x09681df4"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_min_collateral",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x233a7832"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_max_collateral",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 57
+        },
+        "selector": "0x54945717"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_consensus_threshold",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 64
+        },
+        "selector": "0x2c283460"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_staking_hotkey",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 65
+        },
+        "selector": "0x47e11891"
+      },
+      {
+        "args": [],
+        "default": false,
+        "docs": [],
+        "label": "get_netuid",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 66
+        },
+        "selector": "0x75b98cec"
+      }
+    ]
+  },
+  "storage": {
+    "root": {
+      "layout": {
+        "struct": {
+          "fields": [
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 0
+                }
+              },
+              "name": "staking_hotkey"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 3
+                }
+              },
+              "name": "netuid"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "min_collateral"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "max_collateral"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 2
+                }
+              },
+              "name": "consensus_threshold_percent"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 5
+                }
+              },
+              "name": "vote_round_ttl"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 6
+                }
+              },
+              "name": "validators"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 7
+                }
+              },
+              "name": "pending_validators"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x14203b03",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0x14203b03",
+                  "ty": 10
+                }
+              },
+              "name": "collateral"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x61dc188b",
+                              "ty": 15
+                            }
+                          },
+                          "name": "0"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0x61dc188b",
+                              "ty": 4
+                            }
+                          },
+                          "name": "1"
+                        }
+                      ],
+                      "name": "(A, B)"
+                    }
+                  },
+                  "root_key": "0x61dc188b",
+                  "ty": 16
+                }
+              },
+              "name": "lock_state"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "next_request_id"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0xaff2950e",
+                      "ty": 6
+                    }
+                  },
+                  "root_key": "0xaff2950e",
+                  "ty": 20
+                }
+              },
+              "name": "request_voters"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0xda2b6b3d",
+                      "ty": 5
+                    }
+                  },
+                  "root_key": "0xda2b6b3d",
+                  "ty": 23
+                }
+              },
+              "name": "request_created"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x2934de68",
+                      "ty": 9
+                    }
+                  },
+                  "root_key": "0x2934de68",
+                  "ty": 26
+                }
+              },
+              "name": "request_hash"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x2d1260e7",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0x2d1260e7",
+                  "ty": 29
+                }
+              },
+              "name": "unlock_request"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x0153b5d4",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0x0153b5d4",
+                  "ty": 32
+                }
+              },
+              "name": "slash_request"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0xc5aacd23",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0xc5aacd23",
+                  "ty": 35
+                }
+              },
+              "name": "collect_request"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x7749cd3c",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0x7749cd3c",
+                  "ty": 38
+                }
+              },
+              "name": "governance_request"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0xa2090288",
+                      "ty": 4
+                    }
+                  },
+                  "root_key": "0xa2090288",
+                  "ty": 41
+                }
+              },
+              "name": "settled_total"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x61ec5caa",
+                      "ty": 15
+                    }
+                  },
+                  "root_key": "0x61ec5caa",
+                  "ty": 44
+                }
+              },
+              "name": "slashed"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "struct": {
+                      "fields": [
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0xc0d4cd70",
+                              "ty": 0
+                            }
+                          },
+                          "name": "0"
+                        },
+                        {
+                          "layout": {
+                            "leaf": {
+                              "key": "0xc0d4cd70",
+                              "ty": 4
+                            }
+                          },
+                          "name": "1"
+                        }
+                      ],
+                      "name": "(A, B)"
+                    }
+                  },
+                  "root_key": "0xc0d4cd70",
+                  "ty": 47
+                }
+              },
+              "name": "pending_slashes"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "accumulated_fees"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "total_recycled_fees"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "total_collateral"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 4
+                }
+              },
+              "name": "pending_slash_total"
+            }
+          ],
+          "name": "AllwaysBondVault"
+        }
+      },
+      "root_key": "0x00000000",
+      "ty": 51
+    }
+  },
+  "types": [
+    {
+      "id": 0,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "type": 1,
+                "typeName": "[u8; 32]"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "types",
+          "AccountId"
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "type": {
+        "def": {
+          "array": {
+            "len": 32,
+            "type": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": {
+        "def": {
+          "primitive": "u8"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": {
+        "def": {
+          "primitive": "u16"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": {
+        "def": {
+          "primitive": "u64"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": {
+        "def": {
+          "primitive": "u32"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": {
+        "def": {
+          "sequence": {
+            "type": 0
+          }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": {
+        "def": {
+          "sequence": {
+            "type": 8
+          }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": {
+        "def": {
+          "tuple": [
+            0,
+            5,
+            9
+          ]
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "type": 1,
+                "typeName": "[u8; 32]"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "types",
+          "Hash"
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 11
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 13
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "AutoKey"
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "type": {
+        "def": {
+          "tuple": []
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": {
+        "def": {
+          "primitive": "bool"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 17
+          },
+          {
+            "name": "KeyType",
+            "type": 18
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "type": {
+        "def": {
+          "tuple": [
+            15,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 19
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 4
+          },
+          {
+            "name": "V",
+            "type": 6
+          },
+          {
+            "name": "KeyType",
+            "type": 21
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 22
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 4
+          },
+          {
+            "name": "V",
+            "type": 5
+          },
+          {
+            "name": "KeyType",
+            "type": 24
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 25
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 26,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 4
+          },
+          {
+            "name": "V",
+            "type": 9
+          },
+          {
+            "name": "KeyType",
+            "type": 27
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 28
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 30
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 30,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 31
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 31,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 9
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 33
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 34
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 34,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 35,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 9
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 36
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 36,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 37
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 37,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 38,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 9
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 39
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 39,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 40
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 40,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 41,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 0
+          },
+          {
+            "name": "V",
+            "type": 4
+          },
+          {
+            "name": "KeyType",
+            "type": 42
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 42,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 43
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 43,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 44,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 9
+          },
+          {
+            "name": "V",
+            "type": 15
+          },
+          {
+            "name": "KeyType",
+            "type": 45
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 45,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 46
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 46,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 47,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "K",
+            "type": 9
+          },
+          {
+            "name": "V",
+            "type": 48
+          },
+          {
+            "name": "KeyType",
+            "type": 49
+          }
+        ],
+        "path": [
+          "ink_storage",
+          "lazy",
+          "mapping",
+          "Mapping"
+        ]
+      }
+    },
+    {
+      "id": 48,
+      "type": {
+        "def": {
+          "tuple": [
+            0,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "L",
+            "type": 12
+          },
+          {
+            "name": "R",
+            "type": 50
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ResolverKey"
+        ]
+      }
+    },
+    {
+      "id": 50,
+      "type": {
+        "def": {
+          "composite": {}
+        },
+        "params": [
+          {
+            "name": "ParentKey",
+            "type": 14
+          }
+        ],
+        "path": [
+          "ink_storage_traits",
+          "impls",
+          "ManualKey"
+        ]
+      }
+    },
+    {
+      "id": 51,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "name": "staking_hotkey",
+                "type": 0,
+                "typeName": "<AccountId as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<72965257u32, ()>,>>::Type"
+              },
+              {
+                "name": "netuid",
+                "type": 3,
+                "typeName": "<u16 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<3929075658u32, ()>,>>::Type"
+              },
+              {
+                "name": "min_collateral",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3787393505u32, ()>,>>::Type"
+              },
+              {
+                "name": "max_collateral",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<1555038263u32, ()>,>>::Type"
+              },
+              {
+                "name": "consensus_threshold_percent",
+                "type": 2,
+                "typeName": "<u8 as::ink::storage::traits::AutoStorableHint<::ink::storage::\ntraits::ManualKey<2790337311u32, ()>,>>::Type"
+              },
+              {
+                "name": "vote_round_ttl",
+                "type": 5,
+                "typeName": "<u32 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<3336890314u32, ()>,>>::Type"
+              },
+              {
+                "name": "validators",
+                "type": 6,
+                "typeName": "<Vec<AccountId> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<1984062783u32, ()>,>>::Type"
+              },
+              {
+                "name": "pending_validators",
+                "type": 7,
+                "typeName": "<Vec<(AccountId, u32, Hash)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<140638744u32, ()\n>,>>::Type"
+              },
+              {
+                "name": "collateral",
+                "type": 10,
+                "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<54206484u32, ()\n>,>>::Type"
+              },
+              {
+                "name": "lock_state",
+                "type": 16,
+                "typeName": "<Mapping<AccountId, (bool, u64)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2333662305u32,\n()>,>>::Type"
+              },
+              {
+                "name": "next_request_id",
+                "type": 4,
+                "typeName": "<u64 as::ink::storage::traits::AutoStorableHint<::ink::storage\n::traits::ManualKey<599694986u32, ()>,>>::Type"
+              },
+              {
+                "name": "request_voters",
+                "type": 20,
+                "typeName": "<Mapping<u64, Vec<AccountId>> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<244708015u32, ()\n>,>>::Type"
+              },
+              {
+                "name": "request_created",
+                "type": 23,
+                "typeName": "<Mapping<u64, u32> as::ink::storage::traits::AutoStorableHint<::\nink::storage::traits::ManualKey<1030433754u32, ()>,>>::Type"
+              },
+              {
+                "name": "request_hash",
+                "type": 26,
+                "typeName": "<Mapping<u64, Hash> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<1759392809u32, ()>,>>::Type"
+              },
+              {
+                "name": "unlock_request",
+                "type": 29,
+                "typeName": "<Mapping<AccountId, u64> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<3881833005u32,\n()>,>>::Type"
+              },
+              {
+                "name": "slash_request",
+                "type": 32,
+                "typeName": "<Mapping<Hash, u64> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<3568653057u32, ()>,>>::Type"
+              },
+              {
+                "name": "collect_request",
+                "type": 35,
+                "typeName": "<Mapping<Hash, u64> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<600681157u32, ()>,>>::Type"
+              },
+              {
+                "name": "governance_request",
+                "type": 38,
+                "typeName": "<Mapping<Hash, u64> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<1020086647u32, ()>,>>::Type"
+              },
+              {
+                "name": "settled_total",
+                "type": 41,
+                "typeName": "<Mapping<AccountId, Balance> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<2281834914u32,\n()>,>>::Type"
+              },
+              {
+                "name": "slashed",
+                "type": 44,
+                "typeName": "<Mapping<Hash, bool> as::ink::storage::traits::AutoStorableHint<\n::ink::storage::traits::ManualKey<2858216545u32, ()>,>>::Type"
+              },
+              {
+                "name": "pending_slashes",
+                "type": 47,
+                "typeName": "<Mapping<Hash, (AccountId, Balance)> as::ink::storage::traits::\nAutoStorableHint<::ink::storage::traits::ManualKey<1892537536u32,\n()>,>>::Type"
+              },
+              {
+                "name": "accumulated_fees",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3864256064u32, ()>,>>::Type"
+              },
+              {
+                "name": "total_recycled_fees",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<243824719u32, ()>,>>::Type"
+              },
+              {
+                "name": "total_collateral",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<3441091521u32, ()>,>>::Type"
+              },
+              {
+                "name": "pending_slash_total",
+                "type": 4,
+                "typeName": "<Balance as::ink::storage::traits::AutoStorableHint<::ink::\nstorage::traits::ManualKey<1141792132u32, ()>,>>::Type"
+              }
+            ]
+          }
+        },
+        "path": [
+          "allways_bond_vault",
+          "allways_bond_vault",
+          "AllwaysBondVault"
+        ]
+      }
+    },
+    {
+      "id": 52,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 53
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 53
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 53,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 14
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 54
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 14
+          },
+          {
+            "name": "E",
+            "type": 54
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 54,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 0,
+                "name": "NotValidator"
+              },
+              {
+                "index": 1,
+                "name": "InvalidValidatorSet"
+              },
+              {
+                "index": 2,
+                "name": "AlreadyValidator"
+              },
+              {
+                "index": 3,
+                "name": "NotPendingValidator"
+              },
+              {
+                "index": 4,
+                "name": "AdmissionVoid"
+              },
+              {
+                "index": 5,
+                "name": "SelfRemoval"
+              },
+              {
+                "index": 6,
+                "name": "AlreadyVoted"
+              },
+              {
+                "index": 7,
+                "name": "PendingConflict"
+              },
+              {
+                "index": 8,
+                "name": "ThresholdTooLow"
+              },
+              {
+                "index": 9,
+                "name": "InvalidAmount"
+              },
+              {
+                "index": 10,
+                "name": "InsufficientCollateral"
+              },
+              {
+                "index": 11,
+                "name": "ExceedsMaxCollateral"
+              },
+              {
+                "index": 12,
+                "name": "BondLocked"
+              },
+              {
+                "index": 13,
+                "name": "LockStateUnchanged"
+              },
+              {
+                "index": 14,
+                "name": "EpochMismatch"
+              },
+              {
+                "index": 15,
+                "name": "AlreadySlashed"
+              },
+              {
+                "index": 16,
+                "name": "InvalidReimbursement"
+              },
+              {
+                "index": 17,
+                "name": "NoPendingSlash"
+              },
+              {
+                "index": 18,
+                "name": "TransferFailed"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 5,
+                    "typeName": "u32"
+                  }
+                ],
+                "index": 19,
+                "name": "ChainExtension"
+              },
+              {
+                "index": 20,
+                "name": "InvalidBatch"
+              },
+              {
+                "index": 21,
+                "name": "InvalidStatus"
+              }
+            ]
+          }
+        },
+        "path": [
+          "allways_bond_vault",
+          "errors",
+          "Error"
+        ]
+      }
+    },
+    {
+      "id": 55,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 1,
+                "name": "CouldNotReadInput"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "LangError"
+        ]
+      }
+    },
+    {
+      "id": 56,
+      "type": {
+        "def": {
+          "sequence": {
+            "type": 48
+          }
+        }
+      }
+    },
+    {
+      "id": 57,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 4
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 4
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 58,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 17
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 17
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 59,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 15
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 15
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 60,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 61
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 61
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 61,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 0,
+                "name": "None"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 48
+                  }
+                ],
+                "index": 1,
+                "name": "Some"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 48
+          }
+        ],
+        "path": [
+          "Option"
+        ]
+      }
+    },
+    {
+      "id": 62,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 6
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 6
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 63,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 5
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 5
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 64,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 2
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 2
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 65,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 0
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 0
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 66,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 3
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 55
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 3
+          },
+          {
+            "name": "E",
+            "type": 55
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 67,
+      "type": {
+        "def": {
+          "primitive": "u128"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "type": {
+        "def": {
+          "variant": {}
+        },
+        "path": [
+          "allways_bond_vault",
+          "SubtensorExtension"
+        ]
+      }
+    }
+  ],
+  "version": 5
+}

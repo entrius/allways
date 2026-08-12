@@ -32,8 +32,15 @@ def _rate_fixed(display: float) -> int:
 
 class FakeClient:
     def __init__(self, *, active=True, has_active_swap=False, quote_rate=0.0021, pool=None, collateral=10**12):
-        self.miner_state = SimpleNamespace(active=active, has_active_swap=has_active_swap)
-        self.quote = SimpleNamespace(rate=_rate_fixed(quote_rate), from_chain='sol', to_chain='btc')
+        self.miner_state = SimpleNamespace(
+            active=active,
+            has_active_swap=has_active_swap,
+            active_swap_backings=1 if has_active_swap else 0,
+            collateral=collateral,
+        )
+        self.quote = SimpleNamespace(
+            rate=_rate_fixed(quote_rate), from_chain='sol', to_chain='btc', collateral_chain='sol'
+        )
         self._pool = pool
         self.collateral = collateral
         self.calls = []
@@ -48,23 +55,34 @@ class FakeClient:
     def get_miner_state(self, miner):
         return self.miner_state
 
-    def get_pool(self, miner):
+    def get_pool(self, miner, backing='sol'):
         return self._pool
 
-    def get_quote(self, miner, from_chain, to_chain):
-        return self.quote
+    def get_quote(self, miner, from_chain, to_chain, backing='sol'):
+        return self.quote if backing == self.quote.collateral_chain else None
+
+    def get_quotes_for_direction(self, miner, from_chain, to_chain):
+        return [self.quote]
+
+    def get_bond_attestation(self, miner, chain='tao'):
+        return None
 
     def get_config(self):
-        return SimpleNamespace(min_swap_amount=0, max_swap_amount=0)
+        return SimpleNamespace(min_swap_amount=0, max_swap_amount=0, tao_min_swap_amount=0, tao_max_swap_amount=0)
 
     def get_collateral_lamports(self, miner):
         return self.collateral
 
-    def open_or_request(self, miner, from_chain, to_chain):
-        # Two-phase: a bid carries only the pair (the winner names the fill at finalize).
-        self.calls.append(('open_or_request', from_chain, to_chain))
+    def open_or_request(self, miner, from_chain, to_chain, backing='sol'):
+        # Two-phase: a bid carries only the pair + the backing (the winner names the fill at finalize).
+        self.calls.append(('open_or_request', from_chain, to_chain, backing))
         self._pool = SimpleNamespace(
-            opened_at=1, closes_at=FUTURE, from_chain=from_chain, to_chain=to_chain, rate=self.quote.rate
+            opened_at=1,
+            closes_at=FUTURE,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            rate=self.quote.rate,
+            collateral_chain=backing,
         )
         return 'sig123'
 
@@ -87,7 +105,7 @@ def test_open_happy_path_persists_routed_request():
     client = FakeClient()
     r, store = _reserve(client)
     assert r.ok and r.pool_closes_at == FUTURE
-    assert client.calls == [('open_or_request', 'sol', 'btc')]
+    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
     queued = store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
     assert len(queued) == 1
     assert queued[0]['user_pubkey'] == USER_PK
@@ -164,7 +182,7 @@ def test_miner_receive_address_clean_still_bids():
     validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert result.ok
-    assert client.calls == [('open_or_request', 'sol', 'btc')]
+    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
 
 
 def test_inactive_miner_rejects():
@@ -247,7 +265,7 @@ def test_join_uses_pinned_pool_rate_not_live_quote():
     client = FakeClient(quote_rate=0.0099, pool=pinned)  # live quote drifted away from the pinned 0.0021
     r, _ = _reserve(client)
     assert r.ok
-    assert client.calls == [('open_or_request', 'sol', 'btc')]
+    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
 
 
 # ─── _swap_stage: closed-PDA terminal disambiguation ────────────────────────
@@ -326,7 +344,7 @@ class StatusClient:
         self.swap_keys_queried.append(swap_key)
         return self._swap
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def get_hotkey_binding(self, hotkey_bytes):
@@ -456,14 +474,14 @@ class _ConfirmClient(FakeClient):
         self.extensions = []
         self.extend_raises = False
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
         self.claims.append((swap_key, from_tx_hash, from_tx_block))
         return 'claimsig'
 
-    def extend_reservation(self, miner, target_at):
+    def extend_reservation(self, miner, target_at, backing='sol'):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)

@@ -24,7 +24,11 @@ pub struct CloseUnfilledReservation<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    #[account(mut, seeds = [RESV_SEED, miner.key().as_ref()], bump = reservation.bump)]
+    #[account(
+        mut,
+        seeds = [RESV_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump = reservation.bump,
+    )]
     pub reservation: Account<'info, Reservation>,
 }
 
@@ -46,8 +50,9 @@ pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
         r.router
     };
 
-    // Free the miner now (the bid set busy_until far ahead to cover a finalize that never came).
-    ctx.accounts.miner_state.busy_until = now;
+    // Free the hub now (the bid set its busy slot far ahead to cover a finalize that never came).
+    let bit = crate::backing::backing_bit(&ctx.accounts.reservation.collateral_chain)?;
+    ctx.accounts.miner_state.set_busy(bit, now);
 
     let r = &mut ctx.accounts.reservation;
     r.router = Pubkey::default();
@@ -56,6 +61,7 @@ pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
     emit!(UnfilledReservationClosed {
         miner: ctx.accounts.miner.key(),
         router,
+        collateral_chain: ctx.accounts.reservation.collateral_chain.clone(),
     });
     Ok(())
 }

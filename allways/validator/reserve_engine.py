@@ -14,10 +14,14 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.swap_commands.swap_intake import (
+    MinerCandidate,
+    backing_purse,
+    bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    hub_bounds,
     max_intake_from_amount,
     rate_display_from_fixed,
     select_best_miner,
@@ -26,6 +30,7 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.constants import NUMERAIRE_CHAIN
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
+from allways.solana.pdas import BACKING_BITS
 from allways.validator.binding import hotkey_ss58, verify_binding
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -47,6 +52,32 @@ def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
         bt.logging.warning(f'binding for {miner_hotkey}: invalid sr25519 sig, refusing to resolve')
         return None
     return hk_binding.miner
+
+
+def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, from_amount: int, bounds):
+    """The offer of this miner's that gives the user the most — one market per pair, mixed by rate
+    (D2), NOT a preference for either purse. Reuses the taker's selector, so a routed user and a
+    self-represented one pick the same offer, including its exact-tie preference for "sol".
+    Returns ``((quote, backing), '')`` or ``(None, reason)`` — the reason is the taker-facing one
+    from the same gate set, so a routed rejection reads like a self-represented one."""
+    offers = {}
+    candidates = []
+    for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:
+        if q is None:
+            continue
+        backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
+        purse = backing_purse(client, miner_pk, miner_state, backing)
+        if purse is None:
+            continue  # no locked bond behind it — the contract's entry gate would refuse the bid
+        offers[backing] = q
+        candidates.append(MinerCandidate(miner_pk, rate_display_from_fixed(q.rate), purse, backing))
+    if not candidates:
+        return None, f'miner has no quote for {from_chain}->{to_chain}'
+    hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+    if best is None:
+        return None, unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+    return (offers[best[0].backing], best[0].backing), ''
 
 
 @dataclass
@@ -89,37 +120,50 @@ def reserve_on_behalf(
         return ReserveResult(False, 'miner is not active')
 
     now = int(time.time())
+    cfg = client.get_config()
+    bounds = bounds_from_config(cfg)
     quote = None
-    pool = client.get_pool(miner_pk)
-    joining = (
-        pool is not None
-        and int(getattr(pool, 'opened_at', 0) or 0) != 0
-        and now <= int(getattr(pool, 'closes_at', 0) or 0)
-        and pool.from_chain == from_chain
-        and pool.to_chain == to_chain
-    )
+    # Contest slots are per (miner, hub) since v3.1 — a joinable pool may exist on any backing.
+    pool = None
+    joining = False
+    backing = NUMERAIRE_CHAIN
+    for candidate_backing in BACKING_BITS:
+        p = client.get_pool(miner_pk, candidate_backing)
+        if (
+            p is not None
+            and int(getattr(p, 'opened_at', 0) or 0) != 0
+            and now <= int(getattr(p, 'closes_at', 0) or 0)
+            and p.from_chain == from_chain
+            and p.to_chain == to_chain
+        ):
+            pool, joining, backing = p, True, candidate_backing
+            break
     if joining:
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
+        quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
     else:
-        if miner_state.has_active_swap:
-            return ReserveResult(False, 'miner is busy with another swap; try again shortly')
-        quote = client.get_quote(miner_pk, from_chain, to_chain)
-        if quote is None:
-            return ReserveResult(False, f'miner has no quote for {from_chain}->{to_chain}')
+        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds)
+        if offer is None:
+            return ReserveResult(False, why)
+        quote, backing = offer
         rate_fixed = quote.rate
+        # One swap per HUB: only the chosen offer's hub has to be idle — the other hub's swap
+        # neither draws on this pot nor blocks it.
+        if int(getattr(miner_state, 'active_swap_backings', 0)) & BACKING_BITS.get(backing, 0):
+            return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
 
     try:
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed))
+        amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing)
     except ValueError as e:
         return ReserveResult(False, str(e))
     if amts.to_amount <= 0:
         return ReserveResult(False, 'non-positive dest amount for that source amount')
 
-    cfg = client.get_config()
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
-    collateral = client.get_collateral_lamports(miner_pk) or 0
-    ok, reason = swap_viable(amts.collateral_amount, collateral, min_swap, max_swap)
+    purse = backing_purse(client, miner_pk, miner_state, backing)
+    if purse is None:
+        return ReserveResult(False, f'no locked {backing} bond backs that offer')
+    min_swap, max_swap = bounds.get(backing, (0, 0))
+    ok, reason = swap_viable(amts.collateral_amount, purse, min_swap, max_swap, backing)
     if not ok:
         return ReserveResult(False, reason)
 
@@ -137,7 +181,7 @@ def reserve_on_behalf(
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)
     if src_provider is not None:
-        miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain)
+        miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
         miner_from_addr = getattr(miner_quote, 'miner_from_addr', '') if miner_quote else ''
         if miner_from_addr and (
             not src_provider.chain.is_valid_address(miner_from_addr)
@@ -153,7 +197,7 @@ def reserve_on_behalf(
     # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
     # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
     try:
-        sig = client.open_or_request(miner_pk, from_chain, to_chain)
+        sig = client.open_or_request(miner_pk, from_chain, to_chain, backing)
     except Exception as e:
         reason = contract_reject_reason(e)
         if reason is None:
@@ -162,9 +206,9 @@ def reserve_on_behalf(
     # The entry landed — queue the user's details for `finalize_won_seats`. Persisted (not held in
     # memory) so a validator restart inside the pool/finalize window still honors the routing promise.
     validator.state_store.upsert_routed_request(
-        str(miner_pk), from_chain, to_chain, str(user_pk), user_from_addr, user_to_addr, from_amount, now
+        str(miner_pk), from_chain, to_chain, backing, str(user_pk), user_from_addr, user_to_addr, from_amount, now
     )
-    pool = client.get_pool(miner_pk)
+    pool = client.get_pool(miner_pk, backing)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
     return ReserveResult(True, '', closes_at, sig)
 
@@ -194,13 +238,13 @@ def finalize_won_seats(validator, now: int) -> list:
     read_only = validator.solana_swap_loop.read_only
     me = str(client.keypair.pubkey())
     finalized: list = []
-    for miner, from_chain, to_chain in store.distinct_routed_pools():
-        queue = store.pending_routed_requests(miner, from_chain, to_chain)
+    for miner, from_chain, to_chain, backing in store.distinct_routed_pools():
+        queue = store.pending_routed_requests(miner, from_chain, to_chain, backing)
         if not queue:
             continue
         entered_at = queue[0]['created_at']
         try:
-            resv = client.get_reservation(Pubkey.from_string(miner))
+            resv = client.get_reservation(Pubkey.from_string(miner), backing)
         except Exception as e:
             bt.logging.warning(f'routed sweep {miner[:8]}: reservation read failed, retrying next step: {e}')
             continue
@@ -223,17 +267,21 @@ def finalize_won_seats(validator, now: int) -> list:
             # outcome (lost to another router, filled, lapsed) → drop.
             if drawn_unfilled and now <= int(resv.finalize_by):
                 bt.logging.info(f'routed sweep {miner[:8]}: seat won by another router, dropping queue')
-                store.delete_routed_requests(miner, from_chain, to_chain)
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
             elif fresh:
                 bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
-                store.delete_routed_requests(miner, from_chain, to_chain)
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         req = draw_pool_winner(queue)
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
         try:
-            fill = compute_intake_amounts(from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate))
+            # The reservation lives at the queue's backing-seeded address, so the stored chain can
+            # only agree; the fill is sized against THAT leg or the purse gate reads the wrong side.
+            fill = compute_intake_amounts(
+                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing
+            )
             client.finalize_reservation(
                 Pubkey.from_string(miner),
                 Pubkey.from_string(req['user_pubkey']),
@@ -242,6 +290,7 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.collateral_amount,
                 fill.from_amount,
                 fill.to_amount,
+                backing,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
@@ -249,10 +298,10 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
             bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
-            store.delete_routed_requests(miner, from_chain, to_chain)
+            store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
-        store.delete_routed_requests(miner, from_chain, to_chain)
+        store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
     store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
     return finalized
@@ -393,6 +442,9 @@ class BestQuote:
     collateral_amount: int
     from_amount: int
     to_amount: int
+    # The backing the winning quote declared — it is the offer's failure guarantee, so a consumer
+    # that shows a rate has to be able to show which promise comes with it.
+    backing: str = NUMERAIRE_CHAIN
 
 
 # Depth rungs served alongside /rate — enough to show the market, few enough to stay a glance.
@@ -415,18 +467,21 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     never cumulative — a swap fills against a single miner."""
     client = validator.solana_client
     cfg = client.get_config()
-    min_swap = int(getattr(cfg, 'min_swap_amount', 0) or 0)
-    max_swap = int(getattr(cfg, 'max_swap_amount', 0) or 0)
+    bounds = bounds_from_config(cfg)
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap)
+    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     bq = _best_quote_result(validator, best) if best else None
-    reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap)
+    reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     depth: dict = {}
     for cand in cands:
-        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap)
+        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
-    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_chain == NUMERAIRE_CHAIN)
+    # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
+    # source (the hub leg), higher is better; sending the spoke side, lower is better.
+    from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
+    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
     levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
     return RateQuote(bq, reason, levels, max(depth.values(), default=0))
 
@@ -437,7 +492,13 @@ def _best_quote_result(validator, best) -> Optional[BestQuote]:
     if hotkey is None:
         return None
     return BestQuote(
-        hotkey, str(cand.miner), cand.rate_display, amts.collateral_amount, amts.from_amount, amts.to_amount
+        hotkey,
+        str(cand.miner),
+        cand.rate_display,
+        amts.collateral_amount,
+        amts.from_amount,
+        amts.to_amount,
+        cand.backing,
     )
 
 

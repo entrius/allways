@@ -1,3 +1,4 @@
+pub mod backing;
 pub mod constants;
 pub mod consensus;
 pub mod error;
@@ -87,6 +88,26 @@ pub mod allways_swap_manager {
     pub fn set_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
         admin::set_max_swap_amount(ctx, amount)
     }
+    /// TAO-backed swap bounds, in rao (the lamport pair above is SOL-backed only).
+    pub fn set_tao_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_min_swap_amount(ctx, amount)
+    }
+    pub fn set_tao_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_max_swap_amount(ctx, amount)
+    }
+    /// How long a non-locally-backed timeout keeps the miner busy while the penalty settles on the
+    /// backing chain (busy-until-settled).
+    pub fn set_settlement_grace(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_settlement_grace(ctx, secs)
+    }
+    /// Attested bond floor for activating the TAO backing, in rao.
+    pub fn set_tao_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_tao_min_collateral(ctx, amount)
+    }
+    /// How stale the global attestation heartbeat may get before non-local backings fuse off at entry.
+    pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
+        admin::set_attest_max_age(ctx, secs)
+    }
     pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_reservation_ttl(ctx, secs)
     }
@@ -117,18 +138,37 @@ pub mod allways_swap_manager {
         vote_set_weights::handler(ctx, weights, round_key)
     }
 
-    // --- Miner activation consensus ---
-    /// A validator votes to activate a miner (active on quorum).
-    pub fn vote_activate(ctx: Context<VoteActivate>) -> Result<()> {
-        vote_activate::handler(ctx)
+    // --- Miner activation consensus (per backing purse) ---
+    /// A validator votes to activate one of a miner's backings ("sol" | "tao"); its bit is set on quorum.
+    pub fn vote_activate(ctx: Context<VoteActivate>, backing: String) -> Result<()> {
+        vote_activate::handler(ctx, backing)
     }
-    /// A validator votes to force-deactivate a miner (deactivated on quorum).
-    pub fn vote_deactivate(ctx: Context<VoteDeactivate>) -> Result<()> {
-        vote_deactivate::handler(ctx)
+    /// A validator votes to force-deactivate one of a miner's backings; its bit is cleared on quorum.
+    pub fn vote_deactivate(ctx: Context<VoteDeactivate>, backing: String) -> Result<()> {
+        vote_deactivate::handler(ctx, backing)
     }
-    /// Miner self-deactivation (no consensus).
-    pub fn deactivate(ctx: Context<Deactivate>) -> Result<()> {
-        deactivate::handler(ctx)
+
+    // --- Bond attestation (the collateral mirror for backings this program can't read) ---
+    /// A validator attests a miner's effective bond on one backing chain; written on quorum. The full
+    /// payload is hash-bound, so divergent attestations conflict instead of co-counting.
+    pub fn vote_set_attestation(
+        ctx: Context<VoteSetAttestation>,
+        chain: String,
+        effective_balance: u64,
+        locked: bool,
+        epoch: u64,
+    ) -> Result<()> {
+        vote_set_attestation::handler(ctx, chain, effective_balance, locked, epoch)
+    }
+    /// A validator bumps the global attestation heartbeat; on quorum it advances to the chain's clock.
+    /// While it is stale, entry into any non-locally-backed swap is fused off.
+    pub fn vote_attest_heartbeat(ctx: Context<VoteAttestHeartbeat>) -> Result<()> {
+        vote_attest_heartbeat::handler(ctx)
+    }
+    /// Miner self-deactivation (no consensus). `backing = Some(chain)` drops that purse only; `None`
+    /// drops every purse (the full exit).
+    pub fn deactivate(ctx: Context<Deactivate>, backing: Option<String>) -> Result<()> {
+        deactivate::handler(ctx, backing)
     }
 
     // --- Reservation lottery (two-phase: bid → draw → finalize) ---
@@ -139,8 +179,9 @@ pub mod allways_swap_manager {
         ctx: Context<OpenOrRequest>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
     ) -> Result<()> {
-        open_or_request::handler(ctx, from_chain, to_chain)
+        open_or_request::handler(ctx, from_chain, to_chain, collateral_chain)
     }
     /// Permissionless: after the window closes, run the stake-weighted draw and create the winner's
     /// UNFILLED reservation (pins router + miner quote; `reserved_until = 0`).
@@ -240,12 +281,15 @@ pub mod allways_swap_manager {
     }
 
     // --- On-chain miner quotes ---
-    /// Miner publishes/overwrites its standing quote for one pair-direction (the reverse is a
-    /// separate quote). Permissionless: the validator/UI filters to registered miners.
+    /// Miner publishes/overwrites its standing quote for one pair-direction and one backing (the
+    /// reverse direction, and the same direction on the other purse, are separate quotes). The backing
+    /// must be a hub on one of the legs and already activated for this miner.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_quote(
         ctx: Context<SetQuote>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
         miner_from_addr: String,
         miner_to_addr: String,
         rate: u128,
@@ -255,6 +299,7 @@ pub mod allways_swap_manager {
             ctx,
             from_chain,
             to_chain,
+            collateral_chain,
             miner_from_addr,
             miner_to_addr,
             rate,
@@ -266,8 +311,29 @@ pub mod allways_swap_manager {
         ctx: Context<RemoveQuote>,
         from_chain: String,
         to_chain: String,
+        collateral_chain: String,
     ) -> Result<()> {
-        remove_quote::handler(ctx, from_chain, to_chain)
+        remove_quote::handler(ctx, from_chain, to_chain, collateral_chain)
+    }
+    /// Permissionless: reap a quote stranded at the pre-W2b derivation, refunding its rent to the
+    /// miner that paid it. Cannot touch a live quote (see the handler's address proof).
+    pub fn close_legacy_quote(ctx: Context<CloseLegacyQuote>) -> Result<()> {
+        close_legacy_quote::handler(ctx)
+    }
+    /// Permissionless: reap a `Pool` stranded at the retired pre-v3.1 `[pool, miner]` address (the
+    /// live seeds carry the backing), refunding rent to the miner. Any historical layout — the
+    /// address itself is the legacy proof.
+    pub fn close_legacy_pool(ctx: Context<CloseLegacyPool>) -> Result<()> {
+        close_legacy_slot::close_pool(ctx)
+    }
+    /// The same reap for a `Reservation` stranded at the retired `[resv, miner]` address.
+    pub fn close_legacy_reservation(ctx: Context<CloseLegacyReservation>) -> Result<()> {
+        close_legacy_slot::close_reservation(ctx)
+    }
+    /// The same reap for an initiate `VoteRound` stranded at the retired per-miner address (live
+    /// rounds key by swap_key). Rent → caller: rounds were validator-funded, not miner-funded.
+    pub fn close_legacy_initiate_round(ctx: Context<CloseLegacyInitiateRound>) -> Result<()> {
+        close_legacy_slot::close_initiate_round(ctx)
     }
 
     // --- Identity binding ---
@@ -279,5 +345,16 @@ pub mod allways_swap_manager {
         hotkey_sig: [u8; 64],
     ) -> Result<()> {
         bind_hotkey::handler(ctx, hotkey, hotkey_sig)
+    }
+
+    // --- v3 upgrade cranks (admin, idempotent; run migrate_config first) ---
+    /// Rewrite the v10 Config into the v12 layout, seeding the W1+W2 fields with their defaults.
+    pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
+        migrate::migrate_config(ctx)
+    }
+    /// Rewrite one v10 MinerState into the v12 layout, carrying the legacy `active` bool into the SOL
+    /// activation bit.
+    pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
+        migrate::migrate_miner_state(ctx)
     }
 }

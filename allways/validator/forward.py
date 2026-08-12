@@ -12,6 +12,7 @@ from allways import dev_signal
 from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
 from allways.validator.floor_sweep import maybe_sweep_floor
+from allways.validator.relay.engine import maybe_relay
 from allways.validator.reserve_engine import finalize_won_seats
 from allways.validator.scoring import (
     due_for_scoring,
@@ -59,6 +60,10 @@ async def forward(self: Validator) -> None:
 
     # Fold new program events into the crown index before scoring reads it.
     ingest_solana_events(self)
+
+    # Bond relay: carry Solana verdicts to the Bittensor vault and the vault's bonds back.
+    # Off the event loop — a vault write waits on substrate block inclusion.
+    await asyncio.to_thread(maybe_relay, self)
 
     # Block-aligned stake-weight vote: keeps Config.validators draw weights stake-true.
     maybe_vote_weights(self, now)
@@ -118,5 +123,10 @@ def ingest_solana_events(self: Validator) -> None:
         attribution = build_attribution(self.solana_client)
         written = self.event_index.ingest(records, attribution)
         bt.logging.info(f'forward: ingested {written}/{len(records)} solana event(s)')
+        # The relay reads the same stream separately: it keys by Solana pubkey and must keep
+        # events from a miner whose binding lands later, which the crown index drops.
+        relay = getattr(self, 'bond_relay', None)
+        if relay is not None:
+            relay.ingest_events(records)
     if new_cursor is not None and new_cursor != cursor:
         self.state_store.set_solana_event_cursor(new_cursor)

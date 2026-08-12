@@ -101,13 +101,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -116,7 +117,7 @@ fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
 fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteDeactivate {}.data(),
+        &allways_swap_manager::instruction::VoteDeactivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteDeactivate {
             validator: *validator,
             config: config_pda(),
@@ -131,7 +132,7 @@ fn vote_deactivate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
 fn deactivate_ix(miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::Deactivate {}.data(),
+        &allways_swap_manager::instruction::Deactivate { backing: None }.data(),
         allways_swap_manager::accounts::Deactivate {
             miner: *miner,
             miner_state: miner_pda(miner),

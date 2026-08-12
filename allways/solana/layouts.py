@@ -9,8 +9,25 @@ Fixed byte arrays ([u8;32]/[u8;64], incl. pubkeys) decode to Python `bytes` via 
 client converts pubkey fields to solders Pubkey when mapping to dataclasses.
 """
 
-from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, String, Vec
+from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, Option, String, Vec
 from construct import Bytes as _Raw
+
+# `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
+# bump is one edit on each side rather than a literal buried in a test.
+CONFIG_VERSION = 14
+
+# Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
+# `active_backings` bit, indexed by bit position.
+MAX_BACKING_SLOTS = 8
+
+
+def lock_max(value) -> int:
+    """Latest deadline in a per-hub lock array — the global busy/settling view. Tolerates the
+    pre-v3.1 scalar shape so synthetic fixtures and mixed-version reads stay comparable."""
+    if isinstance(value, (list, tuple)):
+        return max((int(v) for v in value), default=0)
+    return int(value or 0)
+
 
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
@@ -19,6 +36,7 @@ Sig64 = _Raw(64)
 # 8-byte account discriminators (IDL `accounts[].discriminator`).
 DISCRIMINATORS = {
     'Binding': bytes([148, 194, 179, 54, 81, 210, 85, 178]),
+    'BondAttestation': bytes([131, 10, 27, 174, 69, 97, 217, 188]),
     'CollateralVault': bytes([19, 189, 95, 155, 100, 9, 159, 145]),
     'Config': bytes([155, 12, 170, 224, 30, 250, 204, 130]),
     'HotkeyBinding': bytes([225, 14, 96, 246, 60, 210, 97, 210]),
@@ -60,12 +78,30 @@ Treasury = CStruct('total' / U64, 'bump' / U8)
 MinerState = CStruct(
     'miner' / Pubkey32,
     'collateral' / U64,
+    # `active`/`has_active_swap` are OR views of their masks (W2 activation, v3.1 per-hub swaps).
+    # The lock arrays are per-hub, indexed by backing-bit position; `settling_until` slots are the
+    # entry locks a non-"sol" timeout sets beside the `busy_until` exit locks.
     'active' / Bool,
+    'active_backings' / U8,
     'has_active_swap' / Bool,
-    'busy_until' / I64,
+    'active_swap_backings' / U8,
+    'busy_until' / I64[MAX_BACKING_SLOTS],
+    'settling_until' / I64[MAX_BACKING_SLOTS],
+    'reserved_collateral' / U64[MAX_BACKING_SLOTS],
     'deactivation_at' / I64,
     'successful_swaps' / U32,
     'failed_swaps' / U32,
+    'bump' / U8,
+)
+
+# W2 — the quorum's assertion about a bond this program can't read (one per miner per backing chain).
+BondAttestation = CStruct(
+    'miner' / Pubkey32,
+    'chain' / String,
+    'effective_balance' / U64,
+    'locked' / Bool,
+    'epoch' / U64,
+    'attested_at' / I64,
     'bump' / U8,
 )
 
@@ -83,6 +119,8 @@ MinerQuote = CStruct(
     'miner' / Pubkey32,
     'from_chain' / String,
     'to_chain' / String,
+    # W2b — the declared backing; also the 5th PDA seed, so two quotes can stand on one direction.
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -99,6 +137,7 @@ Reservation = CStruct(
     'user_to_addr' / String,
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
@@ -123,6 +162,7 @@ Swap = CStruct(
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
+    'collateral_chain' / String,
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
@@ -142,6 +182,8 @@ Pool = CStruct(
     'miner' / Pubkey32,
     'from_chain' / String,
     'to_chain' / String,
+    # Pinned from the quote at open; resolve_pool copies it into the Reservation.
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -167,6 +209,14 @@ Config = CStruct(
     'fulfillment_timeout_secs' / I64,
     'min_swap_amount' / U64,
     'max_swap_amount' / U64,
+    # TAO-backed bounds (rao) + the busy-until-settled grace — W1 split-collateral seam.
+    'tao_min_swap_amount' / U64,
+    'tao_max_swap_amount' / U64,
+    # W2 — the TAO activation floor (rao) and the dead-man fuse's two fields.
+    'tao_min_collateral' / U64,
+    'settlement_grace_secs' / I64,
+    'last_attest_heartbeat' / I64,
+    'attest_max_age_secs' / I64,
     'reservation_ttl_secs' / I64,
     'consensus_threshold_percent' / U8,
     'validators' / Vec(ValidatorInfo),
@@ -184,6 +234,7 @@ Config = CStruct(
 # fields (hotkey, hotkey_sig, claimed_swap_key, bound_hash) intentionally stay raw bytes.
 ACCOUNT_PUBKEY_FIELDS = {
     'Binding': ['miner'],
+    'BondAttestation': ['miner'],
     'HotkeyBinding': ['miner'],
     'Config': ['admin'],
     'MinerState': ['miner'],
@@ -201,12 +252,15 @@ ACCOUNT_PUBKEY_FIELDS = {
 # Emitted via Anchor self-CPI and surfaced in tx logs as base64 `Program data:` lines. Field order/types
 # mirror events.rs / the IDL exactly. swap_key + hotkey stay raw bytes (see EVENT_PUBKEY_FIELDS).
 EVENT_DISCRIMINATORS = {
+    'AttestHeartbeat': bytes([66, 230, 199, 211, 232, 136, 138, 139]),
+    'BondAttested': bytes([65, 162, 178, 67, 21, 45, 162, 255]),
     'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
+    'MinerBackingChanged': bytes([158, 37, 88, 4, 80, 187, 116, 110]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
     'PoolDrawArmed': bytes([56, 138, 178, 84, 109, 162, 248, 202]),
     'PoolOpened': bytes([44, 53, 197, 215, 31, 61, 56, 170]),
@@ -229,34 +283,61 @@ EVENT_DISCRIMINATORS = {
 }
 
 EVENT_LAYOUTS = {
+    'AttestHeartbeat': CStruct('at' / I64),
+    'BondAttested': CStruct(
+        'miner' / Pubkey32,
+        'chain' / String,
+        'effective_balance' / U64,
+        'locked' / Bool,
+        'epoch' / U64,
+        'attested_at' / I64,
+    ),
     'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
+    # Per-purse detail; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
+    'MinerBackingChanged': CStruct(
+        'miner' / Pubkey32,
+        'backing' / String,
+        'enabled' / Bool,
+        'active_backings' / U8,
+        'at' / I64,
+    ),
     'MinerDeactivated': CStruct('miner' / Pubkey32, 'at' / I64),
     'PoolOpened': CStruct(
         'miner' / Pubkey32,
         'opener' / Pubkey32,
         'from_chain' / String,
         'to_chain' / String,
+        'collateral_chain' / String,
         'closes_at' / I64,
         'seed_slot' / U64,
     ),
-    'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64),
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8),
-    'QuoteRemoved': CStruct('miner' / Pubkey32, 'from_chain' / String, 'to_chain' / String, 'remove_fee' / U64),
+    'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
+    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String),
+    'QuoteRemoved': CStruct(
+        'miner' / Pubkey32,
+        'from_chain' / String,
+        'to_chain' / String,
+        'collateral_chain' / String,
+        'remove_fee' / U64,
+    ),
     'QuoteSet': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
         'to_chain' / String,
+        'collateral_chain' / String,
         'rate' / U128,
         'liquidity' / U128,
         'updated_at' / I64,
         'update_fee' / U64,
     ),
-    'ReservationExtended': CStruct('miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64),
+    'ReservationExtended': CStruct(
+        'miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64, 'collateral_chain' / String
+    ),
     'ReservationFilled': CStruct(
         'miner' / Pubkey32,
         'router' / Pubkey32,
@@ -267,10 +348,11 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'reserved_until' / I64,
+        'collateral_chain' / String,
     ),
     'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
-    'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32),
+    'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String),
     'SwapClaimed': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
@@ -288,6 +370,7 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'rate' / U128,
+        'collateral_chain' / String,
     ),
     'SwapFulfilled': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'to_tx_hash' / String, 'to_amount' / U128),
     'SwapInitiated': CStruct(
@@ -298,8 +381,21 @@ EVENT_LAYOUTS = {
         'from_amount' / U128,
         'to_amount' / U128,
         'initiated_at' / I64,
+        'collateral_chain' / String,
     ),
-    'SwapTimedOut': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'collateral_amount' / U64, 'slash' / U64),
+    # `slash` is what moved on Solana (0 for a non-"sol" backing); `penalty`/`reimbursement` are the
+    # absolute figures the backing chain owes and `payee` is whom it owes them to (empty for "sol",
+    # which settled here) — together, the slash relay's whole input.
+    'SwapTimedOut': CStruct(
+        'swap_key' / Hash32,
+        'miner' / Pubkey32,
+        'collateral_amount' / U64,
+        'slash' / U64,
+        'collateral_chain' / String,
+        'penalty' / U64,
+        'reimbursement' / U64,
+        'payee' / String,
+    ),
     'SwapTimeoutExtended': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'validator' / Pubkey32, 'timeout_at' / I64),
     'TreasuryWithdrawn': CStruct('recipient' / Pubkey32, 'amount' / U64, 'total' / U64),
     'ValidatorWeightsUpdated': CStruct('count' / U8, 'updated_at' / I64),
@@ -307,12 +403,15 @@ EVENT_LAYOUTS = {
 
 # Pubkey fields per event (decoded bytes -> solders Pubkey by the client). swap_key/hotkey stay raw bytes.
 EVENT_PUBKEY_FIELDS = {
+    'AttestHeartbeat': [],
+    'BondAttested': ['miner'],
     'CollateralPosted': ['miner'],
     'CollateralWithdrawn': ['miner'],
     'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
     'MinerActivated': ['miner'],
+    'MinerBackingChanged': ['miner'],
     'MinerDeactivated': ['miner'],
     'PoolDrawArmed': ['miner'],
     'PoolOpened': ['miner', 'opener'],
@@ -380,6 +479,25 @@ IX_DISCRIMINATORS = {
     'set_finalize_window': bytes([84, 242, 160, 48, 107, 111, 170, 241]),  # IX_I64_ARGS
     # Stake-weight consensus vote — full vector index-aligned to Config.validators.
     'vote_set_weights': bytes([4, 215, 218, 143, 103, 219, 125, 6]),
+    # W2 — bond attestation + the dead-man heartbeat.
+    'vote_set_attestation': bytes([14, 69, 181, 205, 39, 28, 39, 227]),
+    'vote_attest_heartbeat': bytes([185, 84, 69, 54, 219, 168, 179, 220]),  # no args (empty body)
+    # W1/W2 admin setters (IX_AMOUNT_ARGS u64 / IX_I64_ARGS i64), unreachable from the CLI until W2b.
+    'set_tao_min_swap_amount': bytes([130, 16, 219, 134, 175, 148, 90, 215]),
+    'set_tao_max_swap_amount': bytes([95, 86, 247, 165, 68, 131, 85, 197]),
+    'set_tao_min_collateral': bytes([154, 196, 157, 5, 232, 196, 250, 217]),
+    'set_settlement_grace': bytes([151, 0, 169, 67, 242, 17, 56, 40]),
+    'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),
+    # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
+    'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
+    # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
+    # quotes these did NOT move, so they sit where the live program looks; run them per pre-v3 miner.
+    'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
+    'close_legacy_reservation': bytes([114, 19, 114, 1, 9, 107, 205, 116]),
+    'close_legacy_initiate_round': bytes([70, 12, 167, 155, 208, 160, 73, 154]),
+    # v3 upgrade cranks (no args each; run migrate_config first).
+    'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
+    'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),
 }
 IX_INITIALIZE_ARGS = CStruct(
     'min_collateral' / U64,
@@ -393,6 +511,7 @@ IX_INITIALIZE_ARGS = CStruct(
 IX_SET_QUOTE_ARGS = CStruct(
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
     'miner_from_addr' / String,
     'miner_to_addr' / String,
     'rate' / U128,
@@ -410,12 +529,13 @@ IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64)
 IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
-IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String)
+IX_REMOVE_QUOTE_ARGS = CStruct('from_chain' / String, 'to_chain' / String, 'collateral_chain' / String)
 # Phase 9 — two-phase reservation. A bid is just the pair (resolve_pool / close_unfilled_reservation
 # take no args). The seat winner names the fill in finalize_reservation. Order = handler param order.
 IX_OPEN_OR_REQUEST_ARGS = CStruct(
     'from_chain' / String,
     'to_chain' / String,
+    'collateral_chain' / String,
 )
 IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'user' / Pubkey32,
@@ -426,6 +546,16 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'to_amount' / U128,
 )
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
+# W2 — vote_activate / vote_deactivate now name the purse they act on.
+IX_BACKING_ARGS = CStruct('backing' / String)
+# W2b — `deactivate` takes an Option<String>: borsh tags None as 0x00 and Some(s) as 0x01 + string.
+IX_OPT_BACKING_ARGS = Option(String)
+IX_SET_ATTESTATION_ARGS = CStruct(
+    'chain' / String,
+    'effective_balance' / U64,
+    'locked' / Bool,
+    'epoch' / U64,
+)
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
@@ -435,6 +565,7 @@ IX_BOOL_ARGS = CStruct('value' / Bool)  # set_halted
 # name -> CStruct for the generic reader.
 ACCOUNT_LAYOUTS = {
     'Binding': Binding,
+    'BondAttestation': BondAttestation,
     'CollateralVault': CollateralVault,
     'Config': Config,
     'HotkeyBinding': HotkeyBinding,

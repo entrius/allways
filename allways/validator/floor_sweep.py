@@ -24,6 +24,7 @@ from solders.pubkey import Pubkey
 
 from allways.solana import pdas
 from allways.solana.client import benign_marker
+from allways.solana.layouts import lock_max
 
 if TYPE_CHECKING:
     from neurons.validator import Validator
@@ -99,7 +100,7 @@ class CollateralFloorSweep:
             if not ms.active or int(ms.collateral) >= floor:
                 return True
             # The contract rejects kicks on busy miners; retry once they idle.
-            if ms.has_active_swap or now < int(ms.busy_until):
+            if ms.has_active_swap or now < lock_max(ms.busy_until):
                 return False
             if self._read_only:
                 bt.logging.info(f'floor sweep: WOULD vote_deactivate {miner} (watch mode)')

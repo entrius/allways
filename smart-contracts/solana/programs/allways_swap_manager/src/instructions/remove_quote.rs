@@ -10,7 +10,7 @@ use crate::state::{MinerQuote, Treasury};
 /// the same decaying churn fee an in-place update would (by how long the quote stood) → treasury, so
 /// `remove_quote` + `set_quote` can't dodge the fee; a long-standing quote still removes free (#488).
 #[derive(Accounts)]
-#[instruction(from_chain: String, to_chain: String)]
+#[instruction(from_chain: String, to_chain: String, collateral_chain: String)]
 pub struct RemoveQuote<'info> {
     #[account(mut)]
     pub miner: Signer<'info>,
@@ -19,7 +19,13 @@ pub struct RemoveQuote<'info> {
         mut,
         close = miner,
         has_one = miner,
-        seeds = [QUOTE_SEED, miner.key().as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
+        seeds = [
+            QUOTE_SEED,
+            miner.key().as_ref(),
+            from_chain.as_bytes(),
+            to_chain.as_bytes(),
+            collateral_chain.as_bytes(),
+        ],
         bump = quote.bump,
     )]
     pub quote: Account<'info, MinerQuote>,
@@ -31,7 +37,12 @@ pub struct RemoveQuote<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<RemoveQuote>, from_chain: String, to_chain: String) -> Result<()> {
+pub fn handler(
+    ctx: Context<RemoveQuote>,
+    from_chain: String,
+    to_chain: String,
+    collateral_chain: String,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     // Same decaying fee an in-place overwrite would cost, keyed on how long this quote stood. By
     // design this can make removal fail when the miner is low on SOL: posting a quote affirms a
@@ -60,6 +71,7 @@ pub fn handler(ctx: Context<RemoveQuote>, from_chain: String, to_chain: String) 
         miner: ctx.accounts.miner.key(),
         from_chain,
         to_chain,
+        collateral_chain,
         remove_fee: fee,
     });
     Ok(())

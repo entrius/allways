@@ -35,6 +35,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
 )
 from allways.cli.validator_rejections import render_and_aggregate
+from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import SwapConfirmSynapse
 
@@ -76,17 +77,19 @@ def _find_reservations(client, user, miner_hint, require_user):
         except Exception:
             console.print(f'[red]Invalid miner pubkey: {miner_hint}[/red]')
             return []
-        resv = client.get_reservation(mpk)
-        if live_unclaimed(resv) and (not require_user or str(resv.user) == str(user)):
-            return [(mpk, _hotkey(mpk), resv)]
+        for hub in pdas.BACKING_BITS:
+            resv = client.get_reservation(mpk, hub)
+            if live_unclaimed(resv) and (not require_user or str(resv.user) == str(user)):
+                return [(mpk, _hotkey(mpk), resv)]
         return []
 
     found = []
     for _pda, binding in client.get_all('Binding'):
         mpk = binding.miner
-        resv = client.get_reservation(mpk)
-        if live_unclaimed(resv) and str(resv.user) == str(user):
-            found.append((mpk, hotkey_bytes_to_ss58(binding.hotkey), resv))
+        for hub in pdas.BACKING_BITS:
+            resv = client.get_reservation(mpk, hub)
+            if live_unclaimed(resv) and str(resv.user) == str(user):
+                found.append((mpk, hotkey_bytes_to_ss58(binding.hotkey), resv))
     return found
 
 

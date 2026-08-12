@@ -7,7 +7,9 @@ events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 windowed volume read), ``swap_outcomes`` (terminal completed/timed_out
 truth per swap_key, backing the seam's stage disambiguation after the swap PDA
 closes), ``routed_requests`` (queued on-behalf reservation details awaiting
-finalize — the one table NOT rebuildable from chain), and
+finalize — the one table NOT rebuildable from chain),
+``relay_swaps``/``relay_fees``/``relay_slashes``/``relay_meta`` (the W3 bond
+relay's ledger of what the vault still owes), and
 ``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
@@ -391,6 +393,7 @@ class ValidatorStateStore:
         miner: str,
         from_chain: str,
         to_chain: str,
+        backing: str,
         user_pubkey: str,
         user_from_addr: str,
         user_to_addr: str,
@@ -398,31 +401,41 @@ class ValidatorStateStore:
         created_at: int,
     ) -> None:
         """Persist one routed reservation request. A retry from the same user for the
-        same (miner, direction) refreshes addresses/amount but keeps its original
-        ``created_at`` — a retry never loses its FIFO position."""
+        same (miner, direction, backing) refreshes addresses/amount but keeps its
+        original ``created_at`` — a retry never loses its FIFO position."""
         self._execute(
             """
             INSERT INTO routed_requests
-                (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, from_amount, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(miner, from_chain, to_chain, user_pubkey) DO UPDATE SET
+                (miner, from_chain, to_chain, backing, user_pubkey, user_from_addr, user_to_addr, from_amount, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(miner, from_chain, to_chain, backing, user_pubkey) DO UPDATE SET
                 user_from_addr = excluded.user_from_addr,
                 user_to_addr = excluded.user_to_addr,
                 from_amount = excluded.from_amount
             """,
-            (miner, from_chain, to_chain, user_pubkey, user_from_addr, user_to_addr, str(int(from_amount)), created_at),
+            (
+                miner,
+                from_chain,
+                to_chain,
+                backing,
+                user_pubkey,
+                user_from_addr,
+                user_to_addr,
+                str(int(from_amount)),
+                created_at,
+            ),
         )
 
-    def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> List[dict]:
-        """A miner-direction's queued requests, oldest first (the FIFO order
+    def pending_routed_requests(self, miner: str, from_chain: str, to_chain: str, backing: str = 'sol') -> List[dict]:
+        """A (miner, direction, backing) queue, oldest first (the FIFO order
         ``draw_pool_winner`` selects from)."""
         rows = self._fetchall(
             """
             SELECT user_pubkey, user_from_addr, user_to_addr, from_amount, created_at FROM routed_requests
-            WHERE miner = ? AND from_chain = ? AND to_chain = ?
+            WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ?
             ORDER BY created_at ASC, id ASC
             """,
-            (miner, from_chain, to_chain),
+            (miner, from_chain, to_chain, backing),
         )
         return [
             {
@@ -435,24 +448,162 @@ class ValidatorStateStore:
             for r in rows
         ]
 
-    def distinct_routed_pools(self) -> List[Tuple[str, str, str]]:
-        """The (miner, from_chain, to_chain) keys with pending requests — the
-        finalize sweep's iteration set."""
-        rows = self._fetchall('SELECT DISTINCT miner, from_chain, to_chain FROM routed_requests')
-        return [(r['miner'], r['from_chain'], r['to_chain']) for r in rows]
+    def distinct_routed_pools(self) -> List[Tuple[str, str, str, str]]:
+        """The (miner, from_chain, to_chain, backing) keys with pending requests —
+        the finalize sweep's iteration set."""
+        rows = self._fetchall('SELECT DISTINCT miner, from_chain, to_chain, backing FROM routed_requests')
+        return [(r['miner'], r['from_chain'], r['to_chain'], r['backing']) for r in rows]
 
-    def delete_routed_requests(self, miner: str, from_chain: str, to_chain: str) -> None:
-        """Drop a miner-direction's whole queue — called on any terminal outcome
+    def delete_routed_requests(self, miner: str, from_chain: str, to_chain: str, backing: str = 'sol') -> None:
+        """Drop one (miner, direction, backing) queue — called on any terminal outcome
         (finalized, lost, expired). Non-selected users re-request via their client."""
         self._execute(
-            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ?',
-            (miner, from_chain, to_chain),
+            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ?',
+            (miner, from_chain, to_chain, backing),
         )
 
     def prune_routed_requests(self, cutoff_time: int) -> None:
         """Staleness backstop: drop rows older than ``cutoff_time`` so a dead
         miner (pool never drawn, reservation never seen) can't pin a queue."""
         self._execute('DELETE FROM routed_requests WHERE created_at < ?', (cutoff_time,))
+
+    # ─── W3 bond relay (cross-chain vault relayer) ──────────────────────
+
+    def record_relay_swap(self, swap_key: str, miner: str, backing: str, user_addr: str, seen_at: int) -> None:
+        """Snapshot a live off-chain-backed swap's reimbursement target. First sighting wins: the
+        address is pinned at finalize and immutable, and re-recording it after the fact is
+        impossible — the Swap PDA closes at the verdict and no event carries the address."""
+        self._execute(
+            """
+            INSERT INTO relay_swaps (swap_key, miner, backing, user_addr, seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(swap_key) DO NOTHING
+            """,
+            (swap_key, miner, backing, user_addr, seen_at),
+        )
+
+    def get_relay_swap(self, swap_key: str) -> Optional[dict]:
+        row = self._fetchone(
+            'SELECT swap_key, miner, backing, user_addr, seen_at FROM relay_swaps WHERE swap_key = ?',
+            (swap_key,),
+        )
+        return dict(row) if row is not None else None
+
+    def prune_relay_swaps(self, cutoff_time: int) -> None:
+        """Drop snapshots for swaps long since terminal. Rows whose slash is still unapplied are
+        kept — the relay's obligation outlives the swap."""
+        self._execute(
+            """
+            DELETE FROM relay_swaps WHERE seen_at < ?
+              AND swap_key NOT IN (SELECT swap_key FROM relay_slashes WHERE applied = 0)
+            """,
+            (cutoff_time,),
+        )
+
+    def record_relay_fee(self, swap_key: str, miner: str, backing: str, fee: int, block_time: int) -> None:
+        """One completed off-chain-backed swap's absolute protocol fee (rao). Keyed by swap_key so a
+        re-ingested event can never double-count the accrual."""
+        self._execute(
+            """
+            INSERT INTO relay_fees (swap_key, miner, backing, fee, block_time)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(swap_key) DO NOTHING
+            """,
+            (swap_key, miner, backing, int(fee), block_time),
+        )
+
+    def accrued_fee_total(self, miner: str, backing: str, at_time: Optional[int] = None) -> int:
+        """Cumulative fees this miner has earned the protocol on ``backing``, optionally as of a
+        boundary. The cadence batch reads at the aligned boundary so every validator derives the
+        identical vector."""
+        sql = 'SELECT COALESCE(SUM(fee), 0) AS total FROM relay_fees WHERE miner = ? AND backing = ?'
+        params: Tuple = (miner, backing)
+        if at_time is not None:
+            sql += ' AND block_time <= ?'
+            params += (at_time,)
+        row = self._fetchone(sql, params)
+        return int(row['total']) if row is not None else 0
+
+    def accrued_fee_totals(self, backing: str, at_time: Optional[int] = None) -> Dict[str, int]:
+        """``{miner: cumulative_fee}`` for every miner with an accrual on ``backing``."""
+        sql = 'SELECT miner, COALESCE(SUM(fee), 0) AS total FROM relay_fees WHERE backing = ?'
+        params: Tuple = (backing,)
+        if at_time is not None:
+            sql += ' AND block_time <= ?'
+            params += (at_time,)
+        rows = self._fetchall(sql + ' GROUP BY miner', params)
+        return {r['miner']: int(r['total']) for r in rows}
+
+    def record_relay_slash(
+        self,
+        swap_key: str,
+        miner: str,
+        backing: str,
+        penalty: int,
+        reimbursement: int,
+        user_addr: str,
+        block_time: int,
+    ) -> None:
+        """A timeout verdict owed to the vault. Stored verbatim from the event — the figures are
+        hash-bound into the vault round, so a reconstructed number would conflict, not co-count."""
+        self._execute(
+            """
+            INSERT INTO relay_slashes
+                (swap_key, miner, backing, penalty, reimbursement, user_addr, block_time, applied)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(swap_key) DO NOTHING
+            """,
+            (swap_key, miner, backing, int(penalty), int(reimbursement), user_addr, block_time),
+        )
+
+    def open_relay_slashes(self, backing: str, miner: Optional[str] = None) -> List[dict]:
+        """Verdicts the vault has not confirmed applied, oldest first."""
+        sql = """
+            SELECT swap_key, miner, backing, penalty, reimbursement, user_addr, block_time
+            FROM relay_slashes WHERE applied = 0 AND backing = ?
+        """
+        params: Tuple = (backing,)
+        if miner is not None:
+            sql += ' AND miner = ?'
+            params += (miner,)
+        return [dict(r) for r in self._fetchall(sql + ' ORDER BY block_time ASC, swap_key ASC', params)]
+
+    def mark_relay_slash_applied(self, swap_key: str) -> None:
+        self._execute('UPDATE relay_slashes SET applied = 1 WHERE swap_key = ?', (swap_key,))
+
+    def pending_slash_totals(self, backing: str) -> Dict[str, int]:
+        """``{miner: unapplied penalty total}`` — the netting-at-verdict subtraction, and the
+        off-chain initiate backstop's "has any pending debit" answer."""
+        rows = self._fetchall(
+            """
+            SELECT miner, COALESCE(SUM(penalty), 0) AS total FROM relay_slashes
+            WHERE applied = 0 AND backing = ? GROUP BY miner
+            """,
+            (backing,),
+        )
+        return {r['miner']: int(r['total']) for r in rows}
+
+    def get_relay_meta(self, key: str) -> Optional[str]:
+        row = self._fetchone('SELECT value FROM relay_meta WHERE key = ?', (key,))
+        return row['value'] if row is not None else None
+
+    def relay_meta_prefix(self, prefix: str) -> Dict[str, str]:
+        """Every relay_meta row whose key starts with ``prefix`` — the armed exit set, which has to
+        outlive a restart because "deactivated" and "never activated" look identical on chain."""
+        rows = self._fetchall('SELECT key, value FROM relay_meta WHERE key LIKE ?', (f'{prefix}%',))
+        return {r['key'][len(prefix) :]: r['value'] for r in rows}
+
+    def delete_relay_meta(self, key: str) -> None:
+        self._execute('DELETE FROM relay_meta WHERE key = ?', (key,))
+
+    def set_relay_meta(self, key: str, value: str) -> None:
+        self._execute(
+            """
+            INSERT INTO relay_meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, str(value)),
+        )
 
     def get_solana_event_cursor(self) -> Optional[str]:
         """Last ingested Solana tx signature (the SolanaEventIngest cursor).
@@ -615,6 +766,12 @@ class ValidatorStateStore:
             if cols and 'swap_key' not in cols:
                 conn.execute('ALTER TABLE clearing_rates ADD COLUMN swap_key TEXT')
                 conn.execute('DELETE FROM clearing_rates')
+            # v3.1: routed queues are keyed per (miner, direction, BACKING) — one hub's residue must
+            # not dead-end another hub's queue. Pre-v3.1 rows were all sol-backed by construction.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(routed_requests)')]
+            if cols and 'backing' not in cols:
+                conn.execute("ALTER TABLE routed_requests ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
+                conn.execute('DROP INDEX IF EXISTS idx_routed_requests_key')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -717,6 +874,7 @@ class ValidatorStateStore:
                     miner          TEXT NOT NULL,
                     from_chain     TEXT NOT NULL,
                     to_chain       TEXT NOT NULL,
+                    backing        TEXT NOT NULL DEFAULT 'sol',
                     user_pubkey    TEXT NOT NULL,
                     user_from_addr TEXT NOT NULL,
                     user_to_addr   TEXT NOT NULL,
@@ -724,7 +882,50 @@ class ValidatorStateStore:
                     created_at     INTEGER NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_routed_requests_key
-                    ON routed_requests(miner, from_chain, to_chain, user_pubkey);
+                    ON routed_requests(miner, from_chain, to_chain, backing, user_pubkey);
+
+                -- W3 bond relay. relay_swaps snapshots a live off-chain-backed swap's
+                -- backing-chain user address: it is the vote_slash reimbursement target, the
+                -- Swap PDA closes at the verdict, and no event carries it. relay_fees is the
+                -- per-swap accrual half of "effective bond" (the vault's settled_total is the
+                -- other). relay_slashes holds verdicts until the vault's permanent swap_ref
+                -- marker confirms them — an unapplied row keeps netting AND blocks the miner's
+                -- initiates. Amounts are rao (u64 on the vault's wire), SQLite-INTEGER-safe.
+                CREATE TABLE IF NOT EXISTS relay_swaps (
+                    swap_key    TEXT PRIMARY KEY,
+                    miner       TEXT NOT NULL,
+                    backing     TEXT NOT NULL,
+                    user_addr   TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS relay_fees (
+                    swap_key    TEXT PRIMARY KEY,
+                    miner       TEXT NOT NULL,
+                    backing     TEXT NOT NULL,
+                    fee         INTEGER NOT NULL,
+                    block_time  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_relay_fees_miner
+                    ON relay_fees(backing, miner);
+
+                CREATE TABLE IF NOT EXISTS relay_slashes (
+                    swap_key      TEXT PRIMARY KEY,
+                    miner         TEXT NOT NULL,
+                    backing       TEXT NOT NULL,
+                    penalty       INTEGER NOT NULL,
+                    reimbursement INTEGER NOT NULL,
+                    user_addr     TEXT NOT NULL,
+                    block_time    INTEGER NOT NULL,
+                    applied       INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_relay_slashes_open
+                    ON relay_slashes(backing, applied, miner);
+
+                CREATE TABLE IF NOT EXISTS relay_meta (
+                    key     TEXT PRIMARY KEY,
+                    value   TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS solana_event_meta (
                     key     TEXT PRIMARY KEY,

@@ -1,22 +1,25 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
+use crate::backing;
 use crate::constants::{
-    CONFIG_SEED, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED, RESV_SEED,
-    TREASURY_SEED,
+    ATTEST_SEED, CONFIG_SEED, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
+    RESV_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
-use crate::state::{Config, MinerQuote, MinerState, Pool, Request, Reservation, Treasury};
+use crate::state::{
+    BondAttestation, Config, MinerQuote, MinerState, Pool, Request, Reservation, Treasury,
+};
 
 /// Any account (validator OR plain user — entry is permissionless) opens or joins a per-miner
-/// reservation-lottery pool for a pair. First caller opens and pins the miner's quote; later in-window
-/// callers add one request each (same pinned pair). Every fresh entry pays a flat, non-refundable
-/// reservation fee (router -> treasury) — the anti-spam gate. A non-validator router gets lottery
-/// weight 0 (loses to validators / uniform among users) and, if it wins, flags down a validator to
-/// claim + attest (those are validator-gated).
+/// reservation-lottery pool for one of the miner's quotes. First caller opens and pins that quote
+/// (pair, rate AND backing); later in-window callers add one request each against the same pinned
+/// offer. Every fresh entry pays a flat, non-refundable reservation fee (router -> treasury) — the
+/// anti-spam gate. A non-validator router gets lottery weight 0 (loses to validators / uniform among
+/// users) and, if it wins, flags down a validator to claim + attest (those are validator-gated).
 #[derive(Accounts)]
-#[instruction(from_chain: String, to_chain: String)]
+#[instruction(from_chain: String, to_chain: String, collateral_chain: String)]
 pub struct OpenOrRequest<'info> {
     /// The router of this request — a whitelisted validator OR a plain user (entry is permissionless).
     #[account(mut)]
@@ -36,44 +39,66 @@ pub struct OpenOrRequest<'info> {
     )]
     pub miner_state: Account<'info, MinerState>,
 
-    /// The miner's standing quote for this pair — must exist; pinned into the Pool snapshot at open.
+    /// The miner's standing quote for this pair AND backing — must exist; pinned into the Pool at open.
+    /// The backing is a seed, so naming the wrong one lands on a different (usually absent) account
+    /// rather than silently bidding against an offer the miner never made.
     #[account(
-        seeds = [QUOTE_SEED, miner.key().as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
+        seeds = [
+            QUOTE_SEED,
+            miner.key().as_ref(),
+            from_chain.as_bytes(),
+            to_chain.as_bytes(),
+            collateral_chain.as_bytes(),
+        ],
         bump = quote.bump,
     )]
-    pub quote: Account<'info, MinerQuote>,
+    pub quote: Box<Account<'info, MinerQuote>>,
+
+    /// The bond attestation for the quote's backing — required for any backing but "sol", which reads
+    /// the local vault ledger. Seeds bind it to (this miner, that backing).
+    #[account(
+        seeds = [ATTEST_SEED, miner.key().as_ref(), collateral_chain.as_bytes()],
+        bump,
+    )]
+    pub attestation: Option<Box<Account<'info, BondAttestation>>>,
 
     #[account(
         init_if_needed,
         payer = router,
         space = 8 + Pool::INIT_SPACE,
-        seeds = [POOL_SEED, miner.key().as_ref()],
+        seeds = [POOL_SEED, miner.key().as_ref(), collateral_chain.as_bytes()],
         bump,
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
 
     /// Subnet-revenue sink for the reservation fee (kept separate from the collateral vault).
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
 
-    /// The per-miner reservation slot — checked so a new contest can't be opened while a reservation
-    /// is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
+    /// The (miner, hub) reservation slot — checked so a new contest can't be opened while THIS hub's
+    /// reservation is still active (it would overwrite the winner's hold). Populated by `resolve_pool`.
     #[account(
         init_if_needed,
         payer = router,
         space = 8 + Reservation::INIT_SPACE,
-        seeds = [RESV_SEED, miner.key().as_ref()],
+        seeds = [RESV_SEED, miner.key().as_ref(), collateral_chain.as_bytes()],
         bump,
     )]
-    pub reservation: Account<'info, Reservation>,
+    pub reservation: Box<Account<'info, Reservation>>,
 
     pub system_program: Program<'info, System>,
 }
 
 /// A BID carries only the router competing for the seat. The taker + amounts are named later by the
 /// seat winner in `finalize_reservation`; the swap-size bounds + collateral gate move there too (the
-/// amount isn't known here). Miner-eligibility gates (active, not busy, min collateral) stay.
-pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String) -> Result<()> {
+/// amount isn't known here). Miner-eligibility gates (purse active, not busy, purse above its floor)
+/// stay — all of them now read the QUOTE's backing rather than assuming the local vault.
+pub fn handler(
+    ctx: Context<OpenOrRequest>,
+    from_chain: String,
+    to_chain: String,
+    collateral_chain: String,
+) -> Result<()> {
     require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(
         !from_chain.is_empty() && !to_chain.is_empty(),
@@ -85,18 +110,39 @@ pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String
     );
     crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
 
-    require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
-    require!(
-        !ctx.accounts.miner_state.has_active_swap,
-        ErrorCode::MinerHasActiveSwap
-    );
-    require!(
-        ctx.accounts.miner_state.collateral >= ctx.accounts.config.min_collateral,
-        ErrorCode::InsufficientCollateral
-    );
-
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;
+
+    // Per-backing eligibility: only the purse this quote declared has to be lit and funded, so a
+    // TAO-only miner opens TAO-backed pools and nothing else, and a deficient SOL purse costs a
+    // dual miner only its SOL-backed quotes (D2).
+    let bit = backing::declarable_bit(&collateral_chain, &from_chain, &to_chain)?;
+    require!(
+        ctx.accounts.miner_state.active_backings & bit != 0,
+        ErrorCode::MinerNotActive
+    );
+    // One swap per HUB (v3.1): only this backing's slot must be free — a busy or settling other hub
+    // draws on a different pot and doesn't contend.
+    require!(
+        !ctx.accounts.miner_state.swap_on(bit),
+        ErrorCode::MinerHasActiveSwap
+    );
+    // Fuse + busy-until-settled for a backing that settles elsewhere; both no-ops for "sol".
+    backing::check_entry_gates(
+        &ctx.accounts.config,
+        &ctx.accounts.miner_state,
+        &collateral_chain,
+        now,
+    )?;
+    let purse = backing::backing_purse(
+        &collateral_chain,
+        &ctx.accounts.miner_state,
+        ctx.accounts.attestation.as_deref().map(|a| &**a),
+    )?;
+    require!(
+        purse >= backing::activation_floor(&ctx.accounts.config, &collateral_chain)?,
+        ErrorCode::InsufficientCollateral
+    );
 
     // Can't open a contest while the miner is still held. Two holds block a new draw (which would
     // overwrite the reservation): a FILLED reservation still within its TTL, and a drawn-but-UNFILLED
@@ -157,14 +203,16 @@ pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String
         // Busy from the moment the pool opens: covers the window + the finalize window + the eventual
         // reservation TTL. Set conservatively here so the draw/finalize never SHORTEN it — otherwise a
         // miner would read as free during the finalize window while holding an about-to-fill reservation.
-        ctx.accounts.miner_state.busy_until = closes_at
+        let busy_target = closes_at
             .saturating_add(ctx.accounts.config.finalize_window_secs)
             .saturating_add(ctx.accounts.config.reservation_ttl_secs);
+        ctx.accounts.miner_state.set_busy(bit, busy_target);
 
         let pool = &mut ctx.accounts.pool;
         pool.miner = miner_key;
         pool.from_chain = from_chain.clone();
         pool.to_chain = to_chain.clone();
+        pool.collateral_chain = collateral_chain.clone();
         pool.miner_from_addr = mfrom;
         pool.miner_to_addr = mto;
         pool.rate = rate;
@@ -182,6 +230,7 @@ pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String
             opener: router_key,
             from_chain,
             to_chain,
+            collateral_chain,
             closes_at,
             seed_slot: 0, // armed later by resolve_pool; kept in the event for schema stability
         });
@@ -189,8 +238,12 @@ pub fn handler(ctx: Context<OpenOrRequest>, from_chain: String, to_chain: String
         // JOIN or UPDATE — must be within the window and match the pinned pair.
         let pool = &mut ctx.accounts.pool;
         require!(now <= pool.closes_at, ErrorCode::PoolClosed);
+        // A different backing is a different offer (different rate, different guarantee), so it can no
+        // more join this contest than a different pair can.
         require!(
-            pool.from_chain == from_chain && pool.to_chain == to_chain,
+            pool.from_chain == from_chain
+                && pool.to_chain == to_chain
+                && pool.collateral_chain == collateral_chain,
             ErrorCode::MinerBusyDifferentPair
         );
         // Upsert: a repeat call from the same router updates its bid in place (dynamic bidding

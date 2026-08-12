@@ -82,7 +82,7 @@ def test_submit_swap_claim_ix(client):
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
@@ -99,9 +99,10 @@ def test_vote_initiate_ix(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
-        (pdas.vote_round_pda(pdas.REQ_INITIATE, miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
+        (pdas.vote_round_pda(pdas.REQ_INITIATE, SK, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
+        (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond
         (SYSTEM_PROGRAM, False, False),
     ]
 
@@ -161,7 +162,7 @@ def test_close_stale_claim_ix(client):
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (miner, False, False),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
     ]
 
@@ -191,15 +192,26 @@ def test_vote_activate_ix(client):
     client.vote_activate(miner)
     ix = _ix(client)
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['vote_activate']
-    assert ix.data[8:] == b''  # no args
+    # W2: activation is per backing purse, so the vote names the one it acts on.
+    assert ix.data[8:] == layouts.IX_BACKING_ARGS.build({'backing': 'sol'})
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_ACTIVATE, miner, PID), False, True),
+        (PID, False, False),  # absent optional BondAttestation — "sol" reads the local vault
         (SYSTEM_PROGRAM, False, False),
     ]
+
+
+def test_vote_activate_tao_carries_the_bond_attestation(client):
+    # An off-chain backing has no local purse, so the attestation PDA travels with the vote.
+    miner = Keypair().pubkey()
+    client.vote_activate(miner, backing='tao')
+    ix = _ix(client)
+    assert ix.data[8:] == layouts.IX_BACKING_ARGS.build({'backing': 'tao'})
+    assert _metas(ix)[5] == (pdas.bond_attestation_pda(miner, 'tao', PID), False, False)
 
 
 def test_mark_fulfilled_ix(client):
@@ -244,5 +256,5 @@ def test_extend_reservation_ix(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
-        (pdas.reservation_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
     ]

@@ -9,6 +9,7 @@ from allways.cli.swap_commands.quote import quote_command
 from allways.cli.swap_commands.resume import resume_reservation_command
 from allways.cli.swap_commands.status import status_command
 from allways.cli.swap_commands.swap import swap_group
+from allways.cli.swap_commands.vault import vault_group
 from allways.cli.swap_commands.view import view_group
 
 # Register post + the SOL-numéraire batch quoting under the miner group
@@ -30,5 +31,6 @@ def register_commands(cli):
     cli.add_command(view_group, 'view')
     cli.add_command(miner_group, 'miner')
     cli.add_command(admin_group, 'admin')
+    cli.add_command(vault_group, 'vault')
     cli.add_command(status_command, 'status')
     cli.add_command(bind_hotkey_command, 'bind-hotkey')

@@ -39,6 +39,7 @@ def test_decode_quote_set_roundtrip():
             'miner': bytes(miner),
             'from_chain': 'btc',
             'to_chain': 'tao',
+            'collateral_chain': 'tao',
             'rate': 345 * 10**18,
             'liquidity': 1_000,
             'updated_at': 1_700_000_000,
@@ -49,7 +50,40 @@ def test_decode_quote_set_roundtrip():
     assert name == 'QuoteSet'
     assert f.miner == miner  # converted to Pubkey
     assert f.from_chain == 'btc' and f.to_chain == 'tao'
+    assert f.collateral_chain == 'tao', 'the backing tells two quotes on one direction apart'
     assert f.rate == 345 * 10**18 and f.updated_at == 1_700_000_000
+
+
+def test_decode_bond_attested_roundtrip():
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'BondAttested',
+        {
+            'miner': bytes(miner),
+            'chain': 'tao',
+            'effective_balance': 3_300_000_000,
+            'locked': True,
+            'epoch': 4,
+            'attested_at': 1_700_000_000,
+        },
+    )
+    name, f = decode_event(raw)
+    assert name == 'BondAttested'
+    assert f.miner == miner and f.chain == 'tao'
+    assert f.effective_balance == 3_300_000_000 and f.locked is True and f.epoch == 4
+
+
+def test_decode_miner_backing_changed_roundtrip():
+    # The per-purse event; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'MinerBackingChanged',
+        {'miner': bytes(miner), 'backing': 'tao', 'enabled': False, 'active_backings': 1, 'at': 42},
+    )
+    name, f = decode_event(raw)
+    assert name == 'MinerBackingChanged'
+    assert f.miner == miner and f.backing == 'tao'
+    assert f.enabled is False and f.active_backings == 1
 
 
 def test_decode_swap_completed_roundtrip():
@@ -66,12 +100,58 @@ def test_decode_swap_completed_roundtrip():
             'from_amount': 100_000,
             'to_amount': 345_000_000,
             'rate': 345 * 10**18,
+            'collateral_chain': 'sol',
         },
     )
     name, f = decode_event(raw)
     assert name == 'SwapCompleted'
     assert f.miner == miner
     assert f.to_amount == 345_000_000 and f.from_amount == 100_000
+
+
+def test_decode_swap_timed_out_roundtrip():
+    # The slash relay's whole input: absolute figures plus the payee they are owed to. `payee` is the
+    # last field — appended in W3.1, so a stale decoder truncates rather than mis-reads the figures.
+    miner = Keypair().pubkey()
+    raw = _encode(
+        'SwapTimedOut',
+        {
+            'swap_key': bytes(range(32)),
+            'miner': bytes(miner),
+            'collateral_amount': 3_000_000_000,
+            'slash': 0,
+            'collateral_chain': 'tao',
+            'penalty': 3_300_000_000,
+            'reimbursement': 3_300_000_000,
+            'payee': '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
+        },
+    )
+    name, f = decode_event(raw)
+    assert name == 'SwapTimedOut'
+    assert f.miner == miner and bytes(f.swap_key) == bytes(range(32))
+    assert f.collateral_chain == 'tao' and f.slash == 0
+    assert f.penalty == 3_300_000_000 and f.reimbursement == 3_300_000_000
+    assert f.payee == '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty'
+
+
+def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
+    # A "sol" verdict already paid the user on Solana; the empty string is the on-the-wire shape of
+    # "nothing is owed elsewhere", and it must decode as a value, not a missing field.
+    raw = _encode(
+        'SwapTimedOut',
+        {
+            'swap_key': bytes(range(32)),
+            'miner': bytes(Keypair().pubkey()),
+            'collateral_amount': 2_000_000_000,
+            'slash': 2_200_000_000,
+            'collateral_chain': 'sol',
+            'penalty': 2_200_000_000,
+            'reimbursement': 2_200_000_000,
+            'payee': '',
+        },
+    )
+    _, f = decode_event(raw)
+    assert f.payee == '' and f.slash == 2_200_000_000
 
 
 def test_decode_miner_activated_and_collateral():
@@ -99,6 +179,19 @@ def test_decode_fulfillment_grace_applied_roundtrip():
 def test_decode_unknown_discriminator_returns_none():
     assert decode_event(b'\x00' * 8 + b'junk') is None
     assert decode_event(b'\x01\x02') is None  # too short
+
+
+def test_decode_foreign_version_payload_returns_none():
+    # A pre-v3 SwapTimedOut body (no collateral_chain/penalty/reimbursement/payee): a genesis rescan
+    # walks the same program id's retained history and WILL meet these — they must drop, not raise.
+    from borsh_construct import U64, CStruct
+    from construct import Bytes as _Raw
+
+    old = CStruct('swap_key' / _Raw(32), 'miner' / _Raw(32), 'collateral_amount' / U64, 'slash' / U64)
+    body = old.build({'swap_key': bytes(32), 'miner': bytes(32), 'collateral_amount': 5, 'slash': 3})
+    assert decode_event(events.EVENT_DISCRIMINATORS['SwapTimedOut'] + body) is None
+    # Truncated garbage under a known discriminator drops the same way.
+    assert decode_event(events.EVENT_DISCRIMINATORS['QuoteSet'] + b'\x01\x02\x03') is None
 
 
 def test_every_contract_event_is_registered():

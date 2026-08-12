@@ -68,9 +68,19 @@ def test_tao_to_sol_amounts():
     assert a.collateral_amount == SOL
 
 
-def test_non_sol_pair_rejected():
+def test_spoke_spoke_pair_rejected():
+    # No hub leg at all → invalid pair.
+    with pytest.raises(ValueError):
+        compute_intake_amounts('btc', 'eth', 100, '20')
+
+
+def test_tao_hub_pair_needs_a_leg_backing():
+    # btc↔tao is a valid TAO-hub pair, but the default "sol" backing is not one of its
+    # legs — the contract would refuse it too. The tao backing sizes against the tao leg.
     with pytest.raises(ValueError):
         compute_intake_amounts('btc', 'tao', 100, '300')
+    a = compute_intake_amounts('tao', 'btc', 1_000_000_000, '0.003', backing='tao')
+    assert a.collateral_amount == a.from_amount
 
 
 def test_required_collateral_is_110_percent():

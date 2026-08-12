@@ -32,6 +32,7 @@ def make_swap(
     rate='5',
     from_chain='btc',
     to_chain='sol',
+    collateral_chain='sol',
 ):
     return SimpleNamespace(
         swap_key=key,
@@ -39,6 +40,7 @@ def make_swap(
         status=status,
         from_chain=from_chain,
         to_chain=to_chain,
+        collateral_chain=collateral_chain,
         from_tx_hash='srctx',
         to_tx_hash='dsttx',
         miner_from_addr='minerBTC',
@@ -113,7 +115,7 @@ def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None):
     resv = reservation if reservation is not None else make_reservation(created_at=created_at)
     client = SimpleNamespace(
         get_swaps=lambda: [],
-        get_reservation=lambda miner: resv,
+        get_reservation=lambda miner, backing='sol': resv,
     )
     return SolanaSwapLoop(client, providers, fee_divisor=100), providers
 
@@ -233,7 +235,7 @@ def test_pending_attestation_stale_deposit_rejected_as_replay():
 
 def test_pending_attestation_no_reservation_waits():
     loop, _ = loop_with(result=True)
-    loop.client.get_reservation = lambda miner: None
+    loop.client.get_reservation = lambda miner, backing='sol': None
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.WAIT
 
 
@@ -362,7 +364,7 @@ def test_source_pending_at_ceiling_no_extend():
 
 def test_source_pending_no_reservation_waits():
     loop, _ = loop_with(result=False, reservation=None)
-    loop.client.get_reservation = lambda miner: None
+    loop.client.get_reservation = lambda miner, backing='sol': None
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.WAIT
 
 
@@ -445,7 +447,7 @@ class ExtendRecordingClient:
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
-    def extend_reservation(self, miner, target_at):
+    def extend_reservation(self, miner, target_at, backing='sol'):
         self.calls.append(('extend_reservation', miner, target_at))
         if self.reservation_exc:
             raise self.reservation_exc
@@ -455,7 +457,7 @@ class ExtendRecordingClient:
         if self.timeout_exc:
             raise self.timeout_exc
 
-    def close_stale_claim(self, miner, swap_key):
+    def close_stale_claim(self, miner, swap_key, backing='sol'):
         self.calls.append(('close_stale_claim', miner, swap_key))
         if self.close_exc:
             raise self.close_exc
@@ -509,7 +511,7 @@ def test_run_once_discovers_and_decides_mix():
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = SimpleNamespace(
         get_swaps=lambda: swaps,
-        get_reservation=lambda miner: make_reservation(),
+        get_reservation=lambda miner, backing='sol': make_reservation(),
     )
     loop = SolanaSwapLoop(client, providers, fee_divisor=100, read_only=True)
     out = dict(loop.run_once(now=1500))
@@ -529,14 +531,14 @@ class VoteRecordingClient:
     def get_swaps(self):
         return self._swaps
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing='sol'):
         return make_reservation()
 
     def has_voted(self, req_type, target, voter):
         return self.already_voted
 
-    def vote_initiate(self, swap_key, miner):
-        self.calls.append(('vote_initiate', swap_key, miner))
+    def vote_initiate(self, swap_key, miner, backing='sol'):
+        self.calls.append(('vote_initiate', swap_key, miner, backing))
 
     def confirm_swap(self, swap_key, miner, from_chain, to_chain):
         self.calls.append(('confirm_swap', swap_key, miner, from_chain, to_chain))
@@ -552,12 +554,14 @@ def test_run_once_casts_votes_per_decision():
         ('pk3', make_swap(status='Fulfilled', key=b'\x03' * 32)),
     ]
     swaps[1][1].user = 'USERPK'  # timeout vote needs the user pubkey
+    swaps[0][1].collateral_chain = 'tao'  # regression: the initiate vote must carry the swap's backing
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = VoteRecordingClient(swaps)
     loop = SolanaSwapLoop(client, providers, fee_divisor=100)
     loop.run_once(now=1500)
     kinds = [c[0] for c in client.calls]
     assert kinds == ['vote_initiate', 'timeout_swap', 'confirm_swap']
+    assert client.calls[0][3] == 'tao'  # not the 'sol' default — a tao swap voted as sol dies AttestationMissing
 
 
 def test_run_once_skips_already_voted():
@@ -589,7 +593,7 @@ class PoolRecordingClient:
         assert name == 'Pool'
         return list(enumerate(self._pools))
 
-    def resolve_pool(self, miner):
+    def resolve_pool(self, miner, backing='sol'):
         self.resolved.append(miner)
         return 'SIG'
 
@@ -617,7 +621,7 @@ def test_resolve_pools_read_only_casts_nothing():
 
 def test_resolve_pools_one_failure_does_not_break_sweep():
     class Boom(PoolRecordingClient):
-        def resolve_pool(self, miner):
+        def resolve_pool(self, miner, backing='sol'):
             if miner == 'bad':
                 raise RuntimeError('rpc down')
             return super().resolve_pool(miner)
@@ -640,7 +644,7 @@ def test_benign_marker_classifies_lost_race():
 def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():
     # A peer resolved the pool between our read and our tx → benign NoRequests, swallowed quietly.
     class Raced(PoolRecordingClient):
-        def resolve_pool(self, miner):
+        def resolve_pool(self, miner, backing='sol'):
             if miner == 'raced':
                 raise RuntimeError('custom program error: NoRequests')
             return super().resolve_pool(miner)
@@ -648,3 +652,104 @@ def test_resolve_pools_lost_race_is_not_counted_and_sweep_continues():
     client = Raced([make_pool(miner='raced'), make_pool(miner='mine')])
     loop = SolanaSwapLoop(client, {}, fee_divisor=100)
     assert loop.resolve_pools_once(now=500) == ['mine']  # loser not counted, sweep unbroken
+
+
+# ─── W3: the off-chain half of busy-until-settled ───────────────────────────────────────────────
+
+
+class _Relay:
+    """Just the two hooks the loop calls into the bond relay through."""
+
+    def __init__(self, owes=False):
+        self.owes = owes
+        self.seen = []
+
+    def observe_swap(self, swap):
+        self.seen.append(swap)
+
+    def has_pending_debit(self, miner):
+        return self.owes
+
+
+def _loop_with_relay(relay, backing='tao'):
+    swap = make_swap(status='PendingAttestation')
+    swap.collateral_chain = backing
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
+    client = SimpleNamespace(
+        get_swaps=lambda: [('pda', swap)],
+        get_reservation=lambda miner, backing='sol': make_reservation(),
+    )
+    return SolanaSwapLoop(client, providers, fee_divisor=100, relay=relay), swap
+
+
+def test_an_unapplied_vault_debit_blocks_the_miners_next_initiate():
+    # The contract's settlement grace covers the common case; this covers the tail where the relay
+    # is slower than the grace, and the seconds-wide window right after the verdict.
+    loop, swap = _loop_with_relay(_Relay(owes=True))
+    assert loop.decide(swap, now=1500).decision == SwapDecision.WAIT
+
+
+def test_a_settled_miner_attests_normally():
+    loop, swap = _loop_with_relay(_Relay(owes=False))
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_a_locally_backed_swap_never_consults_the_relay():
+    # SOL settles atomically inside timeout_swap, so there is no pending debit to wait on — and a
+    # SOL-only deployment must not pay for split collateral existing.
+    relay = _Relay(owes=True)
+    loop, swap = _loop_with_relay(relay, backing='sol')
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_the_loop_shows_the_relay_every_live_swap_it_walks():
+    # The only window in which the vote_slash payee is readable: the Swap PDA closes at the verdict.
+    relay = _Relay()
+    loop, swap = _loop_with_relay(relay)
+    loop.read_only = True
+    loop.run_once(now=1500)
+    assert relay.seen == [swap]
+
+
+def test_a_loop_with_no_relay_configured_decides_exactly_as_before():
+    swap = make_swap(status='PendingAttestation')
+    swap.collateral_chain = 'tao'
+    loop, _ = loop_with()
+    assert loop.relay is None
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+def test_the_flattened_swap_view_carries_the_backing_it_draws_against():
+    # The relay's two hooks both key off this field, and the on-chain Swap has carried it since
+    # W2b — a view that drops it makes an off-chain-backed swap look locally settled.
+    from types import SimpleNamespace as NS
+
+    from allways.solana.client import swap_from_solana
+
+    PK = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+
+    acct = NS(
+        miner=PK,
+        user=PK,
+        from_chain='sol',
+        to_chain='tao',
+        user_from_addr='a',
+        user_to_addr='b',
+        miner_from_addr='c',
+        miner_to_addr='d',
+        rate=1,
+        collateral_amount=1,
+        from_amount=1,
+        to_amount=1,
+        from_tx_hash='srctx',
+        from_tx_block=0,
+        to_tx_hash='',
+        to_tx_block=0,
+        status=NS(),
+        initiated_at=0,
+        timeout_at=0,
+        max_extend_at=0,
+        fulfilled_at=0,
+        collateral_chain='tao',
+    )
+    assert swap_from_solana(acct).collateral_chain == 'tao'

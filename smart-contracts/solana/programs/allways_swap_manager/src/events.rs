@@ -50,6 +50,9 @@ pub struct SwapInitiated {
     pub from_amount: u128,
     pub to_amount: u128,
     pub initiated_at: i64,
+    /// Backing hub (v3.1: appended last — one live swap PER hub, so per-miner events are ambiguous
+    /// without it; prefix decoders keep working).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -66,7 +69,9 @@ pub struct SwapCompleted {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
     pub collateral_amount: u64,
-    /// Protocol fee taken from collateral into the treasury (lamports).
+    /// Absolute protocol fee for this swap, in the BACKING asset's smallest unit. For "sol" it is what
+    /// actually moved into the treasury (clamped to available collateral); for a backing that settles
+    /// elsewhere nothing moved here and this is what that chain's fee ledger owes.
     pub fee: u64,
     /// Direction + realized leg amounts + executed rate, for off-chain per-swap history (so indexers
     /// don't re-read the now-closed Swap). Feeds the realized volume/VWAP track record (A2).
@@ -76,15 +81,32 @@ pub struct SwapCompleted {
     pub to_amount: u128,
     /// Fixed-point executed rate (display_rate × RATE_PRECISION); matches the on-chain u128 (#495).
     pub rate: u128,
+    /// Backing chain this swap declared. `fee` above is the absolute protocol fee for the swap; the
+    /// pair (backing, fee) is the whole input the fee relay needs to credit the right ledger.
+    pub collateral_chain: String,
 }
 
+/// The timeout verdict. Self-contained by design — the slash relay must never reconstruct state, so
+/// every figure here is absolute and the backing says which chain applies it.
 #[event]
 pub struct SwapTimedOut {
     pub swap_key: [u8; 32],
     pub miner: Pubkey,
     pub collateral_amount: u64,
-    /// Collateral slashed and refunded to the user (lamports).
+    /// Collateral slashed locally and refunded to the user (lamports). 0 when the backing settles
+    /// off-chain — `penalty`/`reimbursement` are then the figures the backing chain owes.
     pub slash: u64,
+    /// Backing chain this swap declared ("sol" = settled atomically above).
+    pub collateral_chain: String,
+    /// Penalty owed, in the backing asset's smallest unit: 1.10× the swap size, pre-clamp (the purse
+    /// holding the bond does the clamping). Absolute, never a delta.
+    pub penalty: u64,
+    /// Share of `penalty` owed to the wronged user; the surplus (if any) is protocol revenue.
+    pub reimbursement: u64,
+    /// Who the backing chain owes `reimbursement`: the user's own address on `collateral_chain`, so
+    /// the seizure can be relayed from this event alone. Empty when the backing settles locally —
+    /// that refund already moved, to `Swap::user`.
+    pub payee: String,
 }
 
 /// A validator slid a reservation/swap deadline forward (single-validator, no quorum). Carries the
@@ -94,6 +116,8 @@ pub struct ReservationExtended {
     pub miner: Pubkey,
     pub validator: Pubkey,
     pub reserved_until: i64,
+    /// Backing hub whose reservation slid (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -132,6 +156,9 @@ pub struct QuoteSet {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// The quote's declared backing — part of its identity, not a detail: the same miner may stand two
+    /// quotes on one direction at different rates, and only this tells them apart in the log.
+    pub collateral_chain: String,
     /// Fixed-point rate = display_rate × RATE_PRECISION (1e18).
     pub rate: u128,
     pub liquidity: u128,
@@ -146,6 +173,8 @@ pub struct QuoteRemoved {
     pub miner: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// Which of the direction's quotes was retracted (see `QuoteSet::collateral_chain`).
+    pub collateral_chain: String,
     /// Anti-flashing churn fee paid into the treasury on removal (lamports); 0 once the quote has
     /// stood past the decay window.
     pub remove_fee: u64,
@@ -177,6 +206,37 @@ pub struct MinerDeactivated {
     pub at: i64,
 }
 
+/// One backing's activation bit flipped (W2). Emitted on EVERY `vote_activate`/`vote_deactivate`
+/// quorum, whereas MinerActivated/MinerDeactivated fire only when the OR view itself changes — so an
+/// event-driven scorer replaying `active` from those two stays exactly as correct as before.
+#[event]
+pub struct MinerBackingChanged {
+    pub miner: Pubkey,
+    pub backing: String,
+    /// The bit's new state; `active_backings` is the whole mask after this change.
+    pub enabled: bool,
+    pub active_backings: u8,
+    pub at: i64,
+}
+
+/// A bond attestation was written by quorum. Absolute figures per the post-total convention — the
+/// reconciler diffs these against the vault without re-reading Solana state.
+#[event]
+pub struct BondAttested {
+    pub miner: Pubkey,
+    pub chain: String,
+    pub effective_balance: u64,
+    pub locked: bool,
+    pub epoch: u64,
+    pub attested_at: i64,
+}
+
+/// The global attestation heartbeat advanced (the dead-man fuse's liveness signal).
+#[event]
+pub struct AttestHeartbeat {
+    pub at: i64,
+}
+
 // --- Phase 9: reservation lottery (pool keyed per miner) ---
 
 #[event]
@@ -185,6 +245,9 @@ pub struct PoolOpened {
     pub opener: Pubkey,
     pub from_chain: String,
     pub to_chain: String,
+    /// The pinned quote's backing — the contest is for one offer, and which purse is on the hook is
+    /// part of that offer. `resolve_pool` copies it straight into the Reservation.
+    pub collateral_chain: String,
     pub closes_at: i64,
     pub seed_slot: u64,
 }
@@ -210,6 +273,8 @@ pub struct ReservationFilled {
     pub from_amount: u128,
     pub to_amount: u128,
     pub reserved_until: i64,
+    /// Backing hub this fill draws on (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 /// An unfilled reservation was reaped after its finalize deadline (miner freed, fee already sunk).
@@ -217,6 +282,8 @@ pub struct ReservationFilled {
 pub struct UnfilledReservationClosed {
     pub miner: Pubkey,
     pub router: Pubkey,
+    /// Backing hub whose slot was reaped (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 /// The closed pool's draw seed slot has been pinned to a not-yet-produced slot. Re-emitted if that
@@ -225,6 +292,8 @@ pub struct UnfilledReservationClosed {
 pub struct PoolDrawArmed {
     pub miner: Pubkey,
     pub seed_slot: u64,
+    /// Backing hub whose contest armed (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 #[event]
@@ -234,6 +303,8 @@ pub struct PoolResolved {
     pub winner: Pubkey,
     /// How many bids contended.
     pub requests: u8,
+    /// Backing hub whose contest resolved (v3.1, appended last).
+    pub collateral_chain: String,
 }
 
 // --- Phase 10: consensus-governed validator weights ---

@@ -625,7 +625,9 @@ class Tao(Asset, Chain):
             bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
 
-    def send_amount(self, to_address: str, amount: int, from_address: Optional[str] = None) -> SendResult:
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
         """Send TAO via subtensor transfer. Amount is in rao."""
         if self.wallet is None:
             bt.logging.error('TAO send_amount called on a read-only Tao (no wallet)')

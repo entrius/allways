@@ -39,6 +39,8 @@ use {
 };
 
 const RPC_URL: &str = "http://127.0.0.1:8899";
+/// Every pre-W2b fixture pair has a SOL leg, so "sol" is the backing they all declare.
+const BACKING: &str = "sol";
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 const SLOT_HASHES_ID: Pubkey = Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
 
@@ -88,10 +90,10 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"resv", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"resv", m.as_ref(), b"sol"], &pid()).0
 }
 fn pool_pda(m: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", m.as_ref()], &pid()).0
+    Pubkey::find_program_address(&[b"pool", m.as_ref(), b"sol"], &pid()).0
 }
 /// Weights rounds are keyed by the snapshot hash (`round_key`) so competing proposals coexist.
 fn weights_round_pda(round_key: &[u8; 32]) -> Pubkey {
@@ -226,13 +228,14 @@ fn post_ix(miner: &Pubkey, amount: u64) -> Instruction {
 fn vote_activate_ix(validator: &Pubkey, miner: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteActivate {}.data(),
+        &allways_swap_manager::instruction::VoteActivate { backing: "sol".to_string() }.data(),
         allways_swap_manager::accounts::VoteActivate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             vote_round: vote_pda(REQ_ACTIVATE, miner.as_ref()),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -244,6 +247,7 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
         &allways_swap_manager::instruction::OpenOrRequest {
             from_chain: FROM_CHAIN.to_string(),
             to_chain: TO_CHAIN.to_string(),
+            collateral_chain: BACKING.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::OpenOrRequest {
@@ -251,7 +255,8 @@ fn open_ix(router: &Pubkey, miner: &Pubkey) -> Instruction {
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
-            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN),
+            quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            attestation: None,
             pool: pool_pda(miner),
             treasury: treasury_pda(),
             reservation: resv_pda(miner),
@@ -279,6 +284,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            attestation: None,
         }
         .to_account_metas(None),
     )
@@ -338,8 +344,9 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
-            vote_round: vote_pda(REQ_INITIATE, miner.as_ref()),
+            vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
+            attestation: None,
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -897,9 +904,15 @@ fn onchain_non_admin_withdraw_treasury_rejected() {
 
 // ─── Phase 8: miner quotes + validator weights ───────────────────────────────────
 
-fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str) -> Pubkey {
+fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str, backing: &str) -> Pubkey {
     Pubkey::find_program_address(
-        &[b"quote", m.as_ref(), from_chain.as_bytes(), to_chain.as_bytes()],
+        &[
+            b"quote",
+            m.as_ref(),
+            from_chain.as_bytes(),
+            to_chain.as_bytes(),
+            backing.as_bytes(),
+        ],
         &pid(),
     )
     .0
@@ -932,6 +945,7 @@ fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: u128) -> Ins
         &allways_swap_manager::instruction::SetQuote {
             from_chain: from_chain.to_string(),
             to_chain: to_chain.to_string(),
+            collateral_chain: BACKING.to_string(),
             miner_from_addr: MINER_FROM.to_string(),
             miner_to_addr: MINER_TO.to_string(),
             rate,
@@ -940,7 +954,8 @@ fn set_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str, rate: u128) -> Ins
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *m,
-            quote: quote_pda(m, from_chain, to_chain),
+            miner_state: miner_pda(m),
+            quote: quote_pda(m, from_chain, to_chain, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -954,11 +969,12 @@ fn remove_quote_ix(m: &Pubkey, from_chain: &str, to_chain: &str) -> Instruction 
         &allways_swap_manager::instruction::RemoveQuote {
             from_chain: from_chain.to_string(),
             to_chain: to_chain.to_string(),
+            collateral_chain: BACKING.to_string(),
         }
         .data(),
         allways_swap_manager::accounts::RemoveQuote {
             miner: *m,
-            quote: quote_pda(m, from_chain, to_chain),
+            quote: quote_pda(m, from_chain, to_chain, BACKING),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -976,7 +992,7 @@ fn onchain_set_quote_creates_pda() {
     send(&rpc, set_quote_ix(&miner.pubkey(), "btc", "sol", RATE), &miner.pubkey(), &miner)
         .expect("set_quote");
 
-    let a = rpc.get_account(&quote_pda(&miner.pubkey(), "btc", "sol")).expect("quote account");
+    let a = rpc.get_account(&quote_pda(&miner.pubkey(), "btc", "sol", BACKING)).expect("quote account");
     let q = MinerQuote::try_deserialize(&mut a.data.as_slice()).unwrap();
     assert_eq!(q.miner, miner.pubkey());
     assert_eq!(q.from_chain, "btc");
@@ -993,10 +1009,10 @@ fn onchain_remove_quote_closes_pda() {
     let miner = funded_keypair(&rpc, 10 * LAMPORTS_PER_SOL);
 
     send(&rpc, set_quote_ix(&miner.pubkey(), "btc", "sol", RATE), &miner.pubkey(), &miner).expect("set");
-    assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol")), "quote exists after set");
+    assert!(account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol", BACKING)), "quote exists after set");
 
     send(&rpc, remove_quote_ix(&miner.pubkey(), "btc", "sol"), &miner.pubkey(), &miner).expect("remove");
-    assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol")), "quote closed after remove");
+    assert!(!account_exists(&rpc, &quote_pda(&miner.pubkey(), "btc", "sol", BACKING)), "quote closed after remove");
 }
 
 #[test]

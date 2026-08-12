@@ -50,6 +50,7 @@ from allways.validator.bounds_cache import SolanaConfigCache  # noqa: E402
 from allways.validator.event_index import SolanaEventIndex  # noqa: E402
 from allways.validator.floor_sweep import CollateralFloorSweep  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
+from allways.validator.relay.wiring import build_bond_relay  # noqa: E402
 from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
 from allways.validator.state_store import ValidatorStateStore  # noqa: E402
@@ -115,16 +116,26 @@ class Validator(BaseValidatorNeuron):
         solana_read_only = mode == 'watch'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
         warn_if_unbound(self.solana_client)
+        # `solana_config_cache` serves swap bounds + halt (and the relay's heartbeat freshness)
+        # off one TTL-cached Config read, replacing the old substrate reads.
+        self.solana_config_cache = SolanaConfigCache(self.solana_client)
+        # W3 bond relay: the Bittensor-vault half of split collateral. Built only when a vault is
+        # configured — a SOL-only deployment runs exactly as before. Its own subtensor connection
+        # keeps a block-waiting vault extrinsic off the sockets scoring and the axon use.
+        self.vault_subtensor = None
+        self.bond_relay = build_bond_relay(self, read_only=solana_read_only)
         self.solana_swap_loop = SolanaSwapLoop(
-            self.solana_client, self.assets, fee_divisor=self.fee_divisor, read_only=solana_read_only
+            self.solana_client,
+            self.assets,
+            fee_divisor=self.fee_divisor,
+            read_only=solana_read_only,
+            relay=self.bond_relay,
         )
         # Crown-time state is sourced entirely from Solana program events (B3.6):
         # `event_ingest` polls the program's signature stream each forward step,
         # `event_index` folds the decoded events into the state_store crown
-        # tables, and scoring replays those tables. `solana_config_cache` serves
-        # swap bounds + halt off the Config account (replacing substrate reads).
+        # tables, and scoring replays those tables.
         self.event_ingest = SolanaEventIngest(self.solana_client)
-        self.solana_config_cache = SolanaConfigCache(self.solana_client)
         # Kicks miners stranded active under a raised min_collateral (they can't
         # be reserved, so the contract's fee/slash auto-deactivation never fires).
         self.floor_sweep = CollateralFloorSweep(self.solana_client, read_only=solana_read_only)
@@ -225,6 +236,11 @@ class Validator(BaseValidatorNeuron):
         finally:
             if getattr(self, 'seam_server', None) is not None:
                 self.seam_server.shutdown()
+            if getattr(self, 'vault_subtensor', None) is not None:
+                try:
+                    self.vault_subtensor.close()
+                except Exception:
+                    pass
             self.state_store.close()
             self.database_storage.close()
 

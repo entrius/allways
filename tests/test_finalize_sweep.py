@@ -28,11 +28,11 @@ class SweepClient:
         self._reservation = reservation
         self.finalized = []
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing='sol'):
         return self._reservation
 
     def finalize_reservation(
-        self, miner, user, user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount
+        self, miner, user, user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount, backing='sol'
     ):
         self.finalized.append(
             (str(miner), str(user), user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount)
@@ -48,6 +48,7 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
         rate=RATE_FIXED,
         reserved_until=reserved_until,
         finalize_by=finalize_by,
+        collateral_chain='sol',
     )
 
 
@@ -59,7 +60,9 @@ def _validator(tmp_path, client, *, read_only=False):
 
 
 def _queue(store, user, *, created_at=NOW - 10, from_amount=1_000_000_000):
-    store.upsert_routed_request(MINER, 'sol', 'btc', user, f'{user[:6]}src', f'{user[:6]}dst', from_amount, created_at)
+    store.upsert_routed_request(
+        MINER, 'sol', 'btc', 'sol', user, f'{user[:6]}src', f'{user[:6]}dst', from_amount, created_at
+    )
 
 
 def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
@@ -126,7 +129,7 @@ def test_stale_lapsed_residue_from_previous_round_waits(tmp_path):
     _queue(v.state_store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]  # kept — our draw is pending
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # kept — our draw is pending
     v.state_store.close()
 
 
@@ -136,7 +139,7 @@ def test_stale_expired_reservation_residue_waits(tmp_path):
     v = _validator(tmp_path, client)
     _queue(v.state_store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
     v.state_store.close()
 
 
@@ -159,7 +162,7 @@ def test_undrawn_pool_keeps_queue_for_next_step(tmp_path):
     v = _validator(tmp_path, client)
     _queue(v.state_store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
     v.state_store.close()
 
 
@@ -174,7 +177,7 @@ def test_transient_finalize_fault_retains_queue(tmp_path):
     v = _validator(tmp_path, client)
     _queue(v.state_store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]  # retry next step
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # retry next step
     v.state_store.close()
 
 
@@ -202,7 +205,7 @@ def test_read_only_mode_finalizes_nothing_and_retains_queue(tmp_path):
     _queue(v.state_store, USER_A)
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc')]
+    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
     v.state_store.close()
 
 
@@ -217,10 +220,10 @@ def test_stale_queue_pruned_by_ttl_backstop(tmp_path):
 
 def test_upsert_retry_keeps_fifo_position(tmp_path):
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-    store.upsert_routed_request(MINER, 'sol', 'btc', USER_A, 'src1', 'dst1', 100, created_at=NOW - 50)
-    store.upsert_routed_request(MINER, 'sol', 'btc', USER_B, 'src2', 'dst2', 200, created_at=NOW - 20)
+    store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, 'src1', 'dst1', 100, created_at=NOW - 50)
+    store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_B, 'src2', 'dst2', 200, created_at=NOW - 20)
     # A retries with fresh details — position (created_at) must survive, fields must refresh.
-    store.upsert_routed_request(MINER, 'sol', 'btc', USER_A, 'src1b', 'dst1b', 150, created_at=NOW)
+    store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, 'src1b', 'dst1b', 150, created_at=NOW)
     queue = store.pending_routed_requests(MINER, 'sol', 'btc')
     assert [r['user_pubkey'] for r in queue] == [USER_A, USER_B]
     assert queue[0]['created_at'] == NOW - 50

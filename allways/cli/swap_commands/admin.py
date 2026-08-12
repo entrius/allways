@@ -16,6 +16,7 @@ from allways.cli.swap_commands.helpers import (
     secs_str,
     to_lamports,
 )
+from allways.constants import TAO_TO_RAO
 from allways.solana.client import SolanaClientError
 
 
@@ -519,6 +520,139 @@ def resume_system():
         console.print('[green]System resumed[/green]\n')
     except SolanaClientError as e:
         fail(f'Failed to resume system: {e}')
+
+
+# --- Split-collateral levers (W1/W2). TAO amounts are RAO, never converted through the rate: each
+# backing is bounded in its own asset's units, which is what keeps a price oracle out of the guards.
+
+
+def _fmt_tao(rao: int) -> str:
+    return f'{rao / TAO_TO_RAO:.9f} TAO'
+
+
+@admin_group.command('set-tao-min-swap', show_disclaimer=True)
+@click.argument('amount_tao', type=FINITE_FLOAT)
+def set_tao_min_swap(amount_tao: float):
+    """Set the minimum TAO-backed swap size, in TAO.
+
+    [dim]Only bounds swaps whose quote declared the "tao" backing; the SOL pair is set-min-swap.
+    Must clear the fee-meaningfulness floor: a 1% fee on the minimum should dwarf the ~0.0002 TAO
+    settlement postage, so ~0.1 TAO is the practical lower bound.[/dim]
+
+    [dim]Examples:
+        $ alw admin set-tao-min-swap 0.5[/dim]
+    """
+    if amount_tao < 0:
+        fail('Amount must be non-negative')
+    rao = int(amount_tao * TAO_TO_RAO)
+    _run_setter(
+        title='Set Minimum TAO-Backed Swap Amount',
+        getter=lambda c: c.get_config().tao_min_swap_amount,
+        setter=lambda c: c.set_tao_min_swap_amount(rao),
+        noun='minimum TAO swap amount',
+        format_current=_fmt_tao,
+        new_display=_fmt_tao(rao),
+        success_msg=f'Minimum TAO swap amount set to {_fmt_tao(rao)}',
+    )
+
+
+@admin_group.command('set-tao-max-swap', show_disclaimer=True)
+@click.argument('amount_tao', type=FINITE_FLOAT)
+def set_tao_max_swap(amount_tao: float):
+    """Set the maximum TAO-backed swap size, in TAO. Use 0 to remove the cap.
+
+    [dim]Examples:
+        $ alw admin set-tao-max-swap 25
+        $ alw admin set-tao-max-swap 0[/dim]
+    """
+    if amount_tao < 0:
+        fail('Amount must be non-negative')
+    rao = int(amount_tao * TAO_TO_RAO)
+    _run_setter(
+        title='Set Maximum TAO-Backed Swap Amount',
+        getter=lambda c: c.get_config().tao_max_swap_amount,
+        setter=lambda c: c.set_tao_max_swap_amount(rao),
+        noun='maximum TAO swap amount',
+        format_current=lambda v: f'{_fmt_tao(v)}{" (no maximum)" if v == 0 else ""}',
+        new_display=f'{_fmt_tao(rao)}{" (no maximum)" if rao == 0 else ""}',
+        success_msg=f'Maximum TAO swap amount set to {_fmt_tao(rao)}',
+    )
+
+
+@admin_group.command('set-tao-min-collateral', show_disclaimer=True)
+@click.argument('amount_tao', type=FINITE_FLOAT)
+def set_tao_min_collateral(amount_tao: float):
+    """Set the attested bond (TAO) a miner needs to activate its TAO backing.
+
+    [dim]The rao twin of set-min-collateral. Compared against the ATTESTED effective bond — already
+    net of accrued fees and voted slashes — not the vault's gross counter. Ships at a placeholder
+    0.1 TAO; set the real policy figure before the first TAO-backed quote.[/dim]
+
+    [dim]Examples:
+        $ alw admin set-tao-min-collateral 5[/dim]
+    """
+    if amount_tao <= 0:
+        fail('Amount must be positive (a dust bond must not activate a purse the guards then trust)')
+    rao = int(amount_tao * TAO_TO_RAO)
+    _run_setter(
+        title='Set TAO Activation Bond Floor',
+        getter=lambda c: c.get_config().tao_min_collateral,
+        setter=lambda c: c.set_tao_min_collateral(rao),
+        noun='TAO collateral floor',
+        format_current=_fmt_tao,
+        new_display=_fmt_tao(rao),
+        success_msg=f'TAO collateral floor set to {_fmt_tao(rao)}',
+    )
+
+
+@admin_group.command('set-settlement-grace', show_disclaimer=True)
+@click.argument('seconds', type=int)
+def set_settlement_grace(seconds: int):
+    """Set how long a miner stays busy after a non-SOL timeout while the penalty settles (60-7200s).
+
+    [dim]Busy-until-settled: Solana reaches the timeout verdict, the bond chain seizes minutes later.
+    This window blocks new reservations in between, so nothing opens against a bond that still owes
+    a penalty. Unused by the SOL path, which settles atomically.[/dim]
+
+    [dim]Examples:
+        $ alw admin set-settlement-grace 900[/dim]
+    """
+    if not 60 <= seconds <= 7_200:
+        fail('Settlement grace must be 60-7200 seconds (1 min - 2 h)')
+    _run_setter(
+        title='Set Settlement Grace',
+        getter=lambda c: c.get_config().settlement_grace_secs,
+        setter=lambda c: c.set_settlement_grace(seconds),
+        noun='settlement grace',
+        format_current=secs_str,
+        new_display=secs_str(seconds),
+        success_msg=f'Settlement grace set to {secs_str(seconds)}',
+    )
+
+
+@admin_group.command('set-attest-max-age', show_disclaimer=True)
+@click.argument('seconds', type=int)
+def set_attest_max_age(seconds: int):
+    """Set the attestation dead-man fuse: max heartbeat age before TAO-backed entry stops (3600-172800s).
+
+    [dim]A circuit breaker, not a cadence — size it at >=2x the relayer heartbeat interval (12-24 h).
+    While the global heartbeat is older than this, no TAO-backed pool, fill or attestation can open;
+    exits and in-flight swaps are unaffected.[/dim]
+
+    [dim]Examples:
+        $ alw admin set-attest-max-age 86400[/dim]
+    """
+    if not 3_600 <= seconds <= 172_800:
+        fail('Attestation max age must be 3600-172800 seconds (1 h - 48 h)')
+    _run_setter(
+        title='Set Attestation Fuse Max Age',
+        getter=lambda c: c.get_config().attest_max_age_secs,
+        setter=lambda c: c.set_attest_max_age(seconds),
+        noun='attestation max age',
+        format_current=secs_str,
+        new_display=secs_str(seconds),
+        success_msg=f'Attestation max age set to {secs_str(seconds)}',
+    )
 
 
 admin_group.add_command(danger_group)

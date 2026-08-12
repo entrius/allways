@@ -75,34 +75,28 @@ class TestGetChain:
 
 
 class TestCanonicalPair:
-    def test_already_canonical(self):
-        assert canonical_pair('btc', 'tao') == ('btc', 'tao')
+    def test_tao_hub_is_source(self):
+        # TAO is a hub: canonical source of every tao↔spoke pair, so the rate
+        # reads 'X per 1 TAO' — same shape as every other hub pair.
+        assert canonical_pair('tao', 'btc') == ('tao', 'btc')
+        assert canonical_pair('btc', 'tao') == ('tao', 'btc')
+        assert canonical_pair('tao', 'eth') == ('tao', 'eth')
+        assert canonical_pair('eth', 'tao') == ('tao', 'eth')
+        assert canonical_pair('thor', 'tao') == ('tao', 'thor')
 
-    def test_reversed_input(self):
-        assert canonical_pair('tao', 'btc') == ('btc', 'tao')
-
-    def test_tao_always_dest(self):
-        # TAO preference: even when a chain sorts after "tao", TAO is dest
-        assert canonical_pair('thor', 'tao') == ('thor', 'tao')
-        assert canonical_pair('tao', 'thor') == ('thor', 'tao')
-
-    def test_no_tao_alphabetical(self):
+    def test_no_hub_alphabetical(self):
         assert canonical_pair('eth', 'btc') == ('btc', 'eth')
         assert canonical_pair('btc', 'eth') == ('btc', 'eth')
 
     def test_sol_always_source(self):
-        # SOL is the hub: always canonical source, outranking the TAO-dest rule.
+        # SOL is the first hub: always canonical source, outranking TAO on the
+        # hub↔hub pair (grandfathered — sol↔tao quotes keep their convention).
         assert canonical_pair('sol', 'btc') == ('sol', 'btc')
         assert canonical_pair('btc', 'sol') == ('sol', 'btc')
         assert canonical_pair('sol', 'tao') == ('sol', 'tao')
         assert canonical_pair('tao', 'sol') == ('sol', 'tao')
         assert canonical_pair('sol', 'eth') == ('sol', 'eth')
         assert canonical_pair('eth', 'sol') == ('sol', 'eth')
-
-    def test_non_sol_pairs_unchanged(self):
-        # Re-anchor must not perturb the active tao<->btc directions.
-        assert canonical_pair('btc', 'tao') == ('btc', 'tao')
-        assert canonical_pair('tao', 'btc') == ('btc', 'tao')
 
 
 class TestComputeExtensionTargetSecs:
