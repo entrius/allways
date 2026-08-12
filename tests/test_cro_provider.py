@@ -126,8 +126,8 @@ class TestNetworkSelection:
         assert Cro().chain.rpc_bases == list(CRONOS.rpc_urls[network])
 
     def test_mainnet_ladder_leads_with_the_archive_rung(self, provider):
-        # delivery_refused reads state up to 120 blocks back and publicnode prunes Cronos state
-        # at tip-107, so the official gateway must stay first or every slash check pays a failover.
+        # delivery_refused reads state up to 120 blocks back and publicnode keeps only ~100 blocks
+        # of it, so the official gateway must stay first or every slash check pays a failover.
         assert provider.chain.rpc_bases[0] == 'https://evm.cronos.org'
 
     def test_rpc_urls_env_overrides_the_public_ladder(self, monkeypatch):
@@ -268,7 +268,7 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': code_at})
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is True
         # now, then the window's far edge and its midpoint. The 60s window is 60 blocks at the
-        # stored 1s — inside the 107-block state depth publicnode serves, but the gate's 120-block
+        # stored 1s — inside the ~100 blocks of state publicnode keeps, but the gate's 120-block
         # cap is not, which is why the archive gateway leads the mainnet ladder.
         assert probed == ['latest', hex(9_940), hex(9_970)]
 
