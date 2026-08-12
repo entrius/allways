@@ -167,11 +167,12 @@ CHAIN_BNB = ChainDefinition(
     # Fermi (Jan 2026) cut blocks to 0.45s — measured 0.4502s over the last 100k mainnet blocks.
     # 1 is the integer floor, so every derived bound is conservative in wall time, never short.
     seconds_per_block=1,
-    # BEP-126 finalizes a block once it and its child carry >2/3 attestations — ~2 blocks. That
-    # quorum is not guaranteed: across an epoch's validator-set rotation the attesting set changes
-    # and, below quorum, BSC falls back to its longest-chain rule, whose classic safety bound is
-    # 2/3·21+1 = 15 blocks. At 0.45s that bound costs ~6.8s, so take it instead of trusting fast
-    # finality to hold.
+    # BEP-126 finalizes a block once it and its direct child carry >2/3 attestations (~2 blocks).
+    # Below that quorum — e.g. across an epoch's validator-set rotation — BSC falls back to its
+    # longest-chain rule, where what bounds one dishonest proposer is turn_length: the run of
+    # consecutive blocks a single validator signs (BEP-341; measured 8 on mainnet, 2026-08-11).
+    # 15 outlasts one full turn, so no lone validator can build the whole span. turn_length is a
+    # governance parameter and has already been raised twice — if it rises again, raise this above it.
     min_confirmations=15,
     # Rate sanity floor, not an economic guarantee: 0.0002 BNB covers a 21k-gas transfer below
     # ~9.5 gwei — well above the 3-5 gwei BSC sustained through 2022-2024, and ~200x today's

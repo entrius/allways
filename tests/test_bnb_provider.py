@@ -7,11 +7,10 @@ time that drives the scanner. BSC's own hazard is a destination that stops accep
 transfer between reserve and payout (EIP-7702 delegation), so the delivery gates are pinned too.
 """
 
-import time
-
 import pytest
 from eth_account import Account
 
+from allways.assets import evm_coin
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.bnb import Bnb
 from allways.assets.evm import BSC, EvmChain
@@ -23,6 +22,7 @@ TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' 
 RECIPIENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 TX = '0x' + 'ab' * 32
 BLOCK_HASH = '0x' + 'cd' * 32
+DELEGATION = '0xef0100' + '11' * 20  # EIP-7702 delegation indicator
 MINED_BLOCK = 0xF4240  # 1_000_000
 CONFIRMED_TIP = MINED_BLOCK + CHAIN_BNB.min_confirmations - 1
 
@@ -42,6 +42,14 @@ def provider(monkeypatch):
     monkeypatch.delenv('BNB_RPC_URLS', raising=False)
     monkeypatch.delenv('BNB_PRIVATE_KEY', raising=False)
     return Bnb()
+
+
+@pytest.fixture
+def frozen_now(monkeypatch):
+    """Pin the clock so delivery_refused's span arithmetic lands on exact block offsets."""
+    now = 1_800_000_000
+    monkeypatch.setattr(evm_coin.time, 'time', lambda: now)
+    return now
 
 
 def rpc_stub(provider, responses: dict):
@@ -239,13 +247,28 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_getCode': '0x60806040', 'eth_estimateGas': refuse})
         assert provider.can_deliver_to(RECIPIENT, 10**16) is False
 
-    def test_slash_gate_exempts_a_dest_that_gained_code_after_reserve(self, provider):
-        since = int(time.time()) - 60
-        rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': '0xef0100' + '11' * 20})
-        assert provider.delivery_refused(RECIPIENT, since) is True
+    def test_slash_gate_exempts_a_dest_that_gained_then_revoked_code(self, provider, frozen_now):
+        # The case only temporal sampling can catch, and the one a miner gets slashed over: the
+        # dest delegates via EIP-7702 after the reservation pinned it, the payout reverts, and the
+        # delegation is revoked before the slash check. 'latest' is clean by then — only the
+        # historical probes still see it. Code lives at the midpoint offset alone, so a passing
+        # run proves all three probe offsets were actually read.
+        probed = []
 
+        def code_at(params):
+            probed.append(params[1])
+            return DELEGATION if params[1] == hex(9_970) else '0x'
+
+        rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': code_at})
+        assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is True
+        # now, then the window's far edge and its midpoint. The 60s window is 60 blocks at the
+        # stored 1s; note the gate's 120-block span cap is only ~54s of real BSC history (0.45s
+        # blocks), so "the window since since_unix" stops being true beyond that.
+        assert probed == ['latest', hex(9_940), hex(9_970)]
+
+    def test_slash_gate_does_not_exempt_a_dest_that_never_had_code(self, provider, frozen_now):
         rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': '0x'})
-        assert provider.delivery_refused(RECIPIENT, since) is False
+        assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is False
 
 
 class TestDepositScanner:
