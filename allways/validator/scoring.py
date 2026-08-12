@@ -600,8 +600,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, ts, backing=backing)
-                for hk, ms in live_states.items()
+                hk: direction_eligible(ms, from_chain, to_chain, ts, backing=backing) for hk, ms in live_states.items()
             },
         )
         rows.extend(dir_rows)

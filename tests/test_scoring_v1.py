@@ -2905,9 +2905,7 @@ class TestDualBackingLanes:
         """A SOL-only rival contests the sol lane (equal rate + equal depth → even split)
         but never touches the tao lane — that half stays the dual-purse miner's alone."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
-        v = make_validator(
-            tmp_path, hotkeys, collaterals={'hk_a': 550_000_000, 'hk_b': 550_000_000}, **self.BOUNDS
-        )
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000, 'hk_b': 550_000_000}, **self.BOUNDS)
         for backing in ('sol', 'tao'):
             self._seed_quote(v, 'hk_a', backing)
         self._seed_quote(v, 'hk_b', 'sol')
@@ -2929,7 +2927,9 @@ class TestDualBackingLanes:
             self._seed_quote(v, 'hk_a', backing)
         self._fund_tao(v, 'hk_a')
         # Window is (9_700, 10_000]; the tao-backed swap brackets it entirely.
-        v.event_watcher.reserve_then_swap('hk_a', reserve_block=9_000, init_block=9_000, end_block=11_000, backing='tao')
+        v.event_watcher.reserve_then_swap(
+            'hk_a', reserve_block=9_000, init_block=9_000, end_block=11_000, backing='tao'
+        )
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
