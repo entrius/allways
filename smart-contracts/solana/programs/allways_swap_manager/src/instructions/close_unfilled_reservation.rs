@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{MINER_SEED, RESV_SEED};
+use crate::constants::{MINER_SEED, POOL_SEED, RESV_SEED};
 use crate::error::ErrorCode;
 use crate::events::UnfilledReservationClosed;
-use crate::state::{MinerState, Reservation};
+use crate::state::{MinerState, Pool, Reservation};
 
 /// Permissionless: reap a reservation that was drawn but never filled once its finalize window has
 /// passed, freeing the miner immediately instead of letting it idle out the full bid-time busy lock.
@@ -30,6 +30,14 @@ pub struct CloseUnfilledReservation<'info> {
         bump = reservation.bump,
     )]
     pub reservation: Account<'info, Reservation>,
+
+    /// This hub's pool — read to see whether a live contest already re-armed the busy lock far ahead.
+    /// Same (miner, backing) as the reservation; always exists once a contest has ever run on this hub.
+    #[account(
+        seeds = [POOL_SEED, miner.key().as_ref(), reservation.collateral_chain.as_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Account<'info, Pool>,
 }
 
 pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
@@ -50,9 +58,13 @@ pub fn handler(ctx: Context<CloseUnfilledReservation>) -> Result<()> {
         r.router
     };
 
-    // Free the hub now (the bid set its busy slot far ahead to cover a finalize that never came).
+    // Free the hub now (the bid set its busy slot far ahead to cover a finalize that never came) —
+    // but ONLY if no live pool has re-armed it. A fresh contest (`opened_at != 0`) sets busy far ahead
+    // for its own obligation; dragging it back here would read the miner free mid-contest.
     let bit = crate::backing::backing_bit(&ctx.accounts.reservation.collateral_chain)?;
-    ctx.accounts.miner_state.set_busy(bit, now);
+    if ctx.accounts.pool.opened_at == 0 {
+        ctx.accounts.miner_state.set_busy(bit, now);
+    }
 
     let r = &mut ctx.accounts.reservation;
     r.router = Pubkey::default();
