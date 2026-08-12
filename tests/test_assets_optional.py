@@ -46,11 +46,12 @@ def test_none_means_all_required(registry):
 
 def test_evm_network_names_match_the_rpc_registry():
     """chains.py names the networks the CLI accepts; assets/evm.py names the chain ids the
-    provider dials. One fact in two files, so CI compares them."""
+    provider dials. One fact in two files, so CI compares them — for the row that declares the
+    names. A row that declares none (ethusdc) rides the one that does and has nothing of its own."""
     for chain_id, cls, kwarg_names in cp.ASSET_REGISTRY:
         if kwarg_names:
             continue
         asset = cls()
         served = getattr(asset.chain, 'network_def', None)
-        if served:
+        if served and asset.chain_def.networks:
             assert set(asset.chain_def.networks) == set(served.chain_ids), chain_id
