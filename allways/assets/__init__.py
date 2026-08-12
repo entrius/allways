@@ -4,6 +4,7 @@ import bittensor as bt
 
 from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import Asset, SendResult, TransactionInfo
+from allways.assets.aster import Aster
 from allways.assets.avax import Avax
 from allways.assets.baseusdc import BaseUsdc
 from allways.assets.bnb import Bnb
@@ -37,6 +38,7 @@ __all__ = [
     'ArbUsdc',
     'BaseUsdc',
     'EthUsdc',
+    'Aster',
     'create_assets',
 ]
 
@@ -62,6 +64,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('baseusdc', BaseUsdc, ()),
     AssetSpec('ethusdc', EthUsdc, ()),
     AssetSpec('cro', Cro, ()),
+    AssetSpec('aster', Aster, ()),
 )
 
 
