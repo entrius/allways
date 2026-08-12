@@ -220,8 +220,14 @@ class BondRelay:
             # Absolute rao figure (the confirm-events seam W2b landed): Solana moved nothing, the
             # fee is owed on the vault and nets off the effective bond until it settles there.
             miner = str(fields['miner'])
+            # The fee is owed to the vault in service NOW. Refuse to record it under a guessed
+            # generation — ingest holds the cursor and replays, so an unreadable config costs a
+            # retry, while a mis-tagged accrual would be charged against the wrong vault forever.
+            generation = self.vault_generation()
+            if generation is None:
+                raise RuntimeError('vault generation unreadable — cannot tag the fee accrual')
             self.store.record_relay_fee(
-                _hex(fields['swap_key']), miner, self.backing, int(fields['fee']), int(block_time)
+                _hex(fields['swap_key']), miner, self.backing, int(fields['fee']), int(block_time), generation
             )
             self.mark_dirty(miner)
         elif name == 'SwapTimedOut':

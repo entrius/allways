@@ -80,18 +80,20 @@ def compute(relay, miner: str, hotkey: str) -> Optional[Attested]:
     if gross is None or settled is None or lock is None:
         bt.logging.warning(f'relay: vault reads unavailable for {hotkey[:8]}… — leaving its attestation alone')
         return None
-    accrued = relay.store.accrued_fee_total(miner, relay.backing)
+    generation = relay.vault_generation()
+    if generation is None:
+        return None
+    # Scoped to THIS vault: the retired one's settled counter is gone, so summing its accruals
+    # against a fresh `settled` would re-charge fees it already collected.
+    accrued = relay.store.accrued_fee_total(miner, relay.backing, vault_generation=generation)
     # Fees the miner has earned the protocol but the vault has not yet booked. The vault debits at
     # settle time; Solana's guards must see the miner clipped from the moment the fee is earned.
     unsettled = max(0, accrued - settled)
     pending = sum(int(row['penalty']) for row in relay.store.open_relay_slashes(relay.backing, miner))
     locked, epoch = lock
     # A replacement vault restarts its lock epochs at 0, which the on-chain monotonic guard would
-    # read as stale forever. Compose the config's vault generation into the high half so epochs stay
-    # globally monotonic across the swap.
-    generation = relay.vault_generation()
-    if generation is None:
-        return None
+    # read as stale forever. Compose the generation into the high half so epochs stay globally
+    # monotonic across the swap.
     return Attested(
         max(0, gross - unsettled - pending),
         bool(locked),
