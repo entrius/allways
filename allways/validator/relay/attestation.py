@@ -29,6 +29,16 @@ from allways.solana.client import benign_marker
 # The program's AlreadyVoted is an authoritative no-op, not a failure (same rule as floor_sweep).
 _BENIGN_VOTE_MARKERS = ('AlreadyVoted',)
 
+# The program refuses a DOWNWARD attestation write while the miner's hub is held (F5 — the write
+# would strand a live swap's reserve). That refusal is DEFERRED, not owed: the program guarantees the
+# write can't matter until the hub frees, so it must not hold the startup reconcile barrier down —
+# but the miner stays dirty so the write retries the moment the hub clears. See `flush`/`_write_one`.
+_HELD_HUB_MARKERS = ('AttestationWouldStrandSwap',)
+
+# Sentinel `_write_one` return: written attempt refused as deferred (see _HELD_HUB_MARKERS). Distinct
+# from True (settled → drop from dirty) and False (owed/transient → keep dirty AND fail the barrier).
+_DEFERRED = object()
+
 
 @dataclass(frozen=True)
 class Attested:
@@ -84,18 +94,23 @@ def flush(relay, now: int, reconciling: bool = False) -> bool:
             relay._dirty.discard(miner)
             continue
         try:
-            handled = _write_one(relay, miner, hotkey, now, reconciling)
+            outcome = _write_one(relay, miner, hotkey, now, reconciling)
         except Exception as e:
             bt.logging.warning(f'relay: attestation for {miner[:8]} failed: {e}')
-            handled, ok = False, False
-        if handled:
+            outcome, ok = False, False
+        if outcome is _DEFERRED:
+            # Refused while the hub is held (F5). Not owed — the program guarantees the write can't
+            # matter until the hub frees — so it does NOT fail the barrier, but the miner stays dirty
+            # so the write retries once the hub clears. A fleet restart mid-swap no longer wedges here.
+            continue
+        if outcome:
             relay._dirty.discard(miner)
         else:
             ok = False
     return ok
 
 
-def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> bool:
+def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> Any:
     desired = compute(relay, miner, hotkey)
     if desired is None:
         return False
@@ -124,6 +139,13 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> b
             miner, relay.backing, desired.effective_balance, desired.locked, desired.epoch
         )
     except Exception as e:
+        if benign_marker(e, _HELD_HUB_MARKERS):
+            # Downward write refused while the hub is held. Throttle so we don't retry (or log) every
+            # tick, and defer — the reconcile barrier must not wedge on a write the program itself
+            # guarantees is immaterial until the hub frees. The miner stays dirty for a later retry.
+            relay.note_vote(key, now)
+            bt.logging.debug(f'relay: attestation for {miner[:8]} deferred — hub held, retrying once it frees')
+            return _DEFERRED
         if not benign_marker(e, _BENIGN_VOTE_MARKERS):
             raise
         bt.logging.debug(f'relay: attestation vote for {miner[:8]} already recorded')

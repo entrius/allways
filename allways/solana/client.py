@@ -166,6 +166,7 @@ _ERROR_CODES = {
     'SeedSlotNotYetProduced': 6045,
     'AlreadyFilled': 6046,
     'WeightsUpdateTooSoon': 6050,
+    'AttestationWouldStrandSwap': 6067,
 }
 
 
@@ -747,6 +748,9 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, False),
+            # F5: this hub's reservation, read-only — a filled reservation's obligation floors a downward
+            # write (an open pool alone does not). Always derivable; may be uninitialized on-chain.
+            AccountMeta(pdas.reservation_pda(m, chain, self.program_id), False, False),
             AccountMeta(pdas.bond_attestation_pda(m, chain, self.program_id), False, True),
             AccountMeta(pdas.attestation_round_pda(m, chain, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),

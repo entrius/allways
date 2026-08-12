@@ -11,13 +11,58 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program::System;
 use anchor_lang::Discriminator;
 
-use crate::constants::{CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_TX_LEN, SWAP_SEED};
+use crate::constants::{
+    BACKING_BIT_SOL, CONFIG_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MAX_TX_LEN, MINER_SEED, SWAP_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::LegacySwapClosed;
-use crate::state::{Config, Swap};
+use crate::state::{Config, MinerState, Swap, SwapStatus};
+
+/// `Swap` as the v10 program wrote it: no `collateral_chain` (v3 inserted it mid-struct). Frozen —
+/// its `INIT_SPACE` fixes the exact byte length a genuine v10 Swap PDA was allocated at (`init` pads
+/// every `#[max_len]` String to its maximum), so a current-layout account — longer by exactly
+/// `collateral_chain` — is rejected on length alone. Field order is the contract; do not reorder.
+/// Only `INIT_SPACE` is read — the fields exist to fix the layout, hence `dead_code` is expected.
+#[derive(InitSpace)]
+#[allow(dead_code)]
+struct SwapV10 {
+    user: Pubkey,
+    miner: Pubkey,
+    #[max_len(MAX_CHAIN_LEN)]
+    from_chain: String,
+    #[max_len(MAX_CHAIN_LEN)]
+    to_chain: String,
+    #[max_len(MAX_ADDR_LEN)]
+    user_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    user_to_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    miner_from_addr: String,
+    #[max_len(MAX_ADDR_LEN)]
+    miner_to_addr: String,
+    rate: u128,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+    #[max_len(MAX_TX_LEN)]
+    from_tx_hash: String,
+    from_tx_block: u32,
+    #[max_len(MAX_TX_LEN)]
+    to_tx_hash: String,
+    to_tx_block: u32,
+    status: SwapStatus,
+    initiated_at: i64,
+    timeout_at: i64,
+    max_extend_at: i64,
+    fulfilled_at: i64,
+    bump: u8,
+}
+
+/// The exact on-chain byte length of a v10 Swap PDA: 8-byte discriminator + the padded struct.
+const V10_SWAP_LEN: usize = 8 + SwapV10::INIT_SPACE;
 
 #[derive(Accounts)]
-#[instruction(swap_key: [u8; 32])]
+#[instruction(swap_key: [u8; 32], miner: Pubkey)]
 pub struct CloseLegacySwap<'info> {
     /// Admin only — a one-shot recovery run by the migration operator, not a permissionless reap.
     #[account(mut)]
@@ -29,6 +74,12 @@ pub struct CloseLegacySwap<'info> {
     /// CHECK: the decoded swap's `user`; also the rent-refund destination (the wronged party).
     #[account(mut)]
     pub user: UncheckedAccount<'info>,
+
+    /// The miner whose hub the reaped swap froze. Bound by the `miner` arg and re-checked against the
+    /// decoded `swap.miner` in the handler, so the caller can't free a different miner's state. Freeing
+    /// the SOL hub here is what actually unblocks the miner — reaping the PDA alone leaves it bricked.
+    #[account(mut, seeds = [MINER_SEED, miner.as_ref()], bump = miner_state.bump)]
+    pub miner_state: Account<'info, MinerState>,
 
     /// CHECK: the Swap PDA; owner + discriminator + the frozen v10 walk are verified in the handler.
     #[account(mut, seeds = [SWAP_SEED, swap_key.as_ref()], bump)]
@@ -64,19 +115,23 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub fn handler(ctx: Context<CloseLegacySwap>, swap_key: [u8; 32]) -> Result<()> {
+pub fn handler(ctx: Context<CloseLegacySwap>, swap_key: [u8; 32], miner: Pubkey) -> Result<()> {
     let info = ctx.accounts.swap.to_account_info();
     require!(info.owner == ctx.program_id, ErrorCode::InvalidAccountForMigration);
 
-    let (user, miner, collateral_amount, from_tx_hash) = {
+    let (user, decoded_miner, collateral_amount, from_tx_hash) = {
         let data = info.try_borrow_data()?;
+        // Discriminate by the fixed allocation length, NOT by where the walk ends. `init` zero-pads
+        // every String to its `#[max_len]`, so a genuine v10 Swap's walked fields stop well short of
+        // `data.len()`; keying on `r.pos == data.len()` would reject every real account. A current
+        // (collateral_chain) Swap is longer by that field, so length alone rejects it here.
         require!(
-            data.len() >= 8 && data[..8] == Swap::DISCRIMINATOR[..],
+            data.len() == V10_SWAP_LEN && data[..8] == Swap::DISCRIMINATOR[..],
             ErrorCode::InvalidAccountForMigration
         );
         let mut r = Reader { data: &data, pos: 8 };
         let user = r.pubkey()?;
-        let miner = r.pubkey()?;
+        let decoded_miner = r.pubkey()?;
         r.string(MAX_CHAIN_LEN)?; // from_chain
         r.string(MAX_CHAIN_LEN)?; // to_chain
         r.string(MAX_ADDR_LEN)?; // user_from_addr
@@ -90,12 +145,26 @@ pub fn handler(ctx: Context<CloseLegacySwap>, swap_key: [u8; 32]) -> Result<()> 
         r.take(4)?; // from_tx_block
         r.string(MAX_TX_LEN)?; // to_tx_hash
         r.take(4 + 1 + 8 + 8 + 8 + 8 + 1)?; // to_tx_block, status, initiated/timeout/max_extend/fulfilled, bump
-        // A current-layout account (collateral_chain inserted) never ends exactly here — the mismatch
-        // is what rejects it, so this only reaps a genuine v10 Swap.
-        require!(r.pos == data.len(), ErrorCode::InvalidAccountForMigration);
-        (user, miner, collateral_amount, from_tx_hash)
+        // Everything past the walked fields is the fixed allocation's zero padding. Requiring it be
+        // zero rejects a length-matched but corrupt account (a real v10 Swap has a clean padded tail).
+        require!(data[r.pos..].iter().all(|&b| b == 0), ErrorCode::InvalidAccountForMigration);
+        (user, decoded_miner, collateral_amount, from_tx_hash)
     };
     require!(user == ctx.accounts.user.key(), ErrorCode::UserMismatch);
+    // The `miner_state` account is seeded on the `miner` arg; pin it to the decoded swap so the caller
+    // can't reap swap A while freeing miner B's hub.
+    require!(decoded_miner == miner, ErrorCode::InvalidAccountForMigration);
+
+    // Free the miner's SOL hub (v10 swaps are implicitly SOL-backed): clear the in-flight bit, drop the
+    // per-hub locks, and release the reservation this swap held. Without this the PDA is reaped but the
+    // hub stays busy forever — `open_or_request`/`deactivate`/`withdraw_collateral` all gate on the bit.
+    let ms = &mut ctx.accounts.miner_state;
+    ms.set_swap(BACKING_BIT_SOL, false);
+    ms.set_busy(BACKING_BIT_SOL, 0);
+    ms.set_settling(BACKING_BIT_SOL, 0);
+    let owed = ms.reserved(BACKING_BIT_SOL);
+    ms.release_reserved(BACKING_BIT_SOL, owed);
+    ms.failed_swaps = ms.failed_swaps.saturating_add(1);
 
     // Reap: rent → user (the wronged party). Same three steps Anchor's `close` takes, on an account
     // no typed accessor can safely hold.

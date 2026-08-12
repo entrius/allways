@@ -2,10 +2,12 @@ use anchor_lang::prelude::*;
 
 use crate::backing;
 use crate::consensus::{attestation_hash, record_vote, reset_round};
-use crate::constants::{ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_SET_ATTESTATION, VOTE_SEED};
+use crate::constants::{
+    required_collateral, ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_SET_ATTESTATION, RESV_SEED, VOTE_SEED,
+};
 use crate::error::ErrorCode;
 use crate::events::BondAttested;
-use crate::state::{BondAttestation, Config, MinerState, VoteRound};
+use crate::state::{BondAttestation, Config, MinerState, Reservation, VoteRound};
 
 /// Validators write a miner's effective bond on one backing chain. Solana can't read the vault holding
 /// it, so the quorum's assertion IS the value every collateral guard reads.
@@ -24,14 +26,21 @@ pub struct VoteSetAttestation<'info> {
     /// CHECK: identified by address only; bound via the attestation/round PDA seeds.
     pub miner: UncheckedAccount<'info>,
 
-    /// Read to see whether this hub is holding a live obligation — a downward write is refused while it
-    /// is (F5). Every attestable miner is registered, so this state always exists.
+    /// Read for this hub's in-flight-swap reserve — a downward write is refused only if it would drop
+    /// the purse below a LIVE obligation (F5). Every attestable miner is registered, so this always exists.
     #[account(
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
     )]
     pub miner_state: Account<'info, MinerState>,
+
+    /// CHECK: the miner's reservation PDA for THIS hub, read-only. A FILLED reservation's 1.10× is an
+    /// obligation the bond must still cover (`vote_initiate` re-checks it), so it floors a downward write
+    /// — but a mere open pool carries NO obligation and must not, else it can be spammed to keep a
+    /// just-slashed bond advertised stale-high (F5 #4). May be uninitialized; handled in the handler.
+    #[account(seeds = [RESV_SEED, miner.key().as_ref(), chain.as_bytes()], bump)]
+    pub reservation: UncheckedAccount<'info>,
 
     /// One-time rent per (miner, hub), paid by whichever validator's vote reaches quorum first.
     #[account(
@@ -80,12 +89,29 @@ pub fn handler(
 
     let now = Clock::get()?.unix_timestamp;
 
-    // F5: while this hub is held (open pool, filled reservation, or in-flight swap), refuse a write
-    // that LOWERS the bond — it could drop the purse under the 1.1× gate a filled reservation already
-    // passed, stranding the deposit at initiate. Fee shrinkage settles when idle, so it isn't blocked.
+    // F5: refuse a write that LOWERS the bond only when it would drop the purse below what LIVE
+    // obligations already reserved against it — an in-flight swap's reserve, or a filled reservation's
+    // 1.10× (which `vote_initiate` re-checks, so a low bond would strand the deposit). An OPEN POOL
+    // carries no obligation (amount unknown, nothing reserved), so it does NOT block the write: gating
+    // on "hub busy" instead let a spammed open re-arm busy each tick and hold the bond stale-high (F5 #4).
+    // A fee-shrink write that still covers every obligation lands regardless of hub state.
+    let filled_resv_obligation = {
+        let info = ctx.accounts.reservation.to_account_info();
+        if info.owner == ctx.program_id && !info.data_is_empty() {
+            let resv = Reservation::try_deserialize(&mut &info.try_borrow_data()?[..])?;
+            // A drawn-and-filled, still-live reservation (not the unfilled/consumed/expired states).
+            if resv.created_at != 0 && resv.reserved_until >= now {
+                required_collateral(resv.collateral_amount)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+    let live_obligation = ctx.accounts.miner_state.reserved(bit).saturating_add(filled_resv_obligation);
     require!(
-        effective_balance >= ctx.accounts.attestation.effective_balance
-            || ctx.accounts.miner_state.busy_slot(bit) <= now,
+        effective_balance >= ctx.accounts.attestation.effective_balance || effective_balance >= live_obligation,
         ErrorCode::AttestationWouldStrandSwap
     );
     let miner_key = ctx.accounts.miner.key();

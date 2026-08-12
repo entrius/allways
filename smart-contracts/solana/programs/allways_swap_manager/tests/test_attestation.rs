@@ -267,6 +267,7 @@ fn attest_ix(
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
+            reservation: resv_pda_b(miner, chain),
             attestation: attest_pda(miner, chain),
             vote_round: attest_round_pda(miner, chain),
             system_program: SYSTEM_PROGRAM,
@@ -492,6 +493,40 @@ fn overwrite(svm: &mut LiteSVM, pda: Pubkey, serialized: Vec<u8>) {
     )
     .unwrap();
 }
+/// Plant a drawn-AND-FILLED, still-live reservation on a hub (created_at set, reserved_until in the
+/// future) with a chosen collateral size — the obligation the attestation must keep covering. Direct
+/// set_account so a gate test needn't run the whole open→resolve→finalize flow.
+fn plant_filled_reservation(svm: &mut LiteSVM, m: &Pubkey, backing: &str, collateral_amount: u64, reserved_until: i64) {
+    let now = now_ts(svm);
+    let resv = Reservation {
+        router: Pubkey::new_unique(),
+        from_addr: "src".into(),
+        user: Pubkey::new_unique(),
+        user_to_addr: "dst".into(),
+        from_chain: HUB_FROM.into(),
+        to_chain: HUB_TO.into(),
+        collateral_chain: backing.into(),
+        collateral_amount,
+        from_amount: 1,
+        to_amount: 1,
+        miner_from_addr: MINER_FROM.into(),
+        miner_to_addr: MINER_TO.into(),
+        rate: RATE,
+        created_at: now - 10,
+        reserved_until,
+        finalize_by: now + 100,
+        max_extend_at: reserved_until + 1_000,
+        claimed_swap_key: [0u8; 32],
+        bump: 255,
+    };
+    let mut data = Vec::new();
+    resv.try_serialize(&mut data).unwrap();
+    data.resize(8 + Reservation::INIT_SPACE, 0);
+    let lamports = svm.minimum_balance_for_rent_exemption(data.len());
+    svm.set_account(resv_pda_b(m, backing), Account { lamports, data, owner: pid(), executable: false, rent_epoch: 0 })
+        .unwrap();
+}
+
 /// Re-pin a drawn (sol-seeded) reservation to another backing. v3.1 keys the slot by backing, so the
 /// account must MOVE to the backing's PDA (with its bump) — later instructions derive that address
 /// from the stored chain and would otherwise fail their seeds check.
@@ -713,29 +748,73 @@ fn test_attestation_refuses_a_stale_epoch_but_allows_same_epoch_updates() {
 }
 
 #[test]
-fn test_attestation_refuses_a_downward_write_while_the_hub_is_held() {
-    // F5: a filled reservation passed the 1.1× gate at bond B. A quorum that lowers the bond to B'
-    // while the hub is still held would fail vote_initiate on the now-lower purse and strand the
-    // user's deposit. The write is refused until the hub frees; an upward write is always allowed.
+fn test_attestation_refuses_a_downward_write_that_would_strand_a_filled_reservation() {
+    // F5: a FILLED reservation passed the 1.1× gate at bond B; vote_initiate re-checks that purse, so a
+    // quorum that drops the bond below the reservation's obligation would strand the user's deposit at
+    // initiate. The write is refused below the obligation — but a write that STILL covers it, or an
+    // upward write, lands regardless. (The gate floors on the live obligation, not on a blanket "busy".)
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
     attest(&mut svm, &vals, &m, 5_000_000_000, true, 5);
-    let held_until = now_ts(&svm) + 10_000;
-    set_tao_busy_until(&mut svm, &m, held_until);
+    // A filled TAO reservation for a 4.0 SOL-equiv size → obligation = 1.10× = 4.4B lamports.
+    let live_until = now_ts(&svm) + 10_000;
+    plant_filled_reservation(&mut svm, &m, TAO, 4_000_000_000, live_until);
 
     let err = send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 4_000_000_000, true, 5), &vals[0].pubkey(), &vals[0])
-        .expect_err("downward while held");
+        .expect_err("downward below the reservation's 4.4B obligation strands it");
     assert!(err.contains("AttestationWouldStrandSwap"), "{err}");
     assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "untouched");
 
-    // An upward write (the bond grew) never strands anyone, so it lands even while the hub is held.
+    // A downward write that STILL covers the 4.4B obligation is safe, so it lands even while filled.
+    attest(&mut svm, &vals, &m, 4_500_000_000, true, 5);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 4_500_000_000, "obligation-floored, not blanket-refused");
+
+    // An upward write never strands anyone.
     attest(&mut svm, &vals, &m, 6_000_000_000, true, 5);
     assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 6_000_000_000);
 
-    // Once the hub frees, the deferred fee-settlement write applies as normal.
-    set_tao_busy_until(&mut svm, &m, 0);
-    attest(&mut svm, &vals, &m, 4_000_000_000, true, 5);
-    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 4_000_000_000);
+    // Once the reservation lapses (no live obligation), a full fee-settlement write applies.
+    let lapsed = now_ts(&svm) - 1;
+    plant_filled_reservation(&mut svm, &m, TAO, 4_000_000_000, lapsed); // expired
+    attest(&mut svm, &vals, &m, 1_000_000_000, true, 5);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 1_000_000_000);
+}
+
+#[test]
+fn test_f5_a_fresh_open_no_longer_blocks_the_downward_attestation() {
+    // F5 #4 (economic) FIX: after a TAO timeout, timeout_swap sets busy == settling == settled_at, and at
+    // settled_at both lift. An open_or_request re-arms `busy` far ahead but never `settling` and carries
+    // NO obligation (unfilled reservation, reserved == 0). Pre-fix, the downward-attestation gate keyed on
+    // `busy`, so spamming opens held the just-slashed bond stale-HIGH forever. Now the gate floors on the
+    // LIVE OBLIGATION (reserved swaps + a filled reservation), which an open pool doesn't create — so the
+    // honest relay's downward write lands, and the bond cannot be pinned high by opening empty pools.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    const HIGH: u64 = 5_000_000_000; // the pre-slash bond the attestation still reads
+    const LOW: u64 = 3_000_000_000; // what the relay nets it down to after the slash
+    light_tao_purse(&mut svm, &vals, &miner, HIGH);
+
+    // Reproduce the post-timeout hold, then advance to settled_at so both locks lift.
+    let settled_at = now_ts(&svm) + SETTLEMENT_GRACE_SECS;
+    set_tao_busy_until(&mut svm, &m, settled_at);
+    set_settling_until(&mut svm, &m, settled_at);
+    set_clock(&mut svm, settled_at);
+    beat_heartbeat(&mut svm, &vals);
+
+    // The attacker front-runs the relay and opens a fresh TAO contest, re-arming busy far ahead.
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("a fresh TAO pool opens the moment the settling lock lifts");
+    let ms = miner_state(&svm, &m);
+    assert!(ms.busy_slot(BACKING_BIT_TAO) > settled_at, "opening re-armed busy far ahead");
+    assert_eq!(ms.reserved(BACKING_BIT_TAO), 0, "an OPEN pool reserves nothing — no obligation");
+
+    // The open pool carries no obligation, so the downward write now LANDS despite the re-armed busy.
+    attest(&mut svm, &vals, &m, LOW, true, 2);
+    assert_eq!(
+        attestation_acct(&svm, &m, TAO).effective_balance,
+        LOW,
+        "netting write lands — a spammed open can no longer hold the bond stale-high"
+    );
 }
 
 #[test]
@@ -2270,18 +2349,31 @@ fn plant_raw_account(svm: &mut LiteSVM, pda: Pubkey, data: Vec<u8>) {
     .unwrap();
 }
 
-fn close_legacy_swap_ix(admin: &Pubkey, user: &Pubkey, key: [u8; 32]) -> Instruction {
+fn close_legacy_swap_ix(admin: &Pubkey, user: &Pubkey, miner: &Pubkey, key: [u8; 32]) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::CloseLegacySwap { swap_key: key }.data(),
+        &allways_swap_manager::instruction::CloseLegacySwap { swap_key: key, miner: *miner }.data(),
         allways_swap_manager::accounts::CloseLegacySwap {
             admin: *admin,
             config: config_pda(),
             user: *user,
+            miner_state: miner_pda(miner),
             swap: swap_pda(&key),
         }
         .to_account_metas(None),
     )
+}
+
+/// Serialize a mutated `MinerState` back into its PDA (preserving rent) — lets a test put the miner
+/// into the exact in-flight state a surviving v10 swap leaves behind.
+fn write_miner_state(svm: &mut LiteSVM, m: &Pubkey, ms: &MinerState) {
+    let pda = miner_pda(m);
+    let acct = svm.get_account(&pda).unwrap();
+    let mut data = Vec::new();
+    ms.try_serialize(&mut data).unwrap();
+    data.resize(acct.data.len(), 0);
+    svm.set_account(pda, Account { lamports: acct.lamports, data, owner: pid(), executable: false, rent_epoch: 0 })
+        .unwrap();
 }
 
 #[test]
@@ -2316,15 +2408,31 @@ fn test_close_legacy_swap_decodes_a_v10_layout_and_reaps_it() {
         fulfilled_at: 0,
         bump: 255,
     };
-    let mut data = Swap::DISCRIMINATOR.to_vec();
-    legacy.serialize(&mut data).unwrap();
-    plant_raw_account(&mut svm, swap_pda(&key), data);
+    // Plant it padded to the EXACT v10 allocation (Strings padded to their max, zero-slack tail) — the
+    // shape the runtime actually produces. A tight, exactly-sized buffer would falsely pass a closer
+    // that keys on where the walk ends instead of the allocation length.
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    plant_legacy(&mut svm, swap_pda(&key), &Swap::DISCRIMINATOR, body, 8 + Swap::INIT_SPACE - LEGACY_SHRINK);
+
+    // Put the miner into the stranded state a surviving v10 swap leaves behind: SOL hub in-flight,
+    // busy, with the swap's reservation still held. Reaping must free all of it or the hub stays bricked.
+    let mut ms = miner_state(&svm, &miner.pubkey());
+    ms.set_swap(BACKING_BIT_SOL, true);
+    ms.set_busy(BACKING_BIT_SOL, BASE_TS + 7_200);
+    ms.add_reserved(BACKING_BIT_SOL, 2_200_000_000).unwrap();
+    write_miner_state(&mut svm, &miner.pubkey(), &ms);
 
     let user_before = svm.get_account(&user).map(|a| a.lamports).unwrap_or(0);
-    send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, key), &admin.pubkey(), &admin)
+    send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, &miner.pubkey(), key), &admin.pubkey(), &admin)
         .expect("decode + reap the v10 swap");
     assert!(is_closed(&svm, &swap_pda(&key)), "the undecodable swap PDA is handed back to the system");
     assert!(svm.get_account(&user).map(|a| a.lamports).unwrap_or(0) > user_before, "rent refunded to user");
+
+    let ms = miner_state(&svm, &miner.pubkey());
+    assert!(!ms.has_active_swap, "the reaped swap's SOL hub is freed — not left bricked");
+    assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 0, "its busy lock is dropped");
+    assert_eq!(ms.reserved(BACKING_BIT_SOL), 0, "its reservation is released");
 }
 
 #[test]
@@ -2359,11 +2467,55 @@ fn test_close_legacy_swap_refuses_a_current_layout_swap() {
         fulfilled_at: 0,
         bump: 255,
     };
+    // Padded to the real current-layout allocation (longer than a v10 Swap by exactly collateral_chain),
+    // so the length gate rejects it — the whole point being the closer only ever reaps a v10-length PDA.
     let mut data = Vec::new();
     live.try_serialize(&mut data).unwrap();
+    data.resize(8 + Swap::INIT_SPACE, 0);
     plant_raw_account(&mut svm, swap_pda(&key), data);
 
-    let err = send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, key), &admin.pubkey(), &admin)
+    let err = send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, &miner.pubkey(), key), &admin.pubkey(), &admin)
         .expect_err("a current-layout swap has a live terminal path");
+    assert!(err.contains("InvalidAccountForMigration"), "{err}");
+}
+
+#[test]
+fn test_close_legacy_swap_refuses_a_tight_unpadded_v10_buffer() {
+    // A real v10 Swap is allocated at the fixed v10 length with a zero-padded tail; a Borsh-tight buffer
+    // is a shape the runtime never produces. The closer must key on the ALLOCATION length, not on where
+    // the field walk happens to end — otherwise it accepts the fixture but rejects every real account.
+    let (mut svm, admin, _vals, miner) = setup();
+    let user = Keypair::new().pubkey();
+    let key = swap_key("tight_from_tx");
+    let legacy = SwapV10 {
+        user,
+        miner: miner.pubkey(),
+        from_chain: SOL.into(),
+        to_chain: SPOKE_FROM.into(),
+        user_from_addr: "uFrom".into(),
+        user_to_addr: "uTo".into(),
+        miner_from_addr: MINER_FROM.into(),
+        miner_to_addr: MINER_TO.into(),
+        rate: RATE,
+        collateral_amount: 2_000_000_000,
+        from_amount: 2_000_000_000,
+        to_amount: 1,
+        from_tx_hash: "tight_from_tx".into(),
+        from_tx_block: 800_000,
+        to_tx_hash: String::new(),
+        to_tx_block: 0,
+        status: allways_swap_manager::state::SwapStatus::Active,
+        initiated_at: BASE_TS,
+        timeout_at: BASE_TS + 3_600,
+        max_extend_at: BASE_TS + 7_200,
+        fulfilled_at: 0,
+        bump: 255,
+    };
+    let mut data = Swap::DISCRIMINATOR.to_vec();
+    legacy.serialize(&mut data).unwrap(); // tight — no padding to the v10 allocation
+    plant_raw_account(&mut svm, swap_pda(&key), data);
+
+    let err = send(&mut svm, close_legacy_swap_ix(&admin.pubkey(), &user, &miner.pubkey(), key), &admin.pubkey(), &admin)
+        .expect_err("a tight buffer is not a real on-chain v10 account");
     assert!(err.contains("InvalidAccountForMigration"), "{err}");
 }

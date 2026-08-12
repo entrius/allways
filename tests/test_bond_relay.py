@@ -826,6 +826,26 @@ def test_an_unbound_miner_is_left_alone_rather_than_retried_forever():
     assert not relay._dirty
 
 
+class _StrandingSolana(FakeSolana):
+    """`vote_set_attestation` is refused with the program's held-hub error (F5) — a downward write
+    the program won't accept while the miner's hub is held."""
+
+    def vote_set_attestation(self, miner, chain, balance, locked, epoch):
+        raise Exception("Program error: custom(6067) 'AttestationWouldStrandSwap'")
+
+
+def test_a_write_refused_while_the_hub_is_held_defers_without_wedging_the_barrier():
+    # F5: the program refuses a downward attestation write while the miner's hub is held. That refusal
+    # must NOT hold the startup reconcile barrier down — a fleet restart mid-swap would otherwise blank
+    # TAO entry fleet-wide for the swap's whole life. It is deferred (the program guarantees it can't
+    # matter until the hub frees), and the miner stays dirty so the write retries once the hub clears.
+    solana = _StrandingSolana(miner_states={MINER: _miner_state()})
+    relay = _relay(solana=solana)
+    relay.mark_dirty(MINER)
+    assert attestation_job.flush(relay, NOW)  # barrier passes despite the refusal (deferred, not owed)
+    assert MINER in relay._dirty  # ...but the write is not forgotten — it stays owed for a later retry
+
+
 def test_read_only_mode_writes_nothing_anywhere():
     relay = _relay(heartbeat_interval_secs=1)
     relay.read_only = True
