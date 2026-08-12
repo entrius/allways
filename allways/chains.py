@@ -338,17 +338,19 @@ CHAIN_UNI = ChainDefinition(
     min_confirmations=32,
     # Rate sanity floor, not an enforced minimum: 3 UNI covers a 90k-gas dest leg (the observed
     # 57k worst case plus the two delegation checkpoints a transfer can write) only below ~62
-    # gwei — a realistic-high L1 level, not the 0.1 gwei of a quiet day. Above CHAIN_ETHUSDC's
-    # floor in value because UNI's transfer moves voting power and FiatToken's does not.
+    # gwei — a realistic-high L1 level, not the 0.1 gwei of a quiet day. Worth 2.1x
+    # CHAIN_ETHUSDC's floor: 1.38x of that is the bigger gas budget, 1.51x is a higher assumed
+    # gwei. Assumed gas price is per-asset economics, unlike min_confirmations which is a chain fact.
     min_onchain_amount=3_000_000_000_000_000_000,
     # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
     # one chain disagreeing about that chain's clock would be indefensible.
     replay_grace_secs=60,
     # UNI as published by Uniswap (docs.uniswap.org governance/UNI reference, 2026-08-12).
     asset_locator='0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984',
-    # Both halves hold: Uni.sol ships no blacklist or pause in its verified source, and cannot
-    # gain one — EIP-1967 implementation/admin/beacon slots all zero, owner()/admin() revert.
-    # The minter (governance timelock) can only inflate supply, never freeze an address.
+    # No freeze surface: the PUSH4 dispatch table resolves 27 selectors, exactly Uni.sol's ABI, so
+    # there is no blacklist/pause/owner entry point to call. It cannot gain one either — EIP-1967
+    # implementation/admin/beacon slots are all zero. The minter (governance timelock) only
+    # inflates supply; it can never freeze an address.
     refusal_checks=(),
 )
 

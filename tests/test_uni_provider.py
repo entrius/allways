@@ -5,14 +5,14 @@ tests/test_erc20_refusal_checks.py; this covers what is uni-specific. Two things
 
   * UNI is the first REAL row to declare ``refusal_checks=()``. Uni.sol has no
     isBlacklisted/paused, so probing them reverts — and a revert read as a verdict is what made
-    such a pair permanently unslashable. The gates must answer without touching the RPC, and boot
-    must falsify the claim against whatever contract actually resolved.
+    such a pair permanently unslashable. The gates must answer without touching the RPC.
   * It is the THIRD asset on Ethereum's env identity (eth, ethusdc, uni). One ETH_NETWORK must
     move all three, or uni reads an unset var, silently defaults to mainnet, and a testnet miner
     pays real UNI against test swaps.
 """
 
 import pytest
+from eth_utils import keccak
 
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.erc20 import (
@@ -37,6 +37,12 @@ AMOUNT = 12_500_000_000_000_000_000  # 12.5 UNI in wei — 18 decimals, not 6
 SEPOLIA_ID = 11_155_111
 # Startup reads: chain id, tip, then the token's code before the declaration is falsified.
 BOOT = {'eth_chainId': hex(SEPOLIA_ID), 'eth_blockNumber': '0x10', 'eth_getCode': '0xdeadbeef'}
+
+# Siblings UNI emits from the same contract. Approval is the dangerous one: 3 topics, holder
+# and spender indexed, value in `data` — structurally identical to Transfer, so ONLY topic0
+# separates them. Computed, never transcribed.
+APPROVAL_TOPIC0 = '0x' + keccak(text='Approval(address,address,uint256)').hex()
+DELEGATE_VOTES_TOPIC0 = '0x' + keccak(text='DelegateVotesChanged(address,uint256,uint256)').hex()
 
 
 @pytest.fixture
@@ -71,6 +77,24 @@ def transfer_log(contract=CONTRACT, recipient=RECIPIENT, amount=AMOUNT) -> dict:
     }
 
 
+def approval_log(amount=AMOUNT) -> dict:
+    """approve(RECIPIENT, amount) — same contract, same arity, same indexed slots as Transfer."""
+    return dict(transfer_log(amount=amount), topics=[APPROVAL_TOPIC0, topic(SENDER), topic(RECIPIENT)])
+
+
+def delegate_votes_log() -> dict:
+    """DelegateVotesChanged — 2 topics, both balances packed into `data`."""
+    return dict(transfer_log(), topics=[DELEGATE_VOTES_TOPIC0, topic(RECIPIENT)], data=f'0x{0:064x}{AMOUNT:064x}')
+
+
+def nft_transfer_log() -> dict:
+    """An ERC-721-style Transfer: indexed-ness is not hashed, so it carries the SAME topic0 as
+    the ERC-20 one and is separated ONLY by its 4th topic. `data` is populated so that arity is
+    the single thing under test — a real ERC-721 leaves it empty and the amount check would
+    also reject it."""
+    return dict(transfer_log(), topics=[*transfer_log()['topics'], f'0x{7:064x}'])
+
+
 def mined(logs=None, status='0x1', tip=1_000_100, block=None) -> dict:
     return {
         'eth_getTransactionByHash': {'hash': TX, 'blockNumber': '0xf4240', 'blockHash': BLOCK_HASH},
@@ -92,6 +116,10 @@ class TestSharedEnvIdentity:
         assert provider.chain_def is CHAIN_UNI is get_chain_def('uni')
         assert 'uni' in LAUNCH_SPOKES
         assert (CHAIN_UNI.env_prefix, CHAIN_UNI.host_chain) == (CHAIN_ETH.env_prefix, CHAIN_ETH.host_chain)
+        # Pinned here because nothing else on the allways side guards them: a typo'd decimals
+        # ships green through this CI and is only caught by the das drift gate, which runs
+        # after allways merges.
+        assert (CHAIN_UNI.decimals, CHAIN_UNI.native_unit) == (18, 'wei')
         # CHAIN_ETH owns ETH_NETWORK; a second declaration renders a duplicate CLI row.
         assert CHAIN_UNI.networks == ()
 
@@ -194,12 +222,24 @@ class TestVerification:
         rpc_stub(provider, mined(logs=[transfer_log(recipient=SENDER)]))
         assert provider.fetch_matching_tx(TX, RECIPIENT.lower(), AMOUNT) is None
 
-    def test_delegation_logs_alongside_the_transfer_are_ignored(self, provider):
-        # A UNI transfer also moves voting power, emitting DelegateVotesChanged from the SAME
-        # contract. Only topic0 == Transfer may settle a leg.
-        votes = dict(transfer_log(), topics=['0x' + 'de' * 32, topic(SENDER), topic(RECIPIENT)])
-        rpc_stub(provider, mined(logs=[votes, transfer_log()]))
+    def test_approval_alone_never_settles_a_leg(self, provider):
+        # THE collision: approve() emits 3 topics with the spender in topics[2] and the value
+        # in data, exactly Transfer's shape. Settling on it would confirm a swap in which no
+        # funds moved — miner keeps the source, user is paid nothing. Only topic0 says no.
+        rpc_stub(provider, mined(logs=[approval_log()]))
+        assert provider.fetch_matching_tx(TX, RECIPIENT.lower(), AMOUNT) is None
+
+    def test_approval_never_outranks_the_real_transfer(self, provider):
+        # Ordered first and paying double, so a match on it is unmistakable in the amount.
+        rpc_stub(provider, mined(logs=[approval_log(amount=AMOUNT * 2), transfer_log()]))
         assert provider.fetch_matching_tx(TX, RECIPIENT.lower(), AMOUNT).amount == AMOUNT
+
+    @pytest.mark.parametrize('decoy', (delegate_votes_log, nft_transfer_log), ids=('two_topics', 'four_topics'))
+    def test_a_log_with_the_wrong_arity_never_settles_a_leg(self, provider, decoy):
+        # Transfer is exactly 3 topics. Fewer is a different event; more is an ERC-721 Transfer
+        # wearing the identical topic0, whose third topic is a tokenId and not a value.
+        rpc_stub(provider, mined(logs=[decoy()]))
+        assert provider.fetch_matching_tx(TX, RECIPIENT.lower(), AMOUNT) is None
 
     def test_pending_transfer_matches_off_calldata(self, provider):
         calldata = SEL_TRANSFER + topic(RECIPIENT).removeprefix('0x') + f'{AMOUNT:064x}'
