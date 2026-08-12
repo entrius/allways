@@ -13,6 +13,7 @@ in-repo build artifact. ALLWAYS_VAULT_SURI overrides the signer for scripting
 """
 
 import os
+from decimal import Decimal, InvalidOperation
 
 import click
 
@@ -69,6 +70,23 @@ def _fmt_tao(rao: int) -> str:
 def _fmt_max(rao: int) -> str:
     """0 is UNLIMITED in the contract, not 'closed' — never print it as a bare bound."""
     return 'UNLIMITED (0)' if rao == 0 else _fmt_tao(rao)
+
+
+def _tao_flag_to_rao(value, field: str):
+    """Parse a TAO amount flag to EXACT rao via Decimal — float would truncate ~2.7% of rao
+    values, opening a differing round hash per validator. None passes through (keep on-chain)."""
+    if value is None:
+        return None
+    try:
+        return int(Decimal(value) * TAO_TO_RAO)
+    except (InvalidOperation, ValueError):
+        fail(f'--{field} must be a number in TAO (got "{value}").')
+
+
+def _rao_to_tao_flag(rao: int) -> str:
+    """The exact-rao value as a TAO string that re-parses through `_tao_flag_to_rao` to the same
+    rao — so a peer running the printed command votes byte-identical config."""
+    return f'{Decimal(rao).scaleb(-9):f}'
 
 
 # ─── Command group ───────────────────────────────────────────────────────────
@@ -351,8 +369,8 @@ def admin_set_recycle_target(ss58, netuid):
 
 
 @vault_admin_group.command('set-config', show_disclaimer=True)
-@click.option('--min-collateral', type=float, help='Minimum bond required to lock (TAO)')
-@click.option('--max-collateral', type=float, help='Maximum bond (TAO; 0 = unlimited)')
+@click.option('--min-collateral', type=str, help='Minimum bond required to lock (TAO)')
+@click.option('--max-collateral', type=str, help='Maximum bond (TAO; 0 = unlimited)')
 @click.option('--threshold', type=int, help=f'Consensus threshold percent ({MIN_THRESHOLD}-100)')
 @click.option('--round-ttl', type=int, help='Vote-round TTL in blocks')
 def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
@@ -380,8 +398,10 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
             'contract dry-runs decode.'
         )
 
-    new_min = int(min_collateral * TAO_TO_RAO) if min_collateral is not None else current['min']
-    new_max = int(max_collateral * TAO_TO_RAO) if max_collateral is not None else current['max']
+    parsed_min = _tao_flag_to_rao(min_collateral, 'min-collateral')
+    parsed_max = _tao_flag_to_rao(max_collateral, 'max-collateral')
+    new_min = parsed_min if parsed_min is not None else current['min']
+    new_max = parsed_max if parsed_max is not None else current['max']
     new_threshold = threshold if threshold is not None else current['threshold']
     new_ttl = round_ttl if round_ttl is not None else current['ttl']
 
@@ -414,8 +434,8 @@ def admin_set_config(min_collateral, max_collateral, threshold, round_ttl):
             return
 
     peer_cmd = (
-        f'alw vault admin set-config --min-collateral {new_min / TAO_TO_RAO:g} '
-        f'--max-collateral {new_max / TAO_TO_RAO:g} --threshold {new_threshold} --round-ttl {new_ttl}'
+        f'alw vault admin set-config --min-collateral {_rao_to_tao_flag(new_min)} '
+        f'--max-collateral {_rao_to_tao_flag(new_max)} --threshold {new_threshold} --round-ttl {new_ttl}'
     )
     _vote_submit(
         'vote_set_config',

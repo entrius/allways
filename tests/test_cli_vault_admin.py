@@ -89,3 +89,28 @@ def test_set_recycle_target_refuses_a_malformed_address(monkeypatch):
     result = _run(['-y', 'set-recycle-target', 'not-an-address', '9'])
     assert result.exit_code != 0
     client.admin_call.assert_not_called()
+
+
+def test_set_config_peer_command_round_trips_for_precision_losing_rao():
+    """The printed TAO amount must re-parse to the IDENTICAL rao — `%g`/`float` both drop values."""
+    for rao in [0, 1, 250_000_000, 1_000_000_007, 9_999_999_999, 10_000_000_007, 123_456_789_012_345]:
+        printed = vault_cli._rao_to_tao_flag(rao)
+        assert vault_cli._tao_flag_to_rao(printed, 'x') == rao
+    # Prove the hazard the fix removes: the same string via float truncates a rao.
+    assert int(float(vault_cli._rao_to_tao_flag(1_000_000_007)) * 1_000_000_000) != 1_000_000_007
+
+
+def test_set_config_votes_exact_rao_and_prints_a_round_tripping_peer_command(monkeypatch):
+    import re
+
+    client = _client(monkeypatch)
+    result = _run(['-y', 'set-config', '--min-collateral', '1.000000007', '--max-collateral', '9.000000023'])
+    assert result.exit_code == 0
+    _label, min_arg, max_arg, _thr, _ttl = client.admin_call.call_args.args
+    assert int.from_bytes(min_arg, 'little') == 1_000_000_007
+    assert int.from_bytes(max_arg, 'little') == 9_000_000_023
+    printed = ' '.join(result.output.split())
+    m = re.search(r'--min-collateral (\S+) --max-collateral (\S+)', printed)
+    assert m
+    assert vault_cli._tao_flag_to_rao(m.group(1), 'min') == 1_000_000_007
+    assert vault_cli._tao_flag_to_rao(m.group(2), 'max') == 9_000_000_023
