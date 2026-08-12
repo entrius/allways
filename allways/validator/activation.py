@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from allways.cli.swap_commands.swap_intake import floors_from_config
 from allways.solana import pdas
+from allways.solana.layouts import split_attestation_epoch
 from allways.validator.relay.wiring import axon_vault_client
 
 
@@ -91,10 +92,10 @@ def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, 
             f'Bond below the {unit} floor: {attestation.effective_balance} < {floor} (the attested figure '
             f'is your gross bond net of accrued fees and voted slashes).'
         )
-    return _vault(validator, miner_hotkey, backing, attestation, floor)
+    return _vault(validator, miner_hotkey, backing, attestation, floor, config)
 
 
-def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int) -> Eligibility:
+def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, config) -> Eligibility:
     """Verify the attestation against the bond it asserts. A stale mirror is the dangerous direction:
     it can only ever say a withdrawn bond is still there, never the reverse."""
     unit = backing.upper()
@@ -110,9 +111,19 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int) 
     locked, epoch = lock
     if not locked:
         return _no(f'Bond is not locked on the {unit} vault (the attestation has yet to catch up).')
-    if int(epoch) != int(attestation.epoch):
+    # The attested epoch carries the vault generation in its high half, so compare like for like —
+    # and require the CURRENT generation, or an attestation mirrored from a retired vault could
+    # authorise activation whenever its lock epoch happened to collide with the live vault's.
+    attested_generation, attested_epoch = split_attestation_epoch(attestation.epoch)
+    generation = int(getattr(config, 'vault_generation', 0) or 0)
+    if attested_generation != generation:
         return _no(
-            f'Bond attestation is stale — it asserts lock epoch {attestation.epoch}, the {unit} vault is at '
+            f'Bond attestation was mirrored from a retired {unit} vault (generation {attested_generation}, '
+            f'now {generation}). Retry once validators have re-mirrored your bond.'
+        )
+    if int(epoch) != attested_epoch:
+        return _no(
+            f'Bond attestation is stale — it asserts lock epoch {attested_epoch}, the {unit} vault is at '
             f'{epoch}. Retry once validators have re-mirrored your bond.'
         )
     if int(gross) < floor:

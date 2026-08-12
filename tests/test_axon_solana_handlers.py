@@ -41,6 +41,7 @@ class FakeSolanaClient:
         attestation=None,
         tao_min_collateral=TAO_FLOOR,
         heartbeat=NOW,
+        vault_generation=0,
     ):
         self.binding = SimpleNamespace(miner=MINER_PK) if binding else None
         self.full_binding = (
@@ -52,6 +53,7 @@ class FakeSolanaClient:
         self.attestation = attestation
         self._tao_min_collateral = tao_min_collateral
         self._heartbeat = heartbeat
+        self._vault_generation = vault_generation
         self.calls = []
 
     def get_hotkey_binding(self, hotkey_bytes):
@@ -69,6 +71,7 @@ class FakeSolanaClient:
             tao_min_collateral=self._tao_min_collateral,
             last_attest_heartbeat=self._heartbeat,
             attest_max_age_secs=86_400,
+            vault_generation=self._vault_generation,
         )
 
     def get_bond_attestation(self, miner, chain='tao'):
@@ -409,3 +412,31 @@ def test_reserve_bad_hotkey_rejects_at_info_not_error(monkeypatch):
     assert out.accepted is False
     assert 'Invalid SS58' in out.rejection_reason
     assert errors == []  # a garbage caller must not land on the validator's ERROR log
+
+
+def test_activate_tao_accepts_an_attestation_from_the_current_vault_generation(monkeypatch):
+    """After a vault swap the attested epoch carries the generation in its high half; the vault
+    still reports the bare lock epoch, so the check must compare like for like."""
+    from allways.solana.layouts import compose_attestation_epoch
+
+    client = FakeSolanaClient(
+        miner_state=miner_state(),
+        attestation=attested(epoch=compose_attestation_epoch(1, EPOCH)),
+        vault_generation=1,
+    )
+    v = with_vault(monkeypatch, make_validator(client, vault=FakeVault(locked=True, epoch=EPOCH)))
+    assert activation.check(v, HOTKEY, MINER_PK, miner_state(), 'tao', NOW).ok
+
+
+def test_activate_tao_refuses_an_attestation_from_a_retired_vault(monkeypatch):
+    """A retired vault's mirror must not authorise activation just because its lock epoch happens
+    to collide with the live vault's — the generation is what tells them apart."""
+    client = FakeSolanaClient(
+        miner_state=miner_state(),
+        attestation=attested(epoch=EPOCH),  # generation 0, i.e. the retired vault
+        vault_generation=1,
+    )
+    v = with_vault(monkeypatch, make_validator(client, vault=FakeVault(locked=True, epoch=EPOCH)))
+    result = activation.check(v, HOTKEY, MINER_PK, miner_state(), 'tao', NOW)
+    assert not result.ok
+    assert 'retired' in result.reason.lower(), result.reason
