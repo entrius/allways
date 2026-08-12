@@ -165,4 +165,6 @@ pub enum ErrorCode {
     InvalidAccountForMigration,
     #[msg("Miner has an in-flight swap; drain it before migrating its state")]
     MigrationSwapNotDrained,
+    #[msg("Attestation would lower the bond while a reservation/swap is live on this hub")]
+    AttestationWouldStrandSwap,
 }

@@ -266,6 +266,7 @@ fn attest_ix(
             validator: *validator,
             config: config_pda(),
             miner: *miner,
+            miner_state: miner_pda(miner),
             attestation: attest_pda(miner, chain),
             vote_round: attest_round_pda(miner, chain),
             system_program: SYSTEM_PROGRAM,
@@ -548,6 +549,14 @@ fn set_settling_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
     ms.try_serialize(&mut buf).unwrap();
     overwrite(svm, miner_pda(miner), buf);
 }
+/// Hold the TAO hub's exit lock until `until` — stands in for a live reservation/swap on that hub.
+fn set_tao_busy_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
+    let mut ms = miner_state(svm, miner);
+    ms.set_busy(BACKING_BIT_TAO, until);
+    let mut buf = Vec::new();
+    ms.try_serialize(&mut buf).unwrap();
+    overwrite(svm, miner_pda(miner), buf);
+}
 /// Age the heartbeat one second past the fuse. Done by backdating the field rather than by running the
 /// clock forward, which would also expire the live reservation under test.
 fn stale_heartbeat(svm: &mut LiteSVM) {
@@ -701,6 +710,32 @@ fn test_attestation_refuses_a_stale_epoch_but_allows_same_epoch_updates() {
     attest(&mut svm, &vals, &m, 0, false, 6);
     let a = attestation_acct(&svm, &m, TAO);
     assert!(!a.locked && a.epoch == 6);
+}
+
+#[test]
+fn test_attestation_refuses_a_downward_write_while_the_hub_is_held() {
+    // F5: a filled reservation passed the 1.1× gate at bond B. A quorum that lowers the bond to B'
+    // while the hub is still held would fail vote_initiate on the now-lower purse and strand the
+    // user's deposit. The write is refused until the hub frees; an upward write is always allowed.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, 5);
+    let held_until = now_ts(&svm) + 10_000;
+    set_tao_busy_until(&mut svm, &m, held_until);
+
+    let err = send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 4_000_000_000, true, 5), &vals[0].pubkey(), &vals[0])
+        .expect_err("downward while held");
+    assert!(err.contains("AttestationWouldStrandSwap"), "{err}");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "untouched");
+
+    // An upward write (the bond grew) never strands anyone, so it lands even while the hub is held.
+    attest(&mut svm, &vals, &m, 6_000_000_000, true, 5);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 6_000_000_000);
+
+    // Once the hub frees, the deferred fee-settlement write applies as normal.
+    set_tao_busy_until(&mut svm, &m, 0);
+    attest(&mut svm, &vals, &m, 4_000_000_000, true, 5);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 4_000_000_000);
 }
 
 #[test]

@@ -2,10 +2,10 @@ use anchor_lang::prelude::*;
 
 use crate::backing;
 use crate::consensus::{attestation_hash, record_vote, reset_round};
-use crate::constants::{ATTEST_SEED, CONFIG_SEED, REQ_SET_ATTESTATION, VOTE_SEED};
+use crate::constants::{ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_SET_ATTESTATION, VOTE_SEED};
 use crate::error::ErrorCode;
 use crate::events::BondAttested;
-use crate::state::{BondAttestation, Config, VoteRound};
+use crate::state::{BondAttestation, Config, MinerState, VoteRound};
 
 /// Validators write a miner's effective bond on one backing chain. Solana can't read the vault holding
 /// it, so the quorum's assertion IS the value every collateral guard reads.
@@ -23,6 +23,15 @@ pub struct VoteSetAttestation<'info> {
 
     /// CHECK: identified by address only; bound via the attestation/round PDA seeds.
     pub miner: UncheckedAccount<'info>,
+
+    /// Read to see whether this hub is holding a live obligation — a downward write is refused while it
+    /// is (F5). Every attestable miner is registered, so this state always exists.
+    #[account(
+        seeds = [MINER_SEED, miner.key().as_ref()],
+        bump = miner_state.bump,
+        constraint = miner_state.miner == miner.key(),
+    )]
+    pub miner_state: Account<'info, MinerState>,
 
     /// One-time rent per (miner, hub), paid by whichever validator's vote reaches quorum first.
     #[account(
@@ -59,7 +68,7 @@ pub fn handler(
         !backing::settles_locally(&chain),
         ErrorCode::BackingSettlesLocally
     );
-    backing::backing_bit(&chain)?;
+    let bit = backing::backing_bit(&chain)?;
 
     // Monotonic epochs: a stale round must never restore a lock state the vault has moved past. Equal
     // epochs are the normal case — balance moves (fees, slashes, posts) don't bump the vault's epoch.
@@ -70,6 +79,15 @@ pub fn handler(
     );
 
     let now = Clock::get()?.unix_timestamp;
+
+    // F5: while this hub is held (open pool, filled reservation, or in-flight swap), refuse a write
+    // that LOWERS the bond — it could drop the purse under the 1.1× gate a filled reservation already
+    // passed, stranding the deposit at initiate. Fee shrinkage settles when idle, so it isn't blocked.
+    require!(
+        effective_balance >= ctx.accounts.attestation.effective_balance
+            || ctx.accounts.miner_state.busy_slot(bit) <= now,
+        ErrorCode::AttestationWouldStrandSwap
+    );
     let miner_key = ctx.accounts.miner.key();
     let bound = attestation_hash(&miner_key, &chain, effective_balance, locked, epoch);
     let validator = ctx.accounts.validator.key();
