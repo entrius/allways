@@ -383,6 +383,122 @@
       "args": []
     },
     {
+      "name": "close_legacy_swap",
+      "docs": [
+        "Admin break-glass: decode a pre-v3 (v10-layout, implicitly SOL-backed) `Swap` that survived an",
+        "upgrade — undecodable by the live type — reap it (rent → user), and emit its terms so the relay",
+        "settles the refund. Unreachable in the normal flow (the migrate drain gate blocks live Swaps)."
+      ],
+      "discriminator": [
+        190,
+        197,
+        165,
+        54,
+        111,
+        202,
+        70,
+        113
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "docs": [
+            "Admin only — a one-shot recovery run by the migration operator, not a permissionless reap."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "writable": true
+        },
+        {
+          "name": "miner_state",
+          "docs": [
+            "The miner whose hub the reaped swap froze. Bound by the `miner` arg and re-checked against the",
+            "decoded `swap.miner` in the handler, so the caller can't free a different miner's state. Freeing",
+            "the SOL hub here is what actually unblocks the miner — reaping the PDA alone leaves it bricked."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "miner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "swap",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  119,
+                  97,
+                  112
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "swap_key"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "swap_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "miner",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "close_stale_claim",
       "docs": [
         "Permissionless: reap an orphaned `PendingAttestation` claim whose reservation expired (rent →",
@@ -527,6 +643,35 @@
                   101,
                   115,
                   118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "miner"
+              },
+              {
+                "kind": "account",
+                "path": "reservation.collateral_chain",
+                "account": "Reservation"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "docs": [
+            "This hub's pool — read to see whether a live contest already re-armed the busy lock far ahead.",
+            "Same (miner, backing) as the reservation; always exists once a contest has ever run on this hub."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
                 ]
               },
               {
@@ -3829,6 +3974,60 @@
           "name": "miner"
         },
         {
+          "name": "miner_state",
+          "docs": [
+            "Read for this hub's in-flight-swap reserve — a downward write is refused only if it would drop",
+            "the purse below a LIVE obligation (F5). Every attestable miner is registered, so this always exists."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "miner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reservation",
+          "docs": [
+            "obligation the bond must still cover (`vote_initiate` re-checks it), so it floors a downward write",
+            "— but a mere open pool carries NO obligation and must not, else it can be spammed to keep a",
+            "just-slashed bond advertised stale-high (F5 #4). May be uninitialized; handled in the handler."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  115,
+                  118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "miner"
+              },
+              {
+                "kind": "arg",
+                "path": "chain"
+              }
+            ]
+          }
+        },
+        {
           "name": "attestation",
           "docs": [
             "One-time rent per (miner, hub), paid by whichever validator's vote reaches quorum first."
@@ -4396,6 +4595,19 @@
         137,
         120,
         133
+      ]
+    },
+    {
+      "name": "LegacySwapClosed",
+      "discriminator": [
+        3,
+        153,
+        162,
+        14,
+        136,
+        34,
+        47,
+        239
       ]
     },
     {
@@ -5002,6 +5214,16 @@
       "code": 6065,
       "name": "InvalidAccountForMigration",
       "msg": "Account is owned by another program or is not the expected account type"
+    },
+    {
+      "code": 6066,
+      "name": "MigrationSwapNotDrained",
+      "msg": "Miner has an in-flight swap; drain it before migrating its state"
+    },
+    {
+      "code": 6067,
+      "name": "AttestationWouldStrandSwap",
+      "msg": "Attestation would lower the bond while a reservation/swap is live on this hub"
     }
   ],
   "types": [
@@ -5545,6 +5767,47 @@
           {
             "name": "bound_at",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LegacySwapClosed",
+      "docs": [
+        "A pre-collateral-chain (v10-layout) `Swap` that survived an upgrade was decoded and terminated.",
+        "Break-glass only: emits the frozen terms so the off-chain relay reconciles the SOL settlement and",
+        "frees the miner through the existing slash path; the undecodable PDA itself is reaped here."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "swap_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "miner",
+            "type": "pubkey"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "collateral_amount",
+            "docs": [
+              "Swap size in lamports (the v10 layout is implicitly SOL-backed)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "from_tx_hash",
+            "type": "string"
           }
         ]
       }

@@ -97,13 +97,21 @@ def main():
         ]
         run(f'migrate_miner_state {str(m)[:8]}', lambda mm=metas: c._send([c._ix('migrate_miner_state', b'', mm)]))
 
-    # 3. close legacy Pool / Reservation for miners that have them (rent → miner).
+    # 3. Reap what the v3.1 re-seeding orphaned. Pool/Reservation moved to [SEED, miner, backing] and
+    # the initiate round to [vote, REQ_INITIATE, swap_key], so the old addresses are unreachable rather
+    # than mis-decoded — rent to reclaim, not a lockout. Derive the RETIRED address, never the live one.
     for m in miners:
-        if str(pdas.pool_pda(m, c.program_id)) in addrset:
+        if str(pdas.legacy_pool_pda(m, c.program_id)) in addrset:
             run(f'close_legacy_pool {str(m)[:8]}', lambda mm=m: c.close_legacy_pool(mm))
-        if str(pdas.reservation_pda(m, c.program_id)) in addrset:
+        if str(pdas.legacy_reservation_pda(m, c.program_id)) in addrset:
             run(f'close_legacy_reservation {str(m)[:8]}', lambda mm=m: c.close_legacy_reservation(mm))
+        if str(pdas.legacy_initiate_round_pda(m, c.program_id)) in addrset:
+            run(f'close_legacy_initiate_round {str(m)[:8]}', lambda mm=m: c.close_legacy_initiate_round(mm))
 
+    # NOTE (mainnet): orphaned pre-v3 MinerQuotes share the live discriminator but not its layout, so a
+    # miner's startup get_all('MinerQuote') throws and it falls back to requiring every spoke's key. This
+    # devnet set has none (all 6 resolve at current seeds); a mainnet run MUST decode miner/from/to from
+    # the raw bytes and close_legacy_quote each before miners restart.
     print('done.')
 
 
