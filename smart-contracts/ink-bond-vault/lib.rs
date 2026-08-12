@@ -492,15 +492,11 @@ mod allways_bond_vault {
 
         /// Miner-initiated lock — locking yourself is always safe, so no
         /// quorum. A locked bond ≥ min_collateral is what the mirror relays to
-        /// Solana as "eligible for vote_activate".
+        /// Solana as "eligible for vote_activate". Deliberately un-gated on set
+        /// size: unlock at n=1 is 1-of-1 and always live, so a small set is a
+        /// trust choice, not a stranding risk.
         #[ink(message)]
         pub fn lock_bond(&mut self) -> Result<(), Error> {
-            // No bond may be locked into a set too small to govern it: below the
-            // removal floor a locked bond can be stranded or exposed to n-of-n
-            // fragility, so gate the lock on the same MIN_VALIDATORS_TO_REMOVE.
-            if self.validators.len() < MIN_VALIDATORS_TO_REMOVE {
-                return Err(Error::InvalidValidatorSet);
-            }
             let caller = self.env().caller();
             let (locked, epoch) = self.lock_of(caller);
             if locked {
@@ -1266,20 +1262,28 @@ mod allways_bond_vault {
             assert_eq!(vault.lock_bond(), Err(Error::InsufficientCollateral));
         }
 
+        /// Launch runs a single validator for months, so locking must work at
+        /// n=1 — where unlock is 1-of-1 and the bond can never be stranded.
         #[ink::test]
-        fn lock_requires_min_validators() {
+        fn lone_validator_can_lock_and_unlock_a_bond() {
             let acc = accounts();
-            // new_vault seeds only two validators — below the removal floor.
-            let mut vault = new_vault();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django]);
             post(&mut vault, acc.bob, 5_000);
             set_caller(acc.bob);
-            assert_eq!(vault.lock_bond(), Err(Error::InvalidValidatorSet));
+            vault.lock_bond().unwrap();
+            assert_eq!(vault.get_lock_state(acc.bob), (true, 1));
+
+            set_caller(acc.django);
+            vault.vote_unlock(acc.bob, 1).unwrap();
+            assert_eq!(vault.get_lock_state(acc.bob), (false, 2));
         }
 
+        /// The set size a lock lands in is a trust choice, not a precondition:
+        /// n=2 is the ramp between launch and the removal floor.
         #[ink::test]
-        fn lock_succeeds_at_min_validators() {
+        fn lock_succeeds_below_the_removal_floor() {
             let acc = accounts();
-            let mut vault = seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+            let mut vault = new_vault();
             post(&mut vault, acc.bob, 5_000);
             set_caller(acc.bob);
             vault.lock_bond().unwrap();
