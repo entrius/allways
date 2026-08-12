@@ -75,16 +75,25 @@ class SolanaEventIngest:
         with a still-full page, the gap remains: the run is buffered and `[]` is returned so the caller
         holds its cursor and this resumes deeper next call (never dropping the gap)."""
         before = self._resume_before
-        for _ in range(self.max_pages):
-            batch = self.client.rpc.get_signatures_for_address(
-                self.client.program_id, before=before, until=until_sig, limit=self.page_size
-            )
-            if not batch:
-                return self._drain_pending()
-            self._pending.extend(batch)
-            before = batch[-1]['signature']
-            if len(batch) < self.page_size:
-                return self._drain_pending()
+        # Roll back this pass's partial appends if any page fails: the caller holds its cursor and
+        # re-pages from the same resume point next tick, so a retained partial page would be re-fetched
+        # and duplicated (and reordered) in a later drain. `_resume_before` is untouched mid-loop, so
+        # rewinding `_pending` to its pre-pass length restores the exact pre-call buffer.
+        checkpoint = len(self._pending)
+        try:
+            for _ in range(self.max_pages):
+                batch = self.client.rpc.get_signatures_for_address(
+                    self.client.program_id, before=before, until=until_sig, limit=self.page_size
+                )
+                if not batch:
+                    return self._drain_pending()
+                self._pending.extend(batch)
+                before = batch[-1]['signature']
+                if len(batch) < self.page_size:
+                    return self._drain_pending()
+        except Exception:
+            del self._pending[checkpoint:]
+            raise
         # Gap still open: hold here and resume paging from `before` on the next call.
         self._resume_before = before
         return []

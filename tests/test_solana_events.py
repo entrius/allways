@@ -9,6 +9,7 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
 from solders.keypair import Keypair
 
 from allways.solana import events
@@ -341,6 +342,42 @@ def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
 
     records, cursor = ingest.poll(until_sig=None)
     assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, oldest-first'
+    assert cursor == 's5'
+
+
+class FlakyPagingRpc(PagingRpc):
+    """A faithful pager that raises exactly once, on the page requested with `before == fail_before`
+    (the second page of the first pass here), then behaves normally on every later call."""
+
+    def __init__(self, sigs, fail_before):
+        super().__init__(sigs)
+        self._fail_before = fail_before
+
+    def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
+        if self._fail_before is not None and before == self._fail_before:
+            self._fail_before = None  # blip once, then recover
+            raise RuntimeError('rpc paging blip')
+        return super().get_signatures_for_address(program_id, before=before, until=until, limit=limit)
+
+
+def test_pagination_rolls_back_a_partial_page_on_a_mid_pagination_rpc_failure():
+    # F3 robustness: if paging fails partway, the buffered partial page must be rolled back. The caller
+    # holds its cursor and re-pages from the same resume point next tick, so a retained partial would be
+    # re-fetched — duplicating and reordering records in a later drain.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    client = PagingClient(sigs, ev)
+    client.rpc = FlakyPagingRpc(sigs, fail_before='s4')  # page 1 buffers [s5,s4]; page 2 (before=s4) blips
+    ingest = SolanaEventIngest(client, max_pages=2, page_size=2)
+
+    with pytest.raises(RuntimeError):
+        ingest.poll(until_sig=None)  # partial page must be rolled back, not left buffered
+
+    # Cursor was held; re-page cleanly. Without the rollback the drain would carry duplicated s4/s5.
+    records, cursor = ingest.poll(until_sig=None)
+    assert records == [] and cursor is None, 'gap still open — resumes deeper next tick'
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, no dupes, oldest-first'
     assert cursor == 's5'
 
 
