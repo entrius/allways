@@ -463,8 +463,8 @@ class TestIsExecutableRate:
         assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
     def test_ethusdc_routes_at_its_five_dollar_floor(self):
-        """ethusdc ships the economic floor arbusdc declined (5 USDC — an L1 transfer's own
-        gas): non-binding at real bounds, since 0.1 SOL already needs ~15 USDC at 150/SOL."""
+        """ethusdc's floor is a rate-sanity input, not a per-swap minimum (that is the
+        contract's min_swap_amount): non-binding here, since 0.1 SOL needs ~15 USDC at 150/SOL."""
         assert get_chain_def('ethusdc').min_onchain_amount == 5_000_000
         assert is_executable_rate(150.0, 'ethusdc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(150.0, 'sol', 'ethusdc', self.MIN, self.MAX) is True

@@ -64,19 +64,27 @@ class TestGetChain:
             assert chain.id == chain_id
 
     def test_assets_on_one_network_share_its_env_identity(self):
-        """A network is configured once. Rows sharing a host_chain MUST share env_prefix —
-        otherwise the second asset reads an unset {PREFIX}_NETWORK, silently defaults to
-        mainnet, and a testnet miner pays real funds against test swaps. Exactly one of them
-        declares ``networks``: two would render duplicate CLI rows writing the same var."""
+        """A network is configured once, by EXACTLY ONE of its rows. Rows sharing a host_chain
+        MUST share env_prefix, and exactly one of them declares ``networks`` — no more, because
+        two would render duplicate CLI rows writing the same var, and no fewer, because a network
+        nobody declares gets no CLI row at all: `alw config set env testnet` never writes its
+        {PREFIX}_NETWORK, EvmChain defaults it to mainnet, and a testnet miner pays real funds
+        against test swaps."""
         prefixes: dict[str, set[str]] = {}
+        declared: dict[str, list[str]] = {}
         owners: dict[str, list[str]] = {}
         for chain in SUPPORTED_CHAINS.values():
             if chain.host_chain:
                 prefixes.setdefault(chain.host_chain, set()).add(chain.env_prefix)
+                declared.setdefault(chain.host_chain, [])
             if chain.networks:
                 owners.setdefault(chain.env_prefix, []).append(chain.id)
+                if chain.host_chain:
+                    declared[chain.host_chain].append(chain.id)
         for host, found in prefixes.items():
             assert len(found) == 1, f'{host} assets disagree on env_prefix: {sorted(found)}'
+        for host, ids in declared.items():
+            assert len(ids) == 1, f'{host} needs exactly one networks-declaring row, found {ids}'
         for prefix, ids in owners.items():
             assert len(ids) == 1, f'{prefix}_NETWORK is declared by more than one row: {ids}'
 

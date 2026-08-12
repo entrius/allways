@@ -245,9 +245,9 @@ CHAIN_ETHUSDC = ChainDefinition(
     # CHAIN_ETH's finality, deliberately identical — two assets on one chain must not disagree
     # about its reorg depth. 32 × 12s = 384s, inside the program's 600s default fulfillment grace.
     min_confirmations=32,
-    # Economic floor, not a protocol one (ERC-20 has no minimum): FiatToken's transfer burns
-    # ~65k gas, ≈$5 at 40 gwei and $1.9k ETH, so a smaller L1 leg cannot cover its own fee.
-    # Diverges from arbusdc's unit floor on purpose — L2 gas is cents, L1 gas is not.
+    # Rate sanity floor, not an economic guarantee: 5 USDC covers FiatToken's ~65k-gas transfer
+    # only below ~41 gwei — miners price real gas into their quotes, and the per-swap lever is the
+    # contract's min_swap_amount. Above arbusdc's unit floor because L1 gas is not L2 gas.
     min_onchain_amount=5_000_000,
     # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
     # one chain disagreeing about that chain's clock would be indefensible.
