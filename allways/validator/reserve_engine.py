@@ -321,10 +321,14 @@ class ConfirmResult:
 CLAIM_RELAY_MARGIN_SECS = 90
 
 
-def _live_unclaimed_reservation(client, miner_pk, now):
-    """The miner's live unclaimed reservation and its hub, scanned across every per-hub slot: v3.1
-    seeds one per (miner, backing), so a TAO deposit lives in the TAO slot — never assume SOL. Live
-    == reserved_until >= now, no swap yet claimed. (resv, backing, '') on a hit; (None, None, reason)."""
+def _live_unclaimed_slots(client, miner_pk, now):
+    """Every live-unclaimed per-hub reservation slot as ``[(resv, backing), ...]`` in hub order, plus a
+    reason that explains an EMPTY list (``''`` when there were candidates). v3.1 seeds one reservation
+    per (miner, backing) and a miner may hold several live at once (simultaneous swaps), so the
+    deposit's hub is not knowable up front: the caller verifies the deposit against each candidate and
+    claims the one it matches. Returning only the first live slot would reject a TAO deposit whenever a
+    SOL slot is also live-unclaimed (V-1). Live == reserved_until >= now, no swap yet claimed."""
+    slots = []
     saw_any = False
     saw_live_claimed = False
     for backing in BACKING_BITS:
@@ -337,12 +341,14 @@ def _live_unclaimed_reservation(client, miner_pk, now):
         if bytes(resv.claimed_swap_key) != EMPTY_SWAP_KEY:
             saw_live_claimed = True
             continue
-        return resv, backing, ''
+        slots.append((resv, backing))
+    if slots:
+        return slots, ''
     if saw_live_claimed:
-        return None, None, 'Reservation already has a claimed swap'
+        return slots, 'Reservation already has a claimed swap'
     if saw_any:
-        return None, None, 'Reservation is not active'
-    return None, None, 'No reservation for this miner'
+        return slots, 'Reservation is not active'
+    return slots, 'No reservation for this miner'
 
 
 def _freshest_reservation(client, miner_pk):
@@ -405,35 +411,49 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         return ConfirmResult(False, 'Hotkey not bound to a Solana miner')
 
     now = int(time.time())
-    reservation, backing, reason = _live_unclaimed_reservation(client, miner_pk, now)
-    if reservation is None:
+    slots, reason = _live_unclaimed_slots(client, miner_pk, now)
+    if not slots:
         return ConfirmResult(False, reason)
 
-    provider = validator.axon_assets.get(reservation.from_chain)
-    if provider is None:
-        return ConfirmResult(False, f'Unsupported source chain: {reservation.from_chain}')
+    # A miner may hold several live-unclaimed reservations at once (v3.1 simultaneous swaps), so the
+    # deposit's hub is not knowable up front. Verify the deposit against each slot and claim the one it
+    # matches — picking the first live slot blindly would reject a TAO deposit whenever a SOL slot is
+    # also live (V-1). `verify_transaction` is the authoritative matcher (pinned recipient/amount/sender).
+    reservation = backing = tx_info = None
+    unreachable = False
+    for resv, resv_backing in slots:
+        provider = validator.axon_assets.get(resv.from_chain)
+        if provider is None:
+            continue
+        try:
+            candidate = provider.verify_transaction(
+                tx_hash=from_tx_hash,
+                expected_recipient=resv.miner_from_addr,
+                expected_amount=int(resv.from_amount),
+                block_hint=from_tx_block,
+                expected_sender=resv.from_addr,
+            )
+        except ProviderUnreachableError:
+            unreachable = True  # this hub can't be judged now; another might still match
+            continue
+        if candidate is None:
+            continue  # absent or content-mismatch for this hub — try the next live slot
+        # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting
+        # until it confirms. A 0-conf mempool tx has no block_time, so its freshness is deferred too;
+        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for this
+        # hub (its params are pinned), so fast-fail rather than fall through to a different slot.
+        if candidate.block_time is not None:
+            grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
+            if not is_tx_fresh(candidate, int(resv.created_at), grace):
+                return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
+        reservation, backing, tx_info = resv, resv_backing, candidate
+        break
 
-    try:
-        tx_info = provider.verify_transaction(
-            tx_hash=from_tx_hash,
-            expected_recipient=reservation.miner_from_addr,
-            expected_amount=int(reservation.from_amount),
-            block_hint=from_tx_block,
-            expected_sender=reservation.from_addr,
-        )
-    except ProviderUnreachableError:
-        return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
-    if tx_info is None:
-        # None = absent or content-mismatch; fast-fail (no claim) so the short TTL frees the miner.
+    if reservation is None:
+        if unreachable:
+            return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
+        # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
-
-    # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting until it
-    # confirms (source 'pending'->extend, 'ok'+fresh->attest). A 0-conf mempool tx has no block_time, so its
-    # freshness is deferred too; only a mined tx is freshness-checked here (fast-fail a stale mined deposit).
-    if tx_info.block_time is not None:
-        grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
-        if not is_tx_fresh(tx_info, int(reservation.created_at), grace):
-            return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
@@ -454,14 +474,18 @@ def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
         return None
-    reservation, _backing, _ = _live_unclaimed_reservation(client, miner_pk, time.time())
-    if reservation is None:
-        return None
-    provider = validator.axon_assets.get(reservation.from_chain)
-    scan = getattr(provider, 'find_recent_outgoing', None)
-    if scan is None:
-        return None
-    return scan(reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount))
+    slots, _ = _live_unclaimed_slots(client, miner_pk, time.time())
+    # Scan each live-unclaimed hub (v3.1 may hold several at once) and return the first hash found;
+    # confirm_deposit stays the sole verifier, so a loose per-hub scan can never mis-claim.
+    for reservation, _backing in slots:
+        provider = validator.axon_assets.get(reservation.from_chain)
+        scan = getattr(provider, 'find_recent_outgoing', None)
+        if scan is None:
+            continue
+        found = scan(reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount))
+        if found:
+            return found
+    return None
 
 
 @dataclass

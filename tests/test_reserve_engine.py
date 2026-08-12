@@ -690,6 +690,41 @@ def test_confirm_no_live_unclaimed_slot_on_any_hub_rejects():
     assert not r.ok and not client.claims
 
 
+class _MatchingProvider:
+    """Verifies a deposit ONLY against the reservation whose pinned params it actually matches — unlike
+    _FakeProvider, which returns the same tx for every slot. Models the real per-hub matcher, so a
+    first-match scan that guesses the wrong hub is exposed."""
+
+    def __init__(self, amount, recipient):
+        self._amount = amount
+        self._recipient = recipient
+
+    def verify_transaction(self, *, tx_hash, expected_recipient, expected_amount, block_hint, expected_sender):
+        if int(expected_amount) != self._amount or expected_recipient != self._recipient:
+            return None
+        return _tx(confirmed=False, block_time=None)
+
+    @property
+    def chain_def(self):
+        return SimpleNamespace(replay_grace_secs=0)
+
+
+def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
+    # V-1 dual-live: a miner holds a live-unclaimed SOL reservation AND a live-unclaimed TAO reservation
+    # at once (v3.1 simultaneous swaps). A TAO deposit must be verified against the TAO slot — the old
+    # first-match scan checked SOL first, failed the content match, and stranded the deposit (or an
+    # attacker sitting on the SOL slot could shadow every TAO confirm on the miner).
+    sol = _confirm_reservation(from_amount=100_000, miner_from_addr='minerBTC_sol')
+    tao = _near_expiry(20, from_amount=777, miner_from_addr='minerBTC_tao')
+    client = _ConfirmClient({'sol': sol, 'tao': tao})
+    provider = _MatchingProvider(amount=777, recipient='minerBTC_tao')  # the real deposit is the TAO one
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'taoDeposit')
+    assert r.ok and client.claims
+    assert client.claims[0][3] == 'tao'  # claimed against the hub the deposit matched, not the first live slot
+    assert client.extend_backings == ['tao']
+
+
 # --- scan_deposit: the deposit watcher's hash-finder (confirm_deposit stays the verifier) ---
 
 
@@ -766,6 +801,26 @@ def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
     from allways.validator.reserve_engine import scan_deposit
 
     assert scan_deposit(validator, HOTKEY) == 'depositTx'
+    store.close()
+
+
+def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
+    # V-1 dual-live: SOL slot (btc, nothing to find) + TAO slot (eth, the real deposit). The scanner must
+    # try every live hub — a first-match scan would stop at the SOL slot and miss the deposit entirely.
+    from allways.validator.reserve_engine import scan_deposit
+
+    sol = SimpleNamespace(
+        reserved_until=FUTURE, claimed_swap_key=b'\x00' * 32, from_chain='btc',
+        from_amount=10_000, miner_from_addr='tb1qminer', from_addr='tb1quser',
+    )
+    tao = SimpleNamespace(
+        reserved_until=FUTURE, claimed_swap_key=b'\x00' * 32, from_chain='eth',
+        from_amount=5, miner_from_addr='0xminer', from_addr='0xuser',
+    )
+    client = StatusClient(reservation={'sol': sol, 'tao': tao})
+    validator, store = _status_validator(tmp_path, client)
+    validator.axon_assets = {'btc': _ScanProvider(None), 'eth': _ScanProvider('ethDepositTx')}
+    assert scan_deposit(validator, HOTKEY) == 'ethDepositTx'
     store.close()
 
 
