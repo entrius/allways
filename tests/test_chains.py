@@ -18,6 +18,7 @@ from allways.chains import (
     CHAIN_ETH,
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
+    CHAIN_POL,
     CHAIN_QNT,
     CHAIN_TAO,
     CHAIN_UNI,
@@ -68,6 +69,9 @@ class TestGetChain:
 
     def test_qnt(self):
         assert get_chain_def('qnt') is CHAIN_QNT
+
+    def test_pol(self):
+        assert get_chain_def('pol') is CHAIN_POL
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -234,6 +238,11 @@ class TestComputeExtensionTargetSecs:
     def test_cro_remaining_confs(self):
         # cro needs 2 confs, 1s each: remaining=2, raw = 10000 + 2 + 120 = 10122, bucket up to 10200.
         assert compute_extension_target_secs('cro', 0, self.NOW, self.CEILING) == 10_200
+
+    def test_pol_remaining_confs(self):
+        # pol needs 100 confs at the stored 1s (1.5s real): raw = 10000 + 100 + 120 = 10220,
+        # bucket up to 10800 — the bucket swallows the 50s the integer floor under-counts.
+        assert compute_extension_target_secs('pol', 0, self.NOW, self.CEILING) == 10_800
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):

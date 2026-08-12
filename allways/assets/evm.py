@@ -156,6 +156,19 @@ CRONOS = EvmNetwork(
     },
 )
 
+POLYGON = EvmNetwork(
+    label='Polygon',
+    chain_ids={'mainnet': 137, 'amoy': 80_002},
+    rpc_urls={
+        # Both rungs serve receipts and historical eth_getCode at the 120-block depth the slash
+        # gate probes. publicnode leads on the one method they differ on: it answers the
+        # address-pinned eth_getLogs span a token scanner would issue, where drpc's free tier
+        # refuses anything past ~100 blocks (under a misleading "over 10000 blocks" message).
+        'mainnet': ('https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'),
+        'amoy': ('https://polygon-amoy-bor-rpc.publicnode.com', 'https://polygon-amoy.drpc.org'),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
@@ -165,6 +178,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'avalanche': AVALANCHE,
     'base': BASE,
     'cronos': CRONOS,
+    'polygon': POLYGON,
 }
 
 
