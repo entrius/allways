@@ -275,6 +275,7 @@ EVENT_DISCRIMINATORS = {
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
+    'LegacySwapClosed': bytes([3, 153, 162, 14, 136, 34, 47, 239]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
     'MinerBackingChanged': bytes([158, 37, 88, 4, 80, 187, 116, 110]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
@@ -313,6 +314,13 @@ EVENT_LAYOUTS = {
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
+    'LegacySwapClosed': CStruct(
+        'swap_key' / Hash32,
+        'miner' / Pubkey32,
+        'user' / Pubkey32,
+        'collateral_amount' / U64,
+        'from_tx_hash' / String,
+    ),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
     # Per-purse detail; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
     'MinerBackingChanged': CStruct(
@@ -426,6 +434,7 @@ EVENT_PUBKEY_FIELDS = {
     'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
+    'LegacySwapClosed': ['miner', 'user'],
     'MinerActivated': ['miner'],
     'MinerBackingChanged': ['miner'],
     'MinerDeactivated': ['miner'],
