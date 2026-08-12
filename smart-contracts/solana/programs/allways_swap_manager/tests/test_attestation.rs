@@ -1508,6 +1508,36 @@ fn test_migrate_miner_state_broadcasts_v13_scalars_into_every_hub_slot() {
 }
 
 #[test]
+fn test_migrate_miner_state_refuses_a_v13_account_with_a_live_swap() {
+    // V-3: a multi-hub v13 account with a live swap cannot say WHICH hub it is on, so the crank must
+    // refuse rather than mark every active hub in-flight (which bricks the sibling hub). The operator
+    // drains the swap, then re-runs.
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    let live = miner_state(&svm, &m);
+    let legacy = MinerStateV13 {
+        miner: m,
+        collateral: live.collateral,
+        active: true,
+        active_backings: BACKING_BIT_SOL | BACKING_BIT_TAO,
+        has_active_swap: true,
+        busy_until: 42,
+        settling_until: 0,
+        deactivation_at: 0,
+        successful_swaps: 0,
+        failed_swaps: 0,
+        bump: live.bump,
+    };
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    downgrade(&mut svm, miner_pda(&m), &MinerState::DISCRIMINATOR, body);
+
+    let err = send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin)
+        .expect_err("a live swap must block the crank");
+    assert!(err.contains("MigrationSwapNotDrained"), "{err}");
+}
+
+#[test]
 fn test_migrate_config_stamps_a_v13_config_to_v14_in_place() {
     let (mut svm, admin, _vals, _miner) = setup();
     // A v13 Config is the LIVE layout with an older version stamp — no mirror needed.
