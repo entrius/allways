@@ -133,27 +133,41 @@ class CrownSeeder:
         elif name == 'PoolResolved':
             # RESERVE_START now + RESERVE_EXPIRE at block+ttl (default beyond any
             # test window, so a swap's FULFILL_END is what returns to AVAILABLE).
+            # hub mirrors the real ingest: collateral_chain when present, else global.
             ttl = fields.get('ttl', 10**9)
-            self.state_store.insert_activity_event(block, miner, ActivityTransition.RESERVE_START)
-            self.state_store.insert_activity_event(block + ttl, miner, ActivityTransition.RESERVE_EXPIRE)
+            hub = fields.get('collateral_chain')
+            self.state_store.insert_activity_event(block, miner, ActivityTransition.RESERVE_START, hub=hub)
+            self.state_store.insert_activity_event(block + ttl, miner, ActivityTransition.RESERVE_EXPIRE, hub=hub)
         elif name == 'SwapInitiated':
-            self.state_store.insert_activity_event(block, miner, ActivityTransition.FULFILL_START)
+            self.state_store.insert_activity_event(
+                block, miner, ActivityTransition.FULFILL_START, hub=fields.get('collateral_chain')
+            )
         elif name in ('SwapCompleted', 'SwapTimedOut'):
-            self.state_store.insert_activity_event(block, miner, ActivityTransition.FULFILL_END)
+            self.state_store.insert_activity_event(
+                block, miner, ActivityTransition.FULFILL_END, hub=fields.get('collateral_chain')
+            )
         elif name in ('CollateralPosted', 'CollateralWithdrawn'):
             self.state_store.insert_collateral_event(block, miner, int(fields['total']))
         else:
             raise ValueError(f'CrownSeeder: unsupported event {name}')
 
     def reserve_then_swap(
-        self, miner: str, reserve_block: int, init_block: int, end_block: int, end='SwapCompleted', ttl: int = 10**9
+        self,
+        miner: str,
+        reserve_block: int,
+        init_block: int,
+        end_block: int,
+        end='SwapCompleted',
+        ttl: int = 10**9,
+        backing: str | None = None,
     ):
         """Realistic busy span: PoolResolved → SwapInitiated → completion. The
         reservation's RESERVE_EXPIRE is parked at reserve_block + ttl (default
-        beyond the window)."""
-        self.apply_event(reserve_block, 'PoolResolved', {'miner': miner, 'ttl': ttl})
-        self.apply_event(init_block, 'SwapInitiated', {'miner': miner})
-        self.apply_event(end_block, end, {'miner': miner})
+        beyond the window). ``backing`` scopes the span to one hub's machine
+        (v3.1); None = the legacy hub-less shape, busy on every hub."""
+        self.apply_event(reserve_block, 'PoolResolved', {'miner': miner, 'ttl': ttl, 'collateral_chain': backing})
+        self.apply_event(init_block, 'SwapInitiated', {'miner': miner, 'collateral_chain': backing})
+        self.apply_event(end_block, end, {'miner': miner, 'collateral_chain': backing})
 
     def get_active_miners_at(self, at_time: int) -> set[str]:
         return self.state_store.get_active_state_at(at_time)
@@ -1035,7 +1049,9 @@ class TestReplayCrownTime:
         watcher.reserve_then_swap('hk_a', reserve_block=50, init_block=50, end_block=500)
 
         # Window-start state shows A FULFILLING (open swap spans the edge).
-        assert store.get_activity_state_at(100) == {'hk_a': MinerActivity.FULFILLING}
+        assert store.get_activity_state_at(100) == {
+            'hk_a': {'sol': MinerActivity.FULFILLING, 'tao': MinerActivity.FULFILLING}
+        }
         crown = replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
@@ -1122,7 +1138,9 @@ class TestCrownRewardStates:
         """A reservation open before window_start shows RESERVED at the edge."""
         store, watcher = self._seed_solo(tmp_path)
         watcher.apply_event(50, 'PoolResolved', {'miner': 'hk_a', 'ttl': 400})  # expire @ 450
-        assert store.get_activity_state_at(100) == {'hk_a': MinerActivity.RESERVED}
+        assert store.get_activity_state_at(100) == {
+            'hk_a': {'sol': MinerActivity.RESERVED, 'tao': MinerActivity.RESERVED}
+        }
         crown = self._replay(store, rewardable_hotkeys={'hk_a'})
         # RESERVED (100,450] forfeited (solo); earns (450,1100] = 650.
         assert crown == {'hk_a': 650.0}
@@ -1134,7 +1152,9 @@ class TestCrownRewardStates:
         store, watcher = self._seed_solo(tmp_path)
         # ttl 100 → RESERVE_EXPIRE @ 400, but the swap runs 350..800.
         watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=350, end_block=800, ttl=100)
-        assert store.get_activity_state_at(500) == {'hk_a': MinerActivity.FULFILLING}  # past the expire, still busy
+        assert store.get_activity_state_at(500) == {
+            'hk_a': {'sol': MinerActivity.FULFILLING, 'tao': MinerActivity.FULFILLING}
+        }  # past the expire, still busy
         crown = self._replay(store, rewardable_hotkeys={'hk_a'})
         # Forfeits (300,800]; earns (100,300]=200 + (800,1100]=300 = 500.
         assert crown == {'hk_a': 500.0}
@@ -2694,3 +2714,75 @@ class TestCrownCanFund:
             max_swap_hub=500_000_000,
             collaterals={},
         )
+
+
+class TestPerHubBusy:
+    """v3.1.1: busy is per purse in the crown too. A miner mid-swap on one hub keeps
+    earning on directions its other hub serves; a hub↔hub direction forfeits only
+    when both purses are busy — the activity twin of ``direction_eligible``."""
+
+    def _seed(self, tmp_path: Path, directions):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        watcher = make_watcher(store, active={'hk_a'})
+        conn = store.require_connection()
+        for from_c, to_c, rate in directions:
+            conn.execute(
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+                ('hk_a', from_c, to_c, rate, 0),
+            )
+        conn.commit()
+        return store, watcher
+
+    def _replay(self, store, from_chain, to_chain):
+        return replay_crown_time_window(
+            store=store,
+            event_index=SolanaEventIndex(store),
+            from_chain=from_chain,
+            to_chain=to_chain,
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+        )
+
+    def test_sol_busy_keeps_tao_hub_crown(self, tmp_path: Path):
+        # A sol-backed swap spans (300,800]: the sol-hub direction forfeits that span,
+        # the tao-hub direction earns the whole window — serving both purses at once
+        # is exactly what v3.1 enables, and it must not cost the other hub's crown.
+        store, watcher = self._seed(tmp_path, [('sol', 'btc', 300.0), ('tao', 'btc', 0.003)])
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=300, end_block=800, backing='sol')
+        assert self._replay(store, 'sol', 'btc') == {'hk_a': 500.0}
+        assert self._replay(store, 'tao', 'btc') == {'hk_a': 1000.0}
+        store.close()
+
+    def test_tao_busy_keeps_sol_hub_crown(self, tmp_path: Path):
+        store, watcher = self._seed(tmp_path, [('sol', 'btc', 300.0), ('tao', 'btc', 0.003)])
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=300, end_block=800, backing='tao')
+        assert self._replay(store, 'tao', 'btc') == {'hk_a': 500.0}
+        assert self._replay(store, 'sol', 'btc') == {'hk_a': 1000.0}
+        store.close()
+
+    def test_hub_hub_direction_forfeits_only_when_both_purses_busy(self, tmp_path: Path):
+        # sol busy (300,800], tao busy (600,900] → sol↔tao forfeits only the overlap
+        # (600,800]: while either purse is clean, its quote can still be reserved.
+        store, watcher = self._seed(tmp_path, [('sol', 'tao', 2.0)])
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=300, end_block=800, backing='sol')
+        watcher.reserve_then_swap('hk_a', reserve_block=600, init_block=600, end_block=900, backing='tao')
+        assert self._replay(store, 'sol', 'tao') == {'hk_a': 800.0}
+        store.close()
+
+    def test_legacy_hubless_span_forfeits_every_direction(self, tmp_path: Path):
+        # A pre-v3.1.1 row (NULL hub) keeps its original meaning: busy everywhere.
+        store, watcher = self._seed(tmp_path, [('sol', 'btc', 300.0), ('tao', 'btc', 0.003)])
+        watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=300, end_block=800)
+        assert self._replay(store, 'sol', 'btc') == {'hk_a': 500.0}
+        assert self._replay(store, 'tao', 'btc') == {'hk_a': 500.0}
+        store.close()
+
+    def test_window_edge_reconstruction_is_per_hub(self, tmp_path: Path):
+        # A sol swap open across window_start forfeits only sol-hub time at the edge.
+        store, watcher = self._seed(tmp_path, [('sol', 'btc', 300.0), ('tao', 'btc', 0.003)])
+        watcher.reserve_then_swap('hk_a', reserve_block=50, init_block=50, end_block=500, backing='sol')
+        assert store.get_activity_state_at(100) == {'hk_a': {'sol': MinerActivity.FULFILLING}}
+        assert self._replay(store, 'sol', 'btc') == {'hk_a': 600.0}
+        assert self._replay(store, 'tao', 'btc') == {'hk_a': 1000.0}
+        store.close()

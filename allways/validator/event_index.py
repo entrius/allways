@@ -88,7 +88,7 @@ class SolanaEventIndex:
             self.state_store.insert_active_event(block_time, hotkey, name == 'MinerActivated')
             return True
         if name == 'PoolResolved':
-            return self._apply_reservation(hotkey, block_time)
+            return self._apply_reservation(hotkey, block_time, self._event_hub(rec))
         if name == 'SwapFulfilled':
             # Persist the delivery hash for post-close receipts — the Swap PDA (and its
             # to_tx_hash) is gone once the swap completes, and the offering's receipt links
@@ -98,7 +98,9 @@ class SolanaEventIndex:
             )
             return True
         if name in _FULFILL_TRANSITIONS:
-            self.state_store.insert_activity_event(block_time, hotkey, _FULFILL_TRANSITIONS[name])
+            self.state_store.insert_activity_event(
+                block_time, hotkey, _FULFILL_TRANSITIONS[name], hub=self._event_hub(rec)
+            )
             outcome = _OUTCOME_BY_EVENT.get(name)
             if outcome is not None:
                 self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
@@ -151,18 +153,27 @@ class SolanaEventIndex:
             return True
         return False  # not a crown-relevant event
 
-    def _apply_reservation(self, hotkey: str, block_time: int) -> bool:
+    def _apply_reservation(self, hotkey: str, block_time: int, hub: Optional[str]) -> bool:
         """PoolResolved → RESERVE_START now + a synthetic RESERVE_EXPIRE at
         ``block_time + reservation_ttl_secs`` (``reserved_until`` isn't on the
         event). Dropped if no TTL source is wired, so the reservation never opens
-        without its matching expiry."""
+        without its matching expiry. The expiry inherits the start's hub so the
+        pair opens and closes the same per-hub machine."""
         ttl = self._reservation_ttl()
         if ttl is None:
             bt.logging.warning('SolanaEventIndex: no reservation_ttl; dropping PoolResolved')
             return False
-        self.state_store.insert_activity_event(block_time, hotkey, ActivityTransition.RESERVE_START)
-        self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE)
+        self.state_store.insert_activity_event(block_time, hotkey, ActivityTransition.RESERVE_START, hub=hub)
+        self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=hub)
         return True
+
+    @staticmethod
+    def _event_hub(rec: EventRecord) -> Optional[str]:
+        """The purse a lifecycle event draws against (v3.1 events carry it as
+        ``collateral_chain``). None — global-busy on every hub — for a pre-v3.1
+        payload shape, matching how those swaps actually locked the miner."""
+        chain = rec.fields.get('collateral_chain') if isinstance(rec.fields, dict) else None
+        return str(chain).lower() if chain else None
 
     def _reservation_ttl(self) -> Optional[int]:
         if self._reservation_ttl_fn is None:
