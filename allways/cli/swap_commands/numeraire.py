@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
     backing_label,
     console,
+    declarable_backings,
     fail,
     get_cli_context,
     get_solana_cli_context,
@@ -167,9 +168,13 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     hub_up = hub.upper()
     console.print(f'\n[bold]{hub_up}-numéraire quotes[/bold]  [dim](X per 1 {hub_up})[/dim]\n')
     total_fee = 0
+    orphans = []  # (from, to, sibling_backing) live on the OTHER purse this run doesn't touch
     for sp in specs:
         b = backings[(sp.from_chain, sp.to_chain)]
         cur = client.get_quote(miner, sp.from_chain, sp.to_chain, b)
+        for other in declarable_backings(sp.from_chain, sp.to_chain):
+            if other != b and client.get_quote(miner, sp.from_chain, sp.to_chain, other) is not None:
+                orphans.append((sp.from_chain, sp.to_chain, other))
         if cur is None:
             note = '[dim]new — free[/dim]'
         else:
@@ -194,6 +199,15 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
         console.print(
             f'\n[yellow]Total churn fee: {total_fee / 1e9:g} SOL[/yellow] '
             '[dim](→ treasury; each direction is free again 10 min after its last update)[/dim]'
+        )
+
+    # A quote is per (direction, backing): pricing a direction under one backing leaves a prior
+    # quote on the OTHER purse live at its old price. Surface it — takers can still reserve it.
+    for f, t, ob in sorted(set(orphans)):
+        console.print(
+            f'\n[yellow]Heads-up: your {backing_label(ob)} quote on {f.upper()} → {t.upper()} is still '
+            f'live at its old price[/yellow] — this run does not touch it. Retract it with '
+            f'[bold]alw miner remove-quote --from {f} --to {t} --backing {ob}[/bold].'
         )
 
     if dry_run:
