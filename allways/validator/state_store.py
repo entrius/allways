@@ -469,22 +469,30 @@ class ValidatorStateStore:
 
     # ─── W3 bond relay (cross-chain vault relayer) ──────────────────────
 
-    def record_relay_swap(self, swap_key: str, miner: str, backing: str, user_addr: str, seen_at: int) -> None:
-        """Snapshot a live off-chain-backed swap's reimbursement target. First sighting wins: the
-        address is pinned at finalize and immutable, and re-recording it after the fact is
-        impossible — the Swap PDA closes at the verdict and no event carries the address."""
+    def record_relay_swap(
+        self,
+        swap_key: str,
+        miner: str,
+        backing: str,
+        user_addr: str,
+        seen_at: int,
+        hotkey: Optional[str] = None,
+    ) -> None:
+        """Snapshot a live off-chain-backed swap's reimbursement target and bonded hotkey. First
+        sighting wins: the address is pinned at finalize and immutable, and the hotkey is captured
+        here (F1) so a mid-swap rebind can't redirect the seizure to a fresh, unbonded account."""
         self._execute(
             """
-            INSERT INTO relay_swaps (swap_key, miner, backing, user_addr, seen_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO relay_swaps (swap_key, miner, backing, user_addr, seen_at, hotkey)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
-            (swap_key, miner, backing, user_addr, seen_at),
+            (swap_key, miner, backing, user_addr, seen_at, hotkey),
         )
 
     def get_relay_swap(self, swap_key: str) -> Optional[dict]:
         row = self._fetchone(
-            'SELECT swap_key, miner, backing, user_addr, seen_at FROM relay_swaps WHERE swap_key = ?',
+            'SELECT swap_key, miner, backing, user_addr, seen_at, hotkey FROM relay_swaps WHERE swap_key = ?',
             (swap_key,),
         )
         return dict(row) if row is not None else None
@@ -543,23 +551,25 @@ class ValidatorStateStore:
         reimbursement: int,
         user_addr: str,
         block_time: int,
+        hotkey: Optional[str] = None,
     ) -> None:
         """A timeout verdict owed to the vault. Stored verbatim from the event — the figures are
-        hash-bound into the vault round, so a reconstructed number would conflict, not co-count."""
+        hash-bound into the vault round, so a reconstructed number would conflict, not co-count.
+        ``hotkey`` is the observe-time snapshot (F1); NULL falls back to the live lookup."""
         self._execute(
             """
             INSERT INTO relay_slashes
-                (swap_key, miner, backing, penalty, reimbursement, user_addr, block_time, applied)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                (swap_key, miner, backing, penalty, reimbursement, user_addr, block_time, applied, hotkey)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
-            (swap_key, miner, backing, int(penalty), int(reimbursement), user_addr, block_time),
+            (swap_key, miner, backing, int(penalty), int(reimbursement), user_addr, block_time, hotkey),
         )
 
     def open_relay_slashes(self, backing: str, miner: Optional[str] = None) -> List[dict]:
         """Verdicts the vault has not confirmed applied, oldest first."""
         sql = """
-            SELECT swap_key, miner, backing, penalty, reimbursement, user_addr, block_time
+            SELECT swap_key, miner, backing, penalty, reimbursement, user_addr, block_time, hotkey
             FROM relay_slashes WHERE applied = 0 AND backing = ?
         """
         params: Tuple = (backing,)
@@ -772,6 +782,15 @@ class ValidatorStateStore:
             if cols and 'backing' not in cols:
                 conn.execute("ALTER TABLE routed_requests ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
                 conn.execute('DROP INDEX IF EXISTS idx_routed_requests_key')
+            # F1: pin the bond hotkey at observe time so a mid-swap rebind can't redirect the
+            # seizure to a fresh, unbonded account. Pre-F1 rows carry NULL and fall back to the
+            # live lookup, which is the pre-F1 behaviour.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(relay_swaps)')]
+            if cols and 'hotkey' not in cols:
+                conn.execute('ALTER TABLE relay_swaps ADD COLUMN hotkey TEXT')
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(relay_slashes)')]
+            if cols and 'hotkey' not in cols:
+                conn.execute('ALTER TABLE relay_slashes ADD COLUMN hotkey TEXT')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -896,7 +915,8 @@ class ValidatorStateStore:
                     miner       TEXT NOT NULL,
                     backing     TEXT NOT NULL,
                     user_addr   TEXT NOT NULL,
-                    seen_at     INTEGER NOT NULL
+                    seen_at     INTEGER NOT NULL,
+                    hotkey      TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS relay_fees (
@@ -917,7 +937,8 @@ class ValidatorStateStore:
                     reimbursement INTEGER NOT NULL,
                     user_addr     TEXT NOT NULL,
                     block_time    INTEGER NOT NULL,
-                    applied       INTEGER NOT NULL DEFAULT 0
+                    applied       INTEGER NOT NULL DEFAULT 0,
+                    hotkey        TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_relay_slashes_open
                     ON relay_slashes(backing, applied, miner);

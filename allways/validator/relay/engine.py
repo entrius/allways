@@ -161,8 +161,10 @@ class BondRelay:
         addr = self.user_backing_address(swap)
         if not addr:
             return
+        # F1: pin the bonded hotkey now (H1). A rebind before the timeout must not move the seizure.
+        hotkey = self.hotkey_for(str(swap.miner))
         try:
-            self.store.record_relay_swap(_hex(swap.swap_key), str(swap.miner), backing, addr, int(self.clock()))
+            self.store.record_relay_swap(_hex(swap.swap_key), str(swap.miner), backing, addr, int(self.clock()), hotkey)
         except Exception as e:
             bt.logging.warning(f'relay: could not snapshot swap facts: {e}')
 

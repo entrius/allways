@@ -441,6 +441,40 @@ def test_the_first_sighting_wins_so_a_later_pass_cannot_rewrite_the_payee():
     assert relay.store.get_relay_swap(SWAP)['user_addr'] == USER_TAO
 
 
+def test_a_rebind_after_acceptance_does_not_redirect_the_seizure_off_the_bonded_hotkey():
+    # F1: the swap is accepted while MINER is bound to HOTKEY (H1). The miner then rebinds its
+    # pubkey to a fresh, unbonded HOTKEY2 (H2) before the timeout lands. The seizure must still hit
+    # H1 — the hotkey that carried the bond when the swap was live — not the empty H2.
+    relay = _relay()
+    relay.observe_swap(_live_swap())
+    assert relay.store.get_relay_swap(SWAP)['hotkey'] == HOTKEY
+
+    relay._attribution = {MINER: HOTKEY2}  # the mid-swap rebind
+    relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY, 'the seizure targets the observe-time hotkey, not the rebind'
+
+
+def test_a_pre_f1_snapshot_without_a_hotkey_falls_back_to_the_live_binding():
+    # Rows recorded before F1 carry a NULL hotkey; the relay must still slash via the live lookup.
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW)  # no hotkey
+    relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY
+
+
+def test_the_hotkey_snapshot_round_trips_through_swap_and_slash():
+    store = _store()
+    store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW, HOTKEY)
+    assert store.get_relay_swap(SWAP)['hotkey'] == HOTKEY
+    store.record_relay_slash(SWAP, MINER, 'tao', 22 * RAO, 22 * RAO, USER_TAO, NOW, HOTKEY)
+    assert store.open_relay_slashes('tao')[0]['hotkey'] == HOTKEY
+
+
 # --- the off-chain busy-until-settled backstop --------------------------------------------------
 
 
