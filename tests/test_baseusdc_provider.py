@@ -343,7 +343,7 @@ class TestSendGuards:
         assert provider.send_amount(RECIPIENT, AMOUNT, from_address=TEST_ADDR) == ('0x' + 'ee' * 32, 0)
         assert SEL_TRANSFER.removeprefix('0x') in sent['raw']
         assert CONTRACT.lower().removeprefix('0x') in sent['raw']  # addressed to the pinned token
-        assert list(provider.broadcasted_txids.values()) == [(RECIPIENT.lower(), AMOUNT, 1000)]
+        assert list(provider.broadcasted_txids.values()) == [(RECIPIENT.lower(), AMOUNT, '', 1000)]
 
 
 class TestScanner:
