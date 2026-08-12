@@ -185,6 +185,15 @@ def test_fulfilled_overdue_refusal_check_down_defers():
     assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
 
 
+def test_fulfilled_refusing_dest_past_ceiling_times_out():
+    # C1 terminal exit: an undeliverable dest never recovers, so at/after max_extend_at the refusal guard
+    # must stop deferring and TIMEOUT — else has_active_swap never clears and the hub's collateral freezes.
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = True
+    swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1200)  # now past the ceiling
+    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
+
+
 def test_active_overdue_refusing_dest_waits_no_slash():
     loop, providers = loop_with(result=None)
     providers['sol'].refuses = True
@@ -197,6 +206,23 @@ def test_overdue_malformed_dest_addr_waits_no_slash():
     loop, providers = loop_with(result=None)
     providers['sol'].valid_addr = False
     assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+
+
+def test_active_refusing_dest_past_ceiling_times_out():
+    # C1: past max_extend_at an undeliverable dest is terminal — timing out is the only path that clears
+    # the hub bit, so the refusal guard must yield to a TIMEOUT once the ceiling is reached.
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = True
+    swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)  # now past the ceiling
+    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
+
+
+def test_active_malformed_dest_addr_past_ceiling_times_out():
+    # Same terminal exit for a malformed (undeliverable) dest address once past the ceiling.
+    loop, providers = loop_with(result=None)
+    providers['sol'].valid_addr = False
+    swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)
+    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
 
 
 def test_fulfilled_overdue_but_verifiable_still_confirms():
