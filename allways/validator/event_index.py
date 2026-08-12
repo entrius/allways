@@ -133,8 +133,16 @@ class SolanaEventIndex:
             )
             return True
         if name in ('CollateralPosted', 'CollateralWithdrawn'):
+            # The local SOL purse. The attested TAO bond is its own stream (BondAttested below).
             total = int(rec.fields['total'])
-            self.state_store.insert_collateral_event(block_time, hotkey, total)
+            self.state_store.insert_collateral_event(block_time, hotkey, total, backing='sol')
+            return True
+        if name == 'BondAttested':
+            # F4: the tao-hub funding purse. An unlocked bond backs nothing, so it reads as 0
+            # collateral — a quote that can't be funded earns no crown, closing the purse-blind gap.
+            backing = self._backing(rec, 'chain')
+            balance = int(rec.fields['effective_balance']) if rec.fields['locked'] else 0
+            self.state_store.insert_collateral_event(block_time, hotkey, balance, backing=backing)
             return True
         if name == 'QuoteSet':
             # Floor to RATE_SIG_FIGS on ingest, matching the contract's on-chain floor. Redundant for
@@ -142,14 +150,36 @@ class SolanaEventIndex:
             # pre-redeploy full-precision quote could still snipe the crown.
             rate = quantize_rate_fixed(int(rec.fields['rate'])) / RATE_PRECISION
             self.state_store.insert_rate_event(
-                hotkey, self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain'), rate, block_time
+                hotkey,
+                self._chain(rec, 'from_chain'),
+                self._chain(rec, 'to_chain'),
+                rate,
+                block_time,
+                collateral_chain=self._backing(rec, 'collateral_chain'),
             )
             return True
         if name == 'QuoteRemoved':
-            # Opt-out: a zero rate ends crown credit for this direction, same as a recorded zero quote.
+            # Opt-out: a zero rate ends crown credit for this direction UNDER THIS BACKING only (F4) —
+            # a sibling backing's still-live quote on the same direction keeps earning.
             self.state_store.insert_rate_event(
-                hotkey, self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain'), 0.0, block_time
+                hotkey,
+                self._chain(rec, 'from_chain'),
+                self._chain(rec, 'to_chain'),
+                0.0,
+                block_time,
+                collateral_chain=self._backing(rec, 'collateral_chain'),
             )
+            return True
+        if name == 'MinerBackingChanged':
+            # F4: a silent purse drop (bit off, no MinerDeactivated) must stop that backing's crown
+            # credit — otherwise the miner squats the crown on quotes it can no longer fund. The event
+            # names no direction, so zero every direction that still has a live quote under this backing.
+            if not rec.fields['enabled']:
+                backing = self._backing(rec, 'backing')
+                for from_chain, to_chain in self.state_store.directions_with_live_rate(hotkey, backing, block_time):
+                    self.state_store.insert_rate_event(
+                        hotkey, from_chain, to_chain, 0.0, block_time, collateral_chain=backing
+                    )
             return True
         return False  # not a crown-relevant event
 
@@ -193,10 +223,14 @@ class SolanaEventIndex:
         A miner is corrected only while its event stream has been quiet for
         ``RECONCILE_QUIET_SECS``, so a stale live read never fights an in-flight real event."""
         derived_active = self.state_store.get_active_state_at(now)
-        derived_collateral = self.state_store.get_collaterals_at(now)
+        # ms.collateral is the SOL local purse; reconcile only that stream (the TAO bond is fed by
+        # BondAttested, not this live read) so a tao-backing row can't be mistaken for a divergence.
+        derived_collateral = self.state_store.get_collaterals_at(now, backing='sol')
         quiet_start = now - RECONCILE_QUIET_SECS
         recent_active = {e['hotkey'] for e in self.state_store.get_active_events_in_range(quiet_start, now)}
-        recent_collateral = {e['hotkey'] for e in self.state_store.get_collateral_events_in_range(quiet_start, now)}
+        recent_collateral = {
+            e['hotkey'] for e in self.state_store.get_collateral_events_in_range(quiet_start, now, backing='sol')
+        }
         for hotkey, ms in live_states.items():
             live_active = bool(ms.active)
             if hotkey not in recent_active and live_active != (hotkey in derived_active):
@@ -204,7 +238,7 @@ class SolanaEventIndex:
                 bt.logging.warning(f'reconcile {hotkey[:8]}: event-derived active ≠ chain, corrected to {live_active}')
             live_collateral = int(ms.collateral)
             if hotkey not in recent_collateral and derived_collateral.get(hotkey) != live_collateral:
-                self.state_store.insert_collateral_event(now, hotkey, live_collateral)
+                self.state_store.insert_collateral_event(now, hotkey, live_collateral, backing='sol')
                 bt.logging.warning(
                     f'reconcile {hotkey[:8]}: event-derived collateral ≠ chain, corrected to {live_collateral}'
                 )
@@ -221,6 +255,12 @@ class SolanaEventIndex:
     def _chain(rec: EventRecord, key: str) -> str:
         return str(rec.fields[key]).lower()
 
+    @staticmethod
+    def _backing(rec: EventRecord, key: str) -> str:
+        """A backing/collateral-chain field, defaulting to the SOL numéraire when absent — pre-split
+        events carried no backing and were all sol-backed by construction (F4)."""
+        return str(rec.fields.get(key, 'sol')).lower()
+
     # ─── read interface (consumed by scoring's crown replay) ────────────
 
     def get_active_miners_at(self, at_time: int) -> Set[str]:
@@ -229,8 +269,8 @@ class SolanaEventIndex:
     def get_activity_state_at(self, at_time: int) -> Dict[str, MinerActivity]:
         return self.state_store.get_activity_state_at(at_time)
 
-    def get_miner_collaterals_at(self, at_time: int) -> Dict[str, int]:
-        return self.state_store.get_collaterals_at(at_time)
+    def get_miner_collaterals_at(self, at_time: int, backing: Optional[str] = None) -> Dict[str, int]:
+        return self.state_store.get_collaterals_at(at_time, backing=backing)
 
     def get_active_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         return self.state_store.get_active_events_in_range(start_time, end_time)
@@ -238,5 +278,7 @@ class SolanaEventIndex:
     def get_activity_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         return self.state_store.get_activity_events_in_range(start_time, end_time)
 
-    def get_collateral_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
-        return self.state_store.get_collateral_events_in_range(start_time, end_time)
+    def get_collateral_events_in_range(
+        self, start_time: int, end_time: int, backing: Optional[str] = None
+    ) -> List[dict]:
+        return self.state_store.get_collateral_events_in_range(start_time, end_time, backing=backing)

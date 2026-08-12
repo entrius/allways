@@ -163,4 +163,8 @@ pub enum ErrorCode {
     MinerSettling,
     #[msg("Account is owned by another program or is not the expected account type")]
     InvalidAccountForMigration,
+    #[msg("Miner has an in-flight swap; drain it before migrating its state")]
+    MigrationSwapNotDrained,
+    #[msg("Attestation would lower the bond while a reservation/swap is live on this hub")]
+    AttestationWouldStrandSwap,
 }

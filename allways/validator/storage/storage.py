@@ -120,17 +120,18 @@ class DatabaseStorage:
 
     def flush_scoring_window(
         self,
-        crown_rows_by_direction: Dict[Tuple[str, str], List[Tuple[int, int, str, str, str, float, float]]],
-        crown_window_bounds_by_direction: Dict[Tuple[str, str], Tuple[int, int]],
+        crown_rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[int, int, str, str, str, str, float, float]]],
+        crown_window_bounds_by_direction: Dict[Tuple[str, str, str], Tuple[int, int]],
         miner_score_rows: List[Tuple],
         crown_holders_max_ts: int,
     ) -> StorageResult:
         """All-or-nothing flush for one scoring window.
 
-        - `crown_rows_by_direction`: recomputed crown rows, keyed by (from, to).
+        - `crown_rows_by_direction`: recomputed crown rows, keyed by lane
+          (from, to, backing).
         - `crown_window_bounds_by_direction`: [lo, hi) unix-second range to wipe
-          before re-upserting, keyed by (from, to). Must match the rows above.
-        - `miner_score_rows`: per-(hotkey, direction) factor snapshots for the
+          before re-upserting, keyed by lane. Must match the rows above.
+        - `miner_score_rows`: per-(hotkey, lane) factor snapshots for the
           round — written in the same transaction as the crown ledger so the
           two can never disagree about a round.
         - `crown_holders_max_ts` advances the sync_cursor watermark so the
@@ -154,9 +155,9 @@ class DatabaseStorage:
             with self.db_connection.pipeline():
                 crown_inserted = 0
                 for direction, rows in crown_rows_by_direction.items():
-                    from_chain, to_chain = direction
+                    from_chain, to_chain, backing = direction
                     lo, hi = crown_window_bounds_by_direction[direction]
-                    self.repo.delete_crown_in_range(from_chain, to_chain, lo, hi, commit=False)
+                    self.repo.delete_crown_in_range(from_chain, to_chain, backing, lo, hi, commit=False)
                     crown_inserted += self.repo.store_crown_holders_bulk(rows, commit=False)
                 result.stored_counts['crown_holders'] = crown_inserted
 
@@ -175,7 +176,7 @@ class DatabaseStorage:
 
     def flush_halt_window(
         self,
-        directions: List[Tuple[str, str]],
+        directions: List[Tuple[str, str, str]],
         window_start: int,
         window_end: int,
         max_ts: int,
@@ -192,7 +193,7 @@ class DatabaseStorage:
         and nothing was.
 
         ``[window_start, window_end)`` is the unix-second range to clear per
-        direction. ``max_ts`` advances the crown sync_cursor watermark.
+        lane (from, to, backing). ``max_ts`` advances the crown sync_cursor watermark.
         """
         if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
@@ -203,8 +204,10 @@ class DatabaseStorage:
             self.db_connection.autocommit = False
 
             with self.db_connection.pipeline():
-                for from_chain, to_chain in directions:
-                    self.repo.delete_crown_in_range(from_chain, to_chain, window_start, window_end, commit=False)
+                for from_chain, to_chain, backing in directions:
+                    self.repo.delete_crown_in_range(
+                        from_chain, to_chain, backing, window_start, window_end, commit=False
+                    )
                 self.repo.replace_current_miner_scores([], commit=False)
                 self.repo.set_sync_cursor('crown_holders_max_ts', max_ts, commit=False)
 
@@ -219,18 +222,18 @@ class DatabaseStorage:
 
     def upsert_current_crown_snapshot(
         self,
-        rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]],
+        rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]],
     ) -> StorageResult:
-        """Replace current_crown_holders rows for the given directions.
+        """Replace current_crown_holders rows for the given lanes.
 
         Called per forward step (~12s) — the dashboard's live "who holds
         the crown right now" surface. Distinct cadence from
         ``flush_scoring_window``, which writes the historical interval
         ledger at round end (~1h).
 
-        Row format per direction: ``(from_chain, to_chain, hotkey, credit,
-        rate, ts)``. Empty list for a direction means "no qualifying
-        holder right now" — that direction's rows are cleared.
+        Row format per lane: ``(from_chain, to_chain, backing, hotkey,
+        credit, rate, ts)``. Empty list for a lane means "no qualifying
+        holder right now" — that lane's rows are cleared.
         """
         if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])

@@ -916,6 +916,7 @@ fn close_unfilled_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            pool: pool_pda(miner),
         }
         .to_account_metas(None),
     )
@@ -1050,4 +1051,25 @@ fn test_close_unfilled_rejected_while_filled() {
     set_clock(&mut svm, finalize_by + 1_000_000);
     let e = send(&mut svm, close_unfilled_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]);
     assert!(e.is_err(), "a filled reservation is not reapable (NotReapable)");
+}
+
+#[test]
+fn test_close_unfilled_cannot_drag_busy_back_past_a_live_pool() {
+    // F2: a stale unfilled reservation stays reapable once its finalize window lapses, but by then a
+    // FRESH contest may have re-armed the hub's busy lock far ahead. Reaping the stale slot must not
+    // drag that lock backward — that would read the miner free while it owes the new contest.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    bid_and_draw(&mut svm, &vals, &miner.pubkey());
+    let finalize_by = reservation(&svm, &miner.pubkey()).finalize_by;
+
+    // Lapse the first finalize window, then open a NEW pool on the same hub (re-open is allowed once
+    // the prior draw went unfilled). That open re-arms busy_until far ahead.
+    set_clock(&mut svm, finalize_by + 1);
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]).expect("re-open");
+    let busy_after_open = busy_until(&svm, &miner.pubkey());
+    assert!(busy_after_open > finalize_by + 1, "the fresh contest armed a forward lock");
+
+    // The stale reservation is still reapable — but the reaper must leave the live pool's lock intact.
+    send(&mut svm, close_unfilled_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]).expect("reap");
+    assert_eq!(busy_until(&svm, &miner.pubkey()), busy_after_open, "live pool's busy lock must not move back");
 }

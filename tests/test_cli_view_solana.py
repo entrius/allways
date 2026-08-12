@@ -134,3 +134,49 @@ def test_view_swap_rejects_wrong_length_key(monkeypatch):
     assert result.exit_code == 1, result.output
     assert '32 bytes' in result.output
     client.get_swap.assert_not_called()
+
+
+def test_view_reservation_scans_the_tao_hub(monkeypatch):
+    """V-4: `view reservation` must scan every per-hub slot — a TAO-only seat used to render as none
+    because the read defaulted to the SOL slot."""
+    miner = Keypair().pubkey()
+    resv = types.SimpleNamespace(
+        user=Keypair().pubkey(),
+        from_chain='tao',
+        to_chain='btc',
+        from_amount=2_000_000_000,
+        to_amount=100_000,
+        collateral_amount=0,
+        reserved_until=9_999_999_999,
+        finalize_by=0,
+        claimed_swap_key=bytes(view.ZERO_SWAP_KEY),
+        miner_from_addr='miner-tao-addr',
+    )
+
+    class HubClient:
+        def get_reservation(self, m, backing='sol'):
+            return resv if backing == 'tao' else None
+
+    monkeypatch.setattr(view, 'get_solana_cli_context', lambda need_keypair=True: ({}, HubClient()))
+
+    result = CliRunner().invoke(view.view_group, ['reservation', '--miner', str(miner)])
+
+    assert result.exit_code == 0, result.output
+    assert 'TAO → BTC' in result.output  # the TAO-hub seat is found, not "No active reservation"
+
+
+def test_miner_runtime_status_reads_per_hub_when_backing_given():
+    """V-4: a SOL-only swap must not paint a dual-purse miner's free TAO purse busy."""
+    from allways.cli.swap_commands.helpers import miner_runtime_status
+    from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
+
+    state = types.SimpleNamespace(
+        active=True,
+        active_backings=BACKING_BIT_SOL | BACKING_BIT_TAO,
+        has_active_swap=True,
+        active_swap_backings=BACKING_BIT_SOL,
+        busy_until=[0, 0],
+    )
+    assert miner_runtime_status(state, None, 1000) == 'in-swap'  # OR view
+    assert miner_runtime_status(state, None, 1000, backing='sol') == 'in-swap'
+    assert miner_runtime_status(state, None, 1000, backing='tao') == 'available'

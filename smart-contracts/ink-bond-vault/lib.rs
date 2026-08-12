@@ -495,6 +495,12 @@ mod allways_bond_vault {
         /// Solana as "eligible for vote_activate".
         #[ink(message)]
         pub fn lock_bond(&mut self) -> Result<(), Error> {
+            // No bond may be locked into a set too small to govern it: below the
+            // removal floor a locked bond can be stranded or exposed to n-of-n
+            // fragility, so gate the lock on the same MIN_VALIDATORS_TO_REMOVE.
+            if self.validators.len() < MIN_VALIDATORS_TO_REMOVE {
+                return Err(Error::InvalidValidatorSet);
+            }
             let caller = self.env().caller();
             let (locked, epoch) = self.lock_of(caller);
             if locked {
@@ -1213,7 +1219,7 @@ mod allways_bond_vault {
         #[ink::test]
         fn lock_blocks_withdraw_until_quorum_unlock() {
             let acc = accounts();
-            let mut vault = new_vault();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
             post(&mut vault, acc.bob, 5_000);
 
             set_caller(acc.bob);
@@ -1221,13 +1227,15 @@ mod allways_bond_vault {
             assert_eq!(vault.get_lock_state(acc.bob), (true, 1));
             assert_eq!(vault.withdraw_collateral(1_000), Err(Error::BondLocked));
 
-            // One validator vote isn't quorum; bond stays locked.
+            // Below quorum the bond stays locked.
             set_caller(acc.django);
+            vault.vote_unlock(acc.bob, 1).unwrap();
+            set_caller(acc.eve);
             vault.vote_unlock(acc.bob, 1).unwrap();
             assert_eq!(vault.get_lock_state(acc.bob), (true, 1));
 
-            // Second vote reaches quorum: unlocked, epoch bumped.
-            set_caller(acc.eve);
+            // Final vote reaches quorum: unlocked, epoch bumped.
+            set_caller(acc.charlie);
             vault.vote_unlock(acc.bob, 1).unwrap();
             assert_eq!(vault.get_lock_state(acc.bob), (false, 2));
 
@@ -1239,7 +1247,7 @@ mod allways_bond_vault {
         #[ink::test]
         fn unlock_vote_requires_current_epoch() {
             let acc = accounts();
-            let mut vault = new_vault();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
             post(&mut vault, acc.bob, 5_000);
             set_caller(acc.bob);
             vault.lock_bond().unwrap();
@@ -1252,10 +1260,30 @@ mod allways_bond_vault {
         #[ink::test]
         fn lock_requires_min_collateral() {
             let acc = accounts();
-            let mut vault = new_vault();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
             post(&mut vault, acc.bob, MIN_COLLATERAL - 1);
             set_caller(acc.bob);
             assert_eq!(vault.lock_bond(), Err(Error::InsufficientCollateral));
+        }
+
+        #[ink::test]
+        fn lock_requires_min_validators() {
+            let acc = accounts();
+            // new_vault seeds only two validators — below the removal floor.
+            let mut vault = new_vault();
+            post(&mut vault, acc.bob, 5_000);
+            set_caller(acc.bob);
+            assert_eq!(vault.lock_bond(), Err(Error::InvalidValidatorSet));
+        }
+
+        #[ink::test]
+        fn lock_succeeds_at_min_validators() {
+            let acc = accounts();
+            let mut vault = seeded_vault(ink::prelude::vec![acc.django, acc.eve, acc.charlie]);
+            post(&mut vault, acc.bob, 5_000);
+            set_caller(acc.bob);
+            vault.lock_bond().unwrap();
+            assert_eq!(vault.get_lock_state(acc.bob), (true, 1));
         }
 
         #[ink::test]

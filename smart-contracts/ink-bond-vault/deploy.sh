@@ -99,4 +99,4 @@ echo "$CONTRACT" > "$OUT_DIR/contract_address"
 
 echo ""
 echo "VAULT DEPLOYED: $CONTRACT"
-echo "Owner is the SURI signer. Next: add the validator hotkeys, then publish the address."
+echo "The SURI signer only paid for the deploy; the vault has no owner. Next: add the validator hotkeys, then publish the address."

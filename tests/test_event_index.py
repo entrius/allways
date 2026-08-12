@@ -490,16 +490,23 @@ class TestIngestEndToEndCrown:
             [
                 # Both miners active + funded from t=0; btc→tao is the reverse leg of the
                 # TAO-hub pair (canonical 'BTC per TAO'), so the LOWER canonical rate wins.
+                # A tao-hub direction is funded by the attested TAO bond, not the SOL purse (F4),
+                # and the quotes are tao-backed.
                 rec('MinerActivated', miner='pk_a', block_time=0, at=0),
                 rec('MinerActivated', miner='pk_b', block_time=0, at=0),
-                rec('CollateralPosted', miner='pk_a', block_time=0, amount=0, total=500_000_000),
-                rec('CollateralPosted', miner='pk_b', block_time=0, amount=0, total=500_000_000),
+                rec(
+                    'BondAttested', miner='pk_a', block_time=0, chain='tao', effective_balance=500_000_000, locked=True
+                ),
+                rec(
+                    'BondAttested', miner='pk_b', block_time=0, chain='tao', effective_balance=500_000_000, locked=True
+                ),
                 rec(
                     'QuoteSet',
                     miner='pk_a',
                     block_time=0,
                     from_chain='btc',
                     to_chain='tao',
+                    collateral_chain='tao',
                     rate=int(0.002 * RATE_PRECISION),
                     liquidity=0,
                 ),
@@ -509,6 +516,7 @@ class TestIngestEndToEndCrown:
                     block_time=0,
                     from_chain='btc',
                     to_chain='tao',
+                    collateral_chain='tao',
                     rate=int(0.003 * RATE_PRECISION),
                     liquidity=0,
                 ),
@@ -540,6 +548,123 @@ class TestIngestEndToEndCrown:
         )
         # A: (100,400] + (800,1100] = 600. B: (400,800] = 400.
         assert crown == {'hk_a': 600.0, 'hk_b': 400.0}
+        store.close()
+
+    def test_a_tao_miner_earns_only_when_its_bond_funds_the_quote(self, tmp_path: Path):
+        """F4 (4a): a tao-hub direction is purse-scored against the attested TAO bond, not run
+        neutral. The bonded miner earns; an equal-rate rival with no bond can't fund and earns 0
+        (before F4 the purse axis ran neutral and both split the window)."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec('MinerActivated', miner='pk_a', block_time=0, at=0),
+                rec('MinerActivated', miner='pk_b', block_time=0, at=0),
+                # A is bonded on TAO; B posts SOL collateral, which does not fund a tao-hub quote.
+                rec(
+                    'BondAttested', miner='pk_a', block_time=0, chain='tao', effective_balance=500_000_000, locked=True
+                ),
+                rec('CollateralPosted', miner='pk_b', block_time=0, amount=0, total=500_000_000),
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='tao',
+                    collateral_chain='tao',
+                    rate=int(0.002 * RATE_PRECISION),
+                    liquidity=0,
+                ),
+                rec(
+                    'QuoteSet',
+                    miner='pk_b',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='tao',
+                    collateral_chain='tao',
+                    rate=int(0.002 * RATE_PRECISION),
+                    liquidity=0,
+                ),
+            ],
+            ATTR,
+        )
+        crown = replay_crown_time_window(
+            store=store,
+            event_index=idx,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a', 'hk_b'},
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
+        )
+        assert crown == {'hk_a': 1000.0}  # only the bonded miner earns
+        store.close()
+
+    def test_dropping_the_tao_purse_stops_tao_crown_but_not_sol_crown(self, tmp_path: Path):
+        """F4 (4b): a silent tao-purse drop (bit off, no MinerDeactivated) must end the miner's
+        tao-hub crown, while its sol-hub quote keeps earning."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec('MinerActivated', miner='pk_a', block_time=0, at=0),
+                rec(
+                    'BondAttested', miner='pk_a', block_time=0, chain='tao', effective_balance=500_000_000, locked=True
+                ),
+                rec('CollateralPosted', miner='pk_a', block_time=0, amount=0, total=500_000_000),
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='tao',
+                    collateral_chain='tao',
+                    rate=int(0.002 * RATE_PRECISION),
+                    liquidity=0,
+                ),
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=0,
+                    from_chain='btc',
+                    to_chain='sol',
+                    collateral_chain='sol',
+                    rate=int(0.002 * RATE_PRECISION),
+                    liquidity=0,
+                ),
+                # Mid-window the TAO purse bit goes down, with NO MinerDeactivated.
+                rec(
+                    'MinerBackingChanged', miner='pk_a', block_time=600, backing='tao', enabled=False, active_backings=1
+                ),
+            ],
+            ATTR,
+        )
+        tao_crown = replay_crown_time_window(
+            store=store,
+            event_index=idx,
+            from_chain='btc',
+            to_chain='tao',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
+        )
+        sol_crown = replay_crown_time_window(
+            store=store,
+            event_index=idx,
+            from_chain='btc',
+            to_chain='sol',
+            window_start=100,
+            window_end=1100,
+            rewardable_hotkeys={'hk_a'},
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
+        )
+        assert tao_crown == {'hk_a': 500.0}  # (100,600] only — the tao quote is zeroed at 600
+        assert sol_crown == {'hk_a': 1000.0}  # sol quote unaffected by the tao drop
         store.close()
 
 

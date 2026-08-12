@@ -13,6 +13,7 @@ from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
 from allways.validator.floor_sweep import maybe_sweep_floor
 from allways.validator.relay.engine import maybe_relay
+from allways.validator.relay.wiring import ensure_bond_relay
 from allways.validator.reserve_engine import finalize_won_seats
 from allways.validator.scoring import (
     due_for_scoring,
@@ -62,7 +63,9 @@ async def forward(self: Validator) -> None:
     ingest_solana_events(self)
 
     # Bond relay: carry Solana verdicts to the Bittensor vault and the vault's bonds back.
-    # Off the event loop — a vault write waits on substrate block inclusion.
+    # Off the event loop — a vault write waits on substrate block inclusion. Retry construction
+    # first, so a transient vault-client failure at boot self-heals instead of staying off forever.
+    ensure_bond_relay(self, read_only=getattr(self, '_relay_read_only', False))
     await asyncio.to_thread(maybe_relay, self)
 
     # Block-aligned stake-weight vote: keeps Config.validators draw weights stake-true.
@@ -86,7 +89,7 @@ async def forward(self: Validator) -> None:
     # one); halt-aware clearing happens once per round in `_flush_halt_window`.
     crown_snapshot = snapshot_current_crown_holders(self)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
-    dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}': v for k, v in crown_snapshot.items()})
+    dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}-{k[2]}': v for k, v in crown_snapshot.items()})
     if self.database_storage.is_enabled():
         try:
             self.database_storage.upsert_current_crown_snapshot(crown_snapshot)
@@ -110,23 +113,38 @@ def clear_provider_caches(self: Validator) -> None:
 def ingest_solana_events(self: Validator) -> None:
     """Poll program events newer than the stored cursor and fold them into the
     crown ``SolanaEventIndex`` (active/activity/collateral/rate tables), attributing
-    each event's miner Solana pubkey → bound hotkey via the sr25519 binding. The
-    cursor advances only after a successful poll, so a transient RPC failure
-    re-reads the same window next step instead of skipping events."""
-    cursor = self.state_store.get_solana_event_cursor()
+    each event's miner Solana pubkey → bound hotkey via the sr25519 binding.
+
+    F3: the relay is the conservative consumer — it must re-read a window whose verdict write
+    failed — so with a relay present the poll is driven off the relay's OWN cursor and both cursors
+    hold together on a relay ingest failure (the crown re-ingests idempotently). Without a relay the
+    crown cursor drives, exactly as before. A transient RPC failure re-reads the same window."""
+    relay = getattr(self, 'bond_relay', None)
+    if relay is not None:
+        cursor = self.state_store.get_relay_event_cursor()
+        if cursor is None:
+            cursor = self.state_store.get_solana_event_cursor()  # inherit position on first run
+    else:
+        cursor = self.state_store.get_solana_event_cursor()
     try:
         records, new_cursor = self.event_ingest.poll(cursor)
     except Exception as e:
         bt.logging.warning(f'forward: solana event poll failed: {e}')
         return
+    relay_ok = True
     if records:
         attribution = build_attribution(self.solana_client)
         written = self.event_index.ingest(records, attribution)
         bt.logging.info(f'forward: ingested {written}/{len(records)} solana event(s)')
         # The relay reads the same stream separately: it keys by Solana pubkey and must keep
         # events from a miner whose binding lands later, which the crown index drops.
-        relay = getattr(self, 'bond_relay', None)
         if relay is not None:
-            relay.ingest_events(records)
-    if new_cursor is not None and new_cursor != cursor:
+            relay_ok = relay.ingest_events(records)
+    if new_cursor is None or new_cursor == cursor:
+        return
+    if relay is None:
         self.state_store.set_solana_event_cursor(new_cursor)
+    elif relay_ok:
+        self.state_store.set_relay_event_cursor(new_cursor)
+        self.state_store.set_solana_event_cursor(new_cursor)
+    # else: a loss-relevant verdict write failed — hold BOTH cursors and re-read next step.

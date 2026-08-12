@@ -7,6 +7,7 @@ relay hooks are inert, and a SOL-only deployment pays nothing for split collater
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,6 +18,10 @@ from allways.vault import BondVaultClient, VaultConfigError, codec
 from allways.vault.client import resolve_signer, resolve_vault_address
 
 _CONFIG_FILE = Path.home() / '.allways' / 'config.json'
+
+# F3: how often a still-absent relay retries construction. A transient vault-client failure at boot
+# must self-heal on a later tick, not disable TAO relaying for the process's whole life.
+_RELAY_REBUILD_INTERVAL_SECS = 300
 
 
 def _file_config() -> dict:
@@ -63,6 +68,26 @@ def build_bond_relay(validator: Any, read_only: bool = False) -> Optional[BondRe
         f'bond relay on — vault {vault.address}, signer {vault.keypair.ss58_address}, '
         f'heartbeat every {relay.cfg.heartbeat_interval_secs}s, fee cadence {relay.cfg.fee_cadence_secs}s'
     )
+    return relay
+
+
+def ensure_bond_relay(validator: Any, read_only: bool = False) -> Optional[BondRelay]:
+    """Rebuild a relay that failed to construct at boot (F3). One-shot ``None`` used to disable TAO
+    relaying permanently on a transient failure; this retries on a throttle and rewires the swap
+    loop's observe hook once it lands. A genuinely vault-less deployment just re-logs "off"."""
+    relay = getattr(validator, 'bond_relay', None)
+    if relay is not None:
+        return relay
+    now = time.monotonic()
+    if now < getattr(validator, '_relay_rebuild_at', 0.0):
+        return None
+    validator._relay_rebuild_at = now + _RELAY_REBUILD_INTERVAL_SECS
+    relay = build_bond_relay(validator, read_only=read_only)
+    validator.bond_relay = relay
+    if relay is not None:
+        loop = getattr(validator, 'solana_swap_loop', None)
+        if loop is not None:
+            loop.relay = relay  # the loop was built with relay=None; wire its observe_swap hook now
     return relay
 
 

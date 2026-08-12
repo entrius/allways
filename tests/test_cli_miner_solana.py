@@ -37,6 +37,7 @@ def _state(**over):
         active=False,
         active_backings=BACKING_BIT_SOL | BACKING_BIT_TAO,
         has_active_swap=False,
+        active_swap_backings=0,
         busy_until=0,
         deactivation_at=0,
         successful_swaps=0,
@@ -81,14 +82,17 @@ def test_withdraw_blocked_while_active():
         res = CliRunner().invoke(collateral_group, ['withdraw', '--amount', '1', '--yes'])
     assert res.exit_code != 0  # a blocked withdrawal must exit non-zero (script-safe)
     c.withdraw_collateral.assert_not_called()
-    assert 'while miner is active' in res.output
+    assert 'SOL purse is active' in res.output
 
 
 def test_withdraw_blocked_within_cooldown():
-    # Inactive but deactivated 'now' with a long timeout → still in the 2× cooldown window.
+    # SOL purse deactivated 'now' with a long timeout → still in the 2× cooldown window.
     with patch('allways.cli.swap_commands.collateral.time') as t:
         t.time.return_value = 1_000_000
-        c = _client(state=_state(active=False, deactivation_at=1_000_000), config=_config(fulfillment_timeout_secs=600))
+        c = _client(
+            state=_state(active=False, active_backings=0, deactivation_at=1_000_000),
+            config=_config(fulfillment_timeout_secs=600),
+        )
         with patch('allways.cli.swap_commands.collateral.get_solana_cli_context', return_value=({}, c)):
             res = CliRunner().invoke(collateral_group, ['withdraw', '--amount', '1', '--yes'])
     assert res.exit_code != 0  # a blocked withdrawal must exit non-zero (script-safe)
@@ -105,6 +109,44 @@ def test_deactivate_calls_self_deactivate():
             res = CliRunner().invoke(miner_group, ['deactivate'])
     assert res.exit_code == 0, res.output
     c.deactivate.assert_called_once_with(backing=None)
+
+
+def test_deactivate_backing_tao_allowed_while_sol_swap_in_flight():
+    # V-4: the contract's per-hub gate allows dropping the TAO purse while a SOL swap runs, so the
+    # preflight must too — the old global has_active_swap check wrongly refused it.
+    with patch('allways.cli.swap_commands.miner_commands.time') as t:
+        t.time.return_value = 5_000
+        c = _client(
+            state=_state(active=True, has_active_swap=True, active_swap_backings=BACKING_BIT_SOL, busy_until=[0, 0])
+        )
+        c.deactivate.return_value = 'SIG' * 10
+        with patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)):
+            res = CliRunner().invoke(miner_group, ['deactivate', '--backing', 'tao'])
+    assert res.exit_code == 0, res.output
+    c.deactivate.assert_called_once_with(backing='tao')
+
+
+def test_deactivate_backing_tao_still_blocked_when_the_tao_hub_is_busy():
+    # The per-hub gate must not exceed the contract: a TAO-hub swap still blocks a TAO exit.
+    with patch('allways.cli.swap_commands.miner_commands.time') as t:
+        t.time.return_value = 5_000
+        c = _client(state=_state(active=True, has_active_swap=True, active_swap_backings=BACKING_BIT_TAO))
+        with patch('allways.cli.swap_commands.miner_commands.get_solana_cli_context', return_value=({}, c)):
+            res = CliRunner().invoke(miner_group, ['deactivate', '--backing', 'tao'])
+    assert res.exit_code != 0
+    c.deactivate.assert_not_called()
+
+
+def test_withdraw_allowed_while_tao_purse_active():
+    # V-4: withdraw_collateral gates on the SOL hub only, so a serving TAO purse must not block it.
+    with patch('allways.cli.swap_commands.collateral.time') as t:
+        t.time.return_value = 1_000_000
+        c = _client(state=_state(active=True, active_backings=BACKING_BIT_TAO), collateral=5_000_000_000)
+        c.withdraw_collateral.return_value = 'SIG' * 10
+        with patch('allways.cli.swap_commands.collateral.get_solana_cli_context', return_value=({}, c)):
+            res = CliRunner().invoke(collateral_group, ['withdraw', '--amount', '1', '--yes'])
+    assert res.exit_code == 0, res.output
+    c.withdraw_collateral.assert_called_once_with(1_000_000_000)
 
 
 def test_bind_hotkey_signs_and_binds():

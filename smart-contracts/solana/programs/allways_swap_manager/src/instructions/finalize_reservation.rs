@@ -124,10 +124,9 @@ pub fn handler(
     // penalty on that chain. Both are no-ops for "sol", which settles inside `timeout_swap`.
     backing::check_entry_gates(cfg, &ctx.accounts.miner_state, backing, now)?;
 
-    // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front, NET of what
-    // in-flight obligations already reserve (the v3.1 guardrail: N fills can never share one pot's
-    // headroom). Collateral only rises while busy, so vote_initiate's identical gate can't later
-    // strand a user who has already sent source funds.
+    // Over-collateralization gate: hold 1.10× THIS fill in the backing purse up front, NET of in-flight
+    // reservations. An attested purse (TAO) FALLS as fees settle, so `vote_set_attestation` refuses a
+    // downward write while the hub is held — that, not any "only rises", holds the gate through initiate.
     let purse = backing::backing_purse(
         backing,
         &ctx.accounts.miner_state,

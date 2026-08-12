@@ -6,12 +6,14 @@ import time
 import click
 from rich.table import Table
 
+from allways.chains import SUPPORTED_CHAINS
 from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     activation_prerequisites,
     backing_label,
     console,
+    declarable_backings,
     fail,
     from_lamports,
     get_cli_context,
@@ -24,7 +26,7 @@ from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.constants import TAO_TO_RAO
 from allways.solana.client import SolanaClientError, swap_from_solana, swap_key_from_tx_hash
-from allways.solana.layouts import lock_max
+from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_BITS
 from allways.utils.rate import directional_rate
 
@@ -335,22 +337,25 @@ def miner_deactivate(backing: str):
         if backing not in BACKING_BITS:
             fail(f'--backing must be one of: {", ".join(BACKING_BITS)} (got "{backing}")')
 
-    # Pre-flight: the program guards deactivate() on no-active-swap + past busy_until (both global —
-    # one swap at a time spans purses).
+    # Pre-flight mirrors deactivate()'s per-hub gate (v3.1): a --backing exit only needs THAT hub
+    # idle; the full exit needs every hub idle (the OR view). Match the contract, never exceed it.
     try:
         now = int(time.time())
         ms = client.get_miner_state(pubkey)
         if ms is None or not ms.active:
             console.print('[yellow]Miner is not active.[/yellow]\n')
             return
-        if backing is not None and not int(ms.active_backings) & BACKING_BITS[backing]:
+        bit = BACKING_BITS[backing] if backing is not None else None
+        if bit is not None and not int(ms.active_backings) & bit:
             console.print(f'[yellow]Your {backing.upper()} purse is already not serving.[/yellow]\n')
             return
-        if ms.has_active_swap:
+        swapping = hub_swap_on(ms, bit) if bit is not None else ms.has_active_swap
+        busy_until = hub_busy_until(ms, bit) if bit is not None else lock_max(ms.busy_until)
+        if swapping:
             console.print('[dim]Wait for it to complete or time out, then try again.[/dim]')
             fail('Cannot deactivate: you have an active swap.')
-        if lock_max(ms.busy_until) > now:
-            remaining = lock_max(ms.busy_until) - now
+        if busy_until > now:
+            remaining = busy_until - now
             fail(f'Cannot deactivate: you are busy (open pool / held reservation), ~{remaining}s left.')
     except SolanaClientError as e:
         fail(f'Failed to read miner state: {e}')
@@ -371,6 +376,67 @@ def miner_deactivate(backing: str):
             )
     except SolanaClientError as e:
         fail(f'Failed to deactivate: {e}')
+
+
+@miner_group.command('remove-quote')
+@click.option('--from', 'from_chain', required=True, type=str, help='Source chain of the quote to retract')
+@click.option('--to', 'to_chain', required=True, type=str, help='Destination chain of the quote to retract')
+@click.option(
+    '--backing',
+    default=None,
+    type=str,
+    help='Which purse-backed quote to retract (sol|tao). Inferred when only one is live on the direction.',
+)
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def miner_remove_quote(from_chain: str, to_chain: str, backing: str, yes: bool):
+    """Retract ONE posted quote — a direction plus the purse that backs it.
+
+    [dim]Quotes are keyed per (direction, backing): re-pricing a direction under a different
+    --backing leaves the old backing's quote live at its stale price. This takes that orphan down;
+    the sibling on the other purse (if any) keeps trading. The PDA's rent returns to you (churn fee
+    to treasury).[/dim]
+
+    [dim]Examples:
+        $ alw miner remove-quote --from sol --to tao --backing sol[/dim]
+    """
+    from_chain = (from_chain or '').lower()
+    to_chain = (to_chain or '').lower()
+    if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
+        fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
+    declarable = declarable_backings(from_chain, to_chain)  # fails if the pair has no hub leg
+
+    _, client = get_solana_cli_context()
+    miner = client.keypair.pubkey()
+
+    live = [b for b in declarable if client.get_quote(miner, from_chain, to_chain, b) is not None]
+    if backing is not None:
+        backing = backing.lower()
+        if backing not in declarable:
+            fail(f'--backing {backing} is not a leg of {from_chain}->{to_chain} (pick from: {", ".join(declarable)}).')
+        target = backing
+    elif not live:
+        fail(f'No live quote on {from_chain.upper()}->{to_chain.upper()} to remove.')
+    elif len(live) > 1:
+        fail(f'Two live quotes on {from_chain.upper()}->{to_chain.upper()} ({", ".join(live)}); pass --backing.')
+    else:
+        target = live[0]
+
+    if client.get_quote(miner, from_chain, to_chain, target) is None:
+        console.print(
+            f'[yellow]No {backing_label(target)} quote on {from_chain.upper()}->{to_chain.upper()}.[/yellow]\n'
+        )
+        return
+    if not yes and not click.confirm(
+        f'Remove your {backing_label(target)} quote on {from_chain.upper()}->{to_chain.upper()}?'
+    ):
+        console.print('[yellow]Cancelled[/yellow]')
+        return
+    try:
+        with loading('Removing quote...'):
+            sig = client.remove_quote(from_chain, to_chain, backing=target)
+        console.print(f'[green]Quote removed[/green] (sig: {sig[:16]}...)')
+    except SolanaClientError as e:
+        fail(f'Failed to remove quote: {e}')
 
 
 @miner_group.command('mark-fulfilled')

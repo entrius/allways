@@ -22,7 +22,8 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.constants import MIN_BALANCE_FOR_TX_RAO
 from allways.solana.client import SolanaClientError
-from allways.solana.layouts import lock_max
+from allways.solana.layouts import hub_busy_until, hub_swap_on
+from allways.solana.pdas import BACKING_BIT_SOL
 
 # Lamport gas buffer kept free on the Solana keypair so a post/withdraw tx never fails on fees.
 SOLANA_FEE_BUFFER_LAMPORTS = 5_000
@@ -134,14 +135,16 @@ def collateral_withdraw(amount: float | None, yes: bool):
         if ms is None:
             fail('No miner state found for this keypair (no collateral posted).')
 
-        if ms.active:
-            fail('Cannot withdraw while miner is active. Run `alw miner deactivate` first.')
+        # withdraw_collateral touches the SOL vault only, so its gate is the SOL hub — a TAO purse
+        # still serving (or mid-swap) never blocks a SOL withdrawal (v3.1). Match the contract.
+        if int(getattr(ms, 'active_backings', 0)) & BACKING_BIT_SOL:
+            fail('Cannot withdraw while your SOL purse is active. Run `alw miner deactivate --backing sol` first.')
 
-        if ms.has_active_swap:
-            fail('Cannot withdraw while miner has an active swap.')
+        if hub_swap_on(ms, BACKING_BIT_SOL):
+            fail('Cannot withdraw while a SOL-backed swap is in flight.')
 
-        if lock_max(ms.busy_until) > now:
-            fail('Cannot withdraw while miner is busy (open pool / held reservation).')
+        if hub_busy_until(ms, BACKING_BIT_SOL) > now:
+            fail('Cannot withdraw while your SOL hub is busy (open pool / held reservation).')
 
         if ms.deactivation_at > 0:
             config = client.get_config()

@@ -335,6 +335,12 @@ pub mod allways_swap_manager {
     pub fn close_legacy_initiate_round(ctx: Context<CloseLegacyInitiateRound>) -> Result<()> {
         close_legacy_slot::close_initiate_round(ctx)
     }
+    /// Admin break-glass: decode a pre-v3 (v10-layout, implicitly SOL-backed) `Swap` that survived an
+    /// upgrade — undecodable by the live type — reap it (rent → user), and emit its terms so the relay
+    /// settles the refund. Unreachable in the normal flow (the migrate drain gate blocks live Swaps).
+    pub fn close_legacy_swap(ctx: Context<CloseLegacySwap>, swap_key: [u8; 32], miner: Pubkey) -> Result<()> {
+        close_legacy_swap::handler(ctx, swap_key, miner)
+    }
 
     // --- Identity binding ---
     /// A miner links its Solana pubkey to its Bittensor hotkey (stores the hotkey + an sr25519 sig the

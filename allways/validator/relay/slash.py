@@ -29,6 +29,7 @@ def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
     miner = str(fields['miner'])
     snapshot = relay.store.get_relay_swap(swap_key)
     user_addr = _payable(snapshot['user_addr']) if snapshot else ''
+    hotkey = (snapshot.get('hotkey') if snapshot else None) or None
     if not user_addr:
         # No snapshot (fresh state DB, or down for the swap's whole life): the event names the payee
         # itself, so history alone is enough to discharge this. Older verdicts predate the field and
@@ -48,6 +49,7 @@ def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
         int(fields['reimbursement']),
         user_addr,
         block_time,
+        hotkey,
     )
     relay.mark_dirty(miner)
     bt.logging.info(
@@ -98,7 +100,9 @@ def relay_verdicts(relay, now: int) -> bool:
 def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
     swap_key = row['swap_key']
     miner = row['miner']
-    hotkey = relay.hotkey_for(miner)
+    # F1: the observe-time snapshot (H1) is authoritative; a rebind after acceptance must not move
+    # the seizure. Fall back to the live lookup only when no snapshot was taken (pre-F1 rows).
+    hotkey = row.get('hotkey') or relay.hotkey_for(miner)
     if hotkey is None:
         bt.logging.warning(f'relay: {miner[:8]} has no hotkey binding — cannot slash its bond')
         return False

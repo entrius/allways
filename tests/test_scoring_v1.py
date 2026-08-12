@@ -418,24 +418,36 @@ class TestComputeDirectionPools:
     """Pair-level volume weighting WITHIN a hub family: each family holds a fixed
     share ∝ its pair count (hub-leg volumes aren't comparable across hubs), a pair's
     share within it is (1−α)/family_pairs + α·family_volume_share, split evenly
-    between its two legs; zero volume falls back to the equal DIRECTION_POOLS split."""
+    between its two legs, then evenly across each leg's backing lanes (F4 — two on
+    sol↔tao, one on spokes); zero volume falls back to the same lane split of
+    DIRECTION_POOLS. Keys are lanes: (from, to, backing)."""
 
     # A pair's floor leg is the same under family or global blending:
     # family_share × (1−α)/family_pairs == (1−α)/total_pairs.
     FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / N_PAIRS / 2
 
     def test_no_volume_falls_back_to_equal_split(self):
-        assert compute_direction_pools({}) == DIRECTION_POOLS
+        pools = compute_direction_pools({})
+        # Spoke lanes keep the exact per-direction fallback pool.
+        assert pools[('btc', 'sol', 'sol')] == DIRECTION_POOLS[('btc', 'sol')]
+        assert pools[('tao', 'btc', 'tao')] == DIRECTION_POOLS[('tao', 'btc')]
+        # sol↔tao's two lanes split their direction's pool — budget-neutral, not grown.
+        assert pools[('sol', 'tao', 'sol')] == DIRECTION_POOLS[('sol', 'tao')] / 2
+        assert pools[('sol', 'tao', 'tao')] == pools[('sol', 'tao', 'sol')]
+        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_single_pair_volume_tilts_both_its_legs_equally(self):
         pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
         busy = self.FLOOR_LEG + MINER_POOL_SHARE * SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA / 2
-        assert pools[('btc', 'sol')] == pytest.approx(busy)
-        assert pools[('sol', 'btc')] == pools[('btc', 'sol')]  # quiet leg rides its pair
-        assert pools[('sol', 'tao')] == pytest.approx(self.FLOOR_LEG)
-        assert pools[('tao', 'sol')] == pytest.approx(self.FLOOR_LEG)
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(busy)
+        assert pools[('sol', 'btc', 'sol')] == pools[('btc', 'sol', 'sol')]  # quiet leg rides its pair
+        # The hub↔hub pair's floor leg is contested per backing lane, half each.
+        assert pools[('sol', 'tao', 'sol')] == pytest.approx(self.FLOOR_LEG / 2)
+        assert pools[('sol', 'tao', 'tao')] == pytest.approx(self.FLOOR_LEG / 2)
+        assert pools[('tao', 'sol', 'sol')] == pytest.approx(self.FLOOR_LEG / 2)
+        assert pools[('tao', 'sol', 'tao')] == pytest.approx(self.FLOOR_LEG / 2)
         # SOL-family volume never leaks into the TAO family's fixed share.
-        assert pools[('tao', 'btc')] == pytest.approx(MINER_POOL_SHARE / (2 * N_PAIRS))
+        assert pools[('tao', 'btc', 'tao')] == pytest.approx(MINER_POOL_SHARE / (2 * N_PAIRS))
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_volume_is_the_hub_leg_summed_per_pair(self):
@@ -450,8 +462,12 @@ class TestComputeDirectionPools:
         )
         floor_pair = (1 - POOL_VOLUME_ALPHA) / N_PAIRS
         alpha_leg = SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA
-        assert pools[('btc', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.75) / 2)
-        assert pools[('tao', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.25) / 2)
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.75) / 2)
+        # Volume tilts the whole sol↔tao PAIR (never split by backing); each
+        # direction's tilted pool then halves across its two lanes.
+        tao_sol_direction = MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.25) / 2
+        assert pools[('tao', 'sol', 'sol')] == pytest.approx(tao_sol_direction / 2)
+        assert pools[('tao', 'sol', 'tao')] == pytest.approx(tao_sol_direction / 2)
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_families_split_independently(self):
@@ -463,13 +479,26 @@ class TestComputeDirectionPools:
                 ('tao', 'eth'): {'hk_b': (5, 10**9)},  # rao (tao is the hub leg of tao↔eth), tao family
             }
         )
-        sol_total = sum(v for (f, t), v in pools.items() if 'sol' in (f, t))
-        tao_family_total = sum(v for (f, t), v in pools.items() if 'sol' not in (f, t))
+        sol_total = sum(v for (f, t, _b), v in pools.items() if 'sol' in (f, t))
+        tao_family_total = sum(v for (f, t, _b), v in pools.items() if 'sol' not in (f, t))
         assert sol_total == pytest.approx(MINER_POOL_SHARE * SOL_FAMILY_SHARE)
         assert tao_family_total == pytest.approx(MINER_POOL_SHARE * (1 - SOL_FAMILY_SHARE))
         # The volumed tao pair outweighs its quiet siblings inside its family.
-        assert pools[('tao', 'eth')] > pools[('tao', 'btc')]
+        assert pools[('tao', 'eth', 'tao')] > pools[('tao', 'btc', 'tao')]
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+
+    def test_pool_conservation_holds_with_hub_hub_lanes(self):
+        # The F4 lane split is budget-neutral by construction: however volume lands
+        # (none, spoke-only, hub↔hub-heavy, mixed), lanes still sum to MINER_POOL_SHARE.
+        volume_cases = [
+            {},
+            {('sol', 'tao'): {'hk': (10**12, 1)}},  # all volume on the hub↔hub pair
+            {('btc', 'sol'): {'hk': (1, 10**12)}, ('sol', 'tao'): {'hk': (5 * 10**11, 1)}},
+            {('tao', 'eth'): {'hk': (10**9, 1)}, ('tao', 'sol'): {'hk': (1, 10**10)}},
+        ]
+        for volumes in volume_cases:
+            pools = compute_direction_pools(volumes)
+            assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE), volumes
 
     def test_leg_direction_within_pair_is_irrelevant(self):
         # 500 SOL cleared btc→sol vs 500 SOL cleared sol→btc: same pair volume,
@@ -1209,7 +1238,7 @@ class TestSnapshotCurrentCrownHolders:
 
         rows = snapshot_current_crown_holders(v, v.block)
 
-        holders = [row[2] for row in rows[('sol', 'btc')]]
+        holders = [row[3] for row in rows[('sol', 'btc', 'sol')]]
         assert holders == ['hk_funded']
         v.state_store.close()
 
@@ -1230,7 +1259,7 @@ class TestSnapshotCurrentCrownHolders:
 
         rows = snapshot_current_crown_holders(v, v.block)
 
-        holders = [row[2] for row in rows[('btc', 'sol')]]
+        holders = [row[3] for row in rows[('btc', 'sol', 'sol')]]
         assert holders == ['hk_funded']
         v.state_store.close()
 
@@ -1261,7 +1290,7 @@ class TestLedgerSnapshotAgreement:
             )
         conn.commit()
 
-        snapshot_holders = [row[2] for row in snapshot_current_crown_holders(v, v.block)[('btc', 'sol')]]
+        snapshot_holders = [row[3] for row in snapshot_current_crown_holders(v, v.block)[('btc', 'sol', 'sol')]]
         ledger = replay_crown_time_window(
             store=v.state_store,
             event_index=v.event_index,
@@ -2611,9 +2640,9 @@ class TestScoreSnapshots:
         kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
         rows = kwargs['miner_score_rows']
         assert len(rows) == 1
-        (round_ts, hotkey, from_c, to_c, eligible, pool, crown_share, capacity, reward) = rows[0]
+        (round_ts, hotkey, from_c, to_c, backing, eligible, pool, crown_share, capacity, reward) = rows[0]
         assert round_ts == v.block  # round keyed by window_end
-        assert (hotkey, from_c, to_c) == ('hk_a', 'btc', 'sol')
+        assert (hotkey, from_c, to_c, backing) == ('hk_a', 'btc', 'sol', 'sol')
         assert eligible is True
         np.testing.assert_allclose((crown_share, capacity), (1.0, 1.0))
         # hk_a's own swap put all the window's volume on the BTC pair, so the
@@ -2641,7 +2670,7 @@ class TestScoreSnapshots:
         rewards, _ = calculate_miner_rewards(v, v.block)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
         assert len(rows) == 1
-        (_ts, _hk, _from_c, _to_c, eligible, pool, crown_share, _cap, reward) = rows[0]
+        (_ts, _hk, _from_c, _to_c, _backing, eligible, pool, crown_share, _cap, reward) = rows[0]
         assert eligible is False
         np.testing.assert_allclose(crown_share, 1.0)  # crown_share still recorded
         assert pool > 0.0  # the pool the round would have paid on is recorded too
@@ -2726,14 +2755,22 @@ class TestPerHubBusy:
         watcher = make_watcher(store, active={'hk_a'})
         conn = store.require_connection()
         for from_c, to_c, rate in directions:
+            # F4: a direction is crown-scored against its hub leg's purse, so pin the rate row's
+            # backing — sol anchors any pair it's a leg of, else tao — or a tao-hub quote is looked
+            # up under 'sol' and never found.
+            backing = 'sol' if 'sol' in (from_c, to_c) else 'tao'
             conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                ('hk_a', from_c, to_c, rate, 0),
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block, collateral_chain)'
+                ' VALUES (?, ?, ?, ?, ?, ?)',
+                ('hk_a', from_c, to_c, rate, 0, backing),
             )
         conn.commit()
+        # F4: fund both purses so per-hub crown reflects busy-independence, not a missing bond.
+        store.insert_collateral_event(0, 'hk_a', 500_000_000, 'sol')
+        store.insert_collateral_event(0, 'hk_a', 500_000_000, 'tao')
         return store, watcher
 
-    def _replay(self, store, from_chain, to_chain):
+    def _replay(self, store, from_chain, to_chain, backing=None):
         return replay_crown_time_window(
             store=store,
             event_index=SolanaEventIndex(store),
@@ -2742,6 +2779,9 @@ class TestPerHubBusy:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
+            backing=backing,
         )
 
     def test_sol_busy_keeps_tao_hub_crown(self, tmp_path: Path):
@@ -2761,13 +2801,22 @@ class TestPerHubBusy:
         assert self._replay(store, 'sol', 'btc') == {'hk_a': 1000.0}
         store.close()
 
-    def test_hub_hub_direction_forfeits_only_when_both_purses_busy(self, tmp_path: Path):
-        # sol busy (300,800], tao busy (600,900] → sol↔tao forfeits only the overlap
-        # (600,800]: while either purse is clean, its quote can still be reserved.
-        store, watcher = self._seed(tmp_path, [('sol', 'tao', 2.0)])
+    def test_hub_hub_lanes_forfeit_their_own_busy_spans_independently(self, tmp_path: Path):
+        # F4 lanes: sol↔tao is two replays, each gated on its OWN hub's busy. sol busy
+        # (300,800] forfeits only the sol lane; tao busy (600,900] only the tao lane —
+        # a busy sibling purse never suppresses the other lane's crown.
+        store, watcher = self._seed(tmp_path, [('sol', 'tao', 2.0)])  # _seed pins the sol-backed quote
+        conn = store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block, collateral_chain)'
+            ' VALUES (?, ?, ?, ?, ?, ?)',
+            ('hk_a', 'sol', 'tao', 2.0, 0, 'tao'),
+        )
+        conn.commit()
         watcher.reserve_then_swap('hk_a', reserve_block=300, init_block=300, end_block=800, backing='sol')
         watcher.reserve_then_swap('hk_a', reserve_block=600, init_block=600, end_block=900, backing='tao')
-        assert self._replay(store, 'sol', 'tao') == {'hk_a': 800.0}
+        assert self._replay(store, 'sol', 'tao', backing='sol') == {'hk_a': 500.0}
+        assert self._replay(store, 'sol', 'tao', backing='tao') == {'hk_a': 700.0}
         store.close()
 
     def test_legacy_hubless_span_forfeits_every_direction(self, tmp_path: Path):
@@ -2786,3 +2835,123 @@ class TestPerHubBusy:
         assert self._replay(store, 'sol', 'btc') == {'hk_a': 600.0}
         assert self._replay(store, 'tao', 'btc') == {'hk_a': 1000.0}
         store.close()
+
+
+class TestDualBackingLanes:
+    """F4 dual-backing scoring: sol↔tao is TWO lanes, (sol↔tao, sol) and (sol↔tao, tao),
+    each scored against its own purse/rate/busy, under a budget-neutral split of the pair
+    pool. The regression closed: a TAO-backed sol↔tao quote was filed under 'tao'
+    (rate_events.collateral_chain) but read under hub_leg='sol' — it routed real swaps
+    yet earned 0 crown forever."""
+
+    LANE_POOL = DIRECTION_POOLS[('sol', 'tao')] / 2
+    BOUNDS = dict(
+        min_swap_amount=100_000_000,
+        max_swap_amount=500_000_000,
+        tao_min_swap_amount=100_000_000,
+        tao_max_swap_amount=500_000_000,
+    )
+
+    def _seed_quote(self, v: SimpleNamespace, hotkey: str, backing: str, rate: float = 2.0) -> None:
+        conn = v.state_store.require_connection()
+        conn.execute(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block, collateral_chain)'
+            ' VALUES (?, ?, ?, ?, ?, ?)',
+            (hotkey, 'sol', 'tao', rate, 0, backing),
+        )
+        conn.commit()
+
+    def _fund_tao(self, v: SimpleNamespace, hotkey: str, amount_rao: int = 550_000_000) -> None:
+        # The tao purse is the attested TAO bond stream — fed per backing, not by the
+        # SOL CollateralPosted events make_validator seeds.
+        v.state_store.insert_collateral_event(0, hotkey, amount_rao, 'tao')
+
+    def test_dual_purse_miner_earns_both_lanes(self, tmp_path: Path):
+        """A sol-backed AND a tao-backed sol↔tao quote earn on BOTH lanes: two non-zero
+        score rows with distinct backing, summing to today's whole pair-direction pool
+        (the split is budget-neutral — an uncontested dual-purse miner loses nothing)."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000}, **self.BOUNDS)
+        v.database_storage.is_enabled.return_value = True
+        self._seed_quote(v, 'hk_a', 'sol')
+        self._seed_quote(v, 'hk_a', 'tao')
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], DIRECTION_POOLS[('sol', 'tao')], atol=1e-6)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        # (ts, hotkey, from, to, backing, eligible, pool, crown_share, capacity, reward)
+        rewards_by_lane = {(r[2], r[3], r[4]): r[9] for r in rows if r[1] == 'hk_a'}
+        assert rewards_by_lane[('sol', 'tao', 'sol')] > 0
+        assert rewards_by_lane[('sol', 'tao', 'tao')] > 0
+        v.state_store.close()
+
+    def test_tao_backed_quote_alone_earns_the_tao_lane(self, tmp_path: Path):
+        """THE F4 regression: a TAO-only miner (tao-backed quote + attested TAO bond, no
+        SOL quote or purse) used to earn 0 forever; it now takes the tao lane's pool."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, **self.BOUNDS)
+        self._seed_quote(v, 'hk_a', 'tao')
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        assert rewards[0] > 0
+        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        v.state_store.close()
+
+    def test_sol_only_rival_competes_only_for_the_sol_lane(self, tmp_path: Path):
+        """A SOL-only rival contests the sol lane (equal rate + equal depth → even split)
+        but never touches the tao lane — that half stays the dual-purse miner's alone."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000, 'hk_b': 550_000_000}, **self.BOUNDS)
+        for backing in ('sol', 'tao'):
+            self._seed_quote(v, 'hk_a', backing)
+        self._seed_quote(v, 'hk_b', 'sol')
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], self.LANE_POOL * 1.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], self.LANE_POOL * 0.5, atol=1e-6)
+        v.state_store.close()
+
+    def test_tao_busy_swap_zeroes_only_the_tao_lane(self, tmp_path: Path):
+        """#646's per-hub busy extended into the backing dimension: a TAO-backed swap
+        spanning the whole window forfeits the tao lane (recycles — no rival), while the
+        sol lane keeps its full crown."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000}, **self.BOUNDS)
+        for backing in ('sol', 'tao'):
+            self._seed_quote(v, 'hk_a', backing)
+        self._fund_tao(v, 'hk_a')
+        # Window is (9_700, 10_000]; the tao-backed swap brackets it entirely.
+        v.event_watcher.reserve_then_swap(
+            'hk_a', reserve_block=9_000, init_block=9_000, end_block=11_000, backing='tao'
+        )
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        v.state_store.close()
+
+    def test_tao_settle_zeroes_only_the_tao_lane_row(self, tmp_path: Path):
+        """V-2 end-to-end: a miner mid-TAO-settle is gated to zero on the tao lane for the
+        round while the sol lane still pays — per-hub array settling shape, tao slot set."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            collaterals={'hk_a': 550_000_000},
+            settling={'hk_a': [0, 4_000_000_000, 0, 0, 0, 0, 0, 0]},
+            **self.BOUNDS,
+        )
+        for backing in ('sol', 'tao'):
+            self._seed_quote(v, 'hk_a', backing)
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        v.state_store.close()

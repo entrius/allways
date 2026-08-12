@@ -9,6 +9,7 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
 from solders.keypair import Keypair
 
 from allways.solana import events
@@ -295,6 +296,89 @@ def test_poll_reingests_previously_unstamped_once_stamped():
     records, cursor = SolanaEventIngest(client).poll(until_sig='sigA')
     assert [r.signature for r in records] == ['sigB', 'sigC']
     assert cursor == 'sigC'
+
+
+class PagingRpc:
+    """A faithful `get_signatures_for_address`: newest-first, `before`-paged, stopping at `until`."""
+
+    def __init__(self, sigs):
+        self.sigs = sigs  # newest-first
+
+    def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
+        start = 0
+        if before is not None:
+            start = next(i for i, s in enumerate(self.sigs) if s['signature'] == before) + 1
+        out = []
+        for s in self.sigs[start:]:
+            if until is not None and s['signature'] == until:
+                break
+            out.append(s)
+            if len(out) == limit:
+                break
+        return out
+
+
+class PagingClient:
+    def __init__(self, sigs, ev):
+        self.program_id = 'PROG'
+        self.rpc = PagingRpc(sigs)
+        self._ev = ev
+
+    def get_event_logs(self, sig):
+        return [self._ev]
+
+
+def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
+    # F3: a backlog deeper than max_pages*page_size must not silently drop the older gap. With
+    # max_pages=2, page_size=2 the poller can reach only 4 of the 5 new signatures in one pass; it
+    # buffers and resumes deeper next tick, holding its cursor until the whole window is assembled.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    # newest-first s5..s1; all stamped so nothing holds at an unstamped tip.
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), max_pages=2, page_size=2)
+
+    records, cursor = ingest.poll(until_sig=None)
+    assert records == [] and cursor is None, 'gap still open — cursor holds, nothing consumed yet'
+
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, oldest-first'
+    assert cursor == 's5'
+
+
+class FlakyPagingRpc(PagingRpc):
+    """A faithful pager that raises exactly once, on the page requested with `before == fail_before`
+    (the second page of the first pass here), then behaves normally on every later call."""
+
+    def __init__(self, sigs, fail_before):
+        super().__init__(sigs)
+        self._fail_before = fail_before
+
+    def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
+        if self._fail_before is not None and before == self._fail_before:
+            self._fail_before = None  # blip once, then recover
+            raise RuntimeError('rpc paging blip')
+        return super().get_signatures_for_address(program_id, before=before, until=until, limit=limit)
+
+
+def test_pagination_rolls_back_a_partial_page_on_a_mid_pagination_rpc_failure():
+    # F3 robustness: if paging fails partway, the buffered partial page must be rolled back. The caller
+    # holds its cursor and re-pages from the same resume point next tick, so a retained partial would be
+    # re-fetched — duplicating and reordering records in a later drain.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    client = PagingClient(sigs, ev)
+    client.rpc = FlakyPagingRpc(sigs, fail_before='s4')  # page 1 buffers [s5,s4]; page 2 (before=s4) blips
+    ingest = SolanaEventIngest(client, max_pages=2, page_size=2)
+
+    with pytest.raises(RuntimeError):
+        ingest.poll(until_sig=None)  # partial page must be rolled back, not left buffered
+
+    # Cursor was held; re-page cleanly. Without the rollback the drain would carry duplicated s4/s5.
+    records, cursor = ingest.poll(until_sig=None)
+    assert records == [] and cursor is None, 'gap still open — resumes deeper next tick'
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, no dupes, oldest-first'
+    assert cursor == 's5'
 
 
 def test_poll_abandons_ancient_unstamped_entry():

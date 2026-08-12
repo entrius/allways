@@ -132,11 +132,25 @@ def test_a_tao_settle_zeroes_only_tao_directions():
     assert direction_eligible(settling, 'tao', 'btc', 2_000)
     # ...while a SOL-hub direction keeps earning throughout.
     assert direction_eligible(settling, 'btc', 'sol', 1_999)
-    # A hub↔hub direction earns while EITHER purse is clean.
+    # A hub↔hub direction with no lane named reads pair-level: some lane still earns
+    # while EITHER purse is clean (per-lane zeroing is the backing= form below).
     assert direction_eligible(settling, 'sol', 'tao', 1_999)
     # Strikes stay global: struck out ⇒ no direction earns, settling or not.
     struck = _ns_hub(50, MAX_FAILED_SWAPS + 1)
     assert not direction_eligible(struck, 'btc', 'sol', 1_999)
+
+
+def test_tao_share_of_hub_hub_direction_is_zeroed_mid_settle():
+    """V-2, fixed by the F4 dual-backing lanes: on sol↔tao a TAO-settling miner earns its
+    SOL-backed lane but NOT its TAO-backed lane, and the exclusion self-clears at the deadline."""
+    settling = _ns_hub(50, 0, tao_settling_until=2_000)
+    assert direction_eligible(settling, 'sol', 'tao', 1_999, backing='tao') is False  # TAO lane excluded
+    assert direction_eligible(settling, 'sol', 'tao', 1_999, backing='sol') is True  # SOL lane earns
+    assert direction_eligible(settling, 'sol', 'tao', 2_000, backing='tao') is True  # self-clearing
+    # Strikes stay global: struck out ⇒ neither lane earns, clean hubs or not.
+    struck = _ns_hub(50, MAX_FAILED_SWAPS + 1)
+    assert not direction_eligible(struck, 'sol', 'tao', 1_999, backing='sol')
+    assert not direction_eligible(struck, 'sol', 'tao', 1_999, backing='tao')
 
 
 def test_the_pre_v31_scalar_settling_shape_still_gates():

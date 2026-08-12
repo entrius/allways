@@ -345,6 +345,9 @@ class StatusClient:
         return self._swap
 
     def get_reservation(self, miner, backing='sol'):
+        # A dict models a dual-purse miner's per-hub slots (v3.1); a bare value is the same on every hub.
+        if isinstance(self._reservation, dict):
+            return self._reservation.get(backing)
         return self._reservation
 
     def get_hotkey_binding(self, hotkey_bytes):
@@ -472,19 +475,24 @@ class _ConfirmClient(FakeClient):
         self._reservation = reservation
         self.claims = []
         self.extensions = []
+        self.extend_backings = []
         self.extend_raises = False
 
     def get_reservation(self, miner, backing='sol'):
+        # A dict models a dual-purse miner's per-hub slots (v3.1); a bare value is the same on every hub.
+        if isinstance(self._reservation, dict):
+            return self._reservation.get(backing)
         return self._reservation
 
-    def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
-        self.claims.append((swap_key, from_tx_hash, from_tx_block))
+    def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block, backing='sol'):
+        self.claims.append((swap_key, from_tx_hash, from_tx_block, backing))
         return 'claimsig'
 
     def extend_reservation(self, miner, target_at, backing='sol'):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)
+        self.extend_backings.append(backing)
         return 'extendsig'
 
 
@@ -659,6 +667,64 @@ def test_confirm_claims_even_if_the_extension_fails():
     assert r.ok and client.claims
 
 
+# ── V-1: the deposit-confirm seam must scan per-hub slots, not the SOL default ──
+# v3.1 seeds a reservation per (miner, backing). A SOL-defaulted get_reservation reads the empty SOL
+# slot for a TAO-backed deposit, so no claim lands and the deposit is silently lost.
+def test_confirm_uses_tao_slot_when_sol_slot_empty():
+    resv = _near_expiry(20)  # near expiry so the runway extend also travels on the right hub
+    client = _ConfirmClient({'sol': None, 'tao': resv})
+    provider = _FakeProvider(_tx(confirmed=False, block_time=None))
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims
+    assert client.claims[0][3] == 'tao'  # claim submitted against the TAO hub, not the empty SOL slot
+    assert client.extend_backings == ['tao']  # runway bought on the same hub
+
+
+def test_confirm_no_live_unclaimed_slot_on_any_hub_rejects():
+    # Empty SOL + expired TAO: nothing live+unclaimed anywhere → no claim, TTL frees the miner.
+    client = _ConfirmClient({'sol': None, 'tao': _confirm_reservation(reserved_until=1)})
+    provider = _FakeProvider(_tx(confirmed=False, block_time=None))
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert not r.ok and not client.claims
+
+
+class _MatchingProvider:
+    """Verifies a deposit ONLY against the reservation whose pinned params it actually matches — unlike
+    _FakeProvider, which returns the same tx for every slot. Models the real per-hub matcher, so a
+    first-match scan that guesses the wrong hub is exposed."""
+
+    def __init__(self, amount, recipient):
+        self._amount = amount
+        self._recipient = recipient
+
+    def verify_transaction(self, *, tx_hash, expected_recipient, expected_amount, block_hint, expected_sender):
+        if int(expected_amount) != self._amount or expected_recipient != self._recipient:
+            return None
+        return _tx(confirmed=False, block_time=None)
+
+    @property
+    def chain_def(self):
+        return SimpleNamespace(replay_grace_secs=0)
+
+
+def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
+    # V-1 dual-live: a miner holds a live-unclaimed SOL reservation AND a live-unclaimed TAO reservation
+    # at once (v3.1 simultaneous swaps). A TAO deposit must be verified against the TAO slot — the old
+    # first-match scan checked SOL first, failed the content match, and stranded the deposit (or an
+    # attacker sitting on the SOL slot could shadow every TAO confirm on the miner).
+    sol = _confirm_reservation(from_amount=100_000, miner_from_addr='minerBTC_sol')
+    tao = _near_expiry(20, from_amount=777, miner_from_addr='minerBTC_tao')
+    client = _ConfirmClient({'sol': sol, 'tao': tao})
+    provider = _MatchingProvider(amount=777, recipient='minerBTC_tao')  # the real deposit is the TAO one
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'taoDeposit')
+    assert r.ok and client.claims
+    assert client.claims[0][3] == 'tao'  # claimed against the hub the deposit matched, not the first live slot
+    assert client.extend_backings == ['tao']
+
+
 # --- scan_deposit: the deposit watcher's hash-finder (confirm_deposit stays the verifier) ---
 
 
@@ -723,6 +789,56 @@ def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
     validator.solana_client._reservation = None
     assert scan_deposit(validator, HOTKEY) is None  # nothing reserved
     assert provider.calls == []
+    store.close()
+
+
+def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
+    # V-1: the scanner must find the live unclaimed TAO reservation, not read the empty SOL slot.
+    provider = _ScanProvider('depositTx')
+    client = StatusClient(reservation={'sol': None, 'tao': _scan_reservation(FUTURE)})
+    validator, store = _status_validator(tmp_path, client)
+    validator.axon_assets = {'btc': provider}
+    from allways.validator.reserve_engine import scan_deposit
+
+    assert scan_deposit(validator, HOTKEY) == 'depositTx'
+    store.close()
+
+
+def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
+    # V-1 dual-live: SOL slot (btc, nothing to find) + TAO slot (eth, the real deposit). The scanner must
+    # try every live hub — a first-match scan would stop at the SOL slot and miss the deposit entirely.
+    from allways.validator.reserve_engine import scan_deposit
+
+    sol = SimpleNamespace(
+        reserved_until=FUTURE,
+        claimed_swap_key=b'\x00' * 32,
+        from_chain='btc',
+        from_amount=10_000,
+        miner_from_addr='tb1qminer',
+        from_addr='tb1quser',
+    )
+    tao = SimpleNamespace(
+        reserved_until=FUTURE,
+        claimed_swap_key=b'\x00' * 32,
+        from_chain='eth',
+        from_amount=5,
+        miner_from_addr='0xminer',
+        from_addr='0xuser',
+    )
+    client = StatusClient(reservation={'sol': sol, 'tao': tao})
+    validator, store = _status_validator(tmp_path, client)
+    validator.axon_assets = {'btc': _ScanProvider(None), 'eth': _ScanProvider('ethDepositTx')}
+    assert scan_deposit(validator, HOTKEY) == 'ethDepositTx'
+    store.close()
+
+
+def test_swap_status_reads_tao_slot_when_sol_empty(tmp_path):
+    # V-1: status must surface a live TAO-hub reservation, not report 'none' off the empty SOL slot.
+    from allways.validator.reserve_engine import swap_status
+
+    client = StatusClient(reservation={'sol': None, 'tao': _unclaimed_reservation(FUTURE)})
+    validator, store = _status_validator(tmp_path, client)
+    assert swap_status(validator, HOTKEY).stage == 'reserved'
     store.close()
 
 

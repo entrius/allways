@@ -16,22 +16,37 @@ MINER_A = Pubkey.new_unique()
 MINER_B = Pubkey.new_unique()
 
 
-def miner_state(miner, collateral, active=True, has_active_swap=False, busy_until=0):
+def miner_state(
+    miner, collateral, active=True, has_active_swap=False, busy_until=0, active_backings=None, active_swap_backings=None
+):
+    # Real MinerState carries per-hub masks; default the active/swap masks to the SOL bit.
+    if active_backings is None:
+        active_backings = pdas.BACKING_BIT_SOL if active else 0
+    if active_swap_backings is None:
+        active_swap_backings = active_backings if has_active_swap else 0
     return SimpleNamespace(
         miner=bytes(miner),
         collateral=collateral,
         active=active,
+        active_backings=active_backings,
         has_active_swap=has_active_swap,
+        active_swap_backings=active_swap_backings,
         busy_until=busy_until,
     )
 
 
+def bond(effective_balance, locked=True):
+    return SimpleNamespace(effective_balance=effective_balance, locked=locked)
+
+
 class FakeClient:
-    def __init__(self, states):
+    def __init__(self, states, bonds=None):
         # {pubkey_str: miner_state}; mutate `states` to simulate chain changes.
         self.states = states
+        self.bonds = bonds or {}  # {(pubkey_str, chain): bond}
         self.keypair = SimpleNamespace(pubkey=lambda: Pubkey.new_unique())
         self.voted = set()
+        self.vote_backings = []  # (miner_str, backing) in call order
         self.calls = {'get_all': 0, 'get_miner_state': 0, 'vote_deactivate': 0}
         self.fail_get_all = 0  # raise on this many get_all calls before serving
         self.fail_state_for = set()  # miner keys whose reads raise
@@ -50,13 +65,17 @@ class FakeClient:
             raise RuntimeError('rpc down')
         return self.states.get(str(miner))
 
+    def get_bond_attestation(self, miner, chain='tao'):
+        return self.bonds.get((str(miner), chain))
+
     def has_voted(self, req_type, miner, voter):
         assert req_type == pdas.REQ_DEACTIVATE
         return str(miner) in self.voted
 
-    def vote_deactivate(self, miner):
+    def vote_deactivate(self, miner, backing='sol'):
         self.calls['vote_deactivate'] += 1
         self.voted.add(str(miner))
+        self.vote_backings.append((str(miner), backing))
         return 'sig'
 
 
@@ -115,6 +134,84 @@ class TestRaise:
         assert client.calls['vote_deactivate'] == 0
 
 
+TAO_FLOOR = 2_000_000_000  # 2 TAO (rao)
+SOL_BIT = pdas.BACKING_BIT_SOL
+TAO_BIT = pdas.BACKING_BIT_TAO
+
+
+class TestPerHubFloors:
+    """F11: resolve each hub against its own floor, vote the DEFICIENT backing."""
+
+    def test_sol_bit_down_sweeps_tao_never_livelocks_on_sol(self):
+        # SOL bit already cleared (a SOL-side slash), SOL vault still under floor (the
+        # trap the old default-'sol' vote livelocked on), TAO purse also deficient.
+        client = FakeClient(
+            {str(MINER_A): miner_state(MINER_A, 100, active_backings=TAO_BIT)},
+            bonds={(str(MINER_A), 'tao'): bond(1_000_000_000)},
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.vote_backings == [(str(MINER_A), 'tao')]  # never 'sol'
+
+    def test_tao_purse_under_its_floor_is_swept(self):
+        client = FakeClient(
+            {str(MINER_A): miner_state(MINER_A, FLOOR, active_backings=SOL_BIT | TAO_BIT)},
+            bonds={(str(MINER_A), 'tao'): bond(1_000_000_000)},  # under TAO_FLOOR
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.vote_backings == [(str(MINER_A), 'tao')]
+
+    def test_clean_backings_are_not_swept(self):
+        client = FakeClient(
+            {str(MINER_A): miner_state(MINER_A, FLOOR, active_backings=SOL_BIT | TAO_BIT)},
+            bonds={(str(MINER_A), 'tao'): bond(TAO_FLOOR)},  # exactly at floor
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.calls['vote_deactivate'] == 0
+
+    def test_deficient_sol_votes_sol_on_a_dual_purse_miner(self):
+        client = FakeClient(
+            {str(MINER_A): miner_state(MINER_A, 100, active_backings=SOL_BIT | TAO_BIT)},
+            bonds={(str(MINER_A), 'tao'): bond(TAO_FLOOR)},  # TAO fine, SOL under floor
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.vote_backings == [(str(MINER_A), 'sol')]
+
+    def test_tao_floor_raise_arms_the_scan(self):
+        client = FakeClient(
+            {str(MINER_A): miner_state(MINER_A, FLOOR, active_backings=SOL_BIT | TAO_BIT)},
+            bonds={(str(MINER_A), 'tao'): bond(1_000_000_000)},
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, 0)  # boot with no TAO floor: TAO purse can't be under it
+        assert client.calls['vote_deactivate'] == 0
+        sweep.step(FLOOR, TAO_FLOOR)  # the TAO floor raise
+        assert client.calls['get_all'] == 2
+        assert client.vote_backings == [(str(MINER_A), 'tao')]
+
+    def test_busy_sibling_hub_does_not_defer_the_deficient_kick(self):
+        # V-4: a SOL swap in flight (OR-view has_active_swap=True) must NOT defer a TAO kick — the
+        # contract's vote_deactivate gate is per-hub, so only the TAO hub's own lock matters.
+        client = FakeClient(
+            {
+                str(MINER_A): miner_state(
+                    MINER_A,
+                    FLOOR,  # SOL fine
+                    active_backings=SOL_BIT | TAO_BIT,
+                    has_active_swap=True,
+                    active_swap_backings=SOL_BIT,  # the swap is on SOL, not TAO
+                )
+            },
+            bonds={(str(MINER_A), 'tao'): bond(1_000_000_000)},  # TAO under floor
+        )
+        sweep = CollateralFloorSweep(client, clock=Clock())
+        sweep.step(FLOOR, TAO_FLOOR)
+        assert client.vote_backings == [(str(MINER_A), 'tao')]
+
+
 class TestPending:
     def test_busy_miner_retried_after_interval_not_before(self):
         clock = Clock()
@@ -128,6 +225,7 @@ class TestPending:
         assert client.calls['get_miner_state'] == 0
 
         state.has_active_swap = False  # swap resolved on-chain
+        state.active_swap_backings = 0
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
         assert client.calls['get_miner_state'] == 1
@@ -162,6 +260,7 @@ class TestPending:
         sweep.step(FLOOR)
 
         state.has_active_swap = False
+        state.active_swap_backings = 0
         state.collateral = FLOOR  # posted collateral to comply instead
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
@@ -207,6 +306,7 @@ class TestRpcFailure:
 
         for ms in client.states.values():
             ms.has_active_swap = False
+            ms.active_swap_backings = 0
         client.fail_state_for = {str(MINER_A)}
         clock.now += CollateralFloorSweep.RETRY_SECS
         sweep.step(FLOOR)
@@ -251,7 +351,7 @@ class TestStaleVoteRound:
         state = miner_state(MINER_A, 100)
         client = FakeClient({str(MINER_A): state})
 
-        def racing_vote(miner):
+        def racing_vote(miner, backing='sol'):
             client.calls['vote_deactivate'] += 1
             raise RuntimeError('custom program error. Error Message: AlreadyVoted.')
 

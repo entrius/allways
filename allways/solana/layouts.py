@@ -29,6 +29,22 @@ def lock_max(value) -> int:
     return int(value or 0)
 
 
+def hub_swap_on(state, bit: int) -> bool:
+    """Whether ONE hub has an in-flight swap — its `active_swap_backings` bit (v3.1 per-hub state).
+    Mirrors the contract's ``MinerState::swap_on`` so a preflight matches the gate, not the OR view."""
+    return bool(int(getattr(state, 'active_swap_backings', 0) or 0) & bit)
+
+
+def hub_busy_until(state, bit: int) -> int:
+    """ONE hub's busy deadline from the per-hub ``busy_until`` array (contract ``busy_slot``), indexed
+    by bit position. Tolerates the pre-v3.1 scalar shape (the OR view) so mixed-version reads stay safe."""
+    arr = getattr(state, 'busy_until', 0)
+    if isinstance(arr, (list, tuple)):
+        idx = max(bit.bit_length() - 1, 0)
+        return int(arr[idx]) if idx < len(arr) else 0
+    return int(arr or 0)
+
+
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)
@@ -259,6 +275,7 @@ EVENT_DISCRIMINATORS = {
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
+    'LegacySwapClosed': bytes([3, 153, 162, 14, 136, 34, 47, 239]),
     'MinerActivated': bytes([203, 75, 131, 151, 24, 167, 159, 19]),
     'MinerBackingChanged': bytes([158, 37, 88, 4, 80, 187, 116, 110]),
     'MinerDeactivated': bytes([31, 67, 233, 59, 174, 101, 245, 122]),
@@ -297,6 +314,13 @@ EVENT_LAYOUTS = {
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
+    'LegacySwapClosed': CStruct(
+        'swap_key' / Hash32,
+        'miner' / Pubkey32,
+        'user' / Pubkey32,
+        'collateral_amount' / U64,
+        'from_tx_hash' / String,
+    ),
     'MinerActivated': CStruct('miner' / Pubkey32, 'at' / I64),
     # Per-purse detail; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
     'MinerBackingChanged': CStruct(
@@ -410,6 +434,7 @@ EVENT_PUBKEY_FIELDS = {
     'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
+    'LegacySwapClosed': ['miner', 'user'],
     'MinerActivated': ['miner'],
     'MinerBackingChanged': ['miner'],
     'MinerDeactivated': ['miner'],

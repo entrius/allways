@@ -280,7 +280,13 @@ class SolanaSwapLoop:
         if not overdue:
             return SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
         if self._dest_refuses(swap):
-            return SwapAction(SwapDecision.WAIT, reason=f'{why} + overdue but dest refuses delivery — not slashing')
+            # Terminal past the ceiling: an undeliverable dest never recovers, so timing out is the only
+            # path that clears the hub bit — before it, keep deferring to protect a genuinely live miner.
+            if now < int(swap.max_extend_at):
+                return SwapAction(SwapDecision.WAIT, reason=f'{why} + overdue but dest refuses delivery — not slashing')
+            return SwapAction(
+                SwapDecision.TIMEOUT, reason=f'{why} + dest refuses past max_extend_at — terminal, slashing'
+            )
         return SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
 
     def _reject_logged(self, swap: Any, expected_to: int) -> None:
@@ -373,7 +379,12 @@ class SolanaSwapLoop:
         if status == 'Active':
             # Never extend: no mark_fulfilled = no broadcast evidence, so an overdue Active is slash-eligible.
             if overdue and self._dest_refuses(swap):
-                return SwapAction(SwapDecision.WAIT, reason='overdue but dest refuses delivery — not slashing')
+                # The refusal guard defers a slash so a transient dest fault can't punish a live miner —
+                # but an undeliverable dest never becomes deliverable, so at the max_extend_at ceiling it is
+                # terminal: time out (else has_active_swap never clears and the hub's collateral freezes).
+                if now < int(swap.max_extend_at):
+                    return SwapAction(SwapDecision.WAIT, reason='overdue but dest refuses delivery — not slashing')
+                return SwapAction(SwapDecision.TIMEOUT, reason='dest refuses past max_extend_at — terminal, slashing')
             return SwapAction(
                 SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
                 reason='overdue, miner never fulfilled — slashing' if overdue else 'awaiting miner mark_fulfilled',

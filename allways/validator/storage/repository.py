@@ -55,25 +55,27 @@ class Repository(BaseRepository):
         self,
         from_chain: str,
         to_chain: str,
+        backing: str,
         lo_ts: int,
         hi_ts: int,
         commit: bool = True,
     ) -> bool:
-        """Wipe crown_holders intervals starting in [lo_ts, hi_ts) for one direction."""
+        """Wipe crown_holders intervals starting in [lo_ts, hi_ts) for one lane."""
         if hi_ts <= lo_ts:
             return True
         return self.execute_command(
             DELETE_CROWN_IN_RANGE,
-            (from_chain, to_chain, lo_ts, hi_ts),
+            (from_chain, to_chain, backing, lo_ts, hi_ts),
             commit=commit,
         )
 
     def store_crown_holders_bulk(
         self,
-        rows: List[Tuple[int, int, str, str, str, float, float]],
+        rows: List[Tuple[int, int, str, str, str, str, float, float]],
         commit: bool = True,
     ) -> int:
-        """Upsert crown intervals. Rows: (started_at, ended_at, from_chain, to_chain, hotkey, credit, rate)."""
+        """Upsert crown intervals. Rows: (started_at, ended_at, from_chain,
+        to_chain, backing, hotkey, credit, rate)."""
         if not rows:
             return 0
         try:
@@ -100,7 +102,7 @@ class Repository(BaseRepository):
         commit: bool = True,
     ) -> int:
         """Upsert per-round score snapshots. Rows: (round_ts, hotkey, from_chain,
-        to_chain, eligible, pool, crown_share, capacity, reward)."""
+        to_chain, backing, eligible, pool, crown_share, capacity, reward)."""
         if not rows:
             return 0
         try:
@@ -121,7 +123,7 @@ class Repository(BaseRepository):
         commit: bool = True,
     ) -> int:
         """Wipe + rewrite the live score tip. Rows: (ts, hotkey, from_chain,
-        to_chain, eligible, pool, crown_share, capacity, reward).
+        to_chain, backing, eligible, pool, crown_share, capacity, reward).
         The table only holds the in-progress round, so
         the delete is unconditional; one transaction so readers never see a
         partial tip. An empty row list clears it (halt, or no crown holder)."""
@@ -141,23 +143,23 @@ class Repository(BaseRepository):
 
     def replace_current_crown(
         self,
-        rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]],
+        rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]],
         commit: bool = True,
     ) -> int:
-        """Replace current_crown_holders rows for each given direction.
-        Row tail int is the snapshot unix ts (was block).
+        """Replace current_crown_holders rows for each given lane
+        (from, to, backing). Row tail int is the snapshot unix ts (was block).
 
-        Per direction: delete all existing rows, then insert the supplied
+        Per lane: delete all existing rows, then insert the supplied
         winners. Wrapped in one transaction so a tied k-way holder set is
-        never partially visible. An empty row list for a direction clears
+        never partially visible. An empty row list for a lane clears
         it (no qualified holder at the current instant)."""
         if not rows_by_direction:
             return 0
         total = 0
         try:
             with self.get_cursor() as cursor:
-                for (from_chain, to_chain), rows in rows_by_direction.items():
-                    cursor.execute(DELETE_CURRENT_CROWN_BY_DIRECTION, (from_chain, to_chain))
+                for (from_chain, to_chain, backing), rows in rows_by_direction.items():
+                    cursor.execute(DELETE_CURRENT_CROWN_BY_DIRECTION, (from_chain, to_chain, backing))
                     if rows:
                         cursor.executemany(BULK_UPSERT_CURRENT_CROWN_HOLDERS, rows)
                         total += len(rows)

@@ -241,15 +241,17 @@ pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
         }
         if data.len() == V13_LEN {
             let legacy = MinerStateV13::deserialize(&mut &data[8..])?;
+            // Refuse a miner that still has an in-flight swap: a multi-hub v13 account has no way to
+            // say WHICH hub the swap was on, so marking every active hub in-flight would brick the
+            // sibling hub with a phantom busy bit. Surface the drain violation; drain then re-run.
+            require!(!legacy.has_active_swap, ErrorCode::MigrationSwapNotDrained);
             MinerState {
                 miner: legacy.miner,
                 collateral: legacy.collateral,
                 active: legacy.active,
                 active_backings: legacy.active_backings,
-                has_active_swap: legacy.has_active_swap,
-                // The runbook drains before upgrading, so this is ~always 0. If a swap somehow
-                // survives, every active hub is marked in-flight — conservative, never permissive.
-                active_swap_backings: if legacy.has_active_swap { legacy.active_backings } else { 0 },
+                has_active_swap: false,
+                active_swap_backings: 0,
                 busy_until: broadcast(legacy.busy_until),
                 settling_until: broadcast(legacy.settling_until),
                 reserved_collateral: [0; MAX_BACKING_SLOTS],

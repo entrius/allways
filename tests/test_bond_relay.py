@@ -13,8 +13,9 @@ from unittest.mock import patch
 import pytest
 
 from allways.solana import pdas
+from allways.validator import forward as forward_mod
 from allways.validator.relay import attestation as attestation_job
-from allways.validator.relay import exit_relay
+from allways.validator.relay import exit_relay, wiring
 from allways.validator.relay.engine import BondRelay, RelayConfig
 from allways.validator.state_store import ValidatorStateStore
 from allways.vault import codec
@@ -441,6 +442,111 @@ def test_the_first_sighting_wins_so_a_later_pass_cannot_rewrite_the_payee():
     assert relay.store.get_relay_swap(SWAP)['user_addr'] == USER_TAO
 
 
+def test_a_rebind_after_acceptance_does_not_redirect_the_seizure_off_the_bonded_hotkey():
+    # F1: the swap is accepted while MINER is bound to HOTKEY (H1). The miner then rebinds its
+    # pubkey to a fresh, unbonded HOTKEY2 (H2) before the timeout lands. The seizure must still hit
+    # H1 — the hotkey that carried the bond when the swap was live — not the empty H2.
+    relay = _relay()
+    relay.observe_swap(_live_swap())
+    assert relay.store.get_relay_swap(SWAP)['hotkey'] == HOTKEY
+
+    relay._attribution = {MINER: HOTKEY2}  # the mid-swap rebind
+    relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY, 'the seizure targets the observe-time hotkey, not the rebind'
+
+
+def test_a_pre_f1_snapshot_without_a_hotkey_falls_back_to_the_live_binding():
+    # Rows recorded before F1 carry a NULL hotkey; the relay must still slash via the live lookup.
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW)  # no hotkey
+    relay.ingest_events([_timeout_event()])
+    relay.step(NOW)
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY
+
+
+def test_the_hotkey_snapshot_round_trips_through_swap_and_slash():
+    store = _store()
+    store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW, HOTKEY)
+    assert store.get_relay_swap(SWAP)['hotkey'] == HOTKEY
+    store.record_relay_slash(SWAP, MINER, 'tao', 22 * RAO, 22 * RAO, USER_TAO, NOW, HOTKEY)
+    assert store.open_relay_slashes('tao')[0]['hotkey'] == HOTKEY
+
+
+# --- F3: the relay's own cursor, propagated failures, and heartbeat gating -----------------------
+
+
+def test_a_clean_ingest_reports_healthy():
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW, HOTKEY)
+    assert relay.ingest_events([_timeout_event()]) is True
+    assert relay._ingest_healthy is True
+
+
+def test_a_failed_verdict_write_is_not_swallowed_and_holds_the_heartbeat(monkeypatch):
+    relay = _relay()
+    monkeypatch.setattr(
+        relay.store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down'))
+    )
+    assert relay.ingest_events([_timeout_event()]) is False
+    assert relay._ingest_healthy is False
+    # The liveness heartbeat must stay down while a verdict write is still dirty.
+    relay.solana.calls.clear()
+    relay.maybe_heartbeat(NOW + 10**9)
+    assert not [c for c in relay.solana.calls if c[0] == 'vote_attest_heartbeat']
+
+
+def _fake_validator(relay, ingest):
+    return SimpleNamespace(
+        state_store=relay.store,
+        event_ingest=ingest,
+        bond_relay=relay,
+        solana_client=SimpleNamespace(attributions={MINER: HOTKEY}),
+        event_index=SimpleNamespace(ingest=lambda records, attribution: len(records)),
+    )
+
+
+def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatch):
+    # F3: forward advances the crown cursor regardless, but the relay's own cursor must hold on a
+    # write failure so the SwapTimedOut is re-read next step (the inserts are idempotent).
+    relay = _relay()
+    store = relay.store
+    ingest = SimpleNamespace(poll=lambda cursor: ([_timeout_event(payee=USER_TAO)], 'sig1'))
+    validator = _fake_validator(relay, ingest)
+    monkeypatch.setattr(forward_mod, 'build_attribution', lambda client: {})
+
+    orig = store.record_relay_slash
+    monkeypatch.setattr(store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down')))
+    forward_mod.ingest_solana_events(validator)
+    assert store.get_relay_event_cursor() is None, 'the cursor holds while the write is failing'
+    assert store.open_relay_slashes('tao') == []
+
+    monkeypatch.setattr(store, 'record_relay_slash', orig)
+    forward_mod.ingest_solana_events(validator)
+    assert store.get_relay_event_cursor() == 'sig1', 'once it lands, the cursor advances'
+    assert len(store.open_relay_slashes('tao')) == 1
+
+
+def test_a_relay_that_failed_to_build_is_retried_on_a_later_tick(monkeypatch):
+    clock = {'t': 1000.0}
+    monkeypatch.setattr(wiring.time, 'monotonic', lambda: clock['t'])
+    sentinel = object()
+    outcomes = [None, sentinel]
+    monkeypatch.setattr(wiring, 'build_bond_relay', lambda v, read_only=False: outcomes.pop(0))
+    loop = SimpleNamespace(relay=None)
+    validator = SimpleNamespace(bond_relay=None, solana_swap_loop=loop)
+
+    assert wiring.ensure_bond_relay(validator) is None  # first tick: transient failure, still off
+    assert validator.bond_relay is None
+    clock['t'] += wiring._RELAY_REBUILD_INTERVAL_SECS + 1  # a later tick, past the throttle
+    assert wiring.ensure_bond_relay(validator) is sentinel  # self-healed
+    assert validator.bond_relay is sentinel
+    assert loop.relay is sentinel  # the swap loop's observe hook is rewired
+
+
 # --- the off-chain busy-until-settled backstop --------------------------------------------------
 
 
@@ -718,6 +824,26 @@ def test_an_unbound_miner_is_left_alone_rather_than_retried_forever():
     relay.mark_dirty(MINER)
     assert attestation_job.flush(relay, NOW)
     assert not relay._dirty
+
+
+class _StrandingSolana(FakeSolana):
+    """`vote_set_attestation` is refused with the program's held-hub error (F5) — a downward write
+    the program won't accept while the miner's hub is held."""
+
+    def vote_set_attestation(self, miner, chain, balance, locked, epoch):
+        raise Exception("Program error: custom(6067) 'AttestationWouldStrandSwap'")
+
+
+def test_a_write_refused_while_the_hub_is_held_defers_without_wedging_the_barrier():
+    # F5: the program refuses a downward attestation write while the miner's hub is held. That refusal
+    # must NOT hold the startup reconcile barrier down — a fleet restart mid-swap would otherwise blank
+    # TAO entry fleet-wide for the swap's whole life. It is deferred (the program guarantees it can't
+    # matter until the hub frees), and the miner stays dirty so the write retries once the hub clears.
+    solana = _StrandingSolana(miner_states={MINER: _miner_state()})
+    relay = _relay(solana=solana)
+    relay.mark_dirty(MINER)
+    assert attestation_job.flush(relay, NOW)  # barrier passes despite the refusal (deferred, not owed)
+    assert MINER in relay._dirty  # ...but the write is not forgotten — it stays owed for a later retry
 
 
 def test_read_only_mode_writes_nothing_anywhere():

@@ -123,6 +123,8 @@ class Validator(BaseValidatorNeuron):
         # configured — a SOL-only deployment runs exactly as before. Its own subtensor connection
         # keeps a block-waiting vault extrinsic off the sockets scoring and the axon use.
         self.vault_subtensor = None
+        # Kept so the forward pass can retry construction when the boot-time build returns None (F3).
+        self._relay_read_only = solana_read_only
         self.bond_relay = build_bond_relay(self, read_only=solana_read_only)
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client,
