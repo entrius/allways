@@ -69,8 +69,8 @@ class TestPinnedContract:
             'hype-network',
             'bnb-network',
             'avax-network',
+            'base-network',
         )
-        assert CHAIN_NETWORK_KEYS == ('btc-network', 'eth-network', 'arb-network', 'hype-network', 'base-network')
 
     def test_testnet_bundle(self):
         assert ENV_BUNDLES['testnet'] == {
