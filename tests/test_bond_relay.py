@@ -968,3 +968,40 @@ def test_a_fresh_vault_is_still_empty_whatever_the_generation():
 
     assert attestation_job.Attested(0, False, compose(4, 0)).is_empty
     assert not attestation_job.Attested(0, False, compose(4, 1)).is_empty
+
+
+def test_fees_are_scoped_to_the_vault_generation_that_will_collect_them():
+    """A replacement vault restarts its settled counter at 0. If accruals were summed across
+    generations, fees the retired vault already collected would be charged a second time."""
+    store = _store()
+    store.record_relay_fee('aa', MINER, 'tao', 1_800_000, NOW - 100, vault_generation=0)
+    store.record_relay_fee('bb', MINER, 'tao', 500_000, NOW, vault_generation=1)
+
+    assert store.accrued_fee_total(MINER, 'tao', vault_generation=0) == 1_800_000
+    assert store.accrued_fee_total(MINER, 'tao', vault_generation=1) == 500_000
+    # Unscoped stays the whole history — that read is miner discovery, not accounting.
+    assert store.accrued_fee_total(MINER, 'tao') == 2_300_000
+    assert set(store.accrued_fee_totals('tao', vault_generation=1)) == {MINER}
+
+
+def test_attestation_does_not_recharge_fees_the_retired_vault_settled():
+    """The live bug: 0.8 τ posted to a fresh vault was attested as 0.7982 τ because 1.8M rao of
+    already-settled fees came along from the retired vault."""
+    vault = FakeVault()
+    vault.lock[HOTKEY] = (True, 1)
+    vault.collateral[HOTKEY] = 800_000_000
+    vault.settled[HOTKEY] = 0  # a fresh vault has collected nothing yet
+    store = _store()
+    store.record_relay_fee('old', MINER, 'tao', 1_800_000, NOW - 500, vault_generation=0)
+    solana = FakeSolana(
+        miner_states={MINER: _miner_state()},
+        config=SimpleNamespace(last_attest_heartbeat=0, vault_generation=1),
+    )
+    relay = _relay(vault=vault, solana=solana, store=store)
+
+    desired = attestation_job.compute(relay, MINER, HOTKEY)
+    assert desired.effective_balance == 800_000_000, 'the retired vault already collected that fee'
+
+    # A fee earned under the CURRENT generation still nets off, exactly as before.
+    store.record_relay_fee('new', MINER, 'tao', 2_000_000, NOW, vault_generation=1)
+    assert attestation_job.compute(relay, MINER, HOTKEY).effective_balance == 798_000_000

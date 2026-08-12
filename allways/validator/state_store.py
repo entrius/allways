@@ -562,34 +562,49 @@ class ValidatorStateStore:
             (cutoff_time,),
         )
 
-    def record_relay_fee(self, swap_key: str, miner: str, backing: str, fee: int, block_time: int) -> None:
-        """One completed off-chain-backed swap's absolute protocol fee (rao). Keyed by swap_key so a
-        re-ingested event can never double-count the accrual."""
+    def record_relay_fee(
+        self, swap_key: str, miner: str, backing: str, fee: int, block_time: int, vault_generation: int = 0
+    ) -> None:
+        """One completed off-chain-backed swap's absolute protocol fee (rao), tagged with the vault
+        generation that will collect it. Keyed by swap_key so a re-ingested event can never
+        double-count the accrual."""
         self._execute(
             """
-            INSERT INTO relay_fees (swap_key, miner, backing, fee, block_time)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO relay_fees (swap_key, miner, backing, fee, block_time, vault_generation)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
-            (swap_key, miner, backing, int(fee), block_time),
+            (swap_key, miner, backing, int(fee), block_time, int(vault_generation)),
         )
 
-    def accrued_fee_total(self, miner: str, backing: str, at_time: Optional[int] = None) -> int:
-        """Cumulative fees this miner has earned the protocol on ``backing``, optionally as of a
-        boundary. The cadence batch reads at the aligned boundary so every validator derives the
-        identical vector."""
+    def accrued_fee_total(
+        self, miner: str, backing: str, at_time: Optional[int] = None, vault_generation: Optional[int] = None
+    ) -> int:
+        """Cumulative fees this miner owes THIS vault generation on ``backing``, optionally as of a
+        boundary. Scoped by generation because the vault's settled counter restarts at 0 on a
+        replacement — an unscoped sum re-charges what the retired vault already collected. The
+        cadence batch reads at the aligned boundary so every validator derives the identical vector."""
         sql = 'SELECT COALESCE(SUM(fee), 0) AS total FROM relay_fees WHERE miner = ? AND backing = ?'
         params: Tuple = (miner, backing)
+        if vault_generation is not None:
+            sql += ' AND vault_generation = ?'
+            params += (int(vault_generation),)
         if at_time is not None:
             sql += ' AND block_time <= ?'
             params += (at_time,)
         row = self._fetchone(sql, params)
         return int(row['total']) if row is not None else 0
 
-    def accrued_fee_totals(self, backing: str, at_time: Optional[int] = None) -> Dict[str, int]:
-        """``{miner: cumulative_fee}`` for every miner with an accrual on ``backing``."""
+    def accrued_fee_totals(
+        self, backing: str, at_time: Optional[int] = None, vault_generation: Optional[int] = None
+    ) -> Dict[str, int]:
+        """``{miner: cumulative_fee}`` on ``backing``, scoped to one vault generation when given
+        (accounting) and across all of them when not (miner discovery)."""
         sql = 'SELECT miner, COALESCE(SUM(fee), 0) AS total FROM relay_fees WHERE backing = ?'
         params: Tuple = (backing,)
+        if vault_generation is not None:
+            sql += ' AND vault_generation = ?'
+            params += (int(vault_generation),)
         if at_time is not None:
             sql += ' AND block_time <= ?'
             params += (at_time,)
@@ -854,6 +869,14 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(relay_slashes)')]
             if cols and 'hotkey' not in cols:
                 conn.execute('ALTER TABLE relay_slashes ADD COLUMN hotkey TEXT')
+            # A fee is owed to the vault in service when it was earned, and a replacement vault
+            # restarts its settled counter at 0 — so an accrual must never be summed against a vault
+            # that did not collect it. Pre-existing rows default to generation 0, which is exactly
+            # where they were earned (the generation only exists from the first swap onward).
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(relay_fees)')]
+            if cols and 'vault_generation' not in cols:
+                conn.execute('ALTER TABLE relay_fees ADD COLUMN vault_generation INTEGER NOT NULL DEFAULT 0')
+                conn.execute('DROP INDEX IF EXISTS idx_relay_fees_miner')
             # F4: the crown must score each direction against its OWN backing. rate_events gains the
             # quote's collateral_chain and collateral_events a backing, so a tao-hub quote/purse is
             # never confused with the sol one. Pre-F4 rows were all sol-backed by construction.
@@ -1006,10 +1029,14 @@ class ValidatorStateStore:
                     miner       TEXT NOT NULL,
                     backing     TEXT NOT NULL,
                     fee         INTEGER NOT NULL,
-                    block_time  INTEGER NOT NULL
+                    block_time  INTEGER NOT NULL,
+                    -- Which vault the fee is owed to. The vault's settled counter restarts at 0 on a
+                    -- replacement, so summing across generations re-charges fees the retired vault
+                    -- already collected.
+                    vault_generation INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_relay_fees_miner
-                    ON relay_fees(backing, miner);
+                    ON relay_fees(backing, miner, vault_generation);
 
                 CREATE TABLE IF NOT EXISTS relay_slashes (
                     swap_key      TEXT PRIMARY KEY,

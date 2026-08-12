@@ -69,7 +69,10 @@ def _advance(relay, miner: str, now: int) -> bool:
         bt.logging.debug(f'relay: {miner[:8]} exit waiting — {why}')
         return True  # waiting is a healthy state, not an outstanding obligation
 
-    total = relay.store.accrued_fee_total(miner, relay.backing)
+    generation = relay.vault_generation()
+    if generation is None:
+        return False
+    total = relay.store.accrued_fee_total(miner, relay.backing, vault_generation=generation)
     settled = relay.vault.get_settled_total(hotkey)
     if settled is None:
         return False
@@ -189,7 +192,12 @@ def cadence_entries(relay, boundary: int) -> List[Tuple[str, int]]:
     AccountId. Membership is derived from the Solana event stream ALONE — deliberately not
     filtered against the vault — because the vector is hashed into the round key and must be
     byte-identical across validators; the vault's monotonic totals no-op any stale entry."""
-    totals: Dict[str, int] = relay.store.accrued_fee_totals(relay.backing, at_time=boundary)
+    generation = relay.vault_generation()
+    if generation is None:
+        return []
+    totals: Dict[str, int] = relay.store.accrued_fee_totals(
+        relay.backing, at_time=boundary, vault_generation=generation
+    )
     entries: List[Tuple[bytes, str, int]] = []
     for miner, total in totals.items():
         if total <= 0:
