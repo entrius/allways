@@ -19,6 +19,7 @@ from allways.chains import (
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
     CHAIN_TAO,
+    CHAIN_UNI,
     EXTENSION_BUCKET_SECONDS,
     SUPPORTED_CHAINS,
     canonical_pair,
@@ -60,6 +61,9 @@ class TestGetChain:
 
     def test_aster(self):
         assert get_chain_def('aster') is CHAIN_ASTER
+
+    def test_uni(self):
+        assert get_chain_def('uni') is CHAIN_UNI
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -127,6 +131,19 @@ class TestGetChain:
         assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype'))
         # ethusdc rides CHAIN_ETH's network row — same host, same prefix, no networks of its own.
         assert (CHAIN_ETHUSDC.host_chain, CHAIN_ETHUSDC.env_prefix) == (CHAIN_ETH.host_chain, CHAIN_ETH.env_prefix)
+        """btc/tao/sol ARE their own network; every EVM row names the network it rides. Only the
+        self-hosted list is enumerated — a new EVM asset needs no edit here."""
+        for chain_id, chain in SUPPORTED_CHAINS.items():
+            if chain_id in ('btc', 'tao', 'sol'):
+                assert chain.host_chain is None, chain_id
+            else:
+                assert chain.host_chain in EVM_NETWORKS, chain_id
+        # Ethereum hosts several assets (eth, ethusdc, uni). Every rider takes CHAIN_ETH's network
+        # row — same prefix, no networks of its own — so one ETH_NETWORK moves all of them.
+        riders = [c for c in SUPPORTED_CHAINS.values() if c.host_chain == CHAIN_ETH.host_chain and c is not CHAIN_ETH]
+        assert CHAIN_ETHUSDC in riders and CHAIN_UNI in riders
+        for chain in riders:
+            assert (chain.env_prefix, chain.networks) == (CHAIN_ETH.env_prefix, ()), chain.id
 
 
 class TestCanonicalPair:
