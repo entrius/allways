@@ -203,6 +203,32 @@ CHAIN_AVAX = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_BASEUSDC = ChainDefinition(
+    id='baseusdc',
+    name='USDC (Base)',
+    native_unit='µUSDC',
+    decimals=6,
+    env_prefix='BASE',
+    networks=('mainnet', 'sepolia'),  # sepolia = Base Sepolia
+    testnet_network='sepolia',
+    # Measured live on both networks (2026-08-11): exactly 2s between consecutive blocks.
+    seconds_per_block=2,
+    # Base is an OP-stack rollup: the sequencer can reorg its own unsafe head before the L1
+    # batch posts, so it needs far more depth than a fast-finality chain. 120 × 2s ≈ 240s,
+    # well inside the program's 600s default fulfillment grace.
+    min_confirmations=120,
+    # ERC-20 transfers have no protocol minimum and Base's L2 gas is negligible, so 1 is the
+    # honest floor — a rate sanity input, not an economic guarantee (as on Arbitrum).
+    min_onchain_amount=1,
+    # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (monotonic
+    # timestamps say nothing about how far the sequencer's clock sits from the hub's).
+    replay_grace_secs=60,
+    host_chain='base',
+    # Circle-verified native USDC on Base (developers.circle.com, 2026-08-11) — NOT the
+    # bridged USDbC at 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA.
+    asset_locator='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -212,6 +238,7 @@ SUPPORTED_CHAINS = {
     'hype': CHAIN_HYPE,
     'bnb': CHAIN_BNB,
     'avax': CHAIN_AVAX,
+    'baseusdc': CHAIN_BASEUSDC,
 }
 
 
