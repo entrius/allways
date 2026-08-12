@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v10 → v14 migration driver (run AFTER `solana program deploy` upgrades the program).
+"""v10 → v15 migration driver (run AFTER `solana program deploy` upgrades the program).
 
 Signs with the Config admin (= dev-asm on devnet, which is also the upgrade authority). Order matters:
 migrate_config MUST run first (an unmigrated v10 Config can't deserialize under the new layout, so
@@ -28,6 +28,7 @@ from solders.pubkey import Pubkey
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from allways.solana import pdas  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
+from allways.solana.layouts import CONFIG_VERSION  # noqa: E402
 
 SYSTEM = Pubkey.from_string('11111111111111111111111111111111')
 
@@ -81,8 +82,8 @@ def main():
     if not dry:
         v = c.get_config().version
         print(f'  Config.version now: {v}')
-        if v != 14:
-            print('  ABORT: config did not reach v14; not migrating miners.')
+        if v != CONFIG_VERSION:
+            print(f'  ABORT: config did not reach v{CONFIG_VERSION}; not migrating miners.')
             return
 
     # 2. migrate_miner_state per miner.

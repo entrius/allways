@@ -535,6 +535,8 @@ IX_DISCRIMINATORS = {
     'set_tao_min_collateral': bytes([154, 196, 157, 5, 232, 196, 250, 217]),
     'set_settlement_grace': bytes([151, 0, 169, 67, 242, 17, 56, 40]),
     'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),
+    # Retires the current vault's attestation-epoch namespace (see compose_attestation_epoch).
+    'bump_vault_generation': bytes([93, 192, 10, 149, 230, 255, 251, 27]),
     # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
     'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
     # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
