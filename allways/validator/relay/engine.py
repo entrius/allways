@@ -123,6 +123,9 @@ class BondRelay:
         # Per-subject re-vote throttles, so an unlanded round isn't re-submitted every 12s pass.
         self._voted_at: Dict[str, float] = {}
         self._writes = 0
+        # F3: cleared when a verdict ingest write fails, so the liveness heartbeat is held down
+        # until the relay has caught up — the fuse must not report "live" over a lost verdict.
+        self._ingest_healthy = True
 
     # ─── attribution (Solana pubkey ↔ Bittensor hotkey, via the A5 binding) ──
 
@@ -189,15 +192,23 @@ class BondRelay:
             bt.logging.warning(f'relay: pending-debit check failed for {str(miner)[:8]} ({e}); assuming owed')
             return True  # fail closed: an unreadable ledger must not open a new swap
 
-    def ingest_events(self, records: List[Any]) -> None:
+    def ingest_events(self, records: List[Any]) -> bool:
         """Fold Solana program events into the relay ledger. Runs beside (not inside) the crown
         index: this one keys by Solana pubkey and keeps events from unbound miners, because a
-        binding can land after the swap did."""
+        binding can land after the swap did.
+
+        F3: returns False if any record failed to write, so the caller holds the relay cursor and
+        re-reads the window next step (the inserts are ON CONFLICT DO NOTHING — replay is safe). A
+        failed verdict write must never be swallowed: it would lose the slash forever."""
+        ok = True
         for rec in records:
             try:
                 self._ingest_event(rec)
             except Exception as e:
                 bt.logging.warning(f'relay: could not ingest {getattr(rec, "name", "?")}: {e}')
+                ok = False
+        self._ingest_healthy = ok
+        return ok
 
     def _ingest_event(self, rec: Any) -> None:
         name = rec.name
@@ -352,6 +363,9 @@ class BondRelay:
         """Bump the GLOBAL liveness heartbeat on a lazy cadence. Liveness is one question about
         the whole relay, not fifty questions about individual miners — so one round, and quiet
         miners can never false-positive a staleness fuse."""
+        if not self._ingest_healthy:
+            bt.logging.info('relay: a verdict write is still dirty — heartbeat held down')
+            return
         try:
             cfg = self._config_fn()
             last = int(getattr(cfg, 'last_attest_heartbeat', 0) or 0)

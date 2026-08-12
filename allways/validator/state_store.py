@@ -630,6 +630,14 @@ class ValidatorStateStore:
             (signature,),
         )
 
+    def get_relay_event_cursor(self) -> Optional[str]:
+        """The relay's OWN event cursor (F3), kept apart from the crown cursor so a failed verdict
+        write holds it and the window is re-read, without wedging (or being wedged by) the crown."""
+        return self.get_relay_meta('event_cursor')
+
+    def set_relay_event_cursor(self, signature: str) -> None:
+        self.set_relay_meta('event_cursor', signature)
+
     def prune_active_events(self, cutoff_block: int) -> None:
         """Drop active events older than ``cutoff_block``, preserving the latest
         row per hotkey as a state-reconstruction anchor (mirrors the in-memory

@@ -63,22 +63,36 @@ class SolanaEventIngest:
         self.client = solana_client
         self.max_pages = max_pages
         self.page_size = page_size
+        # F3: fail-closed pagination. When a backlog exceeds max_pages*page_size in one pass, the
+        # partial (newest) run is buffered and paging resumes deeper next call — so the older gap
+        # toward until_sig is drained across ticks instead of silently dropped.
+        self._pending: List[dict] = []
+        self._resume_before: Optional[str] = None
 
     def _fetch_new_signatures(self, until_sig: Optional[str]) -> List[dict]:
         """Signature entries strictly newer than until_sig, returned OLDEST-first (RPC gives newest-first).
-        Pages backwards via `before` until it reaches `until_sig` or runs dry."""
-        collected: List[dict] = []
-        before: Optional[str] = None
+        Pages backwards via `before` until it reaches `until_sig` or runs dry. If max_pages is exhausted
+        with a still-full page, the gap remains: the run is buffered and `[]` is returned so the caller
+        holds its cursor and this resumes deeper next call (never dropping the gap)."""
+        before = self._resume_before
         for _ in range(self.max_pages):
             batch = self.client.rpc.get_signatures_for_address(
                 self.client.program_id, before=before, until=until_sig, limit=self.page_size
             )
             if not batch:
-                break
-            collected.extend(batch)
-            if len(batch) < self.page_size:
-                break
+                return self._drain_pending()
+            self._pending.extend(batch)
             before = batch[-1]['signature']
+            if len(batch) < self.page_size:
+                return self._drain_pending()
+        # Gap still open: hold here and resume paging from `before` on the next call.
+        self._resume_before = before
+        return []
+
+    def _drain_pending(self) -> List[dict]:
+        collected = self._pending
+        self._pending = []
+        self._resume_before = None
         collected.reverse()
         return collected
 

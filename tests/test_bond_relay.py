@@ -13,8 +13,9 @@ from unittest.mock import patch
 import pytest
 
 from allways.solana import pdas
+from allways.validator import forward as forward_mod
 from allways.validator.relay import attestation as attestation_job
-from allways.validator.relay import exit_relay
+from allways.validator.relay import exit_relay, wiring
 from allways.validator.relay.engine import BondRelay, RelayConfig
 from allways.validator.state_store import ValidatorStateStore
 from allways.vault import codec
@@ -473,6 +474,77 @@ def test_the_hotkey_snapshot_round_trips_through_swap_and_slash():
     assert store.get_relay_swap(SWAP)['hotkey'] == HOTKEY
     store.record_relay_slash(SWAP, MINER, 'tao', 22 * RAO, 22 * RAO, USER_TAO, NOW, HOTKEY)
     assert store.open_relay_slashes('tao')[0]['hotkey'] == HOTKEY
+
+
+# --- F3: the relay's own cursor, propagated failures, and heartbeat gating -----------------------
+
+
+def test_a_clean_ingest_reports_healthy():
+    relay = _relay()
+    relay.store.record_relay_swap(SWAP, MINER, 'tao', USER_TAO, NOW, HOTKEY)
+    assert relay.ingest_events([_timeout_event()]) is True
+    assert relay._ingest_healthy is True
+
+
+def test_a_failed_verdict_write_is_not_swallowed_and_holds_the_heartbeat(monkeypatch):
+    relay = _relay()
+    monkeypatch.setattr(
+        relay.store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down'))
+    )
+    assert relay.ingest_events([_timeout_event()]) is False
+    assert relay._ingest_healthy is False
+    # The liveness heartbeat must stay down while a verdict write is still dirty.
+    relay.solana.calls.clear()
+    relay.maybe_heartbeat(NOW + 10**9)
+    assert not [c for c in relay.solana.calls if c[0] == 'vote_attest_heartbeat']
+
+
+def _fake_validator(relay, ingest):
+    return SimpleNamespace(
+        state_store=relay.store,
+        event_ingest=ingest,
+        bond_relay=relay,
+        solana_client=SimpleNamespace(attributions={MINER: HOTKEY}),
+        event_index=SimpleNamespace(ingest=lambda records, attribution: len(records)),
+    )
+
+
+def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatch):
+    # F3: forward advances the crown cursor regardless, but the relay's own cursor must hold on a
+    # write failure so the SwapTimedOut is re-read next step (the inserts are idempotent).
+    relay = _relay()
+    store = relay.store
+    ingest = SimpleNamespace(poll=lambda cursor: ([_timeout_event(payee=USER_TAO)], 'sig1'))
+    validator = _fake_validator(relay, ingest)
+    monkeypatch.setattr(forward_mod, 'build_attribution', lambda client: {})
+
+    orig = store.record_relay_slash
+    monkeypatch.setattr(store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down')))
+    forward_mod.ingest_solana_events(validator)
+    assert store.get_relay_event_cursor() is None, 'the cursor holds while the write is failing'
+    assert store.open_relay_slashes('tao') == []
+
+    monkeypatch.setattr(store, 'record_relay_slash', orig)
+    forward_mod.ingest_solana_events(validator)
+    assert store.get_relay_event_cursor() == 'sig1', 'once it lands, the cursor advances'
+    assert len(store.open_relay_slashes('tao')) == 1
+
+
+def test_a_relay_that_failed_to_build_is_retried_on_a_later_tick(monkeypatch):
+    clock = {'t': 1000.0}
+    monkeypatch.setattr(wiring.time, 'monotonic', lambda: clock['t'])
+    sentinel = object()
+    outcomes = [None, sentinel]
+    monkeypatch.setattr(wiring, 'build_bond_relay', lambda v, read_only=False: outcomes.pop(0))
+    loop = SimpleNamespace(relay=None)
+    validator = SimpleNamespace(bond_relay=None, solana_swap_loop=loop)
+
+    assert wiring.ensure_bond_relay(validator) is None  # first tick: transient failure, still off
+    assert validator.bond_relay is None
+    clock['t'] += wiring._RELAY_REBUILD_INTERVAL_SECS + 1  # a later tick, past the throttle
+    assert wiring.ensure_bond_relay(validator) is sentinel  # self-healed
+    assert validator.bond_relay is sentinel
+    assert loop.relay is sentinel  # the swap loop's observe hook is rewired
 
 
 # --- the off-chain busy-until-settled backstop --------------------------------------------------

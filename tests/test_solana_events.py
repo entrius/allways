@@ -297,6 +297,53 @@ def test_poll_reingests_previously_unstamped_once_stamped():
     assert cursor == 'sigC'
 
 
+class PagingRpc:
+    """A faithful `get_signatures_for_address`: newest-first, `before`-paged, stopping at `until`."""
+
+    def __init__(self, sigs):
+        self.sigs = sigs  # newest-first
+
+    def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
+        start = 0
+        if before is not None:
+            start = next(i for i, s in enumerate(self.sigs) if s['signature'] == before) + 1
+        out = []
+        for s in self.sigs[start:]:
+            if until is not None and s['signature'] == until:
+                break
+            out.append(s)
+            if len(out) == limit:
+                break
+        return out
+
+
+class PagingClient:
+    def __init__(self, sigs, ev):
+        self.program_id = 'PROG'
+        self.rpc = PagingRpc(sigs)
+        self._ev = ev
+
+    def get_event_logs(self, sig):
+        return [self._ev]
+
+
+def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
+    # F3: a backlog deeper than max_pages*page_size must not silently drop the older gap. With
+    # max_pages=2, page_size=2 the poller can reach only 4 of the 5 new signatures in one pass; it
+    # buffers and resumes deeper next tick, holding its cursor until the whole window is assembled.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    # newest-first s5..s1; all stamped so nothing holds at an unstamped tip.
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), max_pages=2, page_size=2)
+
+    records, cursor = ingest.poll(until_sig=None)
+    assert records == [] and cursor is None, 'gap still open — cursor holds, nothing consumed yet'
+
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, oldest-first'
+    assert cursor == 's5'
+
+
 def test_poll_abandons_ancient_unstamped_entry():
     miner = Keypair().pubkey()
     ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
