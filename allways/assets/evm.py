@@ -141,6 +141,20 @@ BASE = EvmNetwork(
     },
 )
 
+CRONOS = EvmNetwork(
+    label='Cronos',
+    chain_ids={'mainnet': 25, 'testnet': 338},
+    rpc_urls={
+        # The official gateway leads as the only mainnet rung serving historical eth_getCode, which
+        # delivery_refused probes up to 120 blocks back on every overdue swap: publicnode prunes
+        # Ethermint state at tip-107 and errors below it (measured 2026-08-12). publicnode stays
+        # second — it serves receipts, blocks and tx lookups cleanly, which is what null quorum needs.
+        'mainnet': ('https://evm.cronos.org', 'https://cronos-evm-rpc.publicnode.com'),
+        # Both testnet rungs serve historical eth_getCode past 100k blocks; official leads for symmetry.
+        'testnet': ('https://evm-t3.cronos.org', 'https://cronos-testnet.drpc.org'),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
@@ -149,6 +163,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'bsc': BSC,
     'avalanche': AVALANCHE,
     'base': BASE,
+    'cronos': CRONOS,
 }
 
 

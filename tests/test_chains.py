@@ -11,6 +11,7 @@ from allways.chains import (
     CHAIN_BASEUSDC,
     CHAIN_BNB,
     CHAIN_BTC,
+    CHAIN_CRO,
     CHAIN_ETH,
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
@@ -50,6 +51,9 @@ class TestGetChain:
 
     def test_ethusdc(self):
         assert get_chain_def('ethusdc') is CHAIN_ETHUSDC
+
+    def test_cro(self):
+        assert get_chain_def('cro') is CHAIN_CRO
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -91,11 +95,13 @@ class TestGetChain:
     def test_only_self_hosted_assets_lack_a_host_chain(self):
         for chain_id in ('btc', 'tao', 'sol'):
             assert get_chain_def(chain_id).host_chain is None
-        for chain_id in ('eth', 'hype', 'bnb', 'avax', 'arbusdc'):
+        for chain_id in ('eth', 'hype', 'bnb', 'avax', 'cro', 'arbusdc'):
             assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
         # asset_locator is the token-only field: a native coin has no contract to pin.
         assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
-        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax'))
+        assert all(
+            get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax', 'cro')
+        )
         for chain_id in ('eth', 'hype', 'arbusdc', 'baseusdc'):
             assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
         # asset_locator is the token-only field: a native coin has no contract to pin.
@@ -190,6 +196,10 @@ class TestComputeExtensionTargetSecs:
     def test_baseusdc_remaining_confs(self):
         # baseusdc needs 120 confs, 2s each: remaining=120, raw = 10000 + 240 + 120 = 10360, bucket up to 10800.
         assert compute_extension_target_secs('baseusdc', 0, self.NOW, self.CEILING) == 10_800
+
+    def test_cro_remaining_confs(self):
+        # cro needs 2 confs, 1s each: remaining=2, raw = 10000 + 2 + 120 = 10122, bucket up to 10200.
+        assert compute_extension_target_secs('cro', 0, self.NOW, self.CEILING) == 10_200
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
