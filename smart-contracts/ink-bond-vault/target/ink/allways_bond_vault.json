@@ -1,8 +1,8 @@
 {
   "source": {
-    "hash": "0xde32f2e9cded0f300e77c0431b07d8b68d52c93d30d31126b6efb831d2494bd0",
+    "hash": "0x26351b5ed55e020abed1bbb8fe3282829e07900945db26d3724aebe4175a2fb9",
     "language": "ink! 5.1.1",
-    "compiler": "rustc 1.89.0",
+    "compiler": "rustc 1.91.1",
     "build_info": {
       "build_mode": "Release",
       "cargo_contract_version": "5.0.3",
@@ -168,6 +168,50 @@
           {
             "docs": [],
             "indexed": false,
+            "label": "locked",
+            "type": {
+              "displayName": [
+                "bool"
+              ],
+              "type": 15
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "epoch",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 4
+            }
+          }
+        ],
+        "docs": [
+          "Lock transition. `locked = true` is miner-initiated (`lock_bond`);",
+          "`locked = false` comes from a `vote_unlock` quorum."
+        ],
+        "label": "BondLockChanged",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x08fd1ceaaffd8d4d45e709836d8c40bac75197947993cc8fed1e7efe49aa5ece"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "miner",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
             "label": "amount",
             "type": {
               "displayName": [
@@ -194,6 +238,72 @@
         "label": "CollateralPosted",
         "module_path": "allways_bond_vault::events",
         "signature_topic": "0xac8a40d8f433a5c3b074e1744178ffb9ebfc02a848c5ee67deb0f0c3168380f9"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "candidate",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "expires_at",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "docs": [
+          "A unanimous round approved this candidate; they join the set only once they",
+          "call `accept_validator` themselves, proving they hold the key. Past",
+          "`expires_at` — or after any set change — the approval is void."
+        ],
+        "label": "ValidatorPending",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xfe0b776631193a5e023fd211b84181cc079952677c4d9a473f694f61ae434922"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "validator",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "registered",
+            "type": {
+              "displayName": [
+                "bool"
+              ],
+              "type": 15
+            }
+          }
+        ],
+        "docs": [
+          "Validator joined (after accepting) or was removed"
+        ],
+        "label": "ValidatorUpdated",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0xa196d9e279715a236c224752aaa4e5b3876155c0a9a33e6efd4d0374981d5484"
       },
       {
         "args": [
@@ -243,7 +353,7 @@
           {
             "docs": [],
             "indexed": true,
-            "label": "miner",
+            "label": "staking_hotkey",
             "type": {
               "displayName": [
                 "AccountId"
@@ -254,105 +364,22 @@
           {
             "docs": [],
             "indexed": false,
-            "label": "locked",
+            "label": "netuid",
             "type": {
               "displayName": [
-                "bool"
+                "u16"
               ],
-              "type": 15
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "epoch",
-            "type": {
-              "displayName": [
-                "u64"
-              ],
-              "type": 4
+              "type": 3
             }
           }
         ],
         "docs": [
-          "Lock transition. `locked = true` is miner-initiated (`lock_bond`);",
-          "`locked = false` comes from a `vote_unlock` quorum."
+          "The `add_stake_recycle` destination, moved by a unanimous",
+          "`vote_set_recycle_target` round. Both fields move together."
         ],
-        "label": "BondLockChanged",
+        "label": "RecycleTargetUpdated",
         "module_path": "allways_bond_vault::events",
-        "signature_topic": "0x08fd1ceaaffd8d4d45e709836d8c40bac75197947993cc8fed1e7efe49aa5ece"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "validator",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
-            "docs": [
-              "REQ_UNLOCK = 0 | REQ_SLASH = 1 | REQ_COLLECT = 2 |",
-              "REQ_ADD_VALIDATOR = 3 | REQ_REMOVE_VALIDATOR = 4 | REQ_CONFIG = 5 |",
-              "REQ_RECYCLE_TARGET = 6"
-            ],
-            "indexed": false,
-            "label": "req_type",
-            "type": {
-              "displayName": [
-                "u8"
-              ],
-              "type": 2
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "request_id",
-            "type": {
-              "displayName": [
-                "u64"
-              ],
-              "type": 4
-            }
-          },
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "subject",
-            "type": {
-              "displayName": [
-                "Hash"
-              ],
-              "type": 9
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "vote_count",
-            "type": {
-              "displayName": [
-                "u32"
-              ],
-              "type": 5
-            }
-          }
-        ],
-        "docs": [
-          "A validator voted on a money or governance round. `subject` identifies the",
-          "round's target through one 32-byte field: the miner (unlock), the",
-          "candidate/target account (membership), or the round hash (slash, collect,",
-          "config, recycle target)."
-        ],
-        "label": "VaultVoteCast",
-        "module_path": "allways_bond_vault::events",
-        "signature_topic": "0x05519cde5539536ad39f7b2a6c95f91ffeeddc06eadfc54c68ce05b9e2ee49c4"
+        "signature_topic": "0xd86f261c41e7018ed140894f4e231d60e12a3c10f003fdf48c146dc17ce80ba2"
       },
       {
         "args": [
@@ -409,6 +436,40 @@
         "label": "FeesSettled",
         "module_path": "allways_bond_vault::events",
         "signature_topic": "0x2af8c05b5dcc94a37febfd1fa9e5274bebf23e0e6426d8030d673d3567cb825f"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "tao_amount",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "donated",
+            "type": {
+              "displayName": [
+                "u128"
+              ],
+              "type": 67
+            }
+          }
+        ],
+        "docs": [
+          "Fees recycled into the SN7 pool via add_stake_recycle. `tao_amount` is the",
+          "whole drained pot; `donated` is the share of it that arrived as unattributed",
+          "TAO rather than as settled protocol fees."
+        ],
+        "label": "FeesRecycled",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x140677419dfec5d77e40f512d2b24eb14290022274937ccfe70f7e2d8f12f333"
       },
       {
         "args": [
@@ -513,11 +574,11 @@
           }
         ],
         "docs": [
-          "Direct reimbursement transfer failed; parked for `claim_slash`"
+          "User claimed a parked reimbursement"
         ],
-        "label": "SlashPending",
+        "label": "SlashClaimed",
         "module_path": "allways_bond_vault::events",
-        "signature_topic": "0xe82a67cdc478ee28b09c48f34f28661f87d7fa52f7271a055223c07cd7492511"
+        "signature_topic": "0x2696b479469e85724e7b82b8445c1a4689793c0b98c024e6cef0ed945c544ce5"
       },
       {
         "args": [
@@ -556,144 +617,11 @@
           }
         ],
         "docs": [
-          "User claimed a parked reimbursement"
+          "Direct reimbursement transfer failed; parked for `claim_slash`"
         ],
-        "label": "SlashClaimed",
+        "label": "SlashPending",
         "module_path": "allways_bond_vault::events",
-        "signature_topic": "0x2696b479469e85724e7b82b8445c1a4689793c0b98c024e6cef0ed945c544ce5"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "tao_amount",
-            "type": {
-              "displayName": [
-                "u128"
-              ],
-              "type": 67
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "donated",
-            "type": {
-              "displayName": [
-                "u128"
-              ],
-              "type": 67
-            }
-          }
-        ],
-        "docs": [
-          "Fees recycled into the SN7 pool via add_stake_recycle. `tao_amount` is the",
-          "whole drained pot; `donated` is the share of it that arrived as unattributed",
-          "TAO rather than as settled protocol fees."
-        ],
-        "label": "FeesRecycled",
-        "module_path": "allways_bond_vault::events",
-        "signature_topic": "0x140677419dfec5d77e40f512d2b24eb14290022274937ccfe70f7e2d8f12f333"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "candidate",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "expires_at",
-            "type": {
-              "displayName": [
-                "u32"
-              ],
-              "type": 5
-            }
-          }
-        ],
-        "docs": [
-          "A unanimous round approved this candidate; they join the set only once they",
-          "call `accept_validator` themselves, proving they hold the key. Past",
-          "`expires_at` — or after any set change — the approval is void."
-        ],
-        "label": "ValidatorPending",
-        "module_path": "allways_bond_vault::events",
-        "signature_topic": "0xfe0b776631193a5e023fd211b84181cc079952677c4d9a473f694f61ae434922"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "validator",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "registered",
-            "type": {
-              "displayName": [
-                "bool"
-              ],
-              "type": 15
-            }
-          }
-        ],
-        "docs": [
-          "Validator joined (after accepting) or was removed"
-        ],
-        "label": "ValidatorUpdated",
-        "module_path": "allways_bond_vault::events",
-        "signature_topic": "0xa196d9e279715a236c224752aaa4e5b3876155c0a9a33e6efd4d0374981d5484"
-      },
-      {
-        "args": [
-          {
-            "docs": [],
-            "indexed": true,
-            "label": "staking_hotkey",
-            "type": {
-              "displayName": [
-                "AccountId"
-              ],
-              "type": 0
-            }
-          },
-          {
-            "docs": [],
-            "indexed": false,
-            "label": "netuid",
-            "type": {
-              "displayName": [
-                "u16"
-              ],
-              "type": 3
-            }
-          }
-        ],
-        "docs": [
-          "The `add_stake_recycle` destination, moved by a unanimous",
-          "`vote_set_recycle_target` round. Both fields move together."
-        ],
-        "label": "RecycleTargetUpdated",
-        "module_path": "allways_bond_vault::events",
-        "signature_topic": "0xd86f261c41e7018ed140894f4e231d60e12a3c10f003fdf48c146dc17ce80ba2"
+        "signature_topic": "0xe82a67cdc478ee28b09c48f34f28661f87d7fa52f7271a055223c07cd7492511"
       },
       {
         "args": [
@@ -749,6 +677,78 @@
         "label": "ConfigUpdated",
         "module_path": "allways_bond_vault::events",
         "signature_topic": "0xe28a9a3b8eb4767017c0ddb9bff629fa2b00aa477f572645b9f20e62b8a42c95"
+      },
+      {
+        "args": [
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "validator",
+            "type": {
+              "displayName": [
+                "AccountId"
+              ],
+              "type": 0
+            }
+          },
+          {
+            "docs": [
+              "REQ_UNLOCK = 0 | REQ_SLASH = 1 | REQ_COLLECT = 2 |",
+              "REQ_ADD_VALIDATOR = 3 | REQ_REMOVE_VALIDATOR = 4 | REQ_CONFIG = 5 |",
+              "REQ_RECYCLE_TARGET = 6"
+            ],
+            "indexed": false,
+            "label": "req_type",
+            "type": {
+              "displayName": [
+                "u8"
+              ],
+              "type": 2
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "request_id",
+            "type": {
+              "displayName": [
+                "u64"
+              ],
+              "type": 4
+            }
+          },
+          {
+            "docs": [],
+            "indexed": true,
+            "label": "subject",
+            "type": {
+              "displayName": [
+                "Hash"
+              ],
+              "type": 9
+            }
+          },
+          {
+            "docs": [],
+            "indexed": false,
+            "label": "vote_count",
+            "type": {
+              "displayName": [
+                "u32"
+              ],
+              "type": 5
+            }
+          }
+        ],
+        "docs": [
+          "A validator voted on a money or governance round. `subject` identifies the",
+          "round's target through one 32-byte field: the miner (unlock), the",
+          "candidate/target account (membership), or the round hash (slash, collect,",
+          "config, recycle target)."
+        ],
+        "label": "VaultVoteCast",
+        "module_path": "allways_bond_vault::events",
+        "signature_topic": "0x05519cde5539536ad39f7b2a6c95f91ffeeddc06eadfc54c68ce05b9e2ee49c4"
       }
     ],
     "lang_error": {
@@ -811,7 +811,9 @@
         "docs": [
           " Miner-initiated lock — locking yourself is always safe, so no",
           " quorum. A locked bond ≥ min_collateral is what the mirror relays to",
-          " Solana as \"eligible for vote_activate\"."
+          " Solana as \"eligible for vote_activate\". Deliberately un-gated on set",
+          " size: unlock at n=1 is 1-of-1 and always live, so a small set is a",
+          " trust choice, not a stranding risk."
         ],
         "label": "lock_bond",
         "mutates": true,
