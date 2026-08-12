@@ -810,12 +810,20 @@ def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
     from allways.validator.reserve_engine import scan_deposit
 
     sol = SimpleNamespace(
-        reserved_until=FUTURE, claimed_swap_key=b'\x00' * 32, from_chain='btc',
-        from_amount=10_000, miner_from_addr='tb1qminer', from_addr='tb1quser',
+        reserved_until=FUTURE,
+        claimed_swap_key=b'\x00' * 32,
+        from_chain='btc',
+        from_amount=10_000,
+        miner_from_addr='tb1qminer',
+        from_addr='tb1quser',
     )
     tao = SimpleNamespace(
-        reserved_until=FUTURE, claimed_swap_key=b'\x00' * 32, from_chain='eth',
-        from_amount=5, miner_from_addr='0xminer', from_addr='0xuser',
+        reserved_until=FUTURE,
+        claimed_swap_key=b'\x00' * 32,
+        from_chain='eth',
+        from_amount=5,
+        miner_from_addr='0xminer',
+        from_addr='0xuser',
     )
     client = StatusClient(reservation={'sol': sol, 'tao': tao})
     validator, store = _status_validator(tmp_path, client)
