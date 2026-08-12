@@ -4,7 +4,7 @@ bound hotkey at write time."""
 
 from pathlib import Path
 
-from allways.classes import MinerActivity
+from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
 from allways.validator.event_index import SolanaEventIndex
@@ -14,6 +14,11 @@ from allways.validator.state_store import ValidatorStateStore
 # pubkey str -> hotkey ss58 (what binding.build_attribution returns).
 ATTR = {'pk_a': 'hk_a', 'pk_b': 'hk_b'}
 RESERVATION_TTL = 300
+
+
+def _both(state):
+    # A hub-less (legacy-shape) event steps every hub's machine — the global-busy reading.
+    return {'sol': state, 'tao': state}
 
 
 DEFAULT_SWAP_KEY = b'\x2a' * 32
@@ -78,8 +83,8 @@ class TestIngestActivity:
             ATTR,
         )
         assert idx.get_activity_state_at(100) == {}  # AVAILABLE before the reservation
-        assert idx.get_activity_state_at(200) == {'hk_a': MinerActivity.RESERVED}
-        assert idx.get_activity_state_at(250) == {'hk_a': MinerActivity.FULFILLING}
+        assert idx.get_activity_state_at(200) == {'hk_a': _both(MinerActivity.RESERVED)}
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.FULFILLING)}
         assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
         store.close()
 
@@ -92,8 +97,8 @@ class TestIngestActivity:
             [rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1)],
             ATTR,
         )
-        assert idx.get_activity_state_at(200) == {'hk_a': MinerActivity.RESERVED}
-        assert idx.get_activity_state_at(499) == {'hk_a': MinerActivity.RESERVED}
+        assert idx.get_activity_state_at(200) == {'hk_a': _both(MinerActivity.RESERVED)}
+        assert idx.get_activity_state_at(499) == {'hk_a': _both(MinerActivity.RESERVED)}
         assert idx.get_activity_state_at(500) == {}  # 200 + 300 ttl → AVAILABLE
         kinds = [e['kind'] for e in idx.get_activity_events_in_range(0, 1000)]
         assert kinds == [1, 3]  # RESERVE_START then synthetic RESERVE_EXPIRE
@@ -107,7 +112,7 @@ class TestIngestActivity:
             [rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_b', user='pk_user', requests=1)],
             ATTR,
         )
-        assert idx.get_activity_state_at(250) == {'hk_a': MinerActivity.RESERVED}  # not hk_b
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.RESERVED)}  # not hk_b
         store.close()
 
     def test_pool_resolved_dropped_without_ttl_source(self, tmp_path: Path):
@@ -620,3 +625,93 @@ class TestSwapFulfillmentHash:
         store.prune_swap_outcomes(200)
         assert store.get_swap_fulfillment(DEFAULT_SWAP_KEY.hex()) is None
         store.close()
+
+
+class TestIngestActivityPerHub:
+    """v3.1.1: lifecycle events carry collateral_chain, and the activity machine
+    runs per (hotkey, hub) so a sol-busy miner stays crownable on its tao quotes."""
+
+    def test_pool_resolved_scopes_the_reservation_to_its_hub(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=300)
+        idx.ingest(
+            [
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='tao',
+                )
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': {'tao': MinerActivity.RESERVED}}
+        assert idx.get_activity_state_at(500) == {}  # the synthetic expire inherits the hub
+
+    def test_swap_lifecycle_stays_on_its_hub(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=10**9)
+        idx.ingest(
+            [
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='w',
+                    user='u',
+                    requests=1,
+                    collateral_chain='sol',
+                ),
+                rec('SwapInitiated', miner='pk_a', block_time=250, collateral_chain='sol'),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(300) == {'hk_a': {'sol': MinerActivity.FULFILLING}}
+        idx.ingest(
+            [
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    from_chain='sol',
+                    to_chain='btc',
+                    from_amount=1,
+                    to_amount=1,
+                    collateral_chain='sol',
+                )
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(450) == {}
+
+
+def test_activity_events_hub_column_migrates_in_place(tmp_path: Path):
+    """A pre-v3.1.1 state.db (no hub column) gains it on open; its legacy rows read
+    NULL = busy on every hub, exactly the meaning they were written under."""
+    import sqlite3
+
+    db = tmp_path / 'state.db'
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE activity_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_num   INTEGER NOT NULL,
+            hotkey      TEXT NOT NULL,
+            kind        INTEGER NOT NULL
+        );
+        INSERT INTO activity_events (block_num, hotkey, kind) VALUES (100, 'hk_a', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    store = ValidatorStateStore(db_path=db)
+    assert store.get_activity_state_at(150) == {'hk_a': {'sol': MinerActivity.RESERVED, 'tao': MinerActivity.RESERVED}}
+    store.insert_activity_event(200, 'hk_a', ActivityTransition(2), hub='sol')  # FULFILL_START, sol purse
+    state = store.get_activity_state_at(250)
+    assert state['hk_a']['sol'] == MinerActivity.FULFILLING
+    assert state['hk_a']['tao'] == MinerActivity.RESERVED
+    store.close()

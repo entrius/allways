@@ -615,12 +615,14 @@ class EventKind(IntEnum):
 class ReplayEvent:
     """One transition in the chronological replay stream. ``value`` is
     polymorphic on ``kind``: rate as float, active as 0/1, or an
-    ``ActivityTransition`` value for ACTIVITY."""
+    ``ActivityTransition`` value for ACTIVITY. ``hub`` scopes an ACTIVITY
+    transition to one purse's machine (v3.1 per-hub busy); None = every hub."""
 
     block: int
     hotkey: str
     kind: EventKind
     value: float
+    hub: Optional[str] = None
 
     @property
     def sort_key(self) -> Tuple[int, int, int]:
@@ -649,14 +651,16 @@ def reconstruct_window_start_state(
     to_chain: str,
     window_start: int,
     rewardable_hotkeys: Set[str],
-) -> Tuple[Dict[str, float], Dict[str, MinerActivity], Set[str], Dict[str, int]]:
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, MinerActivity]], Set[str], Dict[str, int]]:
     """Snapshot rates, per-miner activity, active set, and posted collateral as
-    they stood at window_start. ``activity`` holds only non-AVAILABLE miners (a
-    reservation/swap open before the window shows RESERVED/FULFILLING at the
-    edge); absent hotkeys default to AVAILABLE. Rate read is one batched query
-    per direction (N rewardable hotkeys would otherwise be N point lookups, runs
-    every forward step from snapshot_current_crown_holders)."""
-    activity: Dict[str, MinerActivity] = dict(event_index.get_activity_state_at(window_start))
+    they stood at window_start. ``activity`` is per (hotkey, hub) — v3.1 busy is
+    per purse — holding only busy hubs (a reservation/swap open before the window
+    shows RESERVED/FULFILLING at the edge); absences default to AVAILABLE. Rate
+    read is one batched query per direction (N rewardable hotkeys would otherwise
+    be N point lookups, runs every forward step from snapshot_current_crown_holders)."""
+    activity: Dict[str, Dict[str, MinerActivity]] = {
+        hk: dict(hubs) for hk, hubs in event_index.get_activity_state_at(window_start).items()
+    }
     active_set: Set[str] = set(event_index.get_active_miners_at(window_start))
 
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
@@ -686,7 +690,9 @@ def merge_replay_events(
 
     for e in event_index.get_activity_events_in_range(window_start, window_end):
         events.append(
-            ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.ACTIVITY, value=float(e['kind']))
+            ReplayEvent(
+                block=e['block'], hotkey=e['hotkey'], kind=EventKind.ACTIVITY, value=float(e['kind']), hub=e.get('hub')
+            )
         )
 
     for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
@@ -701,6 +707,31 @@ def merge_replay_events(
 
     events.sort(key=lambda ev: ev.sort_key)
     return events
+
+
+def direction_serving_hubs(from_chain: str, to_chain: str) -> List[str]:
+    """The hubs a direction can serve through — its hub legs. A spoke↔spoke pair
+    (never scored) falls back to every hub, reproducing the global-busy reading."""
+    hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
+    return hubs or list(BACKING_BITS)
+
+
+def rewardable_by_activity(
+    activity: Dict[str, Dict[str, MinerActivity]],
+    hotkeys: Set[str],
+    serving_hubs: List[str],
+) -> Set[str]:
+    """Hotkeys whose per-hub activity still permits crown on a direction served by
+    ``serving_hubs``: busy forfeits only when EVERY serving hub is mid-reservation/
+    swap — the activity twin of ``direction_eligible``'s any-clean-hub rule (v3.1:
+    a sol-busy miner keeps earning on its tao quotes and vice versa; a hub↔hub
+    direction forfeits only when both purses are busy). Absent = AVAILABLE."""
+    out: Set[str] = set()
+    for hk in hotkeys:
+        per_hub = activity.get(hk) or {}
+        if any(per_hub.get(h, MinerActivity.AVAILABLE) in REWARD_MINER_STATES for h in serving_hubs):
+            out.add(hk)
+    return out
 
 
 def direction_purse_known(from_chain: str, to_chain: str) -> bool:
@@ -828,13 +859,13 @@ def replay_crown_time_window(
 
     bounds_set = min_swap_hub > 0 or max_swap_hub > 0
 
+    serving_hubs = direction_serving_hubs(from_chain, to_chain)
+
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
         if duration <= 0:
             return
-        rewardable_by_state = {
-            hk for hk in rewardable_hotkeys if activity.get(hk, MinerActivity.AVAILABLE) in REWARD_MINER_STATES
-        }
+        rewardable_by_state = rewardable_by_activity(activity, rewardable_hotkeys, serving_hubs)
         rates_for_instant = rates
         holders = crown_holders_at_instant(
             rates_for_instant,
@@ -874,15 +905,22 @@ def replay_crown_time_window(
         if event.kind is EventKind.RATE:
             rates[event.hotkey] = event.value
         elif event.kind is EventKind.ACTIVITY:
-            cur = activity.get(event.hotkey, MinerActivity.AVAILABLE)
-            nxt = next_activity(cur, ActivityTransition(int(event.value)))
-            if nxt is None:
-                warn_unexpected_activity(cur, ActivityTransition(int(event.value)))
-                nxt = cur
-            if nxt is MinerActivity.AVAILABLE:
+            transition = ActivityTransition(int(event.value))
+            per_hub = activity.setdefault(event.hotkey, {})
+            # A hub-scoped edge steps one purse's machine; a NULL-hub edge (legacy
+            # rows, pre-v3.1 payloads) steps every hub — the global-busy reading.
+            for h in [event.hub] if event.hub else list(BACKING_BITS):
+                cur = per_hub.get(h, MinerActivity.AVAILABLE)
+                nxt = next_activity(cur, transition)
+                if nxt is None:
+                    warn_unexpected_activity(cur, transition)
+                    nxt = cur
+                if nxt is MinerActivity.AVAILABLE:
+                    per_hub.pop(h, None)
+                else:
+                    per_hub[h] = nxt
+            if not per_hub:
                 activity.pop(event.hotkey, None)
-            else:
-                activity[event.hotkey] = nxt
         elif event.kind is EventKind.COLLATERAL:
             collaterals[event.hotkey] = max(0, int(event.value))
         else:  # ACTIVE
@@ -952,9 +990,9 @@ def snapshot_current_crown_holders(
         )
         canon_from, _ = canonical_pair(from_chain, to_chain)
         lower_rate_wins = from_chain != canon_from
-        rewardable_by_state = {
-            hk for hk in rewardable_hotkeys if activity.get(hk, MinerActivity.AVAILABLE) in REWARD_MINER_STATES
-        }
+        rewardable_by_state = rewardable_by_activity(
+            activity, rewardable_hotkeys, direction_serving_hubs(from_chain, to_chain)
+        )
 
         # Same predicates the scoring replay uses, so the live table never
         # credits a holder the ledger drops. Built per direction so each
