@@ -2726,11 +2726,19 @@ class TestPerHubBusy:
         watcher = make_watcher(store, active={'hk_a'})
         conn = store.require_connection()
         for from_c, to_c, rate in directions:
+            # F4: a direction is crown-scored against its hub leg's purse, so pin the rate row's
+            # backing — sol anchors any pair it's a leg of, else tao — or a tao-hub quote is looked
+            # up under 'sol' and never found.
+            backing = 'sol' if 'sol' in (from_c, to_c) else 'tao'
             conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                ('hk_a', from_c, to_c, rate, 0),
+                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block, collateral_chain)'
+                ' VALUES (?, ?, ?, ?, ?, ?)',
+                ('hk_a', from_c, to_c, rate, 0, backing),
             )
         conn.commit()
+        # F4: fund both purses so per-hub crown reflects busy-independence, not a missing bond.
+        store.insert_collateral_event(0, 'hk_a', 500_000_000, 'sol')
+        store.insert_collateral_event(0, 'hk_a', 500_000_000, 'tao')
         return store, watcher
 
     def _replay(self, store, from_chain, to_chain):
@@ -2742,6 +2750,8 @@ class TestPerHubBusy:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a'},
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
 
     def test_sol_busy_keeps_tao_hub_crown(self, tmp_path: Path):
