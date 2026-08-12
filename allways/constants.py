@@ -101,7 +101,21 @@ def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
 
 
 # Chains paired against each hub; add a chain here to launch its pairs.
-LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc', 'hype', 'bnb', 'avax', 'baseusdc', 'ethusdc', 'cro', 'aster', 'uni')
+LAUNCH_SPOKES = (
+    'btc',
+    'tao',
+    'eth',
+    'arbusdc',
+    'hype',
+    'bnb',
+    'avax',
+    'baseusdc',
+    'ethusdc',
+    'cro',
+    'aster',
+    'uni',
+    'qnt',
+)
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
 # lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
