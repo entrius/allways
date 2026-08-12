@@ -22,7 +22,7 @@ import numpy as np
 from allways import dev_signal
 from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
-from allways.cli.swap_commands.swap_intake import bounds_from_config, hub_bounds
+from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
@@ -40,6 +40,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
+    declarable_backings,
     hub_leg,
     required_collateral,
 )
@@ -119,16 +120,16 @@ def _flush_halt_window(self: Validator, current_time: int) -> None:
     window_start = max(0, window_end - SCORING_WINDOW_SECS)
     if window_end <= 0:
         return
-    directions = list(DIRECTION_POOLS.keys())
+    lanes = [(f, t, b) for f, t in DIRECTION_POOLS for b in declarable_backings(f, t)]
     self.database_storage.flush_halt_window(
-        directions=directions,
+        directions=lanes,
         window_start=window_start,
         window_end=window_end,
         max_ts=window_end,
     )
-    # Empty rows per direction → upsert_current_crown_snapshot's
+    # Empty rows per lane → upsert_current_crown_snapshot's
     # delete-then-insert flow clears them.
-    self.database_storage.upsert_current_crown_snapshot({(f, t): [] for f, t in directions})
+    self.database_storage.upsert_current_crown_snapshot({lane: [] for lane in lanes})
 
 
 def contract_is_halted(self: Validator) -> bool:
@@ -200,20 +201,18 @@ def hub_free(miner_state, backing: str, now: int) -> bool:
     return now >= int(settling[idx]) if idx < len(settling) else True
 
 
-def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int) -> bool:
-    """Per-direction gate: the global strikes AND a serving hub that is not mid-settle. A spoke
-    pair names exactly one hub; a hub↔hub direction keeps earning while EITHER purse is clean (its
-    clean-hub quotes keep serving — the settling hub's quotes are entry-gated on-chain anyway).
+def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int, backing: Optional[str] = None) -> bool:
+    """Per-lane gate: the global strikes AND the lane's own hub not mid-settle. ``backing`` names
+    the lane (V-2 fix, shipped with the F4 dual-backing lanes): a miner mid-TAO-settle is zeroed on
+    the (sol↔tao, tao) lane only — the honest SOL-backed lane keeps earning, and the exclusion
+    self-clears at the deadline, matching the contract's per-hub ``check_entry_gates``.
 
-    V-2 (deferred): the ``any(hub_free)`` is inert on the one shipped hub↔hub direction (sol↔tao).
-    A miner mid-TAO-settle stays fully eligible there via the clean SOL hub, so its TAO share is not
-    zeroed — the charter's "zero only the TAO share" needs backing-aware score ROWS (ships with the
-    deferred per-hub capacity work), NOT an ``any``→``all`` flip (that would over-punish the honest
-    SOL share). Accepted for now: on-chain ``check_entry_gates`` still blocks new TAO swaps mid-settle,
-    so the only leak is scoring credit during that window. MUST be fixed before any TAO-only (no SOL
-    co-hub) direction ships. See tests/test_eligibility.py::test_tao_share_of_hub_hub_..._xfail."""
+    ``backing=None`` is the pair-level reading — eligible while ANY declarable lane's hub is clean.
+    A spoke pair names exactly one hub, so the two readings agree there."""
     if not is_eligible(miner_state, now):
         return False
+    if backing is not None:
+        return hub_free(miner_state, backing, now)
     hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
     if not hubs:
         return True
@@ -251,16 +250,18 @@ def build_eligibility(
 
 @dataclass
 class ScoreRow:
-    """One (hotkey, direction) scoring snapshot: the factors the reward math
+    """One (hotkey, lane) scoring snapshot: the factors the reward math
     actually used, in the shape the ``miner_scores`` / ``current_miner_scores``
-    tables persist. ``reward`` is the direction's final emission share (post
-    eligibility gate); the other fields are its inputs, so the dashboard can
-    write the multiplication out. ``pool`` rides along because it is
-    volume-weighted per round — a reader cannot re-derive it."""
+    tables persist. ``backing`` names the lane's funding hub (F4) — sol↔tao
+    carries one row set per backing. ``reward`` is the lane's final emission
+    share (post eligibility gate); the other fields are its inputs, so the
+    dashboard can write the multiplication out. ``pool`` rides along because
+    it is volume-weighted per round — a reader cannot re-derive it."""
 
     hotkey: str
     from_chain: str
     to_chain: str
+    backing: str
     eligible: bool
     pool: float
     crown_share: float
@@ -271,12 +272,13 @@ class ScoreRow:
 def build_direction_score_rows(
     from_chain: str,
     to_chain: str,
+    backing: str,
     pool: float,
     crown_time: Dict[str, float],
     cap_weighted_time: Dict[str, float],
     eligibility: Dict[str, bool],
 ) -> List[ScoreRow]:
-    """Per-holder factors + reward for one direction — the single place the
+    """Per-holder factors + reward for one lane — the single place the
     reward multiplication lives, shared by the round scorer
     (``calculate_miner_rewards``) and the live tip
     (``snapshot_current_miner_scores``) so the two can never disagree.
@@ -299,6 +301,7 @@ def build_direction_score_rows(
                 hotkey=hotkey,
                 from_chain=from_chain,
                 to_chain=to_chain,
+                backing=backing,
                 eligible=eligible,
                 pool=pool,
                 crown_share=crown_share_dir,
@@ -311,19 +314,23 @@ def build_direction_score_rows(
 
 def compute_direction_pools(
     clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
-) -> Dict[Tuple[str, str], float]:
+) -> Dict[Tuple[str, str, str], float]:
     """Volume-weighted pools from a trailing window of realized swaps
-    (``get_clearing_volumes`` shape). Each hub↔spoke *pair* earns
-    ``(1−α)/pairs + α × its share of hub-leg notional``, split evenly between
-    its two directions — weighting at pair level means one leg can't be
-    inflated without inflating the whole pair. No volume anywhere → the equal
-    split. Pools sum to ``MINER_POOL_SHARE``, not 1.0 — the burn lives here.
+    (``get_clearing_volumes`` shape), keyed by lane ``(from, to, backing)``.
+    Each hub↔spoke *pair* earns ``(1−α)/pairs + α × its share of hub-leg
+    notional``, split evenly between its two directions — weighting at pair
+    level means one leg can't be inflated without inflating the whole pair —
+    then evenly again across each direction's backing lanes (F4, budget-
+    neutral: sol↔tao's pair pool splits across its two lanes, spokes carry
+    one). No volume anywhere → the equal split. Pools sum to
+    ``MINER_POOL_SHARE``, not 1.0 — the burn lives here.
 
     Volumes are the pair's HUB-leg notional, so they are only comparable
     within one hub's family (lamports vs rao — converting across would smuggle
     a price oracle in). Each hub family therefore holds a FIXED share of the
     pool (proportional to its pair count) and the α-blend runs within it; a
-    single-family registry reduces exactly to the old global blend."""
+    single-family registry reduces exactly to the old global blend. Volume is
+    never split by backing — same non-comparability argument."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -339,13 +346,17 @@ def compute_direction_pools(
         pair_volumes[pair] = volume
 
     if sum(pair_volumes.values()) <= 0:
-        return dict(DIRECTION_POOLS)
+        return {
+            (from_chain, to_chain, backing): pool / len(declarable_backings(from_chain, to_chain))
+            for (from_chain, to_chain), pool in DIRECTION_POOLS.items()
+            for backing in declarable_backings(from_chain, to_chain)
+        }
 
     families: Dict[str, List[Tuple[str, str]]] = {}
     for pair in pair_directions:
         families.setdefault(hub_leg(*pair) or pair[0], []).append(pair)
 
-    pools: Dict[Tuple[str, str], float] = {}
+    pools: Dict[Tuple[str, str, str], float] = {}
     total_pairs = len(pair_directions)
     for family_pairs in families.values():
         family_share = len(family_pairs) / total_pairs
@@ -358,8 +369,12 @@ def compute_direction_pools(
                 volume_share = pair_volumes[pair] / family_volume
                 pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
             directions = pair_directions[pair]
-            for direction in directions:
-                pools[direction] = MINER_POOL_SHARE * family_share * pair_share / len(directions)
+            for from_chain, to_chain in directions:
+                lanes = declarable_backings(from_chain, to_chain)
+                for backing in lanes:
+                    pools[(from_chain, to_chain, backing)] = (
+                        MINER_POOL_SHARE * family_share * pair_share / len(directions) / len(lanes)
+                    )
     return pools
 
 
@@ -389,23 +404,23 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # state the ingest lost — before the replay below reads those tables.
     live_states = live_miner_states(self.solana_client, self.metagraph)
     self.event_index.reconcile_live_state(live_states, now=current_time)
-    # The global (strike) view feeds the trace log; rows gate per direction so a TAO settle zeroes
-    # only TAO-hub contributions while SOL rows keep earning (v3.1).
+    # The global (strike) view feeds the trace log; rows gate per lane so a TAO settle zeroes
+    # only tao-lane contributions while sol-lane rows keep earning (V-2, F4).
     eligibility = {hk: is_eligible(ms, current_time) for hk, ms in live_states.items()}
 
-    direction_traces: Dict[Tuple[str, str], DirectionTrace] = {}
+    direction_traces: Dict[Tuple[str, str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
-    # Per-(hotkey, direction) factor snapshots — the rows miner_scores persists.
+    # Per-(hotkey, lane) factor snapshots — the rows miner_scores persists.
     # Only on-metagraph holders land here (a dereg'd miner is paid nothing).
     score_rows: List[ScoreRow] = []
     # Captured only when dashboard storage is enabled — the tee inside
     # replay_crown_time_window is a no-op when intervals_out is None, so
     # disabled validators pay zero cost here.
     storage_enabled = self.database_storage.is_enabled()
-    intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, Dict[str, float], float]]] = {}
-    # Per-backing bounds off the cached Config; each direction anchors on its own hub leg
-    # (SOL lamports for sol-hub directions, rao for tao-hub ones). Empty map on failure =
-    # both-0 per direction = permissive, matching the old failure mode.
+    intervals_by_dir: Dict[Tuple[str, str, str], List[Tuple[int, int, Dict[str, float], float]]] = {}
+    # Per-backing bounds off the cached Config; each lane anchors on its own backing hub
+    # (SOL lamports for sol lanes, rao for tao lanes) so the purse-axis math stays in the
+    # purse's own unit. Empty map on failure = both-0 per lane = permissive, as before.
     try:
         swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
@@ -418,14 +433,14 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         self.state_store.get_clearing_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
     )
 
-    for (from_chain, to_chain), pool in pools.items():
+    for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
-        direction_traces[(from_chain, to_chain)] = trace
+        direction_traces[(from_chain, to_chain, backing)] = trace
         intervals: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None
         if storage_enabled:
             intervals = []
-            intervals_by_dir[(from_chain, to_chain)] = intervals
-        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
+            intervals_by_dir[(from_chain, to_chain, backing)] = intervals
+        min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -438,11 +453,12 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             intervals_out=intervals,
             min_swap_hub=min_swap_hub,
             max_swap_hub=max_swap_hub,
-            purse_known=direction_purse_known(from_chain, to_chain),
+            backing=backing,
+            purse_known=direction_purse_known(backing),
         )
         total_crown_dir = sum(crown_time.values())
 
-        bt.logging.debug(f'V1 scoring [{from_chain}→{to_chain}]: total_crown={total_crown_dir:.1f}s')
+        bt.logging.debug(f'V1 scoring [{from_chain}→{to_chain}|{backing}]: total_crown={total_crown_dir:.1f}s')
 
         if total_crown_dir == 0:
             continue  # empty bucket — pool recycles via the remainder below
@@ -450,11 +466,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         rows = build_direction_score_rows(
             from_chain,
             to_chain,
+            backing,
             pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, current_time) for hk, ms in live_states.items()
+                hk: direction_eligible(ms, from_chain, to_chain, current_time, backing=backing)
+                for hk, ms in live_states.items()
             },
         )
         for row in rows:
@@ -495,16 +513,16 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         # direction before upserting, so the wipe matches the data exactly.
         # rate_history is NOT written here: the indexer owns it (real-time,
         # per QuoteSet event) — the validator only persists what it paid.
-        crown_rows_by_dir = {d: intervals_to_crown_rows(ivs, d[0], d[1]) for d, ivs in intervals_by_dir.items()}
+        crown_rows_by_dir = {d: intervals_to_crown_rows(ivs, d[0], d[1], d[2]) for d, ivs in intervals_by_dir.items()}
         # Crown intervals tile [window_start, window_end); the last one ends at
         # window_end, so the freshness cursor is "as of window_end" (unix secs).
         # window_end also keys the round in miner_scores — one snapshot row per
-        # (round, hotkey, direction), written in the same transaction as the
+        # (round, hotkey, lane), written in the same transaction as the
         # crown ledger so the two can never disagree about a round.
         cursor_ts = max(0, window_end)
         self.database_storage.flush_scoring_window(
             crown_rows_by_direction=crown_rows_by_dir,
-            crown_window_bounds_by_direction={d: (window_start, window_end) for d in DIRECTION_POOLS},
+            crown_window_bounds_by_direction={lane: (window_start, window_end) for lane in pools},
             miner_score_rows=miner_score_tuples(score_rows, cursor_ts),
             crown_holders_max_ts=cursor_ts,
         )
@@ -522,6 +540,7 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
             r.hotkey,
             r.from_chain,
             r.to_chain,
+            r.backing,
             r.eligible,
             r.pool,
             r.crown_share,
@@ -554,9 +573,9 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
         swap_bounds = {}
     rows: List[ScoreRow] = []
     pools = compute_direction_pools(self.state_store.get_clearing_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts))
-    for (from_chain, to_chain), pool in pools.items():
+    for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
-        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
+        min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -568,17 +587,22 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             trace=trace,
             min_swap_hub=min_swap_hub,
             max_swap_hub=max_swap_hub,
-            purse_known=direction_purse_known(from_chain, to_chain),
+            backing=backing,
+            purse_known=direction_purse_known(backing),
         )
         if not crown_time:
             continue
         dir_rows = build_direction_score_rows(
             from_chain,
             to_chain,
+            backing,
             pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
-            eligibility={hk: direction_eligible(ms, from_chain, to_chain, ts) for hk, ms in live_states.items()},
+            eligibility={
+                hk: direction_eligible(ms, from_chain, to_chain, ts, backing=backing)
+                for hk, ms in live_states.items()
+            },
         )
         rows.extend(dir_rows)
     return miner_score_tuples(rows, ts)
@@ -659,21 +683,23 @@ def reconstruct_window_start_state(
     to_chain: str,
     window_start: int,
     rewardable_hotkeys: Set[str],
+    backing: Optional[str],
 ) -> Tuple[Dict[str, float], Dict[str, Dict[str, MinerActivity]], Set[str], Dict[str, int]]:
     """Snapshot rates, per-miner activity, active set, and posted collateral as
     they stood at window_start. ``activity`` is per (hotkey, hub) — v3.1 busy is
     per purse — holding only busy hubs (a reservation/swap open before the window
     shows RESERVED/FULFILLING at the edge); absences default to AVAILABLE. Rate
-    read is one batched query per direction (N rewardable hotkeys would otherwise
-    be N point lookups, runs every forward step from snapshot_current_crown_holders)."""
+    read is one batched query per lane (N rewardable hotkeys would otherwise
+    be N point lookups, runs every forward step from snapshot_current_crown_holders).
+
+    Rates and collateral are read for the LANE's ``backing`` only (F4) — the caller
+    names the lane, so sol↔tao's tao lane reads its own quotes and attested TAO bond.
+    A sibling backing never bleeds into the other."""
     activity: Dict[str, Dict[str, MinerActivity]] = {
         hk: dict(hubs) for hk, hubs in event_index.get_activity_state_at(window_start).items()
     }
     active_set: Set[str] = set(event_index.get_active_miners_at(window_start))
 
-    # Each direction is scored against its own hub's quotes and funding purse (F4): sol-hub reads the
-    # local SOL purse, tao-hub the attested TAO bond. A sibling backing never bleeds into the other.
-    backing = hub_leg(from_chain, to_chain)
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start, collateral_chain=backing)
     rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
@@ -689,12 +715,12 @@ def merge_replay_events(
     to_chain: str,
     window_start: int,
     window_end: int,
+    backing: Optional[str],
 ) -> List[ReplayEvent]:
     """Merge in-window active, activity, rate, and collateral transitions into
     one chronologically-sorted stream (incl. the synthetic RESERVE_EXPIRE). Rate and collateral
-    transitions are read for THIS direction's backing only (F4)."""
+    transitions are read for THIS lane's ``backing`` only (F4), named by the caller."""
     events: List[ReplayEvent] = []
-    backing = hub_leg(from_chain, to_chain)
 
     for e in event_index.get_active_events_in_range(window_start, window_end):
         events.append(
@@ -722,11 +748,12 @@ def merge_replay_events(
     return events
 
 
-def direction_serving_hubs(from_chain: str, to_chain: str) -> List[str]:
-    """The hubs a direction can serve through — its hub legs. A spoke↔spoke pair
-    (never scored) falls back to every hub, reproducing the global-busy reading."""
-    hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
-    return hubs or list(BACKING_BITS)
+def lane_serving_hubs(backing: Optional[str]) -> List[str]:
+    """The hub a lane serves through — its backing purse. A lane forfeits crown while
+    its OWN hub is busy; the sibling lane's busy never bleeds across (F4, extends #646's
+    per-hub busy into the backing dimension). None (a spoke↔spoke pair, never scored)
+    falls back to every hub, reproducing the global-busy reading."""
+    return [backing] if backing is not None else list(BACKING_BITS)
 
 
 def rewardable_by_activity(
@@ -734,11 +761,11 @@ def rewardable_by_activity(
     hotkeys: Set[str],
     serving_hubs: List[str],
 ) -> Set[str]:
-    """Hotkeys whose per-hub activity still permits crown on a direction served by
-    ``serving_hubs``: busy forfeits only when EVERY serving hub is mid-reservation/
-    swap — the activity twin of ``direction_eligible``'s any-clean-hub rule (v3.1:
-    a sol-busy miner keeps earning on its tao quotes and vice versa; a hub↔hub
-    direction forfeits only when both purses are busy). Absent = AVAILABLE."""
+    """Hotkeys whose per-hub activity still permits crown on a lane served by
+    ``serving_hubs`` (one hub per lane — ``lane_serving_hubs``): busy forfeits only
+    when EVERY serving hub is mid-reservation/swap — the activity twin of
+    ``direction_eligible``'s per-lane settle gate (a sol-busy miner keeps earning on
+    its tao lanes and vice versa). Absent = AVAILABLE."""
     out: Set[str] = set()
     for hk in hotkeys:
         per_hub = activity.get(hk) or {}
@@ -747,14 +774,14 @@ def rewardable_by_activity(
     return out
 
 
-def direction_purse_known(from_chain: str, to_chain: str) -> bool:
-    """Whether the crown has this direction's funding purse to gate against.
+def direction_purse_known(backing: Optional[str]) -> bool:
+    """Whether the crown has this lane's funding purse to gate against.
 
-    Both hubs now carry a purse stream (F4): sol-hub reads the local SOL purse
-    (CollateralPosted/Withdrawn), tao-hub the attested TAO bond (BondAttested). Each is compared
-    against its own hub-leg bounds, so the purse-axis gates (can_fund, depth split, capacity) run
-    for every hub↔spoke and hub↔hub direction rather than neutral."""
-    return hub_leg(from_chain, to_chain) in HUB_CHAINS
+    Both hubs carry a purse stream (F4): a sol lane reads the local SOL purse
+    (CollateralPosted/Withdrawn), a tao lane the attested TAO bond (BondAttested). Each is compared
+    against its own backing's bounds, so the purse-axis gates (can_fund, depth split, capacity) run
+    for every lane rather than neutral. None (spoke↔spoke, never scored) has no purse stream."""
+    return backing in HUB_CHAINS
 
 
 def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
@@ -823,6 +850,7 @@ def replay_crown_time_window(
     min_swap_hub: int = 0,
     max_swap_hub: int = 0,
     rate_band: float = CROWN_RATE_BAND,
+    backing: Optional[str] = None,
     purse_known: bool = True,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
@@ -840,22 +868,28 @@ def replay_crown_time_window(
     to the contract's active flag; halt state is handled at
     ``score_and_reward_miners`` entry.
 
-    ``min_swap_hub``/``max_swap_hub`` are the direction's HUB-leg bounds (hub smallest-units).
-    Bounds at 0 disable the executability filter (matches the contract's
-    "unset" sentinel); the rate-positive floor still applies. ``purse_known=False``
-    (``direction_purse_known``: the collateral event stream is not this direction's funding
-    purse — tao-hub directions until attestation-fed purse events exist) keeps the rate gates
-    but runs the purse-axis ones neutral: can_fund permissive, depth = even split, capacity 1.0.
+    ``backing`` names the LANE being scored (F4): rates, collateral, busy, and the purse-axis
+    gates all read that backing's own streams, so sol↔tao is two independent replays. None
+    defaults to the pair's hub leg — a spoke pair's single lane, and every pre-lane call site.
+
+    ``min_swap_hub``/``max_swap_hub`` are the lane's BACKING-hub bounds (that hub's
+    smallest-units, matching the purse). Bounds at 0 disable the executability filter
+    (matches the contract's "unset" sentinel); the rate-positive floor still applies.
+    ``purse_known=False`` (``direction_purse_known``: no purse stream for the backing —
+    spoke↔spoke only) keeps the rate gates but runs the purse-axis ones neutral:
+    can_fund permissive, depth = even split, capacity 1.0.
 
     When ``trace`` is supplied, ``trace.cap_weighted_time`` is populated
     alongside ``trace.crown_time``. The weighted series multiplies each
     interval's split by ``capacity_factor(collateral_at_block, max_swap_hub)``
     so a post-window collateral boost cannot retroactively scale credit
     already earned (closes #409)."""
+    if backing is None:
+        backing = hub_leg(from_chain, to_chain)
     rates, activity, active_set, collaterals = reconstruct_window_start_state(
-        store, event_index, from_chain, to_chain, window_start, rewardable_hotkeys
+        store, event_index, from_chain, to_chain, window_start, rewardable_hotkeys, backing
     )
-    replay_events = merge_replay_events(store, event_index, from_chain, to_chain, window_start, window_end)
+    replay_events = merge_replay_events(store, event_index, from_chain, to_chain, window_start, window_end, backing)
 
     # Rates are stored as canonical_dest per canonical_source (BTC per TAO).
     # In the canonical direction (tao→btc) higher = better; in the reverse
@@ -871,7 +905,7 @@ def replay_crown_time_window(
 
     bounds_set = min_swap_hub > 0 or max_swap_hub > 0
 
-    serving_hubs = direction_serving_hubs(from_chain, to_chain)
+    serving_hubs = lane_serving_hubs(backing)
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
@@ -900,7 +934,7 @@ def replay_crown_time_window(
         # rate; the interval splits across them by collateral depth, so a
         # one-tick undercut no longer takes the crown outright and depth is the
         # axis a rival must beat you on inside the band. Unknown purse
-        # (tao-hub direction) → even split, no depth axis.
+        # (spoke↔spoke, never scored) → even split, no depth axis.
         shares = crown_depth_shares(holders, collaterals if purse_known else {}, max_swap_hub)
         if intervals_out is not None:
             intervals_out.append((interval_start, interval_end, dict(shares), winner_rate))
@@ -956,18 +990,18 @@ def replay_crown_time_window(
 def snapshot_current_crown_holders(
     self: Validator,
     at_time: Optional[int] = None,
-) -> Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]]:
-    """Cheap "who holds the crown right now" per direction. Used by the
+) -> Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]]:
+    """Cheap "who holds the crown right now" per lane. Used by the
     per-forward-step live-crown writer.
 
     Reconstructs rates/activity/active at the current time and evaluates
-    ``crown_holders_at_instant`` once per direction — no event-stream walk,
-    so cost is O(rewardable_hotkeys) per direction, sub-millisecond in
+    ``crown_holders_at_instant`` once per lane — no event-stream walk,
+    so cost is O(rewardable_hotkeys) per lane, sub-millisecond in
     practice. Returns rows in ``DatabaseStorage.upsert_current_crown_snapshot``
-    shape: ``(from_chain, to_chain, hotkey, credit, rate, ts)`` keyed
-    by direction. An empty list for a direction means "no qualifying
-    holder right now" — instructs the storage layer to clear that
-    direction's rows.
+    shape: ``(from_chain, to_chain, backing, hotkey, credit, rate, ts)`` keyed
+    by lane ``(from_chain, to_chain, backing)``. An empty list for a lane
+    means "no qualifying holder right now" — instructs the storage layer
+    to clear that lane's rows.
 
     Halt is not checked here — that RPC is expensive and halt is rare;
     instead ``_flush_halt_window`` clears the live table at the next
@@ -987,53 +1021,53 @@ def snapshot_current_crown_holders(
     except Exception as e:
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         swap_bounds = {}
-    rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
+    rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
-        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
-        bounds_set = min_swap_hub > 0 or max_swap_hub > 0
-        purse_known = direction_purse_known(from_chain, to_chain)
-        rates, activity, active_set, collaterals = reconstruct_window_start_state(
-            self.state_store,
-            self.event_index,
-            from_chain,
-            to_chain,
-            ts,
-            rewardable_hotkeys,
-        )
-        canon_from, _ = canonical_pair(from_chain, to_chain)
-        lower_rate_wins = from_chain != canon_from
-        rewardable_by_state = rewardable_by_activity(
-            activity, rewardable_hotkeys, direction_serving_hubs(from_chain, to_chain)
-        )
+        for backing in declarable_backings(from_chain, to_chain):
+            min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
+            bounds_set = min_swap_hub > 0 or max_swap_hub > 0
+            purse_known = direction_purse_known(backing)
+            rates, activity, active_set, collaterals = reconstruct_window_start_state(
+                self.state_store,
+                self.event_index,
+                from_chain,
+                to_chain,
+                ts,
+                rewardable_hotkeys,
+                backing,
+            )
+            canon_from, _ = canonical_pair(from_chain, to_chain)
+            lower_rate_wins = from_chain != canon_from
+            rewardable_by_state = rewardable_by_activity(activity, rewardable_hotkeys, lane_serving_hubs(backing))
 
-        # Same predicates the scoring replay uses, so the live table never
-        # credits a holder the ledger drops. Built per direction so each
-        # closure captures the right chain pair.
-        executable_check, can_fund = make_crown_predicates(
-            from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals
-        )
+            # Same predicates the scoring replay uses, so the live table never
+            # credits a holder the ledger drops. Built per lane so each
+            # closure captures the right chain pair and bounds.
+            executable_check, can_fund = make_crown_predicates(
+                from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals
+            )
 
-        holders = crown_holders_at_instant(
-            rates,
-            rewardable_hotkeys,
-            rewardable_by_state=rewardable_by_state,
-            active=active_set,
-            lower_rate_wins=lower_rate_wins,
-            executable_rate_check=executable_check,
-            can_fund_at_rate=can_fund if bounds_set and purse_known else None,
-            rate_band=CROWN_RATE_BAND,
-        )
-        if holders:
-            # Same band + depth split as the scoring replay, so the live table agrees
-            # with what the round scorer will credit. Every row carries the band's
-            # anchor (best) rate — the direction's crown rate as a taker sees it.
-            shares = crown_depth_shares(holders, collaterals if purse_known else {}, max_swap_hub)
-            rate = rates.get(holders[0], 0.0)
-            rows_by_direction[(from_chain, to_chain)] = [
-                (from_chain, to_chain, hk, share, rate, ts) for hk, share in shares.items()
-            ]
-        else:
-            rows_by_direction[(from_chain, to_chain)] = []
+            holders = crown_holders_at_instant(
+                rates,
+                rewardable_hotkeys,
+                rewardable_by_state=rewardable_by_state,
+                active=active_set,
+                lower_rate_wins=lower_rate_wins,
+                executable_rate_check=executable_check,
+                can_fund_at_rate=can_fund if bounds_set and purse_known else None,
+                rate_band=CROWN_RATE_BAND,
+            )
+            if holders:
+                # Same band + depth split as the scoring replay, so the live table agrees
+                # with what the round scorer will credit. Every row carries the band's
+                # anchor (best) rate — the lane's crown rate as a taker sees it.
+                shares = crown_depth_shares(holders, collaterals if purse_known else {}, max_swap_hub)
+                rate = rates.get(holders[0], 0.0)
+                rows_by_direction[(from_chain, to_chain, backing)] = [
+                    (from_chain, to_chain, backing, hk, share, rate, ts) for hk, share in shares.items()
+                ]
+            else:
+                rows_by_direction[(from_chain, to_chain, backing)] = []
     return rows_by_direction
 
 
@@ -1041,20 +1075,21 @@ def intervals_to_crown_rows(
     intervals: List[Tuple[int, int, Dict[str, float], float]],
     from_chain: str,
     to_chain: str,
-) -> List[Tuple[int, int, str, str, str, float, float]]:
+    backing: str,
+) -> List[Tuple[int, int, str, str, str, str, float, float]]:
     """Convert uniform-state crown intervals to crown_holders rows.
 
     For each (started_at, ended_at, shares, rate) emit one row per holder
     carrying its depth-proportional credit (``crown_depth_shares`` output, so
-    per-interval per-direction credits sum to 1.0). A holder's crown *time*
+    per-interval per-lane credits sum to 1.0). A holder's crown *time*
     over a window is then ``SUM((ended_at - started_at) * credit)``, matching
     the duration the scoring replay already integrates (no per-tick expansion)."""
-    rows: List[Tuple[int, int, str, str, str, float, float]] = []
+    rows: List[Tuple[int, int, str, str, str, str, float, float]] = []
     for lo, hi, shares, rate in intervals:
         if not shares or hi <= lo:
             continue
         for hotkey, share in shares.items():
-            rows.append((lo, hi, from_chain, to_chain, hotkey, share, rate))
+            rows.append((lo, hi, from_chain, to_chain, backing, hotkey, share, rate))
     return rows
 
 

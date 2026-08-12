@@ -74,24 +74,24 @@ def swap_label(swap: Any, metagraph: Optional[Any] = None) -> str:
 def log_crown_winners(
     metagraph: Any,
     block: int,
-    snapshot: dict[tuple[str, str], list[tuple[str, str, str, float, float, int]]],
+    snapshot: dict[tuple[str, str, str], list[tuple[str, str, str, str, float, float, int]]],
 ) -> None:
     """One greppable info line per forward pass naming the current crown holder
-    UID and rate per direction:
+    UID and rate per lane (direction + backing, F4):
 
-        forward: crown holders @ block=N | btc->tao uid=42 rate=326.42 | tao->btc uid=17 rate=339.62
+        forward: crown holders @ block=N | btc->sol[sol] uid=42 rate=326.42 | sol->tao[tao] uid=17 rate=2.1
 
-    Ties render as ``uid=42,55``. Empty directions render as ``btc->tao none``.
-    ASCII arrows so ``grep 'crown holders'`` and ``grep 'btc->tao'`` work
+    Ties render as ``uid=42,55``. Empty lanes render as ``btc->sol[sol] none``.
+    ASCII arrows so ``grep 'crown holders'`` and ``grep 'btc->sol'`` work
     without copy-pasting unicode."""
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(metagraph.hotkeys)}
     parts = [f'forward: crown holders @ block={block}']
-    for (from_chain, to_chain), rows in snapshot.items():
-        direction = f'{from_chain}->{to_chain}'
+    for (from_chain, to_chain, backing), rows in snapshot.items():
+        direction = f'{from_chain}->{to_chain}[{backing}]'
         if not rows:
             parts.append(f'{direction} none')
             continue
-        uids = ','.join(str(hotkey_to_uid.get(row[2], '?')) for row in rows)
-        rate = rows[0][4]
+        uids = ','.join(str(hotkey_to_uid.get(row[3], '?')) for row in rows)
+        rate = rows[0][5]
         parts.append(f'{direction} uid={uids} rate={rate:g}')
     bt.logging.info(' | '.join(parts))

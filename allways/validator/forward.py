@@ -89,7 +89,7 @@ async def forward(self: Validator) -> None:
     # one); halt-aware clearing happens once per round in `_flush_halt_window`.
     crown_snapshot = snapshot_current_crown_holders(self)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
-    dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}': v for k, v in crown_snapshot.items()})
+    dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}-{k[2]}': v for k, v in crown_snapshot.items()})
     if self.database_storage.is_enabled():
         try:
             self.database_storage.upsert_current_crown_snapshot(crown_snapshot)

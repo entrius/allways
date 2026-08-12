@@ -61,7 +61,7 @@ class FakeRepo:
         self.conn._maybe_fail()
         return len(rows)
 
-    def delete_crown_in_range(self, from_chain, to_chain, lo, hi, commit=False):
+    def delete_crown_in_range(self, from_chain, to_chain, backing, lo, hi, commit=False):
         self.conn._maybe_fail()
 
     def set_sync_cursor(self, key, value, commit=False):
@@ -106,7 +106,7 @@ def test_reconnects_on_next_write_after_drop(monkeypatch):
     assert not storage.upsert_current_crown_snapshot({}).success
 
     force_retry_window(storage)
-    result = storage.upsert_current_crown_snapshot({('sol', 'btc'): []})
+    result = storage.upsert_current_crown_snapshot({('sol', 'btc', 'sol'): []})
     assert result.success and result.stored_counts['current_crown_holders'] == 1
     assert storage.db_connection is fresh and fresh.commits == 1
 
@@ -179,6 +179,6 @@ def test_halt_flush_clears_live_score_tip(monkeypatch):
     storage = make_storage(monkeypatch, [conn])
     calls = []
     storage.repo.replace_current_miner_scores = lambda rows, commit=False: calls.append(rows) or len(rows)
-    result = storage.flush_halt_window(directions=[('sol', 'btc')], window_start=0, window_end=100, max_ts=100)
+    result = storage.flush_halt_window(directions=[('sol', 'btc', 'sol')], window_start=0, window_end=100, max_ts=100)
     assert result.success
     assert calls == [[]]

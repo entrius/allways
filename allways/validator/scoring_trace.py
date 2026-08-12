@@ -50,7 +50,7 @@ def log_scoring_trace(
     *,
     window_start: int,
     window_end: int,
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    direction_traces: Dict[Tuple[str, str, str], DirectionTrace],
     rewards: np.ndarray,
     eligibility: Dict[str, bool],
     distributed: float,
@@ -67,13 +67,15 @@ def log_scoring_trace(
         f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
     ]
 
-    for (from_c, to_c), trace in direction_traces.items():
+    for (from_c, to_c, backing), trace in direction_traces.items():
         holders = ', '.join(
             f'UID{hotkey_to_uid[hk]}: {secs:.0f}s'
             for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
             if hk in hotkey_to_uid
         )
-        lines.append(f'  [{from_c}→{to_c}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s')
+        lines.append(
+            f'  [{from_c}→{to_c}|{backing}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s'
+        )
 
     # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
     crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
@@ -116,7 +118,9 @@ def log_scoring_trace(
 
     if recycled > 0:
         parts = [
-            f'{t.unfilled_time}s unfilled in {f}→{to}' for (f, to), t in direction_traces.items() if t.unfilled_time > 0
+            f'{t.unfilled_time}s unfilled in {f}→{to}|{b}'
+            for (f, to, b), t in direction_traces.items()
+            if t.unfilled_time > 0
         ]
         cause = '; '.join(parts) or 'no crown winners'
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
@@ -130,7 +134,7 @@ def non_earner_lines(
     window_end: int,
     rewards: np.ndarray,
     eligibility: Dict[str, bool],
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    direction_traces: Dict[Tuple[str, str, str], DirectionTrace],
     recycle_uid: int,
     collaterals: Optional[Dict[str, int]] = None,
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
@@ -171,7 +175,7 @@ def diagnose_non_earner(
     latest_rates: Dict[Tuple[str, str], float],
     eligible: bool,
     ever_active: Set[str],
-    direction_traces: Dict[Tuple[str, str], DirectionTrace],
+    direction_traces: Dict[Tuple, DirectionTrace],
     collaterals: Optional[Dict[str, int]] = None,
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> str:
@@ -191,7 +195,9 @@ def diagnose_non_earner(
 
     outbid_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():
-        trace = direction_traces.get((from_c, to_c))
+        # last_known_rates carries no backing, so diagnose against the pair's hub-leg
+        # lane (its pricing anchor); the plain pair key keeps direct callers working.
+        trace = direction_traces.get((from_c, to_c, hub_leg(from_c, to_c))) or direction_traces.get((from_c, to_c))
         if trace is None or trace.best_rate <= 0:
             continue
         best = trace.best_rate
