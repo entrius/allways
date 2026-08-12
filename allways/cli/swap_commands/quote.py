@@ -16,7 +16,6 @@ from allways.cli.swap_commands.helpers import (
     backing_label,
     console,
     fail,
-    from_lamports,
     get_solana_cli_context,
     load_miner_book,
     print_json,
@@ -28,12 +27,13 @@ from allways.cli.swap_commands.swap_intake import (
     backing_purse,
     bounds_from_config,
     compute_intake_amounts,
+    hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
     to_smallest_units,
 )
-from allways.constants import FEE_DIVISOR
+from allways.constants import FEE_DIVISOR, hub_leg
 from allways.utils.rate import apply_fee_deduction, directional_rate, is_executable_rate
 
 # The failure guarantee each backing carries. It differs in TIMING, not in whether you are made
@@ -80,15 +80,15 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     to_chain = to_chain.lower()
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
-    if from_chain == to_chain or 'sol' not in (from_chain, to_chain):
-        fail('A swap must have a SOL leg (sol<->btc or sol<->tao) and two distinct chains.')
+    if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
+        fail('A swap must have a hub leg (SOL or TAO, e.g. sol<->btc or tao<->eth) and two distinct chains.')
     if amount <= 0:
         fail('--amount must be positive.')
 
     _, client = get_solana_cli_context(need_keypair=False)
     cfg = safe_read(lambda: client.get_config(), what='read config')
     bounds = bounds_from_config(cfg) if cfg else {}
-    min_swap, max_swap = bounds.get('sol', (0, 0))
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
 
     from_amount = to_smallest_units(amount, from_chain)
     to_dec = get_chain_def(to_chain).decimals
@@ -158,7 +158,9 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
                         'backing': c.backing,
                         'guarantee': GUARANTEE[c.backing] if c.backing in GUARANTEE else 'see docs',
                         'receive': recv / 10**to_dec,
-                        'collateral_sol': from_lamports(c.collateral),
+                        # The purse is in the BACKING asset's own units, not always SOL.
+                        'collateral': c.collateral / 10 ** get_chain_def(c.backing).decimals,
+                        'collateral_unit': c.backing.upper(),
                         'best': str(c.miner) == best_miner,
                     }
                     for c, recv in sorted(viable, key=lambda x: x[1], reverse=True)
@@ -203,7 +205,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
             backing_label(c.backing),
             directional_rate(from_chain, to_chain, c.rate_display),
             f'{recv / 10**to_dec:.8g}',
-            f'{from_lamports(c.collateral):.2f} SOL',
+            f'{c.collateral / 10 ** get_chain_def(c.backing).decimals:.2f} {c.backing.upper()}',
             '★ best' if is_best else '',
         )
     console.print(table)

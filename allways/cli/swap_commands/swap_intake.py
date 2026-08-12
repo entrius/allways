@@ -4,7 +4,7 @@ Mirrors the contract: ``collateral_amount`` is the leg denominated in the quote'
 bounded, collateral-backed notional) — ``backing.rs::collateral_leg_amount``, so a "sol"-backed
 quote is sized against its SOL leg and a "tao"-backed one against its TAO leg, in rao. Uses the
 shared ``calculate_to_amount`` so the CLI's pinned amounts agree with the miner + validator
-byte-for-byte. Launch pairs always have a SOL leg (sol↔btc / sol↔tao); a pair without one is
+byte-for-byte. Every launch pair has a hub leg (sol↔spoke / tao↔spoke); a spoke↔spoke pair is
 rejected here. The one network-touching helper (``candidate_miners``) takes the Solana client as a
 parameter, so the CLI taker path and the validator reserve engine build the same candidate set from
 the same reads.
@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain_def
-from allways.constants import COLLATERAL_REQUIREMENT_BPS, NUMERAIRE_CHAIN, RATE_PRECISION, required_collateral
+from allways.constants import (
+    COLLATERAL_REQUIREMENT_BPS,
+    NUMERAIRE_CHAIN,
+    RATE_PRECISION,
+    hub_leg,
+    required_collateral,
+)
 from allways.utils.rate import (
     calculate_to_amount,
     is_executable_rate,
@@ -38,7 +44,7 @@ class IntakeAmounts:
 @dataclass
 class MinerCandidate:
     miner: object  # solders Pubkey
-    rate_display: str  # canonical 'dest per 1 SOL' rate, display units
+    rate_display: str  # canonical 'dest per 1 hub' rate, display units
     # The purse answering for this offer, in the BACKING's own smallest unit: local lamport
     # collateral for "sol", the attested effective bond (rao) for an off-chain backing.
     collateral: int
@@ -139,6 +145,15 @@ def bounds_from_config(cfg) -> BoundsByBacking:
     }
 
 
+def hub_bounds(bounds: BoundsByBacking, from_chain: str, to_chain: str) -> Tuple[int, int]:
+    """The pair's HUB-leg swap bounds, in the hub's own smallest unit — what the rate-executability
+    gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = unset/permissive for a
+    pair with no hub leg. Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
+    when a tao-backed quote's size is gated on the TAO bounds."""
+    hub = hub_leg(from_chain, to_chain)
+    return bounds.get(hub, (0, 0)) if hub else (0, 0)
+
+
 def _bounds_for(
     backing: str, bounds_by_backing: Optional[BoundsByBacking], min_swap: int, max_swap: int
 ) -> Tuple[int, int]:
@@ -168,14 +183,12 @@ def compute_intake_amounts(
 ) -> IntakeAmounts:
     """Derive (collateral_amount, from_amount, to_amount) for a swap of ``from_amount`` (source smallest-units).
 
-    ``rate_display`` is the miner's canonical 'dest per 1 SOL' rate. Requires one leg to be SOL.
+    ``rate_display`` is the miner's canonical 'dest per 1 hub' rate. Requires one leg to be a hub.
     ``collateral_amount`` is the ``backing``'s leg, in that asset's own units — the figure
     ``finalize_reservation`` bounds and collateralizes.
     """
-    if NUMERAIRE_CHAIN not in (from_chain, to_chain):
-        raise ValueError(
-            f'{from_chain}->{to_chain}: a {NUMERAIRE_CHAIN} leg is required (every launch pair is hub<->spoke)'
-        )
+    if hub_leg(from_chain, to_chain) is None:
+        raise ValueError(f'{from_chain}->{to_chain}: a hub leg (sol or tao) is required (every pair is hub<->spoke)')
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(
@@ -237,9 +250,9 @@ def viable_intakes(
     """Every candidate passing the executable-rate + viability gates, with derived amounts.
     Stable input order. The single gating path shared by auto-select and --miner.
 
-    ``is_executable_rate`` keeps reading the SOL bounds: it is the crown/squat heuristic about a
-    rate nobody can route, and it is defined on the SOL leg. The purse + size gate below is the
-    per-backing one."""
+    ``min_swap``/``max_swap`` are the pair's HUB-leg bounds (``hub_bounds``): ``is_executable_rate``
+    is the crown/squat heuristic about a rate nobody can route, defined on the hub leg. The purse +
+    size gate below is the per-backing one."""
     out: List[Tuple[MinerCandidate, IntakeAmounts]] = []
     for c in candidates:
         try:
@@ -300,13 +313,13 @@ def max_intake_from_amount(
 
 def _bound_phrase(bound: int, backing: str, from_chain: str, rate_display: str) -> str:
     """A bound phrased for the taker. Bounds are contract facts in the BACKING asset; takers think
-    in what they're sending, so the SOL-leg case adds the source-side figure it can convert exactly
-    (the canonical rate is 'dest per 1 SOL'). Display only (float, marked ≈) — never fed back into
-    any gate. A non-SOL backing states its own asset rather than guess a conversion."""
+    in what they're sending, so when the backing is the dest-side hub leg (canonical source — the
+    rate is 'dest per 1 hub'), add the source-side figure it can convert exactly. Display only
+    (float, marked ≈) — never fed back into any gate."""
     native = f'{bound / 10 ** get_chain_def(backing).decimals:.4f} {backing.upper()}'
-    if backing == from_chain or backing != NUMERAIRE_CHAIN:
+    if backing == from_chain or backing != canonical_pair(from_chain, backing)[0]:
         return native
-    src_amount = bound / 1e9 * float(rate_display)
+    src_amount = bound / 10 ** get_chain_def(backing).decimals * float(rate_display)
     return f'≈{src_amount:.6g} {from_chain.upper()} ({native} leg)'
 
 

@@ -14,13 +14,14 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.base import ProviderUnreachableError
-from allways.chains import SUPPORTED_CHAINS
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     backing_purse,
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    hub_bounds,
     max_intake_from_amount,
     rate_display_from_fixed,
     select_best_miner,
@@ -72,10 +73,10 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
         candidates.append(MinerCandidate(miner_pk, rate_display_from_fixed(q.rate), purse, backing))
     if not candidates:
         return None, f'miner has no quote for {from_chain}->{to_chain}'
-    sol_min, sol_max = bounds.get(NUMERAIRE_CHAIN, (0, 0))
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, sol_min, sol_max, bounds)
+    hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
     if best is None:
-        return None, unviable_reason(candidates, from_chain, to_chain, from_amount, sol_min, sol_max, bounds)
+        return None, unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
     return (offers[best[0].backing], best[0].backing), ''
 
 
@@ -467,7 +468,7 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     client = validator.solana_client
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
-    min_swap, max_swap = bounds[NUMERAIRE_CHAIN]
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
     best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     bq = _best_quote_result(validator, best) if best else None
@@ -477,7 +478,10 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
-    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_chain == NUMERAIRE_CHAIN)
+    # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
+    # source (the hub leg), higher is better; sending the spoke side, lower is better.
+    from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
+    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
     levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
     return RateQuote(bq, reason, levels, max(depth.values(), default=0))
 

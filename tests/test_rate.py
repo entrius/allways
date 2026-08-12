@@ -322,10 +322,15 @@ class TestDirectionalRate:
     def test_reverse_is_reciprocal(self):
         assert directional_rate('btc', 'sol', '0.0021') == f'{1 / 0.0021:.8g}'
 
-    def test_legacy_non_hub_pair_reverse(self):
-        # canonical_pair(btc, tao) = (btc, tao): tao→btc is the reverse leg
-        assert directional_rate('tao', 'btc', '345') == f'{1 / 345:.8g}'
-        assert directional_rate('btc', 'tao', '345') == '345'
+    def test_tao_hub_pair_reverse(self):
+        # canonical_pair(tao, btc) = (tao, btc) — TAO is a hub: btc→tao is the reverse leg
+        assert directional_rate('btc', 'tao', '0.003') == f'{1 / 0.003:.8g}'
+        assert directional_rate('tao', 'btc', '0.003') == '0.003'
+
+    def test_no_hub_pair_reverse(self):
+        # canonical_pair(eth, btc) = (btc, eth) — alphabetical fallback: eth→btc is the reverse leg
+        assert directional_rate('eth', 'btc', '20') == f'{1 / 20:.8g}'
+        assert directional_rate('btc', 'eth', '20') == '20'
 
     def test_zero_and_non_numeric_pass_through(self):
         assert directional_rate('btc', 'sol', '0') == '0'
@@ -421,11 +426,11 @@ class TestIsExecutableRate:
         assert is_executable_rate(1e-10, 'tao', 'sol', self.MIN, self.MAX) is False
         assert is_executable_rate(1e-10, 'sol', 'tao', self.MIN, self.MAX) is False
 
-    def test_non_sol_pair_is_permissive(self):
-        """A pair with no SOL leg (e.g. legacy btc↔tao) has no SOL bound to
-        enforce → permissive regardless of rate."""
-        assert is_executable_rate(1e10, 'btc', 'tao', self.MIN, self.MAX) is True
-        assert is_executable_rate(1e-8, 'tao', 'btc', self.MIN, self.MAX) is True
+    def test_no_hub_pair_is_permissive(self):
+        """A pair with no hub leg (btc↔eth) has no bounded asset to enforce
+        against → permissive regardless of rate."""
+        assert is_executable_rate(1e10, 'btc', 'eth', self.MIN, self.MAX) is True
+        assert is_executable_rate(1e-8, 'eth', 'btc', self.MIN, self.MAX) is True
 
     DUST = get_chain_def('btc').min_onchain_amount  # smallest fundable BTC source
 

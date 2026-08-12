@@ -64,12 +64,35 @@ MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap
 # states earn crown. "All busy forfeits" = only AVAILABLE; add MinerActivity.FULFILLING
 # here to reward in-flight miners, with no other logic change.
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
-# Numéraire / hub asset: the subnet is hub-and-spoke — every launch pair is hub↔spoke, so a rate reads
-# uniformly as 'dest per 1 hub'. SOL by construction (the contract lives on Solana: collateral, fee, and the
-# collateral_amount notional are all SOL). Referenced wherever code needs "is this the hub", instead of a literal.
+# Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
+# sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
+# A pair is valid iff one leg is a hub; that leg is its pricing + bounds anchor ('dest per 1 hub').
+HUB_CHAINS = ('sol', 'tao')
+# The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
+# the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
 NUMERAIRE_CHAIN = 'sol'
-# Chains paired against the hub; add a chain here to launch its pair.
+
+
+def is_hub(chain: str) -> bool:
+    """True iff ``chain`` can anchor a pair (and back quotes with its own collateral purse)."""
+    return chain in HUB_CHAINS
+
+
+def hub_leg(from_chain: str, to_chain: str) -> str | None:
+    """The pair's hub anchor — its pricing/bounds leg. None for a spoke↔spoke pair (invalid)."""
+    for hub in HUB_CHAINS:
+        if hub in (from_chain, to_chain):
+            return hub
+    return None
+
+
+# Chains paired against each hub; add a chain here to launch its pairs.
 LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc', 'hype')
+# Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
+# lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
+LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
+    (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
+)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.90
@@ -78,9 +101,9 @@ MINER_POOL_SHARE = 1.0 - BURN_RATE
 # (both ways). The per-round pool values are volume-weighted at pair level
 # (scoring.compute_direction_pools); these constants are what zero volume falls back to.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    pair: MINER_POOL_SHARE / (2 * len(LAUNCH_SPOKES))
-    for spoke in LAUNCH_SPOKES
-    for pair in ((NUMERAIRE_CHAIN, spoke), (spoke, NUMERAIRE_CHAIN))
+    pair: MINER_POOL_SHARE / (2 * len(LAUNCH_PAIRS))
+    for hub, spoke in LAUNCH_PAIRS
+    for pair in ((hub, spoke), (spoke, hub))
 }
 # Volume-weighted pools: each pair's emission share follows the SOL notional it cleared
 # over the trailing window, blended with the equal split so a quiet pair never starves

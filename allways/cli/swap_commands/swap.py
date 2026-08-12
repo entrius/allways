@@ -40,6 +40,7 @@ from allways.cli.swap_commands.swap_intake import (
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
@@ -47,7 +48,7 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, hub_leg
 from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
@@ -213,14 +214,15 @@ def _pick_intake(viable, from_chain, to_chain):
     if not sys.stdin.isatty():
         fail('Bare --miner needs a terminal; pass --miner <pubkey> when scripting.')
     ranked = sorted(viable, key=lambda p: p[1].to_amount, reverse=True)
-    sol_decimals = get_chain_def(NUMERAIRE_CHAIN).decimals
     console.print(f'\n  Miners quoting {from_chain.upper()}->{to_chain.upper()} (best first):')
     for i, (c, amts) in enumerate(ranked, 1):
         rate_disp = directional_rate(from_chain, to_chain, c.rate_display)
+        # The purse is in the BACKING's own unit (lamports for sol, rao for tao) — label it as such.
+        purse = c.collateral / 10 ** get_chain_def(c.backing).decimals
         console.print(
             f'  [{i}] [dim]{c.miner}[/dim]  rate {rate_disp} {to_chain.upper()}/{from_chain.upper()}'
             f'  receive ~[cyan]{_net_receive(amts.to_amount, to_chain):.8g} {to_chain.upper()}[/cyan]'
-            f'  collateral {c.collateral / 10**sol_decimals:g} SOL'
+            f'  collateral {purse:g} {c.backing.upper()}'
         )
     idx = click.prompt('  Miner #', type=click.IntRange(1, len(ranked)))
     return ranked[idx - 1]
@@ -374,8 +376,8 @@ def swap_now_command(
     to_chain = (to_chain_opt or '').lower()
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
-    if from_chain == to_chain or NUMERAIRE_CHAIN not in (from_chain, to_chain):
-        fail(f'A launch swap must have a {NUMERAIRE_CHAIN.upper()} leg (every pair is hub<->spoke).')
+    if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
+        fail('A swap must have a hub leg (SOL or TAO) and two distinct chains — spoke<->spoke has no market.')
     if amount_opt is None:
         amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=float)
     if amount_opt is None or amount_opt <= 0:
@@ -400,7 +402,7 @@ def swap_now_command(
 
     cfg = client.get_config()
     bounds = bounds_from_config(cfg) if cfg else {}
-    min_swap, max_swap = bounds.get(NUMERAIRE_CHAIN, (0, 0))
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     pool_window = int(getattr(cfg, 'pool_window_secs', 60)) if cfg else 60
     finalize_window = int(getattr(cfg, 'finalize_window_secs', 150)) if cfg else 150
 
@@ -627,35 +629,35 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
 
     Self-represented flows have no validator to gate for them (F7), so mirror the
-    validator's reserve gates locally: the taker's receive address must be well-formed and
-    accept the dest asset, and the miner's receive address must accept the source funds
-    (T18). The source-address probe is a courtesy warning only — a frozen source just means
-    the deposit fails and the reservation lapses unclaimed."""
-    spoke = to_chain if from_chain == NUMERAIRE_CHAIN else from_chain
-    provider = _gate_provider(spoke, client, config)
-    if provider is None:
-        return
-    if spoke == to_chain:
+    validator's reserve gates locally, one leg at a time (a non-SOL hub pair has two screenable
+    legs): the taker's receive address must be well-formed and accept the dest asset, and the
+    miner's receive address must accept the source funds (T18). The source-address probe is a
+    courtesy warning only — a frozen source just means the deposit fails and the reservation
+    lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
+    dest_provider = _gate_provider(to_chain, client, config)
+    if dest_provider is not None:
         # Format first — offline, and a malformed address can never be delivered to.
-        if not provider.chain.is_valid_address(receive_addr):
+        if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
-        if not provider.can_deliver_to(receive_addr, amts.to_amount):
+        if not dest_provider.can_deliver_to(receive_addr, amts.to_amount):
             fail(
                 f'  Your receive address cannot accept {to_chain.upper()} right now '
                 '(frozen or transfers paused). No funds moved.'
             )
+    src_provider = _gate_provider(from_chain, client, config)
+    if src_provider is None:
         return
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
     if miner_addr and (
-        not provider.chain.is_valid_address(miner_addr) or not provider.can_deliver_to(miner_addr, from_amount)
+        not src_provider.chain.is_valid_address(miner_addr) or not src_provider.can_deliver_to(miner_addr, from_amount)
     ):
         fail(
             f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
             '— pick another miner (--miner). No funds moved.'
         )
-    if user_from_addr and not provider.can_deliver_to(user_from_addr, from_amount):
+    if user_from_addr and not src_provider.can_deliver_to(user_from_addr, from_amount):
         console.print(
             f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '
             '(frozen?). If the deposit fails, the reservation lapses unclaimed.[/yellow]'

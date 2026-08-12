@@ -22,6 +22,7 @@ import numpy as np
 from allways import dev_signal
 from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
+from allways.cli.swap_commands.swap_intake import bounds_from_config, hub_bounds
 from allways.constants import (
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
@@ -39,11 +40,12 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
+    hub_leg,
     required_collateral,
 )
 from allways.solana.layouts import lock_max
 from allways.solana.pdas import BACKING_BITS
-from allways.utils.rate import is_executable_rate, min_executable_sol_leg
+from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -304,10 +306,16 @@ def compute_direction_pools(
 ) -> Dict[Tuple[str, str], float]:
     """Volume-weighted pools from a trailing window of realized swaps
     (``get_clearing_volumes`` shape). Each hub↔spoke *pair* earns
-    ``(1−α)/pairs + α × its share of SOL notional``, split evenly between its
-    two directions — weighting at pair level means one leg can't be inflated
-    without inflating the whole pair. No volume anywhere → the equal split.
-    Pools sum to ``MINER_POOL_SHARE``, not 1.0 — the burn lives here."""
+    ``(1−α)/pairs + α × its share of hub-leg notional``, split evenly between
+    its two directions — weighting at pair level means one leg can't be
+    inflated without inflating the whole pair. No volume anywhere → the equal
+    split. Pools sum to ``MINER_POOL_SHARE``, not 1.0 — the burn lives here.
+
+    Volumes are the pair's HUB-leg notional, so they are only comparable
+    within one hub's family (lamports vs rao — converting across would smuggle
+    a price oracle in). Each hub family therefore holds a FIXED share of the
+    pool (proportional to its pair count) and the α-blend runs within it; a
+    single-family registry reduces exactly to the old global blend."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -316,23 +324,34 @@ def compute_direction_pools(
     for pair, directions in pair_directions.items():
         volume = 0
         for from_chain, to_chain in directions:
-            # Hub-and-spoke: every direction has SOL on exactly one leg, so the
-            # SOL side is the notional comparable across pairs (all lamports).
-            leg = 0 if from_chain == NUMERAIRE_CHAIN else 1
+            # Hub-and-spoke: every direction has its hub on exactly one leg, so the
+            # hub side is the notional comparable across the family's pairs.
+            leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
             volume += sum(sums[leg] for sums in clearing_volumes.get((from_chain, to_chain), {}).values())
         pair_volumes[pair] = volume
 
-    total_volume = sum(pair_volumes.values())
-    if total_volume <= 0:
+    if sum(pair_volumes.values()) <= 0:
         return dict(DIRECTION_POOLS)
 
+    families: Dict[str, List[Tuple[str, str]]] = {}
+    for pair in pair_directions:
+        families.setdefault(hub_leg(*pair) or pair[0], []).append(pair)
+
     pools: Dict[Tuple[str, str], float] = {}
-    equal_pair_share = 1.0 / len(pair_directions)
-    for pair, directions in pair_directions.items():
-        volume_share = pair_volumes[pair] / total_volume
-        pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
-        for direction in directions:
-            pools[direction] = MINER_POOL_SHARE * pair_share / len(directions)
+    total_pairs = len(pair_directions)
+    for family_pairs in families.values():
+        family_share = len(family_pairs) / total_pairs
+        family_volume = sum(pair_volumes[p] for p in family_pairs)
+        equal_pair_share = 1.0 / len(family_pairs)
+        for pair in family_pairs:
+            if family_volume <= 0:
+                pair_share = equal_pair_share
+            else:
+                volume_share = pair_volumes[pair] / family_volume
+                pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
+            directions = pair_directions[pair]
+            for direction in directions:
+                pools[direction] = MINER_POOL_SHARE * family_share * pair_share / len(directions)
     return pools
 
 
@@ -376,16 +395,14 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # disabled validators pay zero cost here.
     storage_enabled = self.database_storage.is_enabled()
     intervals_by_dir: Dict[Tuple[str, str], List[Tuple[int, int, Dict[str, float], float]]] = {}
+    # Per-backing bounds off the cached Config; each direction anchors on its own hub leg
+    # (SOL lamports for sol-hub directions, rao for tao-hub ones). Empty map on failure =
+    # both-0 per direction = permissive, matching the old failure mode.
     try:
-        max_swap_amount = int(self.solana_config_cache.max_swap_amount())
+        swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
-        bt.logging.warning(f'max_swap_amount read failed: {e}')
-        max_swap_amount = 0
-    try:
-        min_swap_amount = int(self.solana_config_cache.min_swap_amount())
-    except Exception as e:
-        bt.logging.warning(f'min_swap_amount read failed: {e}')
-        min_swap_amount = 0
+        bt.logging.warning(f'swap-bounds read failed: {e}')
+        swap_bounds = {}
 
     # Pools follow realized demand: one volume read for the trailing day, shared
     # by every direction this round so the pools it pays sum to exactly 1.
@@ -400,6 +417,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain)] = intervals
+        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -410,8 +428,9 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
             intervals_out=intervals,
-            min_swap_lamports=min_swap_amount,
-            max_swap_lamports=max_swap_amount,
+            min_swap_hub=min_swap_hub,
+            max_swap_hub=max_swap_hub,
+            purse_known=direction_purse_known(from_chain, to_chain),
         )
         total_crown_dir = sum(crown_time.values())
 
@@ -459,8 +478,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         distributed=distributed,
         recycled=recycled,
         weighting_traces=weighting_traces,
-        min_swap_lamports=min_swap_amount,
-        max_swap_lamports=max_swap_amount,
+        swap_bounds=swap_bounds,
     )
 
     if storage_enabled:
@@ -522,15 +540,15 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     live_states = live_miner_states(self.solana_client, self.metagraph)
     try:
-        min_swap_amount = int(self.solana_config_cache.min_swap_amount())
-        max_swap_amount = int(self.solana_config_cache.max_swap_amount())
+        swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
         bt.logging.warning(f'swap-bounds read failed in live score snapshot: {e}')
-        min_swap_amount = max_swap_amount = 0
+        swap_bounds = {}
     rows: List[ScoreRow] = []
     pools = compute_direction_pools(self.state_store.get_clearing_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts))
     for (from_chain, to_chain), pool in pools.items():
         trace = DirectionTrace(pool=pool)
+        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -540,8 +558,9 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             window_end=window_end,
             rewardable_hotkeys=rewardable_hotkeys,
             trace=trace,
-            min_swap_lamports=min_swap_amount,
-            max_swap_lamports=max_swap_amount,
+            min_swap_hub=min_swap_hub,
+            max_swap_hub=max_swap_hub,
+            purse_known=direction_purse_known(from_chain, to_chain),
         )
         if not crown_time:
             continue
@@ -684,20 +703,31 @@ def merge_replay_events(
     return events
 
 
-def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
-    """Boundary-squat gate: a miner who cannot fund their own rate's smallest SOL leg
+def direction_purse_known(from_chain: str, to_chain: str) -> bool:
+    """Whether the crown's collateral event stream IS this direction's funding purse.
+
+    The event index tracks the local SOL purse (CollateralPosted/Withdrawn), which funds
+    sol-hub directions. A tao-hub direction is funded by the attested TAO bond, which has no
+    event stream yet — its purse-axis gates (can_fund, depth split, capacity) run neutral
+    rather than compare rao bounds against a lamport purse. Attestation-fed purse events are
+    the deferred follow-up that flips this on for TAO."""
+    return hub_leg(from_chain, to_chain) == NUMERAIRE_CHAIN
+
+
+def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
+    """Boundary-squat gate: a miner who cannot fund their own rate's smallest hub leg
     at the contract's 1.10× reserve requirement (mirroring routing's ``swap_viable``)
     is unreservable at any size and earns no crown. Unknown collateral counts as zero
     (fail closed) — the live-state reconcile seeds a baseline for every bound active
     miner, so absent means the chain doesn't know this miner either."""
-    min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_swap_lamports, max_swap_lamports)
+    min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_swap_hub, max_swap_hub)
     return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
 
 def crown_depth_shares(
     holders: List[str],
     collaterals: Dict[str, int],
-    max_swap_lamports: int,
+    max_swap_hub: int,
 ) -> Dict[str, float]:
     """Split one interval's crown credit across band holders in proportion to
     collateral depth, so matching the leader's rate earns share only to the
@@ -706,7 +736,7 @@ def crown_depth_shares(
     full-capacity fill buys no extra share (same never-pay-to-win bound
     ``capacity_factor`` applies at 1.0). All-zero depth (bounds unset in tests,
     or a band of unknown collaterals) falls back to an even split."""
-    cap = required_collateral(max_swap_lamports) if max_swap_lamports > 0 else None
+    cap = required_collateral(max_swap_hub) if max_swap_hub > 0 else None
     depths = {hk: min(collaterals.get(hk, 0), cap) if cap else collaterals.get(hk, 0) for hk in holders}
     total = sum(depths.values())
     if total <= 0:
@@ -714,24 +744,24 @@ def crown_depth_shares(
     return {hk: depth / total for hk, depth in depths.items()}
 
 
-def make_crown_predicates(from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals):
+def make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
     """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
     scoring replay and the live snapshot, so the live crown view can never diverge
     from the rewarded ledger. Both are the shared rate utils with this direction's
-    bounds/collateral bound in."""
+    hub-leg bounds/collateral bound in."""
     executable_check = partial(
         is_executable_rate,
         from_chain=from_chain,
         to_chain=to_chain,
-        min_swap_lamports=min_swap_lamports,
-        max_swap_lamports=max_swap_lamports,
+        min_swap_hub=min_swap_hub,
+        max_swap_hub=max_swap_hub,
     )
     can_fund = partial(
         crown_can_fund,
         from_chain=from_chain,
         to_chain=to_chain,
-        min_swap_lamports=min_swap_lamports,
-        max_swap_lamports=max_swap_lamports,
+        min_swap_hub=min_swap_hub,
+        max_swap_hub=max_swap_hub,
         collaterals=collaterals,
     )
     return executable_check, can_fund
@@ -747,9 +777,10 @@ def replay_crown_time_window(
     rewardable_hotkeys: Set[str],
     trace: Optional[DirectionTrace] = None,
     intervals_out: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None,
-    min_swap_lamports: int = 0,
-    max_swap_lamports: int = 0,
+    min_swap_hub: int = 0,
+    max_swap_hub: int = 0,
     rate_band: float = CROWN_RATE_BAND,
+    purse_known: bool = True,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
     Every qualified miner within ``rate_band`` of the best qualified rate holds
@@ -766,12 +797,16 @@ def replay_crown_time_window(
     to the contract's active flag; halt state is handled at
     ``score_and_reward_miners`` entry.
 
+    ``min_swap_hub``/``max_swap_hub`` are the direction's HUB-leg bounds (hub smallest-units).
     Bounds at 0 disable the executability filter (matches the contract's
-    "unset" sentinel); the rate-positive floor still applies.
+    "unset" sentinel); the rate-positive floor still applies. ``purse_known=False``
+    (``direction_purse_known``: the collateral event stream is not this direction's funding
+    purse — tao-hub directions until attestation-fed purse events exist) keeps the rate gates
+    but runs the purse-axis ones neutral: can_fund permissive, depth = even split, capacity 1.0.
 
     When ``trace`` is supplied, ``trace.cap_weighted_time`` is populated
     alongside ``trace.crown_time``. The weighted series multiplies each
-    interval's split by ``capacity_factor(collateral_at_block, max_swap_lamports)``
+    interval's split by ``capacity_factor(collateral_at_block, max_swap_hub)``
     so a post-window collateral boost cannot retroactively scale credit
     already earned (closes #409)."""
     rates, activity, active_set, collaterals = reconstruct_window_start_state(
@@ -779,21 +814,19 @@ def replay_crown_time_window(
     )
     replay_events = merge_replay_events(store, event_index, from_chain, to_chain, window_start, window_end)
 
-    # Rates are stored as canonical_dest per canonical_source (TAO per BTC).
-    # In the canonical direction (btc→tao) higher = better; in the reverse
-    # direction (tao→btc) lower = better.
+    # Rates are stored as canonical_dest per canonical_source (BTC per TAO).
+    # In the canonical direction (tao→btc) higher = better; in the reverse
+    # direction (btc→tao) lower = better.
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
-    executable_check, can_fund = make_crown_predicates(
-        from_chain, to_chain, min_swap_lamports, max_swap_lamports, collaterals
-    )
+    executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
 
     crown_time: Dict[str, float] = {}
     cap_weighted_time: Dict[str, float] = {}
     prev_ts = window_start
 
-    bounds_set = min_swap_lamports > 0 or max_swap_lamports > 0
+    bounds_set = min_swap_hub > 0 or max_swap_hub > 0
 
     def credit_interval(interval_start: int, interval_end: int) -> None:
         duration = interval_end - interval_start
@@ -810,7 +843,7 @@ def replay_crown_time_window(
             active=active_set,
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
-            can_fund_at_rate=can_fund if bounds_set else None,
+            can_fund_at_rate=can_fund if bounds_set and purse_known else None,
             rate_band=rate_band,
         )
         if not holders:
@@ -823,8 +856,9 @@ def replay_crown_time_window(
         # Holders are every qualified miner within CROWN_RATE_BAND of the best
         # rate; the interval splits across them by collateral depth, so a
         # one-tick undercut no longer takes the crown outright and depth is the
-        # axis a rival must beat you on inside the band.
-        shares = crown_depth_shares(holders, collaterals, max_swap_lamports)
+        # axis a rival must beat you on inside the band. Unknown purse
+        # (tao-hub direction) → even split, no depth axis.
+        shares = crown_depth_shares(holders, collaterals if purse_known else {}, max_swap_hub)
         if intervals_out is not None:
             intervals_out.append((interval_start, interval_end, dict(shares), winner_rate))
         for hk, share in shares.items():
@@ -833,7 +867,7 @@ def replay_crown_time_window(
             # Unknown collateral counts as zero, matching can_fund's fail-closed
             # (the reconcile seeds a baseline for every bound active miner);
             # capacity_factor keeps its bounds-unset fail-safe of 1.0.
-            cap = capacity_factor(collaterals.get(hk, 0), max_swap_lamports)
+            cap = capacity_factor(collaterals.get(hk, 0), max_swap_hub) if purse_known else 1.0
             cap_weighted_time[hk] = cap_weighted_time.get(hk, 0.0) + split * cap
 
     def apply_event(event: ReplayEvent) -> None:
@@ -897,16 +931,17 @@ def snapshot_current_crown_holders(
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     # Match the scoring path's executability filter so the live table never
     # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
-    # TTL cache (no per-step RPC); both-0 on failure = permissive, as before.
+    # TTL cache (no per-step RPC); empty map on failure = permissive, as before.
     try:
-        min_swap_amount = int(self.solana_config_cache.min_swap_amount())
-        max_swap_amount = int(self.solana_config_cache.max_swap_amount())
+        swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
-        min_swap_amount = max_swap_amount = 0
+        swap_bounds = {}
     rows_by_direction: Dict[Tuple[str, str], List[Tuple[str, str, str, float, float, int]]] = {}
-    bounds_set = min_swap_amount > 0 or max_swap_amount > 0
     for from_chain, to_chain in DIRECTION_POOLS:
+        min_swap_hub, max_swap_hub = hub_bounds(swap_bounds, from_chain, to_chain)
+        bounds_set = min_swap_hub > 0 or max_swap_hub > 0
+        purse_known = direction_purse_known(from_chain, to_chain)
         rates, activity, active_set, collaterals = reconstruct_window_start_state(
             self.state_store,
             self.event_index,
@@ -925,7 +960,7 @@ def snapshot_current_crown_holders(
         # credits a holder the ledger drops. Built per direction so each
         # closure captures the right chain pair.
         executable_check, can_fund = make_crown_predicates(
-            from_chain, to_chain, min_swap_amount, max_swap_amount, collaterals
+            from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals
         )
 
         holders = crown_holders_at_instant(
@@ -935,14 +970,14 @@ def snapshot_current_crown_holders(
             active=active_set,
             lower_rate_wins=lower_rate_wins,
             executable_rate_check=executable_check,
-            can_fund_at_rate=can_fund if bounds_set else None,
+            can_fund_at_rate=can_fund if bounds_set and purse_known else None,
             rate_band=CROWN_RATE_BAND,
         )
         if holders:
             # Same band + depth split as the scoring replay, so the live table agrees
             # with what the round scorer will credit. Every row carries the band's
             # anchor (best) rate — the direction's crown rate as a taker sees it.
-            shares = crown_depth_shares(holders, collaterals, max_swap_amount)
+            shares = crown_depth_shares(holders, collaterals if purse_known else {}, max_swap_hub)
             rate = rates.get(holders[0], 0.0)
             rows_by_direction[(from_chain, to_chain)] = [
                 (from_chain, to_chain, hk, share, rate, ts) for hk, share in shares.items()

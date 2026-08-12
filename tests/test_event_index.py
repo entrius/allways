@@ -483,7 +483,8 @@ class TestIngestEndToEndCrown:
         idx = make_index(store, ttl=1000)
         idx.ingest(
             [
-                # Both miners active + funded from t=0; btc→tao (higher rate wins).
+                # Both miners active + funded from t=0; btc→tao is the reverse leg of the
+                # TAO-hub pair (canonical 'BTC per TAO'), so the LOWER canonical rate wins.
                 rec('MinerActivated', miner='pk_a', block_time=0, at=0),
                 rec('MinerActivated', miner='pk_b', block_time=0, at=0),
                 rec('CollateralPosted', miner='pk_a', block_time=0, amount=0, total=500_000_000),
@@ -494,7 +495,7 @@ class TestIngestEndToEndCrown:
                     block_time=0,
                     from_chain='btc',
                     to_chain='tao',
-                    rate=300 * RATE_PRECISION,
+                    rate=int(0.002 * RATE_PRECISION),
                     liquidity=0,
                 ),
                 rec(
@@ -503,7 +504,7 @@ class TestIngestEndToEndCrown:
                     block_time=0,
                     from_chain='btc',
                     to_chain='tao',
-                    rate=200 * RATE_PRECISION,
+                    rate=int(0.003 * RATE_PRECISION),
                     liquidity=0,
                 ),
                 # A is reserved then takes a swap mid-window — crown flips to B while busy.
@@ -529,8 +530,8 @@ class TestIngestEndToEndCrown:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_a', 'hk_b'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
         # A: (100,400] + (800,1100] = 600. B: (400,800] = 400.
         assert crown == {'hk_a': 600.0, 'hk_b': 400.0}

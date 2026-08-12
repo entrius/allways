@@ -11,7 +11,7 @@ import pytest
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     DIRECTION_POOLS,
-    LAUNCH_SPOKES,
+    LAUNCH_PAIRS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
@@ -21,7 +21,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     required_collateral,
 )
-from allways.utils.rate import is_executable_rate, min_executable_sol_leg
+from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
@@ -47,8 +47,14 @@ POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
 # Leg pool when one pair carried ALL the window's clearing volume: the pair
 # share tilts to (1−α)/pairs + α and splits evenly across its two directions.
-N_PAIRS = len(LAUNCH_SPOKES)
-POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / N_PAIRS + POOL_VOLUME_ALPHA) / 2
+N_PAIRS = len(LAUNCH_PAIRS)
+# Volume weighting runs within a hub family (lamports and rao are not comparable):
+# a sol-family pair carrying ALL the family's volume gets family_share × ((1−α)/family + α).
+SOL_FAMILY_PAIRS = sum(1 for hub, _spoke in LAUNCH_PAIRS if hub == 'sol')
+SOL_FAMILY_SHARE = SOL_FAMILY_PAIRS / N_PAIRS
+POOL_BUSY_PAIR_LEG = (
+    MINER_POOL_SHARE * SOL_FAMILY_SHARE * ((1 - POOL_VOLUME_ALPHA) / SOL_FAMILY_PAIRS + POOL_VOLUME_ALPHA) / 2
+)
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -187,6 +193,8 @@ def make_validator(
     *,
     max_swap_amount: int = 0,
     min_swap_amount: int = 0,
+    tao_min_swap_amount: int = 0,
+    tao_max_swap_amount: int = 0,
     collaterals: dict[str, int] | None = None,
     miner_counters: dict[str, tuple[int, int]] | None = None,
     all_eligible: bool = True,
@@ -218,6 +226,13 @@ def make_validator(
     solana_config_cache = MagicMock()
     solana_config_cache.max_swap_amount.return_value = max_swap_amount
     solana_config_cache.min_swap_amount.return_value = min_swap_amount
+    # Scoring reads the whole Config for per-backing bounds (bounds_from_config).
+    solana_config_cache.config.return_value = SimpleNamespace(
+        min_swap_amount=min_swap_amount,
+        max_swap_amount=max_swap_amount,
+        tao_min_swap_amount=tao_min_swap_amount,
+        tao_max_swap_amount=tao_max_swap_amount,
+    )
     solana_config_cache.halted.return_value = False
     database_storage = MagicMock()
     database_storage.is_enabled.return_value = False
@@ -386,11 +401,13 @@ class TestGetClearingVolumes:
 
 
 class TestComputeDirectionPools:
-    """Pair-level volume weighting: each pair's share is (1−α)/pairs + α·volume_share
-    of trailing SOL notional, split evenly between its two legs; zero volume falls
-    back to the equal DIRECTION_POOLS split."""
+    """Pair-level volume weighting WITHIN a hub family: each family holds a fixed
+    share ∝ its pair count (hub-leg volumes aren't comparable across hubs), a pair's
+    share within it is (1−α)/family_pairs + α·family_volume_share, split evenly
+    between its two legs; zero volume falls back to the equal DIRECTION_POOLS split."""
 
-    # A pair's floor share is (1−α)/pairs, its cap α + (1−α)/pairs.
+    # A pair's floor leg is the same under family or global blending:
+    # family_share × (1−α)/family_pairs == (1−α)/total_pairs.
     FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / N_PAIRS / 2
 
     def test_no_volume_falls_back_to_equal_split(self):
@@ -398,13 +415,16 @@ class TestComputeDirectionPools:
 
     def test_single_pair_volume_tilts_both_its_legs_equally(self):
         pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
-        assert pools[('btc', 'sol')] == pytest.approx(self.FLOOR_LEG + MINER_POOL_SHARE * POOL_VOLUME_ALPHA / 2)
+        busy = self.FLOOR_LEG + MINER_POOL_SHARE * SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA / 2
+        assert pools[('btc', 'sol')] == pytest.approx(busy)
         assert pools[('sol', 'btc')] == pools[('btc', 'sol')]  # quiet leg rides its pair
         assert pools[('sol', 'tao')] == pytest.approx(self.FLOOR_LEG)
         assert pools[('tao', 'sol')] == pytest.approx(self.FLOOR_LEG)
+        # SOL-family volume never leaks into the TAO family's fixed share.
+        assert pools[('tao', 'btc')] == pytest.approx(MINER_POOL_SHARE / (2 * N_PAIRS))
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
-    def test_volume_is_the_sol_leg_summed_per_pair(self):
+    def test_volume_is_the_hub_leg_summed_per_pair(self):
         # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair:
         # 100 SOL (from_amount is the SOL leg of sol→tao). Spoke-side legs are
         # deliberately huge to prove they never enter the weighting.
@@ -415,8 +435,26 @@ class TestComputeDirectionPools:
             }
         )
         floor_pair = (1 - POOL_VOLUME_ALPHA) / N_PAIRS
-        assert pools[('btc', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
-        assert pools[('tao', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2)
+        alpha_leg = SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA
+        assert pools[('btc', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.75) / 2)
+        assert pools[('tao', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.25) / 2)
+        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+
+    def test_families_split_independently(self):
+        # Volume in each family tilts only its own pairs; the two families' totals
+        # stay at their fixed pair-count shares whatever the volumes are.
+        pools = compute_direction_pools(
+            {
+                ('btc', 'sol'): {'hk_a': (1, 10**12)},  # lamports, sol family
+                ('tao', 'eth'): {'hk_b': (5, 10**9)},  # rao (tao is the hub leg of tao↔eth), tao family
+            }
+        )
+        sol_total = sum(v for (f, t), v in pools.items() if 'sol' in (f, t))
+        tao_family_total = sum(v for (f, t), v in pools.items() if 'sol' not in (f, t))
+        assert sol_total == pytest.approx(MINER_POOL_SHARE * SOL_FAMILY_SHARE)
+        assert tao_family_total == pytest.approx(MINER_POOL_SHARE * (1 - SOL_FAMILY_SHARE))
+        # The volumed tao pair outweighs its quiet siblings inside its family.
+        assert pools[('tao', 'eth')] > pools[('tao', 'btc')]
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
     def test_leg_direction_within_pair_is_irrelevant(self):
@@ -615,8 +653,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_sentinel', 'hk_sane'},
-            min_swap_lamports=100_000_000,  # 0.1 TAO
-            max_swap_lamports=500_000_000,  # 0.5 TAO
+            min_swap_hub=100_000_000,  # 0.1 TAO
+            max_swap_hub=500_000_000,  # 0.5 TAO
         )
         assert crown == {'hk_sane': 1000.0}
         store.close()
@@ -645,8 +683,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
         assert crown == {}
         store.close()
@@ -677,8 +715,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
         assert crown == {'hk_funded': 1000.0}
         store.close()
@@ -732,8 +770,8 @@ class TestReplayCrownTime:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
         # Blocks (100, 600] dropped (collateral 0.15 SOL < the 0.5 SOL requirement).
         # Blocks (600, 1100] credited (0.55 SOL clears it).
@@ -787,8 +825,8 @@ class TestReplayCrownTime:
             window_start=1100,
             window_end=2100,
             rewardable_hotkeys={'hk_a'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
         assert strict == {}
 
@@ -1212,8 +1250,8 @@ class TestLedgerSnapshotAgreement:
             window_start=100,
             window_end=1100,
             rewardable_hotkeys={'hk_squat', 'hk_funded'},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
         )
 
         assert snapshot_holders == ['hk_funded']
@@ -2373,8 +2411,7 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 0},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('insufficient_collateral'), reason
 
@@ -2388,8 +2425,7 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={},  # absent → unknown
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('unknown_collateral'), reason
 
@@ -2404,8 +2440,7 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('outbid'), reason
 
@@ -2419,8 +2454,7 @@ class TestNonEarnerDiagnosis:
             ever_active={'hk'},
             direction_traces={('btc', 'sol'): self._trace(280.0)},
             collaterals={'hk': 500_000_000},
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('competitive_but_unfilled'), reason
 
@@ -2491,7 +2525,7 @@ class TestCrownPredicateParity:
             return is_executable_rate(rate, from_chain, to_chain, min_rao, max_rao)
 
         def fund_ref(hotkey, rate):
-            min_leg = min_executable_sol_leg(rate, from_chain, to_chain, min_rao, max_rao)
+            min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_rao, max_rao)
             return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
         return exec_ref, fund_ref
@@ -2525,7 +2559,7 @@ class TestCrownPredicateParity:
         collaterals = {'hk_poor': 1, 'hk_rich': 10_000_000_000}
         _, can_fund = make_crown_predicates('sol', 'btc', 100_000_000, 500_000_000, collaterals)
         rate = 345.0
-        min_leg = min_executable_sol_leg(rate, 'sol', 'btc', 100_000_000, 500_000_000)
+        min_leg = min_executable_hub_leg(rate, 'sol', 'btc', 100_000_000, 500_000_000)
         assert min_leg > 0  # rate is executable, so the gate is live
         assert can_fund('hk_poor', rate) is False
         assert can_fund('hk_rich', rate) is True
@@ -2629,11 +2663,11 @@ class TestCrownCanFund:
     1.10× reserve requirement — a miner below required_collateral(min_leg) is
     unreservable at any size and must earn no crown."""
 
-    BOUNDS = dict(from_chain='sol', to_chain='btc', min_swap_lamports=100_000_000, max_swap_lamports=500_000_000)
+    BOUNDS = dict(from_chain='sol', to_chain='btc', min_swap_hub=100_000_000, max_swap_hub=500_000_000)
     RATE = 326.0
 
     def min_leg(self) -> int:
-        return min_executable_sol_leg(self.RATE, **self.BOUNDS)
+        return min_executable_hub_leg(self.RATE, **self.BOUNDS)
 
     def test_collateral_at_raw_leg_is_rejected(self):
         # Regression: the pre-1.1× gate passed exactly-min_leg collateral, paying
@@ -2656,7 +2690,7 @@ class TestCrownCanFund:
             1e-12,
             from_chain='btc',
             to_chain='sol',
-            min_swap_lamports=100_000_000,
-            max_swap_lamports=500_000_000,
+            min_swap_hub=100_000_000,
+            max_swap_hub=500_000_000,
             collaterals={},
         )
