@@ -11,9 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 from bittensor.utils import ss58_encode
 
-from allways.assets.base import ProviderUnreachableError, TransactionInfo
-from allways.assets.bitcoin import Bitcoin
-from allways.assets.subtensor import Tao
+from allways.assets.asset import ProviderUnreachableError, TransactionInfo
+from allways.assets.btc import Bitcoin
+from allways.assets.tao import Tao
 
 BLOCK_TIME = 1_700_000_123
 

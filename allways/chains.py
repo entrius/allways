@@ -16,9 +16,12 @@ class ChainDefinition:
     name: str  # Display name (e.g. 'Bitcoin')
     native_unit: str  # Smallest unit name (e.g. 'satoshi')
     decimals: int  # Precision (e.g. 8 for BTC, 9 for TAO)
-    env_prefix: str  # .env variable prefix (e.g. 'BTC' -> BTC_NETWORK)
+    # .env variable prefix — the NETWORK's, not the asset's ('ARB' -> ARB_NETWORK), so assets
+    # sharing a network share its config. Only {id}_TOKEN_CONTRACT keys off the asset.
+    env_prefix: str
     # Network names the provider accepts in {env_prefix}_NETWORK; [0] is the default (mainnet).
-    # Empty = the network isn't picked by name (sol/tao resolve by RPC URL / bittensor network).
+    # Empty = the network isn't picked by name here — either it resolves another way (sol/tao,
+    # by RPC URL / bittensor network) or another asset on the same network owns the setting.
     networks: tuple[str, ...] = ()
     # Which of ``networks`` the `alw config set env testnet` bundle selects. Named, not
     # positional: a chain can offer several testnets (BTC has three) and only one is the
@@ -33,9 +36,10 @@ class ChainDefinition:
     # Default 0 (at-or-after the floor; only a tx that predates it is a replay). Absorbs honest miner
     # clock skew; MUST stay well under reservation_ttl_secs — the replay window is exactly this wide (B2).
     replay_grace_secs: int = 0
-    # Layered-asset fields: the wire id stays flat, the layering lives here. None for
-    # assets that are their own network (btc/tao/sol/eth).
-    host_chain: str | None = None  # network whose txs carry this asset (assets/evm.py EVM_NETWORKS key)
+    # The network whose txs carry this asset (assets/evm.py EVM_NETWORKS key). Every EVM row
+    # sets it — native coin and token alike — so both resolve their chain the same way.
+    # None only for assets that ARE their own network (btc/tao/sol).
+    host_chain: str | None = None
     # Canonical MAINNET contract of a hosted asset. Testnet deployments + env overrides
     # resolve in the provider (assets/erc20.py) — each address lives exactly once.
     asset_locator: str | None = None
@@ -91,6 +95,7 @@ CHAIN_ETH = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='ETH',
+    host_chain='ethereum',
     networks=('mainnet', 'sepolia'),
     testnet_network='sepolia',
     seconds_per_block=12,
@@ -110,7 +115,7 @@ CHAIN_ARBUSDC = ChainDefinition(
     name='USDC (Arbitrum)',
     native_unit='µUSDC',
     decimals=6,
-    env_prefix='ARBUSDC',
+    env_prefix='ARB',
     networks=('mainnet', 'sepolia'),  # sepolia = Arbitrum Sepolia
     testnet_network='sepolia',
     # ~4 blocks/s real; 1s is the integer floor. 90 confs ≈ 25s real (~90s in extension
@@ -135,6 +140,7 @@ CHAIN_HYPE = ChainDefinition(
     native_unit='wei',
     decimals=18,
     env_prefix='HYPE',
+    host_chain='hyperliquid',
     networks=('mainnet', 'testnet'),
     testnet_network='testnet',
     # ~1s small blocks (transfers never need the 60s big blocks — those carry >2M gas).

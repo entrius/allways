@@ -10,7 +10,7 @@ reward-side limits, so it still passes here.
 
 from typing import Optional
 
-from allways.assets.base import Asset, TransactionInfo
+from allways.assets.asset import Asset, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 

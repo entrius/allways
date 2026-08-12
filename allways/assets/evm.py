@@ -11,7 +11,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.assets.base import Asset, ProviderUnreachableError
+from allways.assets.asset import Asset, ProviderUnreachableError
 from allways.assets.chain import Chain
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
@@ -71,7 +71,9 @@ ETHEREUM = EvmNetwork(
     chain_ids={'mainnet': 1, 'sepolia': 11_155_111},
     rpc_urls={
         'mainnet': ('https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org'),
-        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.drpc.org'),
+        # drpc's free tier stopped serving Sepolia (rpc error 35), leaving the ladder
+        # single-endpoint — a null then never reaches quorum and every absent tx raises.
+        'sepolia': ('https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'),
     },
 )
 ARBITRUM = EvmNetwork(
@@ -102,8 +104,8 @@ class EvmChain(Chain):
     addresses, EIP-191 ownership proofs, tip reads.
 
     One behavior class for the whole family; per-network facts come from the `EvmNetwork`
-    config row, env wiring from ``env_prefix`` (the hosted asset's prefix until a second
-    asset shares the instance — the chain then earns its own env identity).
+    config row, env wiring from ``env_prefix`` — the NETWORK's identity, so every asset on
+    a network reads one {PREFIX}_NETWORK and one ladder and they cannot disagree.
 
     Addresses are hex and case-insensitive (EIP-55 is a display checksum), so every
     comparison goes through ``normalize_address`` (lowercase) — on-chain strings keep
@@ -314,9 +316,9 @@ class EvmAsset(Asset):
     """Base for assets on EVM chains: key handling, send dedup ladder, deposit-scan
     cursors, the settled-tx cache, and the connection check scaffold.
 
-    Chain questions route through ``self.chain`` (seam rule): a fused native coin is its
-    own chain; a token binds ``self._chain`` to its host network's `EvmChain` at
-    construction. Env vars key off the asset's ``chain_def.env_prefix``.
+    Chain questions route through ``self.chain`` (seam rule): every EVM asset, coin or
+    token, binds ``self._chain`` to its host network's `EvmChain` at construction. Env
+    vars key off that NETWORK's ``env_prefix``, shared by every asset on it.
     """
 
     # Settled-tx cache bound — comfortably above any realistic concurrent-leg count.

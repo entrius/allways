@@ -17,7 +17,7 @@ import bittensor as bt
 from solders.pubkey import Pubkey
 
 from allways import dev_signal
-from allways.assets.base import ProviderUnreachableError
+from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
 from allways.constants import EXTENSION_PADDING_SECONDS
 from allways.solana import pdas

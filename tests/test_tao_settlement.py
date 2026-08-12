@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from allways.assets.base import ProviderUnreachableError
-from allways.assets.subtensor import Tao
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.tao import Tao
 
 MINER = 'minerTAO'
 USER = 'userTAO'

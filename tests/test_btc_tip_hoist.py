@@ -15,7 +15,7 @@ class _Resp:
 
 def _provider(monkeypatch):
     monkeypatch.setenv('BTC_MODE', 'lightweight')
-    from allways.assets.bitcoin import Bitcoin
+    from allways.assets.btc import Bitcoin
 
     return Bitcoin()
 

@@ -5,7 +5,7 @@ import bittensor as bt
 from bittensor import Keypair
 from bittensor.utils import is_valid_ss58_address, ss58_encode
 
-from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 

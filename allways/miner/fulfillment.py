@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import bittensor as bt
 
 from allways import dev_signal
-from allways.assets.base import Asset, ProviderUnreachableError
+from allways.assets.asset import Asset, ProviderUnreachableError
 from allways.constants import FEE_DIVISOR, MINER_TIMEOUT_CUSHION_SECS, SENT_CACHE_DISCARD_MARGIN_SECS
 from allways.solana.client import SolanaClientError, SolanaSwap
 from allways.utils.logging import log_on_change

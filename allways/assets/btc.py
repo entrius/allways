@@ -10,7 +10,7 @@ from bitcoin_message_tool.bmt import sign_message, verify_message
 from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
-from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_BTC, ChainDefinition
 

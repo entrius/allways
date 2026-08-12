@@ -9,8 +9,8 @@ import pytest
 import requests
 from solders.keypair import Keypair
 
-from allways.assets.base import ProviderUnreachableError
-from allways.assets.solana import RESERVED_ACCOUNTS, Sol
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
 
 

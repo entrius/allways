@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
-from allways.assets.base import TransactionInfo
+from allways.assets.asset import TransactionInfo
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse

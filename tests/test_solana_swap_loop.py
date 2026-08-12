@@ -7,7 +7,7 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 
 from types import SimpleNamespace
 
-from allways.assets.base import ProviderUnreachableError
+from allways.assets.asset import ProviderUnreachableError
 from allways.solana.client import benign_marker, swap_key_from_tx_hash
 from allways.validator.solana_swap_loop import (
     _BENIGN_RESOLVE_MARKERS,

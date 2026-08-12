@@ -4,6 +4,7 @@ import re
 
 import pytest
 
+from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
     CHAIN_BTC,
@@ -46,12 +47,31 @@ class TestGetChain:
             assert re.fullmatch(r'[a-z0-9]{1,10}', chain_id), chain_id
             assert chain.id == chain_id
 
-    def test_layered_fields_default_none_for_native_assets(self):
-        for chain_id in ('btc', 'tao', 'sol', 'eth', 'hype'):
+    def test_assets_on_one_network_share_its_env_identity(self):
+        """A network is configured once. Rows sharing a host_chain MUST share env_prefix —
+        otherwise the second asset reads an unset {PREFIX}_NETWORK, silently defaults to
+        mainnet, and a testnet miner pays real funds against test swaps. Exactly one of them
+        declares ``networks``: two would render duplicate CLI rows writing the same var."""
+        prefixes: dict[str, set[str]] = {}
+        owners: dict[str, list[str]] = {}
+        for chain in SUPPORTED_CHAINS.values():
+            if chain.host_chain:
+                prefixes.setdefault(chain.host_chain, set()).add(chain.env_prefix)
+            if chain.networks:
+                owners.setdefault(chain.env_prefix, []).append(chain.id)
+        for host, found in prefixes.items():
+            assert len(found) == 1, f'{host} assets disagree on env_prefix: {sorted(found)}'
+        for prefix, ids in owners.items():
+            assert len(ids) == 1, f'{prefix}_NETWORK is declared by more than one row: {ids}'
+
+    def test_only_self_hosted_assets_lack_a_host_chain(self):
+        for chain_id in ('btc', 'tao', 'sol'):
             assert get_chain_def(chain_id).host_chain is None
-            assert get_chain_def(chain_id).asset_locator is None
-        assert CHAIN_ARBUSDC.host_chain == 'arbitrum'
+        for chain_id in ('eth', 'hype', 'arbusdc'):
+            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
+        # asset_locator is the token-only field: a native coin has no contract to pin.
         assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
+        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype'))
 
 
 class TestCanonicalPair:

@@ -9,8 +9,8 @@ from typing import Optional
 
 import pytest
 
-from allways.assets.base import ProviderUnreachableError
-from allways.assets.ethereum import Ether
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.eth import Ether
 from allways.assets.evm import EvmRpcError
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
@@ -36,7 +36,7 @@ def rpc_stub(provider, responses: dict):
         value = responses[method]
         return value(params) if callable(value) else value
 
-    provider.eth_rpc = fake_rpc
+    provider.chain.eth_rpc = fake_rpc
     return provider
 
 
@@ -75,71 +75,71 @@ def counting_rpc_stub(provider, responses: dict):
         value = responses[method]
         return value(params) if callable(value) else value
 
-    provider.eth_rpc = fake_rpc
+    provider.chain.eth_rpc = fake_rpc
     return calls
 
 
 class TestAddresses:
     def test_valid_lowercase(self, provider):
-        assert provider.is_valid_address(TEST_ADDR.lower())
+        assert provider.chain.is_valid_address(TEST_ADDR.lower())
 
     def test_valid_checksummed(self, provider):
-        assert provider.is_valid_address(TEST_ADDR)
+        assert provider.chain.is_valid_address(TEST_ADDR)
 
     def test_bad_checksum_mixed_case_rejected(self, provider):
         # Flip one letter's case: mixed-case implies EIP-55, and the checksum no longer verifies.
         bad = TEST_ADDR.replace('aad', 'aaD')
-        assert not provider.is_valid_address(bad)
+        assert not provider.chain.is_valid_address(bad)
 
     def test_wrong_length_and_junk(self, provider):
-        assert not provider.is_valid_address('0x1234')
-        assert not provider.is_valid_address('')
-        assert not provider.is_valid_address(None)
-        assert not provider.is_valid_address('f39Fd6e51aad88F6F4ce6aB8827279cffFb92266')  # no 0x
+        assert not provider.chain.is_valid_address('0x1234')
+        assert not provider.chain.is_valid_address('')
+        assert not provider.chain.is_valid_address(None)
+        assert not provider.chain.is_valid_address('f39Fd6e51aad88F6F4ce6aB8827279cffFb92266')  # no 0x
 
     def test_zero_address_rejected(self, provider):
         # ERC-20 transfer() reverts to the zero address (no blacklist/pause gate catches it), so an
         # honest miner reserved for it would be forced into a slash. Reject at the format gate.
-        assert not provider.is_valid_address('0x' + '00' * 20)
-        assert not provider.is_valid_address('0x' + '0' * 40)
+        assert not provider.chain.is_valid_address('0x' + '00' * 20)
+        assert not provider.chain.is_valid_address('0x' + '0' * 40)
 
     def test_normalize_lowercases(self, provider):
-        assert provider.normalize_address(TEST_ADDR) == TEST_ADDR.lower()
+        assert provider.chain.normalize_address(TEST_ADDR) == TEST_ADDR.lower()
 
 
 class TestProofSigning:
     def test_sign_verify_roundtrip(self, provider):
-        sig = provider.sign_from_proof(TEST_ADDR, 'proof: abc', key=TEST_KEY)
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'proof: abc', key=TEST_KEY)
         assert sig
-        assert provider.verify_from_proof(TEST_ADDR, 'proof: abc', sig)
+        assert provider.chain.verify_from_proof(TEST_ADDR, 'proof: abc', sig)
 
     def test_verify_is_case_insensitive_on_address(self, provider):
-        sig = provider.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert provider.verify_from_proof(TEST_ADDR.lower(), 'msg', sig)
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
+        assert provider.chain.verify_from_proof(TEST_ADDR.lower(), 'msg', sig)
 
     def test_verify_accepts_unprefixed_signature(self, provider):
-        sig = provider.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert provider.verify_from_proof(TEST_ADDR, 'msg', sig.removeprefix('0x'))
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
+        assert provider.chain.verify_from_proof(TEST_ADDR, 'msg', sig.removeprefix('0x'))
 
     def test_wrong_message_fails(self, provider):
-        sig = provider.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert not provider.verify_from_proof(TEST_ADDR, 'other', sig)
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
+        assert not provider.chain.verify_from_proof(TEST_ADDR, 'other', sig)
 
     def test_wrong_address_fails(self, provider):
-        sig = provider.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert not provider.verify_from_proof(RECIPIENT, 'msg', sig)
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
+        assert not provider.chain.verify_from_proof(RECIPIENT, 'msg', sig)
 
     def test_garbage_signature_fails(self, provider):
-        assert not provider.verify_from_proof(TEST_ADDR, 'msg', 'not-hex')
+        assert not provider.chain.verify_from_proof(TEST_ADDR, 'msg', 'not-hex')
 
     def test_sign_key_address_mismatch_refused(self, provider):
         # Signing for an address the key doesn't derive is a wasted (and misleading) proof.
-        assert provider.sign_from_proof(RECIPIENT, 'msg', key=TEST_KEY) == ''
+        assert provider.chain.sign_from_proof(RECIPIENT, 'msg', key=TEST_KEY) == ''
 
     def test_sign_falls_back_to_env_key(self, provider, monkeypatch):
         monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
-        sig = provider.sign_from_proof(TEST_ADDR, 'msg')
-        assert provider.verify_from_proof(TEST_ADDR, 'msg', sig)
+        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg')
+        assert provider.chain.verify_from_proof(TEST_ADDR, 'msg', sig)
 
 
 class TestCanSendFrom:
@@ -220,7 +220,7 @@ class TestFetchMatchingTx:
         def boom(method, params, timeout=15):
             raise RuntimeError('all ETH RPCs failed')
 
-        provider.eth_rpc = boom
+        provider.chain.eth_rpc = boom
         with pytest.raises(ProviderUnreachableError):
             provider.fetch_matching_tx(TX, RECIPIENT, 1)
 
@@ -318,18 +318,18 @@ class TestRpcFailover:
                 raise ConnectionError('refused')
             return self._Resp(body={'result': '0x10'})
 
-        provider.http.post = post
-        provider.rpc_bases = ['https://a.example', 'https://b.example']
-        assert provider.eth_rpc('eth_blockNumber', []) == '0x10'
+        provider.chain.http.post = post
+        provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
+        assert provider.chain.eth_rpc('eth_blockNumber', []) == '0x10'
         assert calls == ['https://a.example', 'https://b.example']
 
     def test_rpc_error_object_fails_over(self, provider):
         responses = iter(
             [self._Resp(body={'error': {'code': -32005, 'message': 'limit'}}), self._Resp(body={'result': '0x1'})]
         )
-        provider.http.post = lambda url, json=None, timeout=15: next(responses)
-        provider.rpc_bases = ['https://a.example', 'https://b.example']
-        assert provider.eth_rpc('eth_chainId', []) == '0x1'
+        provider.chain.http.post = lambda url, json=None, timeout=15: next(responses)
+        provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
+        assert provider.chain.eth_rpc('eth_chainId', []) == '0x1'
 
     def test_null_result_is_authoritative_no_failover(self, provider):
         calls = []
@@ -338,23 +338,23 @@ class TestRpcFailover:
             calls.append(url)
             return self._Resp(body={'result': None})
 
-        provider.http.post = post
-        provider.rpc_bases = ['https://a.example', 'https://b.example']
-        assert provider.eth_rpc('eth_getTransactionByHash', [TX]) is None
+        provider.chain.http.post = post
+        provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
+        assert provider.chain.eth_rpc('eth_getTransactionByHash', [TX]) is None
         assert calls == ['https://a.example']
 
     def test_all_fail_raises(self, provider):
-        provider.http.post = lambda url, json=None, timeout=15: self._Resp(status_code=500)
-        provider.rpc_bases = ['https://a.example']
+        provider.chain.http.post = lambda url, json=None, timeout=15: self._Resp(status_code=500)
+        provider.chain.rpc_bases = ['https://a.example']
         with pytest.raises(Exception):
-            provider.eth_rpc('eth_blockNumber', [])
+            provider.chain.eth_rpc('eth_blockNumber', [])
 
     def test_execution_revert_raises_typed_verdict(self, provider):
         body = {'error': {'code': 3, 'message': 'execution reverted', 'data': '0x'}}
-        provider.http.post = lambda url, json=None, timeout=15: self._Resp(body=body)
-        provider.rpc_bases = ['https://a.example']
+        provider.chain.http.post = lambda url, json=None, timeout=15: self._Resp(body=body)
+        provider.chain.rpc_bases = ['https://a.example']
         with pytest.raises(EvmRpcError) as exc:
-            provider.eth_rpc('eth_estimateGas', [{}])
+            provider.chain.eth_rpc('eth_estimateGas', [{}])
         assert exc.value.is_execution_revert
 
     def test_revert_outranks_later_transport_failure(self, provider):
@@ -365,10 +365,10 @@ class TestRpcFailover:
                 return self._Resp(body={'error': {'code': 3, 'message': 'execution reverted'}})
             raise ConnectionError('down')
 
-        provider.http.post = post
-        provider.rpc_bases = ['https://a.example', 'https://b.example']
+        provider.chain.http.post = post
+        provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
         with pytest.raises(EvmRpcError) as exc:
-            provider.eth_rpc('eth_estimateGas', [{}])
+            provider.chain.eth_rpc('eth_estimateGas', [{}])
         assert exc.value.is_execution_revert
 
 
@@ -433,7 +433,7 @@ class TestFindRecentOutgoing:
                 return {'status': '0x1' if params[0] == matching['hash'] else '0x0'}
             raise AssertionError(method)
 
-        provider.eth_rpc = rpc
+        provider.chain.eth_rpc = rpc
         # Casing crossed on purpose: cursor keys and matching go through normalize_address.
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 10**18) == matching['hash']
 
@@ -445,7 +445,7 @@ class TestFindRecentOutgoing:
                 return {'transactions': []}
             raise AssertionError(method)
 
-        provider.eth_rpc = rpc
+        provider.chain.eth_rpc = rpc
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 1) is None
         key = (TEST_ADDR.lower(), RECIPIENT.lower(), 1)
         assert provider.scan_cursors[key] == 100
@@ -461,7 +461,7 @@ class TestNetworkGuard:
     def test_unset_defaults_to_mainnet(self, monkeypatch):
         monkeypatch.delenv('ETH_NETWORK', raising=False)
         monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        assert Ether().network == 'mainnet'
+        assert Ether().chain.network == 'mainnet'
 
 
 class TestAbsenceQuorum:
@@ -483,25 +483,25 @@ class TestAbsenceQuorum:
                 raise value
             return self._Resp({'result': value})
 
-        provider.http.post = post
-        provider.rpc_bases = list(per_url)
+        provider.chain.http.post = post
+        provider.chain.rpc_bases = list(per_url)
 
     def test_second_endpoint_overrules_a_stale_null(self, provider):
         self._posts(provider, {'https://a.example': None, 'https://b.example': {'hash': TX}})
-        assert provider.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True) == {'hash': TX}
+        assert provider.chain.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True) == {'hash': TX}
 
     def test_unanimous_null_is_absent(self, provider):
         self._posts(provider, {'https://a.example': None, 'https://b.example': None})
-        assert provider.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True) is None
+        assert provider.chain.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True) is None
 
     def test_null_plus_unreachable_raises(self, provider):
         self._posts(provider, {'https://a.example': None, 'https://b.example': ConnectionError('down')})
         with pytest.raises(ProviderUnreachableError):
-            provider.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True)
+            provider.chain.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True)
 
     def test_without_flag_null_returns_immediately(self, provider):
         self._posts(provider, {'https://a.example': None, 'https://b.example': {'hash': TX}})
-        assert provider.eth_rpc('eth_getTransactionByHash', [TX]) is None
+        assert provider.chain.eth_rpc('eth_getTransactionByHash', [TX]) is None
 
 
 class TestBlockTimeUnknownNotStale:
@@ -693,7 +693,7 @@ class TestScannerCursorParking:
                 return {'status': '0x1'}
             raise AssertionError(method)
 
-        provider.eth_rpc = rpc
+        provider.chain.eth_rpc = rpc
         key = (TEST_ADDR.lower(), RECIPIENT.lower(), 10**18)
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 10**18) is None
         assert provider.scan_cursors[key] == 79

@@ -6,9 +6,9 @@ import bittensor as bt
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
-from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
-from allways.chains import ChainDefinition, get_chain_def
+from allways.chains import ChainDefinition
 
 
 def _selector(signature: str) -> str:
@@ -29,8 +29,9 @@ MAX_TOKEN_TRANSFER_GAS = 150_000
 DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 
 # Testnet deployments per (asset id, network). The canonical mainnet deployment is the
-# registry row's asset_locator; {PREFIX}_TOKEN_CONTRACT overrides either (e2e fakes,
-# emergency repoint) — each address lives exactly once.
+# registry row's asset_locator; {ASSET_ID}_TOKEN_CONTRACT overrides either (e2e fakes,
+# emergency repoint) — each address lives exactly once. Keyed by asset, not by network
+# prefix: one network can host several tokens, and each pins its own contract.
 TESTNET_TOKEN_CONTRACTS = {
     # Circle-verified native USDC on Arbitrum Sepolia (developers.circle.com, 2026-08-07).
     'arbusdc': {'sepolia': '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'},
@@ -38,16 +39,15 @@ TESTNET_TOKEN_CONTRACTS = {
 
 
 def _token_contract(chain_def: ChainDefinition, network: str) -> str:
-    override = os.environ.get(f'{chain_def.env_prefix}_TOKEN_CONTRACT')
+    var = f'{chain_def.id.upper()}_TOKEN_CONTRACT'
+    override = os.environ.get(var)
     if override:
         return override
     contract = (
         chain_def.asset_locator if network == 'mainnet' else TESTNET_TOKEN_CONTRACTS.get(chain_def.id, {}).get(network)
     )
     if not contract:
-        raise ValueError(
-            f'No {chain_def.id} token contract for network {network!r} — set {chain_def.env_prefix}_TOKEN_CONTRACT'
-        )
+        raise ValueError(f'No {chain_def.id} token contract for network {network!r} — set {var}')
     return contract
 
 
@@ -67,10 +67,9 @@ def _topic_addr(topic: str) -> str:
 class Erc20(EvmAsset):
     """A generic ERC-20 asset on an EVM chain, bound by its registry row.
 
-    Not fused: the token composes its host network's `EvmChain` (``self._chain``) — the
-    first non-fused asset. Each token builds its own chain instance today; a second token
-    on the same network would want them pooled (one ladder, one tip fetch per pass) — a
-    construction change here, not a shape change.
+    Composes its host network's `EvmChain` (``self._chain``), as every EVM asset does.
+    Assets on one network share its env prefix, so they can never disagree about which
+    network they are on; they still build an instance each (one extra tip fetch per pass).
 
     Settlement truth is the token contract's Transfer log, never tx.value: verification
     accepts a tx iff its status-1 receipt carries a Transfer from the PINNED contract
@@ -109,7 +108,7 @@ class Erc20(EvmAsset):
         if code == '0x':
             # A typo'd override or wrong network would otherwise surface as every send failing.
             raise ConnectionError(
-                f'{self.chain_def.env_prefix} token contract {self.token_contract} has no code on {self.chain.network}'
+                f'{self.chain_def.id} token contract {self.token_contract} has no code on {self.chain.network}'
             )
         try:
             if self._eth_call(SEL_PAUSED):
@@ -308,7 +307,7 @@ class Erc20(EvmAsset):
         Returns (tx_hash, 0) or None; dedup/rescue ladder mirrors the native EVM send.
         """
         self.last_send_error = None
-        prefix = self.chain_def.env_prefix
+        prefix = self.chain_def.env_prefix  # the NETWORK's key/RPC env
         norm = self.chain.normalize_address
         acct = self.chain._account()
         if acct is None:
@@ -350,13 +349,13 @@ class Erc20(EvmAsset):
             # estimator too, which would misread as the destination refusing.
             token_balance = self.get_balance(acct.address)
             if token_balance < amount:
-                self._send_error(f'Insufficient {prefix}: have {token_balance} units, need {amount}')
+                self._send_error(f'{self._log} insufficient balance: have {token_balance} units, need {amount}')
                 return None
 
             calldata = SEL_TRANSFER[2:] + _pad_addr(to_address) + f'{int(amount):064x}'
             gas = self._transfer_gas(acct.address, calldata)
             if gas is None:
-                self._send_error(f'destination {to_address} refuses {prefix} transfers — not sending')
+                self._send_error(f'{self._log} destination {to_address} refuses transfers — not sending')
                 return None
 
             gas_balance = int(self.chain.eth_rpc('eth_getBalance', [acct.address, 'latest']), 16)
@@ -401,11 +400,11 @@ class Erc20(EvmAsset):
                 self._send_error(f'{prefix} broadcast failed: {broadcast_err}')
                 return None
 
-            bt.logging.info(f'Sent {amount} {prefix} units to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
+            bt.logging.info(f'{self._log} sent {amount} units to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
             # A quirky null broadcast reply must never persist as a blank tx hash.
             return (tx_hash or expected_txid, 0)
         except Exception as e:
-            self._send_error(f'{prefix} send failed: {type(e).__name__}: {e}')
+            self._send_error(f'{self._log} send failed: {type(e).__name__}: {e}')
             return None
 
     def _transfer_gas(self, from_addr: str, calldata: str) -> Optional[int]:
@@ -499,10 +498,3 @@ class Erc20(EvmAsset):
                 return log['transactionHash']
         self._set_cursor(key, head)
         return None
-
-
-class ArbUsdc(Erc20):
-    """USDC on Arbitrum — a config-row binding of the generic Erc20 (see chains.CHAIN_ARBUSDC)."""
-
-    def __init__(self):
-        super().__init__(get_chain_def('arbusdc'))

@@ -5,8 +5,8 @@ import bittensor as bt
 from eth_account import Account
 from eth_utils import to_checksum_address
 
-from allways.assets.base import ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.evm import FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain, EvmNetwork
+from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
 
 TRANSFER_GAS = 21_000
@@ -20,22 +20,21 @@ ZERO_ADDRESS = '0x' + '00' * 20
 MAX_WALK_BLOCKS = 32
 
 
-class EvmCoin(EvmAsset, EvmChain):
+class EvmCoin(EvmAsset):
     """An EVM network's native coin: eth-account + public JSON-RPC (no local node required).
 
     Plain EOA value transfers only, by design: a swap leg is verified off the transaction's
     own from/to/value, which internal (contract-mediated) transfers don't populate — and the
     sender-pinning defense needs a provable EOA sender anyway.
 
-    Fused with its chain (a native coin is its network's first asset); the shared EVM
-    plumbing lives in `EvmChain`/`EvmAsset` and splits out the day a second asset lands on
-    the network. The `Erc20` twin for tokens; both are bound by a registry row, never
-    subclassed per chain.
+    Composes its network's `EvmChain` exactly as the `Erc20` twin does — a native coin is
+    an asset ON a network, not the network itself, and fusing the two stops being true the
+    moment a token lands beside it. Both are bound by a registry row, never subclassed.
     """
 
-    def __init__(self, chain_def: ChainDefinition, network_def: EvmNetwork):
+    def __init__(self, chain_def: ChainDefinition):
         self._chain_def = chain_def
-        EvmChain.__init__(self, network_def, chain_def.env_prefix)
+        self._chain = EvmChain(EVM_NETWORKS[chain_def.host_chain], chain_def.env_prefix)
         EvmAsset.__init__(self)
 
     @property

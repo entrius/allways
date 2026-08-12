@@ -8,7 +8,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
-from allways.assets.base import Asset, ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.solana.rpc import SolanaRpc, resolve_rpc_url
