@@ -28,11 +28,11 @@ from allways.constants import (
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
     DIRECTION_POOLS,
+    HUB_CHAINS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
     MIN_SUCCESSFUL_SWAPS,
     MINER_POOL_SHARE,
-    NUMERAIRE_CHAIN,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
     RECYCLE_UID,
@@ -659,10 +659,13 @@ def reconstruct_window_start_state(
     activity: Dict[str, MinerActivity] = dict(event_index.get_activity_state_at(window_start))
     active_set: Set[str] = set(event_index.get_active_miners_at(window_start))
 
-    all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start)
+    # Each direction is scored against its own hub's quotes and funding purse (F4): sol-hub reads the
+    # local SOL purse, tao-hub the attested TAO bond. A sibling backing never bleeds into the other.
+    backing = hub_leg(from_chain, to_chain)
+    all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start, collateral_chain=backing)
     rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
-    collaterals: Dict[str, int] = dict(event_index.get_miner_collaterals_at(window_start))
+    collaterals: Dict[str, int] = dict(event_index.get_miner_collaterals_at(window_start, backing=backing))
 
     return rates, activity, active_set, collaterals
 
@@ -676,8 +679,10 @@ def merge_replay_events(
     window_end: int,
 ) -> List[ReplayEvent]:
     """Merge in-window active, activity, rate, and collateral transitions into
-    one chronologically-sorted stream (incl. the synthetic RESERVE_EXPIRE)."""
+    one chronologically-sorted stream (incl. the synthetic RESERVE_EXPIRE). Rate and collateral
+    transitions are read for THIS direction's backing only (F4)."""
     events: List[ReplayEvent] = []
+    backing = hub_leg(from_chain, to_chain)
 
     for e in event_index.get_active_events_in_range(window_start, window_end):
         events.append(
@@ -689,10 +694,10 @@ def merge_replay_events(
             ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.ACTIVITY, value=float(e['kind']))
         )
 
-    for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end):
+    for e in store.get_rate_events_in_range(from_chain, to_chain, window_start, window_end, collateral_chain=backing):
         events.append(ReplayEvent(block=e['block'], hotkey=e['hotkey'], kind=EventKind.RATE, value=float(e['rate'])))
 
-    for e in event_index.get_collateral_events_in_range(window_start, window_end):
+    for e in event_index.get_collateral_events_in_range(window_start, window_end, backing=backing):
         events.append(
             ReplayEvent(
                 block=e['block'], hotkey=e['hotkey'], kind=EventKind.COLLATERAL, value=float(e['collateral_rao'])
@@ -704,14 +709,13 @@ def merge_replay_events(
 
 
 def direction_purse_known(from_chain: str, to_chain: str) -> bool:
-    """Whether the crown's collateral event stream IS this direction's funding purse.
+    """Whether the crown has this direction's funding purse to gate against.
 
-    The event index tracks the local SOL purse (CollateralPosted/Withdrawn), which funds
-    sol-hub directions. A tao-hub direction is funded by the attested TAO bond, which has no
-    event stream yet — its purse-axis gates (can_fund, depth split, capacity) run neutral
-    rather than compare rao bounds against a lamport purse. Attestation-fed purse events are
-    the deferred follow-up that flips this on for TAO."""
-    return hub_leg(from_chain, to_chain) == NUMERAIRE_CHAIN
+    Both hubs now carry a purse stream (F4): sol-hub reads the local SOL purse
+    (CollateralPosted/Withdrawn), tao-hub the attested TAO bond (BondAttested). Each is compared
+    against its own hub-leg bounds, so the purse-axis gates (can_fund, depth split, capacity) run
+    for every hub↔spoke and hub↔hub direction rather than neutral."""
+    return hub_leg(from_chain, to_chain) in HUB_CHAINS
 
 
 def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):

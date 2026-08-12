@@ -53,24 +53,30 @@ class ValidatorStateStore:
         to_chain: str,
         rate: float,
         block: int,
+        collateral_chain: str = 'sol',
     ) -> bool:
-        """Insert a rate event, skipping same-rate duplicates."""
+        """Insert a rate event, skipping same-rate duplicates. Dedup is per (hotkey, direction,
+        collateral_chain) so a tao-backed quote and a sol-backed one on the same direction never
+        overwrite or shadow each other (F4)."""
         with self.lock:
             conn = self.require_connection()
             row = conn.execute(
                 """
                 SELECT rate FROM rate_events
-                WHERE hotkey = ? AND from_chain = ? AND to_chain = ?
+                WHERE hotkey = ? AND from_chain = ? AND to_chain = ? AND collateral_chain = ?
                 ORDER BY block DESC, id DESC
                 LIMIT 1
                 """,
-                (hotkey, from_chain, to_chain),
+                (hotkey, from_chain, to_chain, collateral_chain),
             ).fetchone()
             if row is not None and row['rate'] == rate:
                 return False
             conn.execute(
-                'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
-                (hotkey, from_chain, to_chain, rate, block),
+                """
+                INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block, collateral_chain)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (hotkey, from_chain, to_chain, rate, block, collateral_chain),
             )
             conn.commit()
             return True
@@ -81,16 +87,17 @@ class ValidatorStateStore:
         from_chain: str,
         to_chain: str,
         block: int,
+        collateral_chain: Optional[str] = None,
     ) -> Optional[Tuple[float, int]]:
-        row = self._fetchone(
-            """
+        sql = """
             SELECT rate, block FROM rate_events
             WHERE hotkey = ? AND from_chain = ? AND to_chain = ? AND block <= ?
-            ORDER BY block DESC, id DESC
-            LIMIT 1
-            """,
-            (hotkey, from_chain, to_chain, block),
-        )
+        """
+        params: Tuple = (hotkey, from_chain, to_chain, block)
+        if collateral_chain is not None:
+            sql += ' AND collateral_chain = ?'
+            params += (collateral_chain,)
+        row = self._fetchone(sql + ' ORDER BY block DESC, id DESC LIMIT 1', params)
         return (row['rate'], row['block']) if row is not None else None
 
     def get_latest_rates_before(
@@ -98,32 +105,36 @@ class ValidatorStateStore:
         from_chain: str,
         to_chain: str,
         block: int,
+        collateral_chain: Optional[str] = None,
     ) -> Dict[str, Tuple[float, int]]:
         """Batched form of get_latest_rate_before — one query per direction
         instead of one per (hotkey, direction). Returns {hotkey: (rate, block)}
         for every hotkey that has at least one rate event in that direction
-        at-or-before ``block``. Caller filters by membership in the
-        rewardable set after.
+        at-or-before ``block``. ``collateral_chain`` restricts to one backing
+        (F4: a direction is scored against its own hub's quotes). Caller filters
+        by membership in the rewardable set after.
 
         Ordering matches the single-row form: ``block DESC, id DESC`` so a
         same-block re-emit (id is monotonic) picks the latest write.
         """
+        sql = """
+            SELECT hotkey, rate, block FROM (
+                SELECT hotkey, rate, block,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY hotkey
+                           ORDER BY block DESC, id DESC
+                       ) AS rn
+                FROM rate_events
+                WHERE from_chain = ? AND to_chain = ? AND block <= ?{backing}
+            ) WHERE rn = 1
+        """
+        params: Tuple = (from_chain, to_chain, block)
+        if collateral_chain is not None:
+            params += (collateral_chain,)
+        sql = sql.format(backing=' AND collateral_chain = ?' if collateral_chain is not None else '')
         with self.lock:
             conn = self.require_connection()
-            rows = conn.execute(
-                """
-                SELECT hotkey, rate, block FROM (
-                    SELECT hotkey, rate, block,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY hotkey
-                               ORDER BY block DESC, id DESC
-                           ) AS rn
-                    FROM rate_events
-                    WHERE from_chain = ? AND to_chain = ? AND block <= ?
-                ) WHERE rn = 1
-                """,
-                (from_chain, to_chain, block),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return {r['hotkey']: (r['rate'], r['block']) for r in rows}
 
     def get_rate_events_in_range(
@@ -132,17 +143,40 @@ class ValidatorStateStore:
         to_chain: str,
         start_block: int,
         end_block: int,
+        collateral_chain: Optional[str] = None,
     ) -> List[dict]:
-        """Rate events in ``(start_block, end_block]`` for a direction, oldest first."""
-        rows = self._fetchall(
-            """
+        """Rate events in ``(start_block, end_block]`` for a direction, oldest first.
+        ``collateral_chain`` restricts to one backing (F4)."""
+        sql = """
             SELECT id, hotkey, rate, block FROM rate_events
             WHERE from_chain = ? AND to_chain = ? AND block > ? AND block <= ?
-            ORDER BY block ASC, id ASC
-            """,
-            (from_chain, to_chain, start_block, end_block),
-        )
+        """
+        params: Tuple = (from_chain, to_chain, start_block, end_block)
+        if collateral_chain is not None:
+            sql += ' AND collateral_chain = ?'
+            params += (collateral_chain,)
+        rows = self._fetchall(sql + ' ORDER BY block ASC, id ASC', params)
         return [{'id': r['id'], 'hotkey': r['hotkey'], 'rate': r['rate'], 'block': r['block']} for r in rows]
+
+    def directions_with_live_rate(self, hotkey: str, collateral_chain: str, block: int) -> List[Tuple[str, str]]:
+        """Directions where ``hotkey`` has a positive latest rate under ``collateral_chain`` at-or-before
+        ``block`` (F4). Used to zero exactly one backing's quotes on a silent purse drop — the event
+        that drops the purse names no direction, so the live ones are read back here."""
+        rows = self._fetchall(
+            """
+            SELECT from_chain, to_chain, rate FROM (
+                SELECT from_chain, to_chain, rate,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY from_chain, to_chain
+                           ORDER BY block DESC, id DESC
+                       ) AS rn
+                FROM rate_events
+                WHERE hotkey = ? AND collateral_chain = ? AND block <= ?
+            ) WHERE rn = 1 AND rate > 0
+            """,
+            (hotkey, collateral_chain, block),
+        )
+        return [(r['from_chain'], r['to_chain']) for r in rows]
 
     # ─── crown event tables (Solana-sourced via SolanaEventIndex) ───────
 
@@ -168,10 +202,10 @@ class ValidatorStateStore:
         rows = self._fetchall('SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, id ASC')
         return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'kind': r['kind']} for r in rows]
 
-    def insert_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int) -> None:
+    def insert_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int, backing: str = 'sol') -> None:
         self._execute(
-            'INSERT INTO collateral_events (block_num, hotkey, collateral_rao) VALUES (?, ?, ?)',
-            (block_num, hotkey, int(collateral_rao)),
+            'INSERT INTO collateral_events (block_num, hotkey, collateral_rao, backing) VALUES (?, ?, ?, ?)',
+            (block_num, hotkey, int(collateral_rao), backing),
         )
 
     def load_all_collateral_events(self) -> List[dict]:
@@ -258,35 +292,40 @@ class ValidatorStateStore:
             states[hk] = cur if nxt is None else nxt
         return {hk: st for hk, st in states.items() if st is not MinerActivity.AVAILABLE}
 
-    def get_collateral_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
+    def get_collateral_events_in_range(
+        self, start_time: int, end_time: int, backing: Optional[str] = None
+    ) -> List[dict]:
         """Collateral transitions in ``(start_time, end_time]``, oldest first.
-        ``collateral_rao`` is the post-event total."""
-        rows = self._fetchall(
-            """
-            SELECT id, block_num, hotkey, collateral_rao FROM collateral_events
-            WHERE block_num > ? AND block_num <= ?
-            ORDER BY block_num ASC, id ASC
-            """,
-            (start_time, end_time),
+        ``collateral_rao`` is the post-event total. ``backing`` restricts to one
+        purse (F4: the SOL local purse vs the attested TAO bond)."""
+        sql = (
+            'SELECT id, block_num, hotkey, collateral_rao FROM collateral_events WHERE block_num > ? AND block_num <= ?'
         )
+        params: Tuple = (start_time, end_time)
+        if backing is not None:
+            sql += ' AND backing = ?'
+            params += (backing,)
+        rows = self._fetchall(sql + ' ORDER BY block_num ASC, id ASC', params)
         return [
             {'hotkey': r['hotkey'], 'collateral_rao': int(r['collateral_rao']), 'block': r['block_num']} for r in rows
         ]
 
-    def get_collaterals_at(self, at_time: int) -> Dict[str, int]:
+    def get_collaterals_at(self, at_time: int, backing: Optional[str] = None) -> Dict[str, int]:
         """Per-hotkey posted collateral at ``at_time`` — latest transition
         at-or-before ``at_time``. Hotkeys with no event are absent (caller
-        treats as unknown, not zero)."""
-        rows = self._fetchall(
-            """
+        treats as unknown, not zero). ``backing`` restricts to one purse (F4)."""
+        sql = """
             SELECT hotkey, collateral_rao FROM (
                 SELECT hotkey, collateral_rao,
                        ROW_NUMBER() OVER (PARTITION BY hotkey ORDER BY block_num DESC, id DESC) AS rn
-                FROM collateral_events WHERE block_num <= ?
+                FROM collateral_events WHERE block_num <= ?{backing}
             ) WHERE rn = 1
-            """,
-            (at_time,),
-        )
+        """
+        params: Tuple = (at_time,)
+        if backing is not None:
+            params += (backing,)
+        sql = sql.format(backing=' AND backing = ?' if backing is not None else '')
+        rows = self._fetchall(sql, params)
         return {r['hotkey']: int(r['collateral_rao']) for r in rows}
 
     # ─── clearing_rates (per-swap realized legs) ────────────────────────
@@ -799,6 +838,15 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(relay_slashes)')]
             if cols and 'hotkey' not in cols:
                 conn.execute('ALTER TABLE relay_slashes ADD COLUMN hotkey TEXT')
+            # F4: the crown must score each direction against its OWN backing. rate_events gains the
+            # quote's collateral_chain and collateral_events a backing, so a tao-hub quote/purse is
+            # never confused with the sol one. Pre-F4 rows were all sol-backed by construction.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(rate_events)')]
+            if cols and 'collateral_chain' not in cols:
+                conn.execute("ALTER TABLE rate_events ADD COLUMN collateral_chain TEXT NOT NULL DEFAULT 'sol'")
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(collateral_events)')]
+            if cols and 'backing' not in cols:
+                conn.execute("ALTER TABLE collateral_events ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -807,7 +855,8 @@ class ValidatorStateStore:
                     from_chain  TEXT NOT NULL,
                     to_chain    TEXT NOT NULL,
                     rate        REAL NOT NULL,
-                    block       INTEGER NOT NULL
+                    block       INTEGER NOT NULL,
+                    collateral_chain TEXT NOT NULL DEFAULT 'sol'
                 );
                 CREATE INDEX IF NOT EXISTS idx_rate_events_block
                     ON rate_events(block);
@@ -845,7 +894,8 @@ class ValidatorStateStore:
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     block_num       INTEGER NOT NULL,
                     hotkey          TEXT NOT NULL,
-                    collateral_rao  INTEGER NOT NULL
+                    collateral_rao  INTEGER NOT NULL,
+                    backing         TEXT NOT NULL DEFAULT 'sol'
                 );
                 CREATE INDEX IF NOT EXISTS idx_collateral_events_block
                     ON collateral_events(block_num);

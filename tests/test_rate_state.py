@@ -68,6 +68,41 @@ class TestInsertRateEvent:
         assert store.insert_rate_event('hk1', 'btc', 'tao', 6500.0, block=105) is True
         store.close()
 
+    def test_backing_isolation_round_trips_the_collateral_chain(self, tmp_path: Path):
+        """F4: dedupe and reads are per (hotkey, direction, collateral_chain). Two backings on one
+        direction coexist and are read back independently."""
+        store = make_store(tmp_path)
+        assert store.insert_rate_event('hk1', 'sol', 'tao', 6500.0, block=100, collateral_chain='sol') is True
+        # Same direction, other backing, same rate — not a duplicate: the backing disambiguates.
+        assert store.insert_rate_event('hk1', 'sol', 'tao', 6500.0, block=100, collateral_chain='tao') is True
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=200, collateral_chain='sol') == (6500.0, 100)
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=200, collateral_chain='tao') == (6500.0, 100)
+        by_sol = store.get_latest_rates_before('sol', 'tao', block=200, collateral_chain='sol')
+        by_tao = store.get_latest_rates_before('sol', 'tao', block=200, collateral_chain='tao')
+        assert by_sol == {'hk1': (6500.0, 100)} and by_tao == {'hk1': (6500.0, 100)}
+        store.close()
+
+    def test_removing_one_backing_leaves_the_sibling_quote_live(self, tmp_path: Path):
+        """F4 (4c): zeroing a direction under one backing must not touch the sibling backing."""
+        store = make_store(tmp_path)
+        store.insert_rate_event('hk1', 'sol', 'tao', 6500.0, block=100, collateral_chain='sol')
+        store.insert_rate_event('hk1', 'sol', 'tao', 6400.0, block=100, collateral_chain='tao')
+        # QuoteRemoved on the tao-backed quote → a zero rate under 'tao' only.
+        store.insert_rate_event('hk1', 'sol', 'tao', 0.0, block=200, collateral_chain='tao')
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=300, collateral_chain='tao') == (0.0, 200)
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=300, collateral_chain='sol') == (6500.0, 100)
+        store.close()
+
+    def test_directions_with_live_rate_lists_only_the_named_backing(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        store.insert_rate_event('hk1', 'btc', 'tao', 0.002, block=100, collateral_chain='tao')
+        store.insert_rate_event('hk1', 'eth', 'tao', 0.05, block=100, collateral_chain='tao')
+        store.insert_rate_event('hk1', 'btc', 'sol', 0.001, block=100, collateral_chain='sol')
+        store.insert_rate_event('hk1', 'eth', 'tao', 0.0, block=150, collateral_chain='tao')  # withdrawn
+        live = set(store.directions_with_live_rate('hk1', 'tao', block=200))
+        assert live == {('btc', 'tao')}  # eth→tao withdrawn, btc→sol is a different backing
+        store.close()
+
 
 class TestGetLatestRateBefore:
     def test_returns_none_when_empty(self, tmp_path: Path):
