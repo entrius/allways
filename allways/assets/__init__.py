@@ -4,10 +4,14 @@ import bittensor as bt
 
 from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import Asset, SendResult, TransactionInfo
+from allways.assets.avax import Avax
+from allways.assets.baseusdc import BaseUsdc
+from allways.assets.bnb import Bnb
 from allways.assets.btc import Bitcoin
 from allways.assets.chain import Chain
 from allways.assets.erc20 import Erc20
 from allways.assets.eth import Ether
+from allways.assets.ethusdc import EthUsdc
 from allways.assets.evm_coin import EvmCoin
 from allways.assets.hype import Hype
 from allways.assets.sol import Sol
@@ -25,8 +29,12 @@ __all__ = [
     'EvmCoin',
     'Ether',
     'Hype',
+    'Bnb',
+    'Avax',
     'Erc20',
     'ArbUsdc',
+    'BaseUsdc',
+    'EthUsdc',
     'create_assets',
 ]
 
@@ -47,6 +55,10 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('eth', Ether, ()),
     AssetSpec('arbusdc', ArbUsdc, ()),
     AssetSpec('hype', Hype, ()),
+    AssetSpec('bnb', Bnb, ()),
+    AssetSpec('avax', Avax, ()),
+    AssetSpec('baseusdc', BaseUsdc, ()),
+    AssetSpec('ethusdc', EthUsdc, ()),
 )
 
 

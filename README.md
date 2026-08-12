@@ -10,7 +10,7 @@ Native transactions across independent assets — no wrapped tokens, no bridges,
 
 Allways creates a verification layer above independent systems. Assets move natively. Miners complete transactions, validators independently verify the results, and a smart contract enforces outcomes through collateral and slashing.
 
-Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, and SOL ↔ HYPE (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
+Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, and SOL ↔ USDC-on-Ethereum (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 
 ## Miner Risk Disclaimer
 
@@ -123,7 +123,7 @@ needs to persist across restarts.
 
 ## Miner Environment Variables
 
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `{ETH,ARB,HYPE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config. See `.env.example`.
+- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars). See `.env.example`.
 
 ## Running a Local Subtensor Lite Node (Validators)
 

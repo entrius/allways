@@ -462,6 +462,17 @@ class TestIsExecutableRate:
         assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
+    def test_ethusdc_routes_at_its_five_dollar_floor(self):
+        """ethusdc's floor is a rate-sanity input, not a per-swap minimum (that is the
+        contract's min_swap_amount): non-binding here, since 0.1 SOL needs ~15 USDC at 150/SOL."""
+        assert get_chain_def('ethusdc').min_onchain_amount == 5_000_000
+        assert is_executable_rate(150.0, 'ethusdc', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(150.0, 'sol', 'ethusdc', self.MIN, self.MAX) is True
+
+    def test_crown_squat_low_ethusdc_rate_rejected(self):
+        """1e-9 µUSDC/SOL: even the 5 USDC floor overshoots max_swap — unroutable."""
+        assert is_executable_rate(1e-9, 'ethusdc', 'sol', self.MIN, self.MAX) is False
+
     def test_arbusdc_survives_a_real_dust_floor(self):
         """What PR-E unlocks: with the orientation fixed, a real economic floor
         (0.01 USDC = 10_000 µUSDC) no longer kills the arbusdc→sol direction —

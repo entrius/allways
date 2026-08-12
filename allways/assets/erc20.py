@@ -35,6 +35,10 @@ DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 TESTNET_TOKEN_CONTRACTS = {
     # Circle-verified native USDC on Arbitrum Sepolia (developers.circle.com, 2026-08-07).
     'arbusdc': {'sepolia': '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'},
+    # Circle-verified native USDC on Base Sepolia (developers.circle.com, 2026-08-11).
+    'baseusdc': {'sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'},
+    # Circle-verified native USDC on Ethereum Sepolia (developers.circle.com, 2026-08-11).
+    'ethusdc': {'sepolia': '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'},
 }
 
 

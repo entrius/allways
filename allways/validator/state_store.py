@@ -186,12 +186,16 @@ class ValidatorStateStore:
             (block_num, hotkey, 1 if active else 0),
         )
 
-    def insert_activity_event(self, block_num: int, hotkey: str, transition: ActivityTransition) -> None:
+    def insert_activity_event(
+        self, block_num: int, hotkey: str, transition: ActivityTransition, hub: Optional[str] = None
+    ) -> None:
         """Record one edge of a miner's ``MinerActivity`` machine (RESERVE_START,
-        FULFILL_START, FULFILL_END, or the synthetic RESERVE_EXPIRE)."""
+        FULFILL_START, FULFILL_END, or the synthetic RESERVE_EXPIRE). ``hub`` is the
+        purse the swap draws against (v3.1 per-hub busy); NULL applies to every hub —
+        the pre-v3.1.1 global-busy reading, kept for legacy rows and reconcile writes."""
         self._execute(
-            'INSERT INTO activity_events (block_num, hotkey, kind) VALUES (?, ?, ?)',
-            (block_num, hotkey, int(transition)),
+            'INSERT INTO activity_events (block_num, hotkey, kind, hub) VALUES (?, ?, ?, ?)',
+            (block_num, hotkey, int(transition), hub),
         )
 
     def load_all_active_events(self) -> List[dict]:
@@ -199,8 +203,8 @@ class ValidatorStateStore:
         return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'active': bool(r['active'])} for r in rows]
 
     def load_all_activity_events(self) -> List[dict]:
-        rows = self._fetchall('SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, id ASC')
-        return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'kind': r['kind']} for r in rows]
+        rows = self._fetchall('SELECT block_num, hotkey, kind, hub FROM activity_events ORDER BY block_num ASC, id ASC')
+        return [{'block_num': r['block_num'], 'hotkey': r['hotkey'], 'kind': r['kind'], 'hub': r['hub']} for r in rows]
 
     def insert_collateral_event(self, block_num: int, hotkey: str, collateral_rao: int, backing: str = 'sol') -> None:
         self._execute(
@@ -255,24 +259,25 @@ class ValidatorStateStore:
     def get_activity_events_in_range(self, start_time: int, end_time: int) -> List[dict]:
         """Activity transitions in ``(start_time, end_time]``. Ordered ``block_num,
         kind`` so coincident-instant edges replay in machine-precedence order
-        (closers/openers before a reservation lapse)."""
+        (closers/openers before a reservation lapse). ``hub`` NULL = every hub."""
         rows = self._fetchall(
             """
-            SELECT id, block_num, hotkey, kind FROM activity_events
+            SELECT id, block_num, hotkey, kind, hub FROM activity_events
             WHERE block_num > ? AND block_num <= ?
             ORDER BY block_num ASC, kind ASC, id ASC
             """,
             (start_time, end_time),
         )
-        return [{'hotkey': r['hotkey'], 'kind': r['kind'], 'block': r['block_num']} for r in rows]
+        return [{'hotkey': r['hotkey'], 'kind': r['kind'], 'block': r['block_num'], 'hub': r['hub']} for r in rows]
 
-    def get_activity_state_at(self, at_time: int) -> Dict[str, MinerActivity]:
-        """Per-hotkey ``MinerActivity`` at ``at_time``, reduced over each miner's
-        transition timeline. Only non-AVAILABLE miners are returned (callers
-        default the rest to AVAILABLE)."""
+    def get_activity_state_at(self, at_time: int) -> Dict[str, Dict[str, MinerActivity]]:
+        """Per-(hotkey, hub) ``MinerActivity`` at ``at_time``, reduced over each
+        miner's per-hub transition timelines (v3.1: busy is per purse). Only busy
+        entries are returned — ``{hotkey: {hub: state}}`` with AVAILABLE hubs
+        omitted; callers default absences to AVAILABLE."""
         rows = self._fetchall(
             """
-            SELECT block_num, hotkey, kind FROM activity_events
+            SELECT block_num, hotkey, kind, hub FROM activity_events
             WHERE block_num <= ?
             ORDER BY block_num ASC, kind ASC, id ASC
             """,
@@ -281,16 +286,26 @@ class ValidatorStateStore:
         return self._reduce_activity(rows)
 
     @staticmethod
-    def _reduce_activity(rows: Sequence[sqlite3.Row]) -> Dict[str, MinerActivity]:
-        """Fold ordered transition rows into ``{hotkey: state}`` for non-AVAILABLE
-        miners. An undefined transition holds the current state (defensive)."""
-        states: Dict[str, MinerActivity] = {}
+    def _reduce_activity(rows: Sequence[sqlite3.Row]) -> Dict[str, Dict[str, MinerActivity]]:
+        """Fold ordered transition rows into ``{hotkey: {hub: state}}`` keeping only
+        non-AVAILABLE hubs. A NULL-hub row (legacy global-busy, reconcile) steps every
+        hub's machine. An undefined transition holds the current state (defensive)."""
+        from allways.solana.pdas import BACKING_BITS
+
+        states: Dict[str, Dict[str, MinerActivity]] = {}
         for r in rows:
             hk = r['hotkey']
-            cur = states.get(hk, MinerActivity.AVAILABLE)
-            nxt = next_activity(cur, ActivityTransition(r['kind']))
-            states[hk] = cur if nxt is None else nxt
-        return {hk: st for hk, st in states.items() if st is not MinerActivity.AVAILABLE}
+            hub = r['hub'] if 'hub' in r.keys() else None
+            per_hub = states.setdefault(hk, {})
+            for h in [hub] if hub else list(BACKING_BITS):
+                cur = per_hub.get(h, MinerActivity.AVAILABLE)
+                nxt = next_activity(cur, ActivityTransition(r['kind']))
+                per_hub[h] = cur if nxt is None else nxt
+        return {
+            hk: busy
+            for hk, per_hub in states.items()
+            if (busy := {h: st for h, st in per_hub.items() if st is not MinerActivity.AVAILABLE})
+        }
 
     def get_collateral_events_in_range(
         self, start_time: int, end_time: int, backing: Optional[str] = None
@@ -702,8 +717,9 @@ class ValidatorStateStore:
         with self.lock:
             conn = self.require_connection()
             all_rows = conn.execute(
-                'SELECT block_num, hotkey, kind FROM activity_events ORDER BY block_num ASC, kind ASC, id ASC'
+                'SELECT block_num, hotkey, kind, hub FROM activity_events ORDER BY block_num ASC, kind ASC, id ASC'
             ).fetchall()
+            # Busy on ANY hub keeps the hotkey's full timeline (the reducer's keys).
             open_hotkeys = set(self._reduce_activity(all_rows))
             if open_hotkeys:
                 placeholders = ','.join('?' * len(open_hotkeys))
@@ -847,6 +863,11 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(collateral_events)')]
             if cols and 'backing' not in cols:
                 conn.execute("ALTER TABLE collateral_events ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
+            # v3.1.1: activity gains the per-hub dimension. Pre-upgrade rows stay NULL =
+            # global-busy on every hub — exactly the behavior they were written under.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(activity_events)')]
+            if cols and 'hub' not in cols:
+                conn.execute('ALTER TABLE activity_events ADD COLUMN hub TEXT')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -877,13 +898,16 @@ class ValidatorStateStore:
                     ON active_events(hotkey);
 
                 -- MinerActivity transitions (D4): kind is an ActivityTransition
-                -- value; the crown replay reduces these into per-instant state so
-                -- a reserved/fulfilling miner forfeits crown (REWARD_MINER_STATES).
+                -- value; the crown replay reduces these into per-instant PER-HUB
+                -- state (v3.1 busy is per purse), so a reserved/fulfilling miner
+                -- forfeits crown only on directions its busy hub serves. hub NULL
+                -- = every hub (legacy rows, reconcile writes).
                 CREATE TABLE IF NOT EXISTS activity_events (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     block_num   INTEGER NOT NULL,
                     hotkey      TEXT NOT NULL,
-                    kind        INTEGER NOT NULL
+                    kind        INTEGER NOT NULL,
+                    hub         TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_activity_events_block
                     ON activity_events(block_num);

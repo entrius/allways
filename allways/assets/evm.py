@@ -94,9 +94,62 @@ HYPERLIQUID = EvmNetwork(
         'testnet': ('https://rpc.hyperliquid-testnet.xyz/evm', 'https://hyperliquid-testnet.drpc.org'),
     },
 )
+BSC = EvmNetwork(
+    label='BNB Smart Chain',
+    chain_ids={'mainnet': 56, 'testnet': 97},  # testnet = Chapel
+    rpc_urls={
+        # Picked on a real eth_getTransactionReceipt under load, not on eth_chainId: publicnode's
+        # BSC mainnet node answers chainId and then 403s every receipt ('Archive requests require a
+        # personal token') even one block back, and the receipt IS the settlement check. drpc's free
+        # BSC tier 429s under any burst, which would strand null quorum. Both excluded on purpose.
+        'mainnet': ('https://bsc-dataseed.bnbchain.org', 'https://bsc.blockrazor.xyz'),
+        # publicnode's TESTNET node does serve receipts — the asymmetry with mainnet is deliberate.
+        'testnet': ('https://bsc-testnet-dataseed.bnbchain.org', 'https://bsc-testnet-rpc.publicnode.com'),
+    },
+)
+
+AVALANCHE = EvmNetwork(
+    label='Avalanche',
+    chain_ids={'mainnet': 43_114, 'fuji': 43_113},
+    # Ava Labs' gateway leads because it is the only rung serving historical eth_getCode, which
+    # delivery_refused probes on every overdue swap — publicnode prunes state, drpc times out.
+    rpc_urls={
+        'mainnet': (
+            'https://api.avax.network/ext/bc/C/rpc',
+            'https://avalanche-c-chain-rpc.publicnode.com',
+            'https://avalanche.drpc.org',
+        ),
+        'fuji': (
+            'https://api.avax-test.network/ext/bc/C/rpc',
+            'https://avalanche-fuji-c-chain-rpc.publicnode.com',
+            'https://avalanche-fuji.drpc.org',
+        ),
+    },
+)
+
+BASE = EvmNetwork(
+    label='Base',
+    chain_ids={'mainnet': 8_453, 'sepolia': 84_532},
+    rpc_urls={
+        # publicnode is deliberately absent: its free Base mainnet endpoint 403s every
+        # eth_getTransactionReceipt as an "archive request", so it can never settle a leg.
+        # The official gateways rate-limit under load (429s observed on mainnet.base.org),
+        # which makes an absent tx raise instead of resolving; operators running volume
+        # should point {PREFIX}_RPC_URLS at a keyed endpoint, as on Hyperliquid.
+        'mainnet': ('https://mainnet.base.org', 'https://base.drpc.org'),
+        'sepolia': ('https://sepolia.base.org', 'https://base-sepolia.drpc.org'),
+    },
+)
 
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
-EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM, 'hyperliquid': HYPERLIQUID}
+EVM_NETWORKS: Mapping[str, EvmNetwork] = {
+    'ethereum': ETHEREUM,
+    'arbitrum': ARBITRUM,
+    'hyperliquid': HYPERLIQUID,
+    'bsc': BSC,
+    'avalanche': AVALANCHE,
+    'base': BASE,
+}
 
 
 class EvmChain(Chain):

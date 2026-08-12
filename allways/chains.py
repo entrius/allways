@@ -155,6 +155,107 @@ CHAIN_HYPE = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_BNB = ChainDefinition(
+    id='bnb',
+    name='BNB Smart Chain',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='BNB',
+    host_chain='bsc',
+    networks=('mainnet', 'testnet'),  # testnet = Chapel
+    testnet_network='testnet',
+    # Fermi (Jan 2026) cut blocks to 0.45s — measured 0.4502s over the last 100k mainnet blocks.
+    # 1 is the integer floor, so every derived bound is conservative in wall time, never short.
+    seconds_per_block=1,
+    # BEP-126 finalizes a block once it and its direct child carry >2/3 attestations (~2 blocks).
+    # Below that quorum — e.g. across an epoch's validator-set rotation — BSC falls back to its
+    # longest-chain rule, where what bounds one dishonest proposer is turn_length: the run of
+    # consecutive blocks a single validator signs (BEP-341; measured 8 on mainnet, 2026-08-11).
+    # 15 outlasts one full turn, so no lone validator can build the whole span. turn_length is a
+    # governance parameter and has already been raised twice — if it rises again, raise this above it.
+    min_confirmations=15,
+    # Rate sanity floor, not an economic guarantee: 0.0002 BNB covers a 21k-gas transfer below
+    # ~9.5 gwei — well above the 3-5 gwei BSC sustained through 2022-2024, and ~200x today's
+    # 0.05 gwei minimum. Miners price real gas into their quotes.
+    min_onchain_amount=200_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
+CHAIN_AVAX = ChainDefinition(
+    id='avax',
+    name='Avalanche',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='AVAX',
+    host_chain='avalanche',
+    networks=('mainnet', 'fuji'),
+    testnet_network='fuji',
+    # ~1.1s measured on C-Chain mainnet; the integer floor is 1, as on Arbitrum.
+    seconds_per_block=1,
+    # Snowman accepts a block irreversibly, so finality IS inclusion — there is no reorg
+    # depth to outrun. 2 is a one-block margin against an endpoint serving an unaccepted head.
+    min_confirmations=2,
+    # Rate sanity floor, not an economic guarantee: 0.001 AVAX covers a 21k-gas transfer below
+    # ~47 gwei — a congested C-Chain level, ~1000x the quiet base fee its dynamic fee floats at.
+    min_onchain_amount=1_000_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
+CHAIN_BASEUSDC = ChainDefinition(
+    id='baseusdc',
+    name='USDC (Base)',
+    native_unit='µUSDC',
+    decimals=6,
+    env_prefix='BASE',
+    networks=('mainnet', 'sepolia'),  # sepolia = Base Sepolia
+    testnet_network='sepolia',
+    # Measured live on both networks (2026-08-11): exactly 2s between consecutive blocks.
+    seconds_per_block=2,
+    # Base is an OP-stack rollup: the sequencer can reorg its own unsafe head before the L1
+    # batch posts, so it needs far more depth than a fast-finality chain. 120 × 2s ≈ 240s,
+    # well inside the program's 600s default fulfillment grace.
+    min_confirmations=120,
+    # ERC-20 transfers have no protocol minimum and Base's L2 gas is negligible, so 1 is the
+    # honest floor — a rate sanity input, not an economic guarantee (as on Arbitrum).
+    min_onchain_amount=1,
+    # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (monotonic
+    # timestamps say nothing about how far the sequencer's clock sits from the hub's).
+    replay_grace_secs=60,
+    host_chain='base',
+    # Circle-verified native USDC on Base (developers.circle.com, 2026-08-11) — NOT the
+    # bridged USDbC at 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA.
+    asset_locator='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+)
+
+CHAIN_ETHUSDC = ChainDefinition(
+    id='ethusdc',
+    name='USDC (Ethereum)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Ethereum's prefix, shared with CHAIN_ETH: one ETH_NETWORK / ETH_RPC_URLS / ETH_PRIVATE_KEY
+    # serves both assets, so they can never disagree about which Ethereum they are on.
+    env_prefix='ETH',
+    host_chain='ethereum',
+    # CHAIN_ETH already declares the ETH_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=12,
+    # CHAIN_ETH's finality, deliberately identical — two assets on one chain must not disagree
+    # about its reorg depth. 32 × 12s = 384s, inside the program's 600s default fulfillment grace.
+    min_confirmations=32,
+    # Rate sanity floor, not an economic guarantee: 5 USDC covers FiatToken's ~65k-gas transfer
+    # only below ~41 gwei — miners price real gas into their quotes, and the per-swap lever is the
+    # contract's min_swap_amount. Above arbusdc's unit floor because L1 gas is not L2 gas.
+    min_onchain_amount=5_000_000,
+    # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
+    # one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=0,
+    # Circle-verified native USDC on Ethereum (developers.circle.com, 2026-08-11).
+    asset_locator='0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -162,6 +263,10 @@ SUPPORTED_CHAINS = {
     'eth': CHAIN_ETH,
     'arbusdc': CHAIN_ARBUSDC,
     'hype': CHAIN_HYPE,
+    'bnb': CHAIN_BNB,
+    'avax': CHAIN_AVAX,
+    'baseusdc': CHAIN_BASEUSDC,
+    'ethusdc': CHAIN_ETHUSDC,
 }
 
 
