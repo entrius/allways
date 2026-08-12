@@ -49,6 +49,8 @@ TESTNET_TOKEN_CONTRACTS = {
     # Same address as mainnet and byte-identical runtime bytecode (keccak
     # 0xdeba17f1…0868, 12567 bytes) — verified symbol UNI, 18 decimals, 1e27 supply.
     'uni': {'sepolia': '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984'},
+    # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
+    'polusdc': {'amoy': '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'},
 }
 
 

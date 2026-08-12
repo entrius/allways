@@ -116,6 +116,7 @@ LAUNCH_SPOKES = (
     'uni',
     'qnt',
     'pol',
+    'polusdc',
 )
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
 # lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.

@@ -19,6 +19,7 @@ from allways.chains import (
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
     CHAIN_POL,
+    CHAIN_POLUSDC,
     CHAIN_QNT,
     CHAIN_TAO,
     CHAIN_UNI,
@@ -72,6 +73,9 @@ class TestGetChain:
 
     def test_pol(self):
         assert get_chain_def('pol') is CHAIN_POL
+
+    def test_polusdc(self):
+        assert get_chain_def('polusdc') is CHAIN_POLUSDC
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -250,6 +254,12 @@ class TestComputeExtensionTargetSecs:
         cover = compute_extension_target_secs('pol', 0, worst_phase, self.CEILING) - worst_phase
         assert cover == 220
         assert cover >= CHAIN_POL.min_confirmations * 1.5
+
+    def test_polusdc_matches_the_chain_it_shares(self):
+        # A token and its host coin must extend identically — same confs, same stored block time.
+        assert compute_extension_target_secs('polusdc', 0, self.NOW, self.CEILING) == compute_extension_target_secs(
+            'pol', 0, self.NOW, self.CEILING
+        )
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
