@@ -199,6 +199,51 @@
       ]
     },
     {
+      "name": "bump_vault_generation",
+      "docs": [
+        "Retire the current vault's attestation-epoch namespace when the bond vault is replaced."
+      ],
+      "discriminator": [
+        93,
+        192,
+        10,
+        149,
+        230,
+        255,
+        251,
+        27
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "close_legacy_initiate_round",
       "docs": [
         "The same reap for an initiate `VoteRound` stranded at the retired per-miner address (live",
@@ -5667,6 +5712,15 @@
               "Stored PDA bump."
             ],
             "type": "u8"
+          },
+          {
+            "name": "vault_generation",
+            "docs": [
+              "Which bond vault the attested epochs belong to. Bumped when the vault is replaced: relayers",
+              "compose it into the high half of the attestation epoch, so a new vault's epochs outrank every",
+              "epoch the retired one could produce and the monotonic guard keeps working across the swap."
+            ],
+            "type": "u64"
           }
         ]
       }

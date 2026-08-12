@@ -910,3 +910,61 @@ def test_reconcile_refreshes_who_exists_before_asking_what_they_owe():
     relay.solana.attributions = {MINER: HOTKEY, MINER2: HOTKEY2}
     relay.reconcile(NOW)
     assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in relay.solana.calls
+
+
+# ─── vault generation: the attestation epoch namespace ───────────────────────────────────────────
+
+
+def test_epoch_composition_round_trips_and_orders_across_generations():
+    from allways.solana.layouts import compose_attestation_epoch as compose
+    from allways.solana.layouts import split_attestation_epoch as split
+
+    assert split(compose(0, 0)) == (0, 0)
+    assert split(compose(3, 7)) == (3, 7)
+    # Generation 0 must compose to the bare lock epoch, so a pre-upgrade fleet's epochs are unchanged.
+    assert compose(0, 9) == 9
+    # The whole point: ANY epoch in a newer generation outranks EVERY epoch the retired vault
+    # could have produced, which is what keeps the on-chain monotonic guard satisfiable.
+    assert compose(1, 0) > compose(0, 2**32 - 1)
+    with pytest.raises(ValueError):
+        compose(1, 2**32)
+
+
+def test_attestation_composes_the_configured_vault_generation():
+    vault = FakeVault()
+    vault.lock[HOTKEY] = (True, 1)
+    vault.collateral[HOTKEY] = 5 * RAO
+    solana = FakeSolana(
+        miner_states={MINER: _miner_state()},
+        config=SimpleNamespace(last_attest_heartbeat=0, vault_generation=2),
+    )
+    relay = _relay(vault=vault, solana=solana)
+
+    desired = attestation_job.compute(relay, MINER, HOTKEY)
+    from allways.solana.layouts import split_attestation_epoch as split
+
+    assert split(desired.epoch) == (2, 1), 'generation in the high half, vault lock epoch in the low'
+    assert desired.locked is True
+
+
+def test_attestation_is_skipped_when_the_generation_is_unreadable():
+    """Unknown must never be spelled as generation 0 — that would attest into a retired namespace."""
+    vault = FakeVault()
+    vault.lock[HOTKEY] = (True, 1)
+    vault.collateral[HOTKEY] = 5 * RAO
+
+    class Broken(FakeSolana):
+        def get_config(self):
+            raise RuntimeError('rpc down')
+
+    relay = _relay(vault=vault, solana=Broken(miner_states={MINER: _miner_state()}))
+    assert attestation_job.compute(relay, MINER, HOTKEY) is None
+
+
+def test_a_fresh_vault_is_still_empty_whatever_the_generation():
+    """`is_empty` must read the VAULT half: a replacement vault starts at lock epoch 0 in a
+    non-zero generation, and that is still "no bond posted", not a real assertion worth writing."""
+    from allways.solana.layouts import compose_attestation_epoch as compose
+
+    assert attestation_job.Attested(0, False, compose(4, 0)).is_empty
+    assert not attestation_job.Attested(0, False, compose(4, 1)).is_empty

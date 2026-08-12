@@ -67,7 +67,7 @@ pub const ATTEST_SEED: &[u8] = b"attest";
 /// On-chain schema/version for upgrade tracking, bumped as phases land. v14: v3.1 per-hub swap
 /// concurrency — per-hub transient state on MinerState, per-hub Pool/Reservation seeds. v13 = W2b
 /// quote-level backing; v12 = W2 bond attestation; v11 = W1 seam; v10 = A4 freshness replay.
-pub const CONFIG_VERSION: u32 = 14;
+pub const CONFIG_VERSION: u32 = 15;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;

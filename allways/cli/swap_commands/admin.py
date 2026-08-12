@@ -655,4 +655,26 @@ def set_attest_max_age(seconds: int):
     )
 
 
+@admin_group.command('bump-vault-generation', show_disclaimer=True)
+def bump_vault_generation():
+    """Retire the current bond vault's attestation-epoch namespace after replacing the vault.
+
+    [dim]A replacement vault restarts its lock epochs at 0, which the on-chain monotonic guard would
+    reject as stale forever — miners could never re-attest. Bumping the generation makes the new
+    vault's epochs outrank every epoch the retired one could produce.[/dim]
+
+    [dim]Run this AFTER instantiating the new vault and BEFORE pointing relayers at it
+    (ALLWAYS_VAULT_ADDRESS). Increment-only.[/dim]
+    """
+    _run_setter(
+        title='Bump Vault Generation',
+        getter=lambda c: c.get_config().vault_generation,
+        setter=lambda c: c.bump_vault_generation(),
+        noun='vault generation',
+        format_current=str,
+        new_display='next',
+        success_msg='Vault generation bumped — relayers may now attest against the new vault',
+    )
+
+
 admin_group.add_command(danger_group)

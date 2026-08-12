@@ -24,6 +24,7 @@ import bittensor as bt
 
 from allways import dev_signal
 from allways.solana.client import benign_marker
+from allways.solana.layouts import compose_attestation_epoch, split_attestation_epoch
 
 # A vote can race a peer's identical vote, or the round's staleness clock by a second or two.
 # The program's AlreadyVoted is an authoritative no-op, not a failure (same rule as floor_sweep).
@@ -40,6 +41,12 @@ _HELD_HUB_MARKERS = ('AttestationWouldStrandSwap',)
 _DEFERRED = object()
 
 
+def _epoch_str(epoch: int) -> str:
+    """Composed epochs are opaque as one integer — render both halves."""
+    generation, lock_epoch = split_attestation_epoch(epoch)
+    return f'{lock_epoch} (gen {generation})'
+
+
 @dataclass(frozen=True)
 class Attested:
     effective_balance: int
@@ -49,8 +56,9 @@ class Attested:
     @property
     def is_empty(self) -> bool:
         """No bond on the vault at all — as opposed to a bond that nets to zero, which is a real
-        assertion (it says "this miner is spoken for") and must still be written."""
-        return not self.locked and self.effective_balance == 0 and self.epoch == 0
+        assertion (it says "this miner is spoken for") and must still be written. Reads the VAULT
+        half of the epoch: a fresh vault starts at lock epoch 0 whatever the generation."""
+        return not self.locked and self.effective_balance == 0 and split_attestation_epoch(self.epoch)[1] == 0
 
     def matches(self, account: Any) -> bool:
         return (
@@ -78,7 +86,17 @@ def compute(relay, miner: str, hotkey: str) -> Optional[Attested]:
     unsettled = max(0, accrued - settled)
     pending = sum(int(row['penalty']) for row in relay.store.open_relay_slashes(relay.backing, miner))
     locked, epoch = lock
-    return Attested(max(0, gross - unsettled - pending), bool(locked), int(epoch))
+    # A replacement vault restarts its lock epochs at 0, which the on-chain monotonic guard would
+    # read as stale forever. Compose the config's vault generation into the high half so epochs stay
+    # globally monotonic across the swap.
+    generation = relay.vault_generation()
+    if generation is None:
+        return None
+    return Attested(
+        max(0, gross - unsettled - pending),
+        bool(locked),
+        compose_attestation_epoch(generation, int(epoch)),
+    )
 
 
 def flush(relay, now: int, reconciling: bool = False) -> bool:
@@ -130,7 +148,7 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> A
     if relay.read_only:
         bt.logging.info(
             f'relay: WOULD vote_set_attestation {miner[:8]} '
-            f'balance={desired.effective_balance} locked={desired.locked} epoch={desired.epoch} (read-only)'
+            f'balance={desired.effective_balance} locked={desired.locked} epoch={_epoch_str(desired.epoch)} (read-only)'
         )
         relay.note_vote(key, now)
         return True
@@ -152,7 +170,7 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> A
     relay.note_vote(key, now)
     bt.logging.info(
         f'relay: attested {miner[:8]} {relay.backing} balance={desired.effective_balance} '
-        f'locked={desired.locked} epoch={desired.epoch}{" (reconcile)" if reconciling else ""}'
+        f'locked={desired.locked} epoch={_epoch_str(desired.epoch)}{" (reconcile)" if reconciling else ""}'
     )
     dev_signal.emit(
         'relay_attestation',

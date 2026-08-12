@@ -108,6 +108,10 @@ pub mod allways_swap_manager {
     pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_attest_max_age(ctx, secs)
     }
+    /// Retire the current vault's attestation-epoch namespace when the bond vault is replaced.
+    pub fn bump_vault_generation(ctx: Context<AdminConfig>) -> Result<()> {
+        admin::bump_vault_generation(ctx)
+    }
     pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_reservation_ttl(ctx, secs)
     }

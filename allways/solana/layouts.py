@@ -14,11 +14,32 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 14
+CONFIG_VERSION = 15
 
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
 MAX_BACKING_SLOTS = 8
+
+
+# The attestation epoch is a two-part value: the Solana config's vault generation in the high 32
+# bits, the vault's own lock epoch in the low 32. That keeps the on-chain `epoch >= stored.epoch`
+# guard globally monotonic across a vault replacement, whose lock epochs restart at 0.
+EPOCH_GENERATION_SHIFT = 32
+_LOCK_EPOCH_MASK = (1 << EPOCH_GENERATION_SHIFT) - 1
+
+
+def compose_attestation_epoch(generation: int, lock_epoch: int) -> int:
+    """Pack (generation, vault lock epoch) into the epoch the attestation stores."""
+    generation, lock_epoch = int(generation), int(lock_epoch)
+    if lock_epoch < 0 or lock_epoch > _LOCK_EPOCH_MASK:
+        raise ValueError(f'vault lock epoch {lock_epoch} does not fit in {EPOCH_GENERATION_SHIFT} bits')
+    return (generation << EPOCH_GENERATION_SHIFT) | lock_epoch
+
+
+def split_attestation_epoch(epoch: int) -> tuple:
+    """(generation, vault lock epoch) — for display and for comparing against a vault read."""
+    epoch = int(epoch or 0)
+    return epoch >> EPOCH_GENERATION_SHIFT, epoch & _LOCK_EPOCH_MASK
 
 
 def lock_max(value) -> int:
@@ -244,6 +265,7 @@ Config = CStruct(
     'weights_update_min_interval_secs' / I64,
     'max_total_extension_secs' / I64,
     'bump' / U8,
+    'vault_generation' / U64,
 )
 
 # Top-level pubkey fields per account (decoded bytes -> solders Pubkey by the client). Hash/id byte

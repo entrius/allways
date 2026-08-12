@@ -70,6 +70,10 @@ pub struct Config {
     pub max_total_extension_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
+    /// Which bond vault the attested epochs belong to. Bumped when the vault is replaced: relayers
+    /// compose it into the high half of the attestation epoch, so a new vault's epochs outrank every
+    /// epoch the retired one could produce and the monotonic guard keeps working across the swap.
+    pub vault_generation: u64,
 }
 
 /// Per-miner native-SOL collateral vault PDA (`seeds = [COLLATERAL_SEED, miner]`), program-owned.

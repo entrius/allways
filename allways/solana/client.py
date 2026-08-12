@@ -402,6 +402,11 @@ class AllwaysSolanaClient:
     def set_halted(self, halted: bool) -> str:
         return self._admin_config('set_halted', layouts.IX_BOOL_ARGS.build({'value': halted}))
 
+    def bump_vault_generation(self) -> str:
+        """Retire the current vault's attestation-epoch namespace — run once per vault replacement,
+        BEFORE relayers are pointed at the new vault."""
+        return self._admin_config('bump_vault_generation', b'')
+
     def set_min_collateral(self, amount: int) -> str:
         return self._admin_config('set_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
 
