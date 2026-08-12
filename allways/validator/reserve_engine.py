@@ -321,7 +321,45 @@ class ConfirmResult:
 CLAIM_RELAY_MARGIN_SECS = 90
 
 
-def _extend_for_claim(client, miner_pk, reservation) -> None:
+def _live_unclaimed_reservation(client, miner_pk, now):
+    """The miner's live unclaimed reservation and its hub, scanned across every per-hub slot: v3.1
+    seeds one per (miner, backing), so a TAO deposit lives in the TAO slot — never assume SOL. Live
+    == reserved_until >= now, no swap yet claimed. (resv, backing, '') on a hit; (None, None, reason)."""
+    saw_any = False
+    saw_live_claimed = False
+    for backing in BACKING_BITS:
+        resv = client.get_reservation(miner_pk, backing)
+        if resv is None:
+            continue
+        saw_any = True
+        if int(resv.reserved_until) == 0 or int(resv.reserved_until) < now:
+            continue
+        if bytes(resv.claimed_swap_key) != EMPTY_SWAP_KEY:
+            saw_live_claimed = True
+            continue
+        return resv, backing, ''
+    if saw_live_claimed:
+        return None, None, 'Reservation already has a claimed swap'
+    if saw_any:
+        return None, None, 'Reservation is not active'
+    return None, None, 'No reservation for this miner'
+
+
+def _freshest_reservation(client, miner_pk):
+    """The miner's most-alive reservation across per-hub slots (v3.1) — ranked by max(reserved_until,
+    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot."""
+    best, best_at = None, -1
+    for backing in BACKING_BITS:
+        resv = client.get_reservation(miner_pk, backing)
+        if resv is None:
+            continue
+        at = max(int(getattr(resv, 'reserved_until', 0) or 0), int(getattr(resv, 'finalize_by', 0) or 0))
+        if at > best_at:
+            best, best_at = resv, at
+    return best
+
+
+def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
     """Slide `reserved_until` forward so the pending claim can land, when a verified deposit arrives
     with little runway left.
 
@@ -344,7 +382,7 @@ def _extend_for_claim(client, miner_pk, reservation) -> None:
     if target <= reserved_until:
         return  # already at the contract ceiling — nothing left to buy
     try:
-        client.extend_reservation(miner_pk, target)
+        client.extend_reservation(miner_pk, target, backing)
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
         bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')
@@ -366,14 +404,10 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     if miner_pk is None:
         return ConfirmResult(False, 'Hotkey not bound to a Solana miner')
 
-    reservation = client.get_reservation(miner_pk)
-    if reservation is None:
-        return ConfirmResult(False, 'No reservation for this miner')
     now = int(time.time())
-    if reservation.reserved_until == 0 or reservation.reserved_until < now:
-        return ConfirmResult(False, 'Reservation is not active')
-    if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
-        return ConfirmResult(False, 'Reservation already has a claimed swap')
+    reservation, backing, reason = _live_unclaimed_reservation(client, miner_pk, now)
+    if reservation is None:
+        return ConfirmResult(False, reason)
 
     provider = validator.axon_assets.get(reservation.from_chain)
     if provider is None:
@@ -404,10 +438,10 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
-    _extend_for_claim(client, miner_pk, reservation)
+    _extend_for_claim(client, miner_pk, reservation, backing)
 
     swap_key = swap_key_from_tx_hash(from_tx_hash)
-    sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0)
+    sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
     return ConfirmResult(True, '', swap_key.hex(), sig)
 
 
@@ -420,12 +454,8 @@ def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
         return None
-    reservation = client.get_reservation(miner_pk)
+    reservation, _backing, _ = _live_unclaimed_reservation(client, miner_pk, time.time())
     if reservation is None:
-        return None
-    if reservation.reserved_until == 0 or reservation.reserved_until < time.time():
-        return None
-    if bytes(reservation.claimed_swap_key) != EMPTY_SWAP_KEY:
         return None
     provider = validator.axon_assets.get(reservation.from_chain)
     scan = getattr(provider, 'find_recent_outgoing', None)
@@ -550,7 +580,7 @@ def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapSta
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
         return SwapStatus('none')
-    reservation = client.get_reservation(miner_pk)
+    reservation = _freshest_reservation(client, miner_pk)
     if reservation is None or reservation.reserved_until == 0:
         return SwapStatus('none')
     swap_key = bytes(reservation.claimed_swap_key)

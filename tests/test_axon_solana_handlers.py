@@ -74,14 +74,14 @@ class FakeSolanaClient:
     def get_bond_attestation(self, miner, chain='tao'):
         return self.attestation
 
-    def get_reservation(self, miner):
+    def get_reservation(self, miner, backing='sol'):
         return self.reservation
 
     def vote_activate(self, miner, backing='sol'):
         self.calls.append(('vote_activate', miner, backing))
 
-    def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block):
-        self.calls.append(('submit_swap_claim', miner, swap_key, from_tx_hash, from_tx_block))
+    def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block, backing='sol'):
+        self.calls.append(('submit_swap_claim', miner, swap_key, from_tx_hash, from_tx_block, backing))
 
 
 class FakeProvider:
@@ -356,7 +356,7 @@ def test_confirm_unconfirmed_mempool_deposit_relays_claim():
     client = FakeSolanaClient(reservation=_reservation())
     s = run(axon_handlers.handle_swap_confirm(make_validator(client, FakeProvider(mempool)), confirm_synapse()))
     assert s.accepted is True
-    assert client.calls == [('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 0)]
+    assert client.calls == [('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 0, 'sol')]
 
 
 def test_confirm_stale_deposit_rejects():
@@ -380,7 +380,7 @@ def test_confirm_success_relays_claim():
     s = run(axon_handlers.handle_swap_confirm(make_validator(client, FakeProvider(_fresh_tx())), confirm_synapse()))
     assert s.accepted is True
     assert client.calls == [
-        ('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 800_000),
+        ('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 800_000, 'sol'),
     ]
 
 
