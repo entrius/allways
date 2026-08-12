@@ -155,6 +155,33 @@ CHAIN_HYPE = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_BNB = ChainDefinition(
+    id='bnb',
+    name='BNB Smart Chain',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='BNB',
+    host_chain='bsc',
+    networks=('mainnet', 'testnet'),  # testnet = Chapel
+    testnet_network='testnet',
+    # Fermi (Jan 2026) cut blocks to 0.45s — measured 0.4502s over the last 100k mainnet blocks.
+    # 1 is the integer floor, so every derived bound is conservative in wall time, never short.
+    seconds_per_block=1,
+    # BEP-126 finalizes a block once it and its direct child carry >2/3 attestations (~2 blocks).
+    # Below that quorum — e.g. across an epoch's validator-set rotation — BSC falls back to its
+    # longest-chain rule, where what bounds one dishonest proposer is turn_length: the run of
+    # consecutive blocks a single validator signs (BEP-341; measured 8 on mainnet, 2026-08-11).
+    # 15 outlasts one full turn, so no lone validator can build the whole span. turn_length is a
+    # governance parameter and has already been raised twice — if it rises again, raise this above it.
+    min_confirmations=15,
+    # Rate sanity floor, not an economic guarantee: 0.0002 BNB covers a 21k-gas transfer below
+    # ~9.5 gwei — well above the 3-5 gwei BSC sustained through 2022-2024, and ~200x today's
+    # 0.05 gwei minimum. Miners price real gas into their quotes.
+    min_onchain_amount=200_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -162,6 +189,7 @@ SUPPORTED_CHAINS = {
     'eth': CHAIN_ETH,
     'arbusdc': CHAIN_ARBUSDC,
     'hype': CHAIN_HYPE,
+    'bnb': CHAIN_BNB,
 }
 
 

@@ -94,9 +94,27 @@ HYPERLIQUID = EvmNetwork(
         'testnet': ('https://rpc.hyperliquid-testnet.xyz/evm', 'https://hyperliquid-testnet.drpc.org'),
     },
 )
+BSC = EvmNetwork(
+    label='BNB Smart Chain',
+    chain_ids={'mainnet': 56, 'testnet': 97},  # testnet = Chapel
+    rpc_urls={
+        # Picked on a real eth_getTransactionReceipt under load, not on eth_chainId: publicnode's
+        # BSC mainnet node answers chainId and then 403s every receipt ('Archive requests require a
+        # personal token') even one block back, and the receipt IS the settlement check. drpc's free
+        # BSC tier 429s under any burst, which would strand null quorum. Both excluded on purpose.
+        'mainnet': ('https://bsc-dataseed.bnbchain.org', 'https://bsc.blockrazor.xyz'),
+        # publicnode's TESTNET node does serve receipts — the asymmetry with mainnet is deliberate.
+        'testnet': ('https://bsc-testnet-dataseed.bnbchain.org', 'https://bsc-testnet-rpc.publicnode.com'),
+    },
+)
 
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
-EVM_NETWORKS: Mapping[str, EvmNetwork] = {'ethereum': ETHEREUM, 'arbitrum': ARBITRUM, 'hyperliquid': HYPERLIQUID}
+EVM_NETWORKS: Mapping[str, EvmNetwork] = {
+    'ethereum': ETHEREUM,
+    'arbitrum': ARBITRUM,
+    'hyperliquid': HYPERLIQUID,
+    'bsc': BSC,
+}
 
 
 class EvmChain(Chain):
