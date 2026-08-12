@@ -86,6 +86,12 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
     return None
 
 
+def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
+    """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
+    two on the hub↔hub pair (sol↔tao), one on a spoke pair, none on a spoke↔spoke pair (invalid)."""
+    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
+
+
 # Chains paired against each hub; add a chain here to launch its pairs.
 LAUNCH_SPOKES = ('btc', 'tao', 'eth', 'arbusdc', 'hype', 'bnb', 'avax', 'baseusdc', 'ethusdc')
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao

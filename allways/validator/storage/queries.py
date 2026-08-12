@@ -7,17 +7,18 @@
 # crown_holders window wipe: crown derivation operates on a moving time
 # window, so an old window's intervals are deleted before the recomputed ones
 # are upserted. Bounded by the caller (the scoring window, in unix seconds).
+# Keyed per lane (direction + backing, F4) — sol↔tao carries two row sets.
 DELETE_CROWN_IN_RANGE = """
 DELETE FROM crown_holders
-WHERE from_chain = %s AND to_chain = %s AND started_at >= %s AND started_at < %s
+WHERE from_chain = %s AND to_chain = %s AND backing = %s AND started_at >= %s AND started_at < %s
 """
 
 # crown_holders: per-interval winners with fractional credit. k-way ties emit
 # k rows summing to 1.0; DOUBLE PRECISION column avoids drift at aggregation.
 BULK_UPSERT_CROWN_HOLDERS = """
-INSERT INTO crown_holders (started_at, ended_at, from_chain, to_chain, hotkey, credit, rate)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (started_at, from_chain, to_chain, hotkey)
+INSERT INTO crown_holders (started_at, ended_at, from_chain, to_chain, backing, hotkey, credit, rate)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (started_at, from_chain, to_chain, backing, hotkey)
 DO UPDATE SET ended_at = EXCLUDED.ended_at, credit = EXCLUDED.credit, rate = EXCLUDED.rate
 """
 
@@ -37,13 +38,13 @@ ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 # consistent — readers never see a partial tie.
 DELETE_CURRENT_CROWN_BY_DIRECTION = """
 DELETE FROM current_crown_holders
-WHERE from_chain = %s AND to_chain = %s
+WHERE from_chain = %s AND to_chain = %s AND backing = %s
 """
 
 BULK_UPSERT_CURRENT_CROWN_HOLDERS = """
-INSERT INTO current_crown_holders (from_chain, to_chain, hotkey, credit, rate, ts, updated_at)
-VALUES (%s, %s, %s, %s, %s, %s, NOW())
-ON CONFLICT (from_chain, to_chain, hotkey)
+INSERT INTO current_crown_holders (from_chain, to_chain, backing, hotkey, credit, rate, ts, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (from_chain, to_chain, backing, hotkey)
 DO UPDATE SET credit = EXCLUDED.credit,
               rate   = EXCLUDED.rate,
               ts     = EXCLUDED.ts,
@@ -51,13 +52,13 @@ DO UPDATE SET credit = EXCLUDED.credit,
 """
 
 # miner_scores: per-round factor snapshots — what the validator actually paid,
-# one row per (round, hotkey, direction), flushed in the same transaction as
+# one row per (round, hotkey, lane), flushed in the same transaction as
 # the crown ledger. Idempotent on retry of the same round.
 BULK_UPSERT_MINER_SCORES = """
-INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, eligible,
+INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, backing, eligible,
                           pool, crown_share, capacity, reward)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (round_ts, hotkey, from_chain, to_chain)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (round_ts, hotkey, from_chain, to_chain, backing)
 DO UPDATE SET eligible    = EXCLUDED.eligible,
               pool        = EXCLUDED.pool,
               crown_share = EXCLUDED.crown_share,
@@ -73,7 +74,7 @@ DELETE FROM current_miner_scores
 """
 
 BULK_INSERT_CURRENT_MINER_SCORES = """
-INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, eligible,
+INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, backing, eligible,
                                   pool, crown_share, capacity, reward, updated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 """

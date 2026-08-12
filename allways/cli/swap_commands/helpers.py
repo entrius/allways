@@ -17,7 +17,7 @@ from rich.text import Text
 from allways.chains import SUPPORTED_CHAINS, ChainDefinition
 from allways.classes import SwapStatus
 from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
-from allways.constants import NETUID_FINNEY, TAO_TO_RAO
+from allways.constants import NETUID_FINNEY, TAO_TO_RAO, declarable_backings
 from allways.solana import pdas
 from allways.solana.client import SolanaClientError
 from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
@@ -740,10 +740,8 @@ def backing_label(backing: Optional[str]) -> str:
     return BACKING_LABELS.get(backing, f'{backing}-backed')
 
 
-def declarable_backings(from_chain: str, to_chain: str) -> List[str]:
-    """Backings this pair could carry — hub-capable legs only. One entry on a spoke pair (sol<->btc,
-    tao<->btc), two on a hub<->hub pair (sol<->tao), none on a pair with no hub leg."""
-    return [b for b in pdas.BACKING_BITS if b in (from_chain, to_chain)]
+# declarable_backings lifted to allways.constants (F4: scoring keys its lanes off it too);
+# re-imported above so the CLI call sites and `from helpers import declarable_backings` keep working.
 
 
 def resolve_quote_backing(miner_state, from_chain: str, to_chain: str, explicit: Optional[str] = None) -> str:
