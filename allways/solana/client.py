@@ -746,6 +746,7 @@ class AllwaysSolanaClient:
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, False),
             AccountMeta(pdas.bond_attestation_pda(m, chain, self.program_id), False, True),
             AccountMeta(pdas.attestation_round_pda(m, chain, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
@@ -899,6 +900,7 @@ class AllwaysSolanaClient:
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
+            AccountMeta(pdas.pool_pda(m, backing, self.program_id), False, False),
         ]
         return self._send([self._ix('close_unfilled_reservation', b'', metas)])
 
