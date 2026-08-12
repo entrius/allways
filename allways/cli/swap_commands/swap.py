@@ -28,6 +28,7 @@ from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
     PENDING_SWAP_FILE,
+    backing_label,
     console,
     fail,
     get_cli_context,
@@ -36,6 +37,7 @@ from allways.cli.swap_commands.helpers import (
     live_unclaimed,
     loading,
 )
+from allways.cli.swap_commands.quote import GUARANTEE
 from allways.cli.swap_commands.swap_intake import (
     bounds_from_config,
     candidate_miners,
@@ -465,6 +467,11 @@ def swap_now_command(
         f'  (miner [dim]{str(cand.miner)[:8]}…[/dim], rate {rate_disp} '
         f'{to_chain.upper()}/{from_chain.upper()}{pinned_note})\n'
     )
+    # Which purse backs this offer decides what you're owed if the miner fails — disclose it.
+    console.print(
+        f'  [cyan]{backing_label(cand.backing)}[/cyan] — if the miner fails to deliver, '
+        f'{GUARANTEE.get(cand.backing, "see docs")}.\n'
+    )
     if contention.is_open and not resuming:
         fee_sol = int(getattr(cfg, 'reservation_fee_lamports', 0)) / 10 ** get_chain_def(NUMERAIRE_CHAIN).decimals
         if contention.weighted_rivals > 0:
@@ -554,7 +561,11 @@ def swap_now_command(
             backing=cand.backing,
         )
     recv = apply_fee_deduction(int(resv.to_amount), FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
-    console.print(f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan].')
+    resv_backing = str(getattr(resv, 'collateral_chain', '') or '')
+    console.print(
+        f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan], '
+        f'[cyan]{backing_label(resv_backing)}[/cyan].'
+    )
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
