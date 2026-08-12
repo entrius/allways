@@ -108,18 +108,18 @@ BSC = EvmNetwork(
 AVALANCHE = EvmNetwork(
     label='Avalanche',
     chain_ids={'mainnet': 43_114, 'fuji': 43_113},
-    # Three rungs: publicnode prunes historical state and drpc's free tier times out on it, but
-    # delivery_refused's getCode-at-depth probes need it — Ava Labs' own gateway always serves them.
+    # Ava Labs' gateway leads because it is the only rung serving historical eth_getCode, which
+    # delivery_refused probes on every overdue swap — publicnode prunes state, drpc times out.
     rpc_urls={
         'mainnet': (
+            'https://api.avax.network/ext/bc/C/rpc',
             'https://avalanche-c-chain-rpc.publicnode.com',
             'https://avalanche.drpc.org',
-            'https://api.avax.network/ext/bc/C/rpc',
         ),
         'fuji': (
+            'https://api.avax-test.network/ext/bc/C/rpc',
             'https://avalanche-fuji-c-chain-rpc.publicnode.com',
             'https://avalanche-fuji.drpc.org',
-            'https://api.avax-test.network/ext/bc/C/rpc',
         ),
     },
 )
