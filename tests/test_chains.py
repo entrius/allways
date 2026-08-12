@@ -7,8 +7,8 @@ import pytest
 from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
-    CHAIN_BNB,
     CHAIN_AVAX,
+    CHAIN_BNB,
     CHAIN_BTC,
     CHAIN_ETH,
     CHAIN_HYPE,
@@ -39,6 +39,7 @@ class TestGetChain:
 
     def test_bnb(self):
         assert get_chain_def('bnb') is CHAIN_BNB
+
     def test_avax(self):
         assert get_chain_def('avax') is CHAIN_AVAX
 

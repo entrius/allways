@@ -105,6 +105,9 @@ BSC = EvmNetwork(
         'mainnet': ('https://bsc-dataseed.bnbchain.org', 'https://bsc.blockrazor.xyz'),
         # publicnode's TESTNET node does serve receipts — the asymmetry with mainnet is deliberate.
         'testnet': ('https://bsc-testnet-dataseed.bnbchain.org', 'https://bsc-testnet-rpc.publicnode.com'),
+    },
+)
+
 AVALANCHE = EvmNetwork(
     label='Avalanche',
     chain_ids={'mainnet': 43_114, 'fuji': 43_113},

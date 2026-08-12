@@ -178,6 +178,10 @@ CHAIN_BNB = ChainDefinition(
     # ~9.5 gwei — well above the 3-5 gwei BSC sustained through 2022-2024, and ~200x today's
     # 0.05 gwei minimum. Miners price real gas into their quotes.
     min_onchain_amount=200_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 CHAIN_AVAX = ChainDefinition(
     id='avax',
     name='Avalanche',
