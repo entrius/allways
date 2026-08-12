@@ -145,12 +145,12 @@ CRONOS = EvmNetwork(
     label='Cronos',
     chain_ids={'mainnet': 25, 'testnet': 338},
     rpc_urls={
-        # The official gateway leads as the only mainnet rung serving historical eth_getCode, which
-        # delivery_refused probes up to 120 blocks back on every overdue swap: publicnode keeps only
-        # ~100 blocks of Ethermint state (the Cosmos SDK pruning-keep-recent default) and errors
-        # below it. publicnode stays second — it serves receipts, blocks and tx lookups cleanly,
-        # which is what null quorum needs.
-        'mainnet': ('https://evm.cronos.org', 'https://cronos-evm-rpc.publicnode.com'),
+        # publicnode leads: it tracks the tip closely (the official gateway measured a median 25
+        # blocks behind it, 32% of samples past 32) and so serves every hot-path call. It keeps
+        # only ~100 blocks of Ethermint state (the Cosmos SDK pruning-keep-recent default), so the
+        # official gateway trails as the archive rung that answers delivery_refused's 120-block
+        # probe by fall-through — a rung need not lead to serve a call the leader errors on.
+        'mainnet': ('https://cronos-evm-rpc.publicnode.com', 'https://evm.cronos.org'),
         # Both testnet rungs serve historical eth_getCode past 100k blocks; official leads for symmetry.
         'testnet': ('https://evm-t3.cronos.org', 'https://cronos-testnet.drpc.org'),
     },

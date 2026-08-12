@@ -125,10 +125,14 @@ class TestNetworkSelection:
         monkeypatch.setenv('CRO_NETWORK', network)
         assert Cro().chain.rpc_bases == list(CRONOS.rpc_urls[network])
 
-    def test_mainnet_ladder_leads_with_the_archive_rung(self, provider):
-        # delivery_refused reads state up to 120 blocks back and publicnode keeps only ~100 blocks
-        # of it, so the official gateway must stay first or every slash check pays a failover.
-        assert provider.chain.rpc_bases[0] == 'https://evm.cronos.org'
+    def test_mainnet_ladder_keeps_an_archive_rung_behind_the_fresh_one(self, provider):
+        # The leader serves every hot-path call, so it is the rung that tracks the tip. The
+        # official gateway trails purely as the archive rung: it is reached by fall-through for
+        # the one call publicnode cannot serve — a probe past its ~100 blocks of retained state.
+        assert provider.chain.rpc_bases == [
+            'https://cronos-evm-rpc.publicnode.com',
+            'https://evm.cronos.org',
+        ]
 
     def test_rpc_urls_env_overrides_the_public_ladder(self, monkeypatch):
         monkeypatch.setenv('CRO_RPC_URLS', 'https://paid.example/key/,https://backup.example')
@@ -269,7 +273,7 @@ class TestDeliveryGates:
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is True
         # now, then the window's far edge and its midpoint. The 60s window is 60 blocks at the
         # stored 1s — inside the ~100 blocks of state publicnode keeps, but the gate's 120-block
-        # cap is not, which is why the archive gateway leads the mainnet ladder.
+        # cap is not, which is why the mainnet ladder carries an archive rung behind publicnode.
         assert probed == ['latest', hex(9_940), hex(9_970)]
 
     def test_slash_gate_does_not_exempt_a_dest_that_never_had_code(self, provider, frozen_now):
