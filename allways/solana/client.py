@@ -605,7 +605,9 @@ class AllwaysSolanaClient:
         return self._send([self._ix('deactivate', args, metas)])
 
     # ---------- swap lifecycle (B2: validator votes + the claim relay) ----------
-    def submit_swap_claim(self, miner, swap_key: bytes, from_tx_hash: str, from_tx_block: int, backing: str = 'sol') -> str:
+    def submit_swap_claim(
+        self, miner, swap_key: bytes, from_tx_hash: str, from_tx_block: int, backing: str = 'sol'
+    ) -> str:
         """Validator-relayed: record the winner's source-tx on-chain, creating the Swap in
         PendingAttestation (all terms pinned from the Reservation). swap_key must == keccak(from_tx_hash)."""
         caller = self.keypair.pubkey()

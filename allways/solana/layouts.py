@@ -317,9 +317,7 @@ EVENT_LAYOUTS = {
         'seed_slot' / U64,
     ),
     'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
-    'PoolResolved': CStruct(
-        'miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String
-    ),
+    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String),
     'QuoteRemoved': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
@@ -354,9 +352,7 @@ EVENT_LAYOUTS = {
     ),
     'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
-    'UnfilledReservationClosed': CStruct(
-        'miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String
-    ),
+    'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String),
     'SwapClaimed': CStruct(
         'swap_key' / Hash32,
         'miner' / Pubkey32,
