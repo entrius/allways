@@ -499,12 +499,12 @@ def _screen(gate, from_chain, to_chain, client=None):
     return gate
 
 
-def test_screen_blocks_undeliverable_receive_address():
-    # F7: self-represented takers have no validator to bounce a blacklisted dest for them.
-    import pytest
-
-    with pytest.raises(SystemExit):
-        _screen(_Gate(reject={'recvaddr'}), 'sol', 'arbusdc')
+def test_screen_does_not_probe_or_block_undeliverable_receive_address():
+    # Reserve-time deliverability is no longer predicted (not a boundary; the sound check is the
+    # delivery-time reverted-tx proof). A dest that would refuse is neither probed nor blocked here —
+    # fat-finger UX moved to the client app. Validity is still screened (test below).
+    gate = _screen(_Gate(reject={'recvaddr'}), 'sol', 'arbusdc')
+    assert 'recvaddr' not in gate.checked
 
 
 def test_screen_blocks_rejecting_miner_receive_address():
@@ -547,8 +547,10 @@ def test_screen_blocks_malformed_miner_receive_address():
 
 
 def test_screen_rejection_aborts_swap_now_before_any_bid():
-    # Placement guard: the screen fires inside `swap now` BEFORE the resume/bid machinery —
-    # a doomed dest aborts the flow with no bid placed and no reservation touched.
+    # Placement guard: the SOURCE-side screen (which stays — it protects takers) fires inside
+    # `swap now` BEFORE the resume/bid machinery, so a miner whose receive address rejects the source
+    # aborts the flow with no bid placed. (The dest-side deliverability screen was removed — a refusing
+    # DEST is no longer probed here; see test_screen_does_not_probe_or_block_undeliverable_receive_address.)
     from click.testing import CliRunner
 
     from allways.cli.swap_commands.swap import swap_now_command
@@ -559,12 +561,13 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
     client.get_config.return_value = types.SimpleNamespace(
         min_swap_amount=1, max_swap_amount=10**18, pool_window_secs=60
     )
+    client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='minerSOLaddr', miner_to_addr='')
     amts = types.SimpleNamespace(collateral_amount=10**9, from_amount=5000, to_amount=10**9)
     cand = types.SimpleNamespace(miner='miner-pk', rate_display='0.0021', collateral=10**10, backing='sol')
     argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=_Gate(reject={'userBTCaddr'})),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=_Gate(reject={'minerSOLaddr'})),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._save_pending'),

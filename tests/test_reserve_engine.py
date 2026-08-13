@@ -121,15 +121,15 @@ def _gate_asset(can_deliver, valid=lambda addr: True):
     )
 
 
-def test_undeliverable_destination_rejects_before_any_bid():
-    # B-lite reserve gate: a dest that provably refuses transfers bounces before funds move.
+def test_reserve_does_not_predict_dest_deliverability():
+    # Reserve-time deliverability is NOT a security boundary (a dest can pass here then revert later),
+    # so a dest that WOULD refuse is no longer bounced here — the sound check is the delivery-time
+    # reverted-tx proof (cancel_swap). Validity is still screened (see the malformed test below).
     client = FakeClient()
     validator = _validator(client)
     validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: False)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
-    assert not result.ok
-    assert 'rejects incoming transfers' in result.reason
-    assert client.calls == []  # bounced before the on-chain bid
+    assert 'rejects incoming transfers' not in (result.reason or '')
 
 
 def test_malformed_destination_address_rejects_before_any_bid():

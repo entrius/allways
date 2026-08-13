@@ -651,17 +651,10 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     dest_provider = _gate_provider(to_chain, client, config)
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
-        # Format first — offline, and a malformed address can never be delivered to.
+        # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
+        # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
-        # Simulate from the miner's committed dest-side sender, as the validator gate does.
-        miner_to_addr = getattr(quote, 'miner_to_addr', '') if quote else ''
-        if not dest_provider.can_deliver_to(receive_addr, amts.to_amount, from_address=miner_to_addr or None):
-            fail(
-                f'  Your receive address cannot accept {to_chain.upper()} right now '
-                '(frozen or transfers paused). No funds moved.'
-            )
     src_provider = _gate_provider(from_chain, client, config)
     if src_provider is None:
         return
