@@ -125,10 +125,10 @@ CHAIN_ARBUSDC = ChainDefinition(
     # math) — both far inside the 600s default program grace, so no grace-table arm.
     seconds_per_block=1,
     min_confirmations=90,
-    # ERC-20 transfers have no protocol minimum, so 1 is the honest floor. (The old
-    # F1 orientation defect that made this value load-bearing is fixed in utils/rate.py;
-    # raising it to an economic floor is now safe if ever wanted.)
-    min_onchain_amount=1,
+    # 5 USDC. min_onchain_amount floors the routable source amount inside is_executable_rate, so a
+    # floor of 1 (0.000001 USDC) leaves the crown-eligibility gate open to absurd rates routable only
+    # for dust — distorting emissions and the network's displayed rates. 5 USDC tightens that band.
+    min_onchain_amount=5_000_000,
     # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (Arbitrum
     # timestamps are non-decreasing, but monotonicity says nothing about hub-spoke skew).
     replay_grace_secs=60,
@@ -221,9 +221,9 @@ CHAIN_BASEUSDC = ChainDefinition(
     # batch posts, so it needs far more depth than a fast-finality chain. 120 × 2s ≈ 240s,
     # well inside the program's 600s default fulfillment grace.
     min_confirmations=120,
-    # ERC-20 transfers have no protocol minimum and Base's L2 gas is negligible, so 1 is the
-    # honest floor — a rate sanity input, not an economic guarantee (as on Arbitrum).
-    min_onchain_amount=1,
+    # 5 USDC — matches Arbitrum/Ethereum USDC. As a rate-sanity input to is_executable_rate, a floor
+    # of 1 lets absurd rates pass the crown-eligibility gate routable only for dust; 5 USDC tightens it.
+    min_onchain_amount=5_000_000,
     # Sequencer-stamped timestamps vs the hub clock — modest skew allowance (monotonic
     # timestamps say nothing about how far the sequencer's clock sits from the hub's).
     replay_grace_secs=60,

@@ -454,11 +454,11 @@ class TestIsExecutableRate:
         rate = ((10 * self.DUST) / self.MAX) * 0.999
         assert is_executable_rate(rate, 'btc', 'sol', self.MIN, self.MAX) is False
 
-    def test_arbusdc_rates_executable_at_unit_floor(self):
-        """arbusdc regression guard (the F1 pin, kept): the pair must stay routable
-        BOTH ways at the honest unit floor. The orientation defect this guarded
-        against is fixed — the gate now inverts the canonical rate correctly."""
-        assert get_chain_def('arbusdc').min_onchain_amount == 1
+    def test_arbusdc_routes_at_its_five_dollar_floor(self):
+        """arbusdc's floor is now 5 USDC — a rate-sanity input to the crown gate (matching ethusdc),
+        tightening it against absurd rates routable only for dust. A real rate still routes BOTH ways
+        (0.1 SOL needs ~15 USDC at 150/SOL), which also keeps the F1 orientation-defect guard."""
+        assert get_chain_def('arbusdc').min_onchain_amount == 5_000_000
         assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
