@@ -54,6 +54,7 @@ def test_ix_discriminators_match_anchor_global_formula():
         'vote_initiate',
         'confirm_swap',
         'timeout_swap',
+        'cancel_swap',
         'close_stale_claim',
         'vote_activate',
         'vote_set_weights',
@@ -148,6 +149,25 @@ def test_confirm_swap_ix(client):
         (pdas.swap_pda(SK, PID), False, True),
         (pdas.stats_pda(miner, 'BTC', 'tao', PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_CONFIRM, SK, PID), False, True),
+        (SYSTEM_PROGRAM, False, False),
+    ]
+
+
+def test_cancel_swap_ix(client):
+    miner = Keypair().pubkey()
+    client.cancel_swap(SK, miner, reason=3)
+    ix = _ix(client)
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['cancel_swap']
+    assert ix.data[8:] == layouts.IX_CANCEL_SWAP_ARGS.build({'swap_key': SK, 'reason': 3})
+    # Leaner than timeout_swap: no collateral_vault, no user — cancel moves no funds. Order must match
+    # the on-chain CancelSwap<'info> struct exactly.
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (pdas.config_pda(PID), False, False),
+        (miner, False, False),
+        (pdas.miner_state_pda(miner, PID), False, True),
+        (pdas.swap_pda(SK, PID), False, True),
+        (pdas.vote_round_pda(pdas.REQ_CANCEL, SK, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
 

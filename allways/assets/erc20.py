@@ -9,6 +9,7 @@ from eth_utils import keccak, to_checksum_address
 from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
+from allways.constants import CANCEL_REASON_ERC20_BLACKLIST, CANCEL_REASON_ERC20_PAUSED
 
 
 def _selector(signature: str) -> str:
@@ -463,6 +464,21 @@ class Erc20(EvmAsset):
             except Exception as e:
                 bt.logging.warning(f'{self._log} historical refusal sample at {probe} failed ({e}) — skipping')
         return False
+
+    def cancel_evidence(self, address: str, amount: int, tx_hash: Optional[str] = None) -> Optional[int]:
+        """No-fault-cancel evidence for a FiatToken: the issuer's own state proves the destination
+        cannot receive — a blacklisted dest or a paused token — attributed to the DEST, not the miner
+        (a reverted ERC-20 transfer alone is ambiguous: it could be miner-blacklist or miner-under-
+        balance, so we key on issuer state, not the tx). Returns CANCEL_REASON_ERC20_BLACKLIST /
+        _PAUSED, else None. None on RPC trouble so the caller waits rather than slashing."""
+        try:
+            if bool(self._eth_call(SEL_IS_BLACKLISTED, address)):
+                return CANCEL_REASON_ERC20_BLACKLIST
+            if bool(self._eth_call(SEL_PAUSED)):
+                return CANCEL_REASON_ERC20_PAUSED
+        except Exception:
+            return None
+        return None
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
         """Tx hash of a recent settled token transfer ``from_addr`` → ``to_addr`` of >= ``amount``,

@@ -11,6 +11,7 @@ from solders.signature import Signature
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
+from allways.constants import CANCEL_REASON_SOL_RESERVED
 from allways.solana.rpc import SolanaRpc, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
@@ -261,6 +262,12 @@ class Sol(Asset, Chain):
         rejects the lamport credit outright, so the miner could never have paid. Offline and
         exact, so unlike the EVM probes there is no RPC to fail and no window to sample."""
         return address in RESERVED_ACCOUNTS
+
+    def cancel_evidence(self, address: str, amount: int, tx_hash: Optional[str] = None) -> Optional[int]:
+        """No-fault-cancel evidence: a reserved-account destination is undeliverable by construction, a
+        fixed offline membership test — deterministic, no RPC, sound enough to terminate the swap with
+        no slash. Returns CANCEL_REASON_SOL_RESERVED, else None."""
+        return CANCEL_REASON_SOL_RESERVED if address in RESERVED_ACCOUNTS else None
 
     def is_valid_address(self, address: str) -> bool:
         """Validate a base58 ed25519 pubkey (32 bytes) without RPC."""

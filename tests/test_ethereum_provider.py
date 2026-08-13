@@ -785,16 +785,17 @@ class TestTransferGas:
     def test_estimate_sizes_the_send_with_headroom(self, provider):
         assert self._send(provider, hex(50_000)) is not None  # 60k limit, under cap
 
-    def test_reverting_destination_refuses_send(self, provider):
+    def test_reverting_destination_broadcasts_floor_gas_evidence(self, provider):
+        # P0: a reverting dest no longer bails silently — the miner broadcasts a floor-gas attempt so the
+        # on-chain reverted tx becomes no-fault-cancel evidence (a REFUSE, not a false timeout slash).
         def revert(params):
             raise RuntimeError('rpc error execution reverted')
 
-        assert self._send(provider, revert) is None
-        assert 'refuses' in provider.last_send_error
+        assert self._send(provider, revert) is not None
 
-    def test_absurd_estimate_refuses_send(self, provider):
-        assert self._send(provider, hex(500_000)) is None
-        assert 'refuses' in provider.last_send_error
+    def test_absurd_estimate_broadcasts_floor_gas_evidence(self, provider):
+        # An over-cap estimate likewise broadcasts at the fulfillment gas floor rather than refusing to send.
+        assert self._send(provider, hex(500_000)) is not None
 
     def test_estimator_down_falls_back_to_plain_transfer_gas(self, provider):
         def down(params):
