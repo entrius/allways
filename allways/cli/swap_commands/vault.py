@@ -19,7 +19,7 @@ import click
 
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import console, fail, get_cli_context, loading
-from allways.constants import TAO_TO_RAO
+from allways.constants import TAO_HUB_VAULT_ADDRESSES, TAO_TO_RAO
 from allways.vault import BondVaultClient, VaultConfigError, codec
 
 # Mirror the vault contract's floors — fail locally with a clear message rather
@@ -34,9 +34,23 @@ def _client(use_coldkey: bool = False) -> BondVaultClient:
 
     config, wallet, subtensor, _ = get_cli_context()
     try:
-        return BondVaultClient.from_config(subtensor, config, keypair=resolve_signer(wallet, use_coldkey))
+        client = BondVaultClient.from_config(subtensor, config, keypair=resolve_signer(wallet, use_coldkey))
     except (VaultConfigError, codec.VaultCodecError) as e:
         fail(str(e))
+    _warn_if_off_record(client.address, getattr(subtensor, 'network', None))
+    return client
+
+
+def _warn_if_off_record(address: str, network) -> None:
+    """A stale configured address posts bonds into a vault no validator watches — it reads back
+    healthy but nothing ever attests, so the miner silently never activates."""
+    expected = TAO_HUB_VAULT_ADDRESSES.get(str(network or ''))
+    if expected and address != expected:
+        console.print(
+            f'[yellow]⚠ Configured vault {address}\n  is not the of-record vault for "{network}" '
+            f'({expected}).\n  A bond posted to an unwatched vault is never attested — '
+            f'`alw config set vault-address` unless this is intentional.[/yellow]'
+        )
 
 
 def _account_bytes(ss58: str) -> bytes:
@@ -53,6 +67,13 @@ def _report(result, ok_msg: str):
         if result.reverted:
             console.print(
                 '[yellow]The vault rejected the call (contract reverted) — e.g. empty pot, locked bond, or insufficient balance.[/yellow]'
+            )
+        elif result.error == 'TransferFailed':
+            console.print(
+                '[yellow]The chain could not draw the funds (TransferFailed) — pallet-contracts '
+                'pre-charges the FULL gas limit (refunded after execution) plus the existential '
+                'deposit, so a transfer near the signer\'s whole balance fails even though the fee '
+                'actually charged is tiny. Leave ~0.3 τ of headroom or post a smaller amount.[/yellow]'
             )
         else:
             console.print(f'[red]Call failed[/red]{f" [dim]({result.error})[/dim]" if result.error else ""}')

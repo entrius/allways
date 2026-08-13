@@ -169,12 +169,15 @@ RELAY_SWAP_RETENTION_SECS = 7 * 86400
 
 # ─── TAO bond vault (ink!) — deployed contract address, of record ───
 # So a deployment isn't lost. The runtime resolves the ACTIVE vault via ALLWAYS_VAULT_ADDRESS /
-# `alw config set vault-address`; this constant is the reference record per network.
-# TESTNET (SN19, deployed 2026-08-12). Replaces 5GAE4JD8…BEcD, whose immutable code still carried the
+# `alw config set vault-address`; this map is the reference record, keyed by subtensor network,
+# and the vault CLI warns when a configured address strays from it — a bond posted to a vault no
+# validator watches reads back healthy but is never attested.
+# test: SN19, deployed 2026-08-12. Replaces 5GAE4JD8…BEcD, whose immutable code still carried the
 # lock_bond validator floor (#653) — it cannot lock a bond at our n=1 launch set, so it was re-instantiated.
-TAO_HUB_VAULT_ADDRESS = '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs'
-# MAINNET
-# TAO_HUB_VAULT_ADDRESS = ''  # fill when prod is deployed
+TAO_HUB_VAULT_ADDRESSES = {
+    'test': '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs',
+    # 'finney': '',  # fill when prod is deployed
+}
 
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are

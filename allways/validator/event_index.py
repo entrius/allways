@@ -26,6 +26,7 @@ from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION, RECONCILE_QUIET_SECS
 from allways.solana.events import EventRecord
+from allways.solana.layouts import EVENT_PUBKEY_FIELDS
 from allways.utils.rate import quantize_rate_fixed
 from allways.validator.state_store import ValidatorStateStore
 
@@ -282,6 +283,10 @@ class SolanaEventIndex:
 
     @staticmethod
     def _miner_str(rec: EventRecord) -> Optional[str]:
+        # Some events (AttestHeartbeat, HaltSet, …) carry no miner by design — that's a skip,
+        # not a decode failure worth logging.
+        if 'miner' not in EVENT_PUBKEY_FIELDS.get(rec.name, ('miner',)):
+            return None
         try:
             return str(rec.fields['miner'])
         except (KeyError, TypeError) as e:
