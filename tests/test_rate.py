@@ -473,6 +473,25 @@ class TestIsExecutableRate:
         """1e-9 µUSDC/SOL: even the 5 USDC floor overshoots max_swap — unroutable."""
         assert is_executable_rate(1e-9, 'ethusdc', 'sol', self.MIN, self.MAX) is False
 
+    def test_paxg_routes_at_its_gold_unit_floor(self):
+        """Canonical is spoke-per-1-hub, so paxg rates run ~1e-2 (0.017 PAXG per SOL at
+        $75.71/SOL, $4354/oz) — three orders off every other spoke. Below rate 0.02 the floor
+        is the BINDING term in min_source, so a later edit to it silently unroutes both pairs."""
+        assert get_chain_def('paxg').min_onchain_amount == 2_000_000_000_000_000
+        assert is_executable_rate(0.017, 'paxg', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(0.017, 'sol', 'paxg', self.MIN, self.MAX) is True
+
+    def test_paxg_routes_on_the_tao_hub_too(self):
+        """Multi-hub: a spoke is FOUR directions, and the TAO hub has its own bounds
+        (TAO_MAX_SWAP_AMOUNT_RAO = 1 tao). At 0.046 PAXG/TAO the lanes clear with ~22x
+        headroom; they stop routing below TAO ~$9, which is the number to watch."""
+        assert is_executable_rate(0.046, 'paxg', 'tao', self.MIN, self.MAX) is True
+        assert is_executable_rate(0.046, 'tao', 'paxg', self.MIN, self.MAX) is True
+
+    def test_crown_squat_low_paxg_rate_rejected(self):
+        """1e-9 PAXG/SOL: the gold-unit floor overshoots max_swap — unroutable."""
+        assert is_executable_rate(1e-9, 'paxg', 'sol', self.MIN, self.MAX) is False
+
     def test_arbusdc_survives_a_real_dust_floor(self):
         """What PR-E unlocks: with the orientation fixed, a real economic floor
         (0.01 USDC = 10_000 µUSDC) no longer kills the arbusdc→sol direction —

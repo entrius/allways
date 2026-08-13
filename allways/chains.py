@@ -450,6 +450,41 @@ CHAIN_POLUSDC = ChainDefinition(
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
+CHAIN_PAXG = ChainDefinition(
+    id='paxg',
+    name='PAX Gold',
+    # atto-PAXG. Not 'wei' — that is ETH's subunit, and this row is a token on Ethereum, not ETH.
+    native_unit='aPAXG',
+    decimals=18,
+    # Ethereum's prefix, shared with CHAIN_ETH and CHAIN_ETHUSDC: one ETH_NETWORK / ETH_RPC_URLS /
+    # ETH_PRIVATE_KEY serves every asset on it, so they can never disagree about which Ethereum.
+    env_prefix='ETH',
+    host_chain='ethereum',
+    # CHAIN_ETH already declares the ETH_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=12,
+    # CHAIN_ETH's finality, deliberately identical — assets on one chain must not disagree about
+    # its reorg depth. 32 x 12s = 384s, inside the program's 600s default fulfillment grace.
+    min_confirmations=32,
+    # Rate sanity floor, not an enforced minimum. One PAXG is a troy ounce of gold, so a token
+    # COUNT copied from another row would be absurd here: UNI's floor of 3 would mean three ounces,
+    # over $12,000, and the pair would silently never route. Derived instead from the gas the dest
+    # leg burns: 66,730 measured worst case (fresh recipient, cold slot) at 62 gwei is 0.0041 ETH,
+    # ~$7.74, ~0.0018 PAXG at $4,353/oz and $1,877/ETH (2026-08-13). Rounded up to 0.002.
+    min_onchain_amount=2_000_000_000_000_000,
+    # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
+    # one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=60,
+    # PAX Gold as published by Paxos (paxos.com/paxgold, contract verified on Etherscan, 2026-08-13).
+    asset_locator='0x45804880De22913dAFE09f4980848ECE6EcbAf78',
+    # Paxos freezes per address with isFrozen, NOT Circle's isBlacklisted — probed live 2026-08-13:
+    # isFrozen(address) and paused() both answer, isBlacklisted(address) reverts. Declaring Circle's
+    # surface here would make every probe raise, which defers each slash only as far as
+    # max_extend_at (~2.6h) and then times out anyway — slashing and striking an honest miner.
+    refusal_checks=('isFrozen(address)', 'paused()'),
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -467,6 +502,7 @@ SUPPORTED_CHAINS = {
     'qnt': CHAIN_QNT,
     'pol': CHAIN_POL,
     'polusdc': CHAIN_POLUSDC,
+    'paxg': CHAIN_PAXG,
 }
 
 
