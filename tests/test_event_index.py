@@ -731,6 +731,108 @@ class TestReconcileLiveState:
         store.close()
 
 
+class TestReconcileLiveQuotes:
+    """Rate-liveness backstop: a lane whose event-derived rate is positive but
+    which has no matching live on-chain quote is zeroed once per round — the
+    safety net for a lost ``QuoteRemoved`` (which would otherwise freeze the
+    lane's last nonzero rate as its prune anchor forever). Quiet-window guarded
+    per lane; an empty quote book reads as a failed RPC and skips the sweep."""
+
+    NOW = 100_000
+
+    @staticmethod
+    def _seed_quote(
+        idx,
+        *,
+        block_time: int,
+        from_chain: str = 'btc',
+        to_chain: str = 'tao',
+        rate: int = 200,
+        collateral_chain: str = 'sol',
+    ):
+        idx.ingest(
+            [
+                rec(
+                    'QuoteSet',
+                    miner='pk_a',
+                    block_time=block_time,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
+                    rate=rate * RATE_PRECISION,
+                    liquidity=0,
+                    collateral_chain=collateral_chain,
+                )
+            ],
+            ATTR,
+        )
+
+    def test_zeroes_lane_whose_quote_removed_was_dropped(self, tmp_path: Path):
+        # The quote died on-chain but its QuoteRemoved never reached ingest; the
+        # book still has an unrelated live quote, so the sweep runs and zeroes it.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=100)
+        idx.reconcile_live_quotes({('hk_b', 'sol', 'tao', 'sol'): 1.0}, now=self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'btc', 'tao', self.NOW, collateral_chain='sol') == (0.0, self.NOW)
+        store.close()
+
+    def test_zeroes_only_the_missing_backing_on_dual_lane(self, tmp_path: Path):
+        # Dual-backing direction: the sol-backed quote vanished, the tao-backed
+        # sibling is still live — only the sol lane is zeroed.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=100, from_chain='sol', to_chain='tao', rate=1, collateral_chain='sol')
+        self._seed_quote(idx, block_time=200, from_chain='sol', to_chain='tao', rate=2, collateral_chain='tao')
+        idx.reconcile_live_quotes({('hk_a', 'sol', 'tao', 'tao'): 2.0}, now=self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'sol', 'tao', self.NOW, collateral_chain='sol') == (0.0, self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'sol', 'tao', self.NOW, collateral_chain='tao') == (2.0, 200)
+        store.close()
+
+    def test_quiet_guard_defers_to_recent_rate_event(self, tmp_path: Path):
+        # The lane's quote was set seconds ago; a stale (pre-set) book read that
+        # doesn't carry it yet must not zero the fresher event truth.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=self.NOW - 60)
+        idx.reconcile_live_quotes({('hk_b', 'sol', 'tao', 'sol'): 1.0}, now=self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'btc', 'tao', self.NOW, collateral_chain='sol') == (
+            200.0,
+            self.NOW - 60,
+        )
+        store.close()
+
+    def test_corrects_diverged_rate_to_chain_value(self, tmp_path: Path):
+        # A missed QuoteSet: the chain says 250, the event stream still says 200.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=100, rate=200)
+        idx.reconcile_live_quotes({('hk_a', 'btc', 'tao', 'sol'): 250.0}, now=self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'btc', 'tao', self.NOW, collateral_chain='sol') == (
+            250.0,
+            self.NOW,
+        )
+        store.close()
+
+    def test_empty_book_skips_the_sweep(self, tmp_path: Path):
+        # An empty bulk read is indistinguishable from a failed one — fail open
+        # rather than zeroing every lane at once.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=100)
+        idx.reconcile_live_quotes({}, now=self.NOW)
+        assert store.get_latest_rate_before('hk_a', 'btc', 'tao', self.NOW, collateral_chain='sol') == (200.0, 100)
+        store.close()
+
+    def test_noop_when_consistent(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        self._seed_quote(idx, block_time=100)
+        idx.reconcile_live_quotes({('hk_a', 'btc', 'tao', 'sol'): 200.0}, now=self.NOW)
+        events = store.get_rate_events_in_range('btc', 'tao', 0, self.NOW, collateral_chain='sol')
+        assert [e['block'] for e in events] == [100]
+        store.close()
+
+
 class TestSwapFulfillmentHash:
     def test_swap_fulfilled_persists_delivery_hash(self, tmp_path: Path):
         store = make_store(tmp_path)
