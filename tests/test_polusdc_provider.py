@@ -273,9 +273,11 @@ class TestDepositScanner:
     def test_scan_window_is_the_full_unbounded_lookback(self, provider):
         """C8: Erc20 has no MAX_WALK_BLOCKS, so this whole span goes out as ONE eth_getLogs.
 
-        300 blocks is served by publicnode on both Polygon networks and refused by mainnet drpc
-        past ~100, so the scanner fails over on every call and runs effectively single-rung.
-        Pinned so C8's span cap has a test to change rather than a silent behaviour to break."""
+        publicnode leads the mainnet ladder and serves all 300 blocks, and eth_rpc returns on the
+        first success — so nothing fails over and nothing is wasted. The cost is that drpc cannot
+        serve this span at all (it caps at 101 blocks), leaving the scanner with no working
+        fallback rung on mainnet. Pinned so C8's span cap has a test to change rather than a
+        silent behaviour to break."""
         seen = {}
 
         def logs(params):
