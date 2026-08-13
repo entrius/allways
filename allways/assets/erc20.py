@@ -485,16 +485,20 @@ class Erc20(EvmAsset):
     def cancel_evidence(
         self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
     ) -> Optional[int]:
-        """No-fault-cancel evidence for a FiatToken: the issuer's own state proves the destination
-        cannot receive — a blacklisted dest or a paused token — attributed to the DEST, not the miner
-        (a reverted ERC-20 transfer alone is ambiguous: it could be miner-blacklist or miner-under-
-        balance, so we key on issuer state, not the tx). Returns CANCEL_REASON_ERC20_BLACKLIST /
-        _PAUSED, else None. None on RPC trouble so the caller waits rather than slashing."""
+        """No-fault-cancel evidence: the issuer's own state proves the destination cannot receive —
+        a frozen dest or a stopped token — attributed to the DEST, not the miner (a reverted ERC-20
+        transfer alone is ambiguous: it could be miner-frozen or miner-under-balance, so we key on
+        issuer state, not the tx).
+
+        Reads the surface the ROW declares, exactly as ``_refused_at`` does. Hardcoding one issuer's
+        selectors here would revert on every other token and silently yield no evidence — which
+        slashes a miner for a destination its issuer froze. Returns CANCEL_REASON_ERC20_BLACKLIST
+        for a per-address freeze, _PAUSED for a token-wide stop, else None. None on RPC trouble so
+        the caller waits rather than slashing."""
         try:
-            if bool(self._eth_call(SEL_IS_BLACKLISTED, address)):
-                return CANCEL_REASON_ERC20_BLACKLIST
-            if bool(self._eth_call(SEL_PAUSED)):
-                return CANCEL_REASON_ERC20_PAUSED
+            for selector, takes_address in self._checks:
+                if self._eth_call(selector, address if takes_address else ''):
+                    return CANCEL_REASON_ERC20_BLACKLIST if takes_address else CANCEL_REASON_ERC20_PAUSED
         except Exception:
             return None
         return None

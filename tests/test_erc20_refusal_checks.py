@@ -14,9 +14,10 @@ from dataclasses import replace
 
 import pytest
 
-from allways.assets.erc20 import Erc20
+from allways.assets.erc20 import SEL_IS_BLACKLISTED, Erc20, _refusal_call
 from allways.assets.evm import EvmRpcError
 from allways.chains import CHAIN_ETHUSDC
+from allways.constants import CANCEL_REASON_ERC20_BLACKLIST, CANCEL_REASON_ERC20_PAUSED
 
 RECIPIENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 DECLARED = CHAIN_ETHUSDC  # ('isBlacklisted(address)', 'paused()')
@@ -111,3 +112,38 @@ class TestDeclaredChecks:
             raise ConnectionError('every endpoint is down')
 
         assert build(DECLARED, down).can_deliver_to(RECIPIENT, amount=1) is True
+
+
+class TestCancelEvidenceReadsTheDeclaredSurface:
+    """#669 added the no-fault cancel; it hardcoded Circle's selectors, so a token declaring any
+    other surface produced no evidence and rode to a TIMEOUT slash instead. No non-Circle token
+    existed in the registry then — paxg is the first, so this is the guard for every one after."""
+
+    PAXOS = replace(
+        CHAIN_ETHUSDC, id='paxos', name='Paxos-style token', refusal_checks=('isFrozen(address)', 'paused()')
+    )
+
+    @pytest.mark.parametrize(
+        'signature,expected',
+        (('isFrozen(address)', CANCEL_REASON_ERC20_BLACKLIST), ('paused()', CANCEL_REASON_ERC20_PAUSED)),
+    )
+    def test_a_non_circle_surface_still_yields_cancel_evidence(self, signature, expected):
+        answering, _ = _refusal_call(signature)
+
+        def rpc(method, params, **kw):
+            # A declared selector the contract really has answers; Circle's does not exist here
+            # (exactly as on real PAXG), and must never be reached.
+            assert not params[0]['data'].startswith(SEL_IS_BLACKLISTED), 'probed Circle on a Paxos-style row'
+            return f'0x{int(params[0]["data"].startswith(answering)):064x}'
+
+        provider = build(self.PAXOS, rpc)
+        assert provider.cancel_evidence(RECIPIENT, amount=1) == expected
+
+    def test_a_clean_destination_yields_no_evidence(self):
+        assert build(self.PAXOS, lambda m, p, **kw: f'0x{0:064x}').cancel_evidence(RECIPIENT, amount=1) is None
+
+    def test_rpc_trouble_yields_no_evidence_rather_than_a_false_cancel(self):
+        def down(*_a, **_kw):
+            raise ConnectionError('every endpoint is down')
+
+        assert build(self.PAXOS, down).cancel_evidence(RECIPIENT, amount=1) is None
