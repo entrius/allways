@@ -18,6 +18,7 @@ from allways.assets.evm_coin import EvmCoin
 from allways.assets.hype import Hype
 from allways.assets.sol import Sol
 from allways.assets.tao import Tao
+from allways.assets.uni import Uni
 
 __all__ = [
     'Asset',
@@ -39,6 +40,7 @@ __all__ = [
     'BaseUsdc',
     'EthUsdc',
     'Aster',
+    'Uni',
     'create_assets',
 ]
 
@@ -65,6 +67,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('ethusdc', EthUsdc, ()),
     AssetSpec('cro', Cro, ()),
     AssetSpec('aster', Aster, ()),
+    AssetSpec('uni', Uni, ()),
 )
 
 

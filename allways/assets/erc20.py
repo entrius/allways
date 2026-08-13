@@ -46,6 +46,9 @@ TESTNET_TOKEN_CONTRACTS = {
     'baseusdc': {'sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'},
     # Circle-verified native USDC on Ethereum Sepolia (developers.circle.com, 2026-08-11).
     'ethusdc': {'sepolia': '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'},
+    # Same address as mainnet and byte-identical runtime bytecode (keccak
+    # 0xdeba17f1…0868, 12567 bytes) — verified symbol UNI, 18 decimals, 1e27 supply.
+    'uni': {'sepolia': '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984'},
 }
 
 

@@ -320,6 +320,40 @@ CHAIN_ASTER = ChainDefinition(
     refusal_checks=(),
 )
 
+CHAIN_UNI = ChainDefinition(
+    id='uni',
+    name='Uniswap',
+    native_unit='wei',
+    decimals=18,
+    # Ethereum's prefix, shared with CHAIN_ETH and CHAIN_ETHUSDC: one ETH_NETWORK / ETH_RPC_URLS /
+    # ETH_PRIVATE_KEY serves every asset on it, so they can never disagree about which Ethereum.
+    env_prefix='ETH',
+    host_chain='ethereum',
+    # CHAIN_ETH already declares the ETH_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=12,
+    # CHAIN_ETH's finality, deliberately identical — two assets on one chain must not disagree
+    # about its reorg depth. 32 × 12s = 384s, inside the program's 600s default fulfillment grace.
+    min_confirmations=32,
+    # Rate sanity floor, not an enforced minimum: 3 UNI covers a 90k-gas dest leg (the observed
+    # 57k worst case plus the two delegation checkpoints a transfer can write) only below ~62
+    # gwei — a realistic-high L1 level, not the 0.1 gwei of a quiet day. Worth 2.1x
+    # CHAIN_ETHUSDC's floor: 1.38x of that is the bigger gas budget, 1.51x is a higher assumed
+    # gwei. Assumed gas price is per-asset economics, unlike min_confirmations which is a chain fact.
+    min_onchain_amount=3_000_000_000_000_000_000,
+    # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
+    # one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=60,
+    # UNI as published by Uniswap (docs.uniswap.org governance/UNI reference, 2026-08-12).
+    asset_locator='0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984',
+    # No freeze surface: the PUSH4 dispatch table resolves 27 selectors, exactly Uni.sol's ABI, so
+    # there is no blacklist/pause/owner entry point to call. It cannot gain one either — EIP-1967
+    # implementation/admin/beacon slots are all zero. The minter (governance timelock) only
+    # inflates supply; it can never freeze an address.
+    refusal_checks=(),
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -333,6 +367,7 @@ SUPPORTED_CHAINS = {
     'ethusdc': CHAIN_ETHUSDC,
     'cro': CHAIN_CRO,
     'aster': CHAIN_ASTER,
+    'uni': CHAIN_UNI,
 }
 
 
