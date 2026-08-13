@@ -240,9 +240,16 @@ class TestComputeExtensionTargetSecs:
         assert compute_extension_target_secs('cro', 0, self.NOW, self.CEILING) == 10_200
 
     def test_pol_remaining_confs(self):
-        # pol needs 100 confs at the stored 1s (1.5s real): raw = 10000 + 100 + 120 = 10220,
-        # bucket up to 10800 — the bucket swallows the 50s the integer floor under-counts.
+        # pol needs 100 confs at the stored 1s: raw = 10000 + 100 + 120 = 10220, bucket up to 10800.
         assert compute_extension_target_secs('pol', 0, self.NOW, self.CEILING) == 10_800
+        # What covers the 50s the integer floor under-counts is the 120s padding, NOT the bucket:
+        # the bucket's contribution is phase-dependent and is 0 at the `now` below. 220s of cover
+        # against a 150s real need is the whole margin, and it is what breaks first if
+        # min_confirmations is ever raised past 240 — the literal above would not notice.
+        worst_phase = 9_980  # now + remaining + padding lands exactly on a bucket boundary
+        cover = compute_extension_target_secs('pol', 0, worst_phase, self.CEILING) - worst_phase
+        assert cover == 220
+        assert cover >= CHAIN_POL.min_confirmations * 1.5
 
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):

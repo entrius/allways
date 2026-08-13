@@ -397,14 +397,16 @@ CHAIN_POL = ChainDefinition(
     networks=('mainnet', 'amoy'),
     testnet_network='amoy',
     # Measured 1.5000s over 50k mainnet blocks (2026-08-12); Amoy runs 1.0000s. 1 is the integer
-    # floor, and unlike the sub-second chains here it UNDER-states real time, so every block-derived
-    # bound spans 1.5x the wall seconds its intent reads — longer than it looks, never shorter.
+    # floor, and unlike the sub-second chains here it UNDER-states real time. Bounds that DIVIDE by
+    # it (scan lookback, the delivery_refused span) cover 1.5x the wall seconds they read; the one
+    # that MULTIPLIES, compute_extension_target_secs, under-counts by 50s — inside its 120s padding.
     seconds_per_block=1,
-    # Heimdall v2 milestones finalize deterministically but BEHIND the tip (the finalized tag ran
-    # 1-4 blocks back over 30 samples, matching the docs' 2-5s), so unlike Snowman/HyperBFT there
-    # is a reorg window to outrun. Its depth is set by how long a milestone can stall, not by a
-    # producer turn as on BSC: under VEBloP one elected producer builds the whole unfinalized span.
-    # 100 blocks = 150s real, 25x the deepest lag seen, inside the program's 600s fulfillment grace.
+    # Heimdall v2 milestones finalize deterministically but BEHIND the tip (the finalized tag has
+    # trailed by 1-5 blocks across repeated 40-sample runs, matching the docs' 2-5s), so unlike
+    # Snowman/HyperBFT there is a reorg window to outrun. Its depth is set by how long a milestone
+    # can stall, not by a producer turn as on BSC: under VEBloP one elected producer builds the
+    # whole unfinalized span. 100 blocks = 150s real, >=20x the deepest lag seen, and inside the
+    # program's 600s fulfillment grace.
     min_confirmations=100,
     # Rate sanity floor, not an economic guarantee: 0.05 POL covers a 21k-gas transfer below
     # ~2380 gwei, ~9x the 230-260 gwei base fee Polygon has held for weeks. Miners price real gas.

@@ -160,10 +160,11 @@ POLYGON = EvmNetwork(
     label='Polygon',
     chain_ids={'mainnet': 137, 'amoy': 80_002},
     rpc_urls={
-        # Both rungs serve receipts and historical eth_getCode at the 120-block depth the slash
-        # gate probes. publicnode leads on the one method they differ on: it answers the
-        # address-pinned eth_getLogs span a token scanner would issue, where drpc's free tier
-        # refuses anything past ~100 blocks (under a misleading "over 10000 blocks" message).
+        # A native coin's deepest read here is historical eth_getCode at tip-120 (the slash gate),
+        # and both rungs serve receipts and that depth — so this order costs pol nothing. It is
+        # pinned for the token that will ride this row: only publicnode answers the address-pinned
+        # eth_getLogs span a deposit scanner issues, drpc's free tier refusing past 100 blocks
+        # (measured; the "ranges over 10000 blocks" message it answers with is misleading).
         'mainnet': ('https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'),
         'amoy': ('https://polygon-amoy-bor-rpc.publicnode.com', 'https://polygon-amoy.drpc.org'),
     },
