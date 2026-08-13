@@ -43,6 +43,9 @@ class ChainDefinition:
     # Canonical MAINNET contract of a hosted asset. Testnet deployments + env overrides
     # resolve in the provider (assets/erc20.py) — each address lives exactly once.
     asset_locator: str | None = None
+    # ABI signatures the issuer refuses delivery with: 'f()' stops the whole token, 'f(address)'
+    # freezes one destination. Required on every token row; () claims no freeze surface at all.
+    refusal_checks: tuple[str, ...] | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -132,6 +135,7 @@ CHAIN_ARBUSDC = ChainDefinition(
     host_chain='arbitrum',
     # Circle-verified native USDC on Arbitrum One (developers.circle.com, 2026-08-07).
     asset_locator='0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
 CHAIN_HYPE = ChainDefinition(
@@ -227,6 +231,7 @@ CHAIN_BASEUSDC = ChainDefinition(
     # Circle-verified native USDC on Base (developers.circle.com, 2026-08-11) — NOT the
     # bridged USDbC at 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA.
     asset_locator='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
 CHAIN_ETHUSDC = ChainDefinition(
@@ -254,6 +259,7 @@ CHAIN_ETHUSDC = ChainDefinition(
     replay_grace_secs=60,
     # Circle-verified native USDC on Ethereum (developers.circle.com, 2026-08-11).
     asset_locator='0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
 SUPPORTED_CHAINS = {

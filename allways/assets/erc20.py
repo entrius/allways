@@ -22,6 +22,12 @@ SEL_BALANCE_OF = _selector('balanceOf(address)')
 SEL_IS_BLACKLISTED = _selector('isBlacklisted(address)')
 SEL_PAUSED = _selector('paused()')
 
+
+def _refusal_call(signature: str) -> tuple[str, bool]:
+    """A declared refusal check → (selector, takes_address)."""
+    return _selector(signature), signature.endswith('(address)')
+
+
 # transfer() runs contract code (~65k for Circle's FiatToken) — cap bounds the miner's
 # gas spend against a pathological estimate without pinching the real cost.
 MAX_TOKEN_TRANSFER_GAS = 150_000
@@ -85,6 +91,10 @@ class Erc20(EvmAsset):
 
     def __init__(self, chain_def: ChainDefinition):
         self._chain_def = chain_def
+        # A token that forgot to declare would answer "never refused" and slash honest miners.
+        if chain_def.refusal_checks is None:
+            raise ValueError(f'{chain_def.id} declares no refusal_checks — name the freeze surface, or ()')
+        self._checks = tuple(_refusal_call(sig) for sig in chain_def.refusal_checks)
         self._chain = EvmChain(EVM_NETWORKS[chain_def.host_chain], chain_def.env_prefix)
         EvmAsset.__init__(self)
         self.token_contract = _token_contract(chain_def, self.chain.network)
@@ -97,10 +107,12 @@ class Erc20(EvmAsset):
         return f'{super().describe()} — token {self.token_contract}'
 
     def _eth_call(self, selector: str, address: str = '', block: str = 'latest') -> int:
-        """eth_call a nullary/one-address view on the token contract → uint result."""
+        """eth_call a nullary/one-address view on the token contract → uint result.
+
+        Anything unparseable raises rather than reading as 0: an absent function and a `False`
+        answer must never collapse, or a frozen destination reads as deliverable."""
         data = selector + (_pad_addr(address) if address else '')
-        result = self.chain.eth_rpc('eth_call', [{'to': self.token_contract, 'data': data}, block])
-        return int(result, 16) if result and result != '0x' else 0
+        return int(self.chain.eth_rpc('eth_call', [{'to': self.token_contract, 'data': data}, block]), 16)
 
     def check_connection(self, require_send: bool = True) -> None:
         super().check_connection(require_send=require_send)
@@ -115,10 +127,10 @@ class Erc20(EvmAsset):
                 f'{self.chain_def.id} token contract {self.token_contract} has no code on {self.chain.network}'
             )
         try:
-            if self._eth_call(SEL_PAUSED):
-                bt.logging.warning(f'{self._log} token is PAUSED — transfers will fail until the issuer unpauses')
+            if any(self._eth_call(sel) for sel, takes_address in self._checks if not takes_address):
+                bt.logging.warning(f'{self._log} token is STOPPED — transfers fail until the issuer clears it')
         except Exception as e:
-            bt.logging.warning(f'{self._log} paused() probe failed: {e}')
+            bt.logging.warning(f'{self._log} refusal probe failed: {e}')
 
     # --- Verification ---
 
@@ -427,17 +439,20 @@ class Erc20(EvmAsset):
 
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: the issuer can freeze an address (blacklist) or the whole token
-        (pause) — both make delivery impossible regardless of dest code and neither is the
-        miner's fault, so they must bounce the reservation. Fails open on RPC trouble.
-        ``from_address`` is unused: FiatToken transfers gate on issuer state, not dest code."""
+        (pause), per the refusal checks the token's row declares — all make delivery impossible
+        and none is the miner's fault, so they must bounce the reservation. Fails open on RPC
+        trouble. ``from_address`` is unused: FiatToken transfers gate on issuer state, not dest code."""
         try:
-            return not self._eth_call(SEL_IS_BLACKLISTED, address) and not self._eth_call(SEL_PAUSED)
+            return not self._refused_at(address)
         except Exception:
             return True
 
     def _refused_at(self, address: str, block: str = 'latest') -> bool:
-        """Issuer refusal at ``block``: dest blacklisted, or the whole token paused."""
-        return bool(self._eth_call(SEL_IS_BLACKLISTED, address, block)) or bool(self._eth_call(SEL_PAUSED, '', block))
+        """Issuer refusal at ``block``, per the checks the row declares. No checks, no RPC."""
+        return any(
+            self._eth_call(selector, address if takes_address else '', block)
+            for selector, takes_address in self._checks
+        )
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: issuer refusal (blacklisted dest, or token paused — both make delivery
@@ -450,6 +465,8 @@ class Erc20(EvmAsset):
         falsifies one. Historical samples are best-effort (public nodes serve historical
         eth_call only ~a minute deep at 1s blocks; verified live 2026-08-07): a failing sample
         is skipped with a warning rather than deferring every slash on the pair forever."""
+        if not self._checks:
+            return False
         if self._refused_at(address):
             return True
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
