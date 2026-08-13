@@ -63,6 +63,7 @@ class TestPinnedContract:
             'avax-network',
             'base-network',
             'cro-network',
+            'pol-network',
             'router',
             'env',
         )
@@ -77,6 +78,7 @@ class TestPinnedContract:
             'avax-network',
             'base-network',
             'cro-network',
+            'pol-network',
         )
 
     def test_testnet_bundle(self):
@@ -91,6 +93,7 @@ class TestPinnedContract:
             'avax-network': 'fuji',
             'base-network': 'sepolia',
             'cro-network': 'testnet',
+            'pol-network': 'amoy',
             'netuid': '19',
             'router': '5HicmHG7fjbxrtx8FZNdv4xxS5jSN84KGpMnTHsKtKv9peao',
         }
@@ -107,6 +110,7 @@ class TestPinnedContract:
             'avax-network': 'mainnet',
             'base-network': 'mainnet',
             'cro-network': 'mainnet',
+            'pol-network': 'mainnet',
             'netuid': '7',
             'router': '',
         }
@@ -133,6 +137,7 @@ class TestPinnedContract:
             'avax': ('mainnet', 'fuji'),
             'baseusdc': ('mainnet', 'sepolia'),
             'cro': ('mainnet', 'testnet'),
+            'pol': ('mainnet', 'amoy'),
         }
 
 

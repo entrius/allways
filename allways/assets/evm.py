@@ -33,7 +33,9 @@ class EvmRpcError(RuntimeError):
 
 
 # eth_maxPriorityFeePerGas fallback when an endpoint doesn't serve it (1 gwei clears
-# comfortably in normal conditions without meaningfully overpaying a transfer).
+# comfortably in normal conditions without meaningfully overpaying a transfer). A chain that
+# REJECTS a tip below some floor declares it as EvmNetwork.min_priority_fee_wei; both send
+# paths clamp up to that, so this value is a default and never the final word.
 FALLBACK_PRIORITY_FEE_WEI = 1_000_000_000
 
 # Send-dedup / deposit-scan window in wall seconds (≈5 min); each chain derives its block
@@ -64,6 +66,9 @@ class EvmNetwork:
     label: str
     chain_ids: Mapping[str, int]
     rpc_urls: Mapping[str, Tuple[str, ...]]
+    # Protocol-enforced floor on maxPriorityFeePerGas. A tx under it is refused at intake, not
+    # merely slow, so both send paths clamp up to it. 0 = the chain enforces no floor.
+    min_priority_fee_wei: int = 0
 
 
 ETHEREUM = EvmNetwork(
@@ -156,6 +161,25 @@ CRONOS = EvmNetwork(
     },
 )
 
+POLYGON = EvmNetwork(
+    label='Polygon',
+    chain_ids={'mainnet': 137, 'amoy': 80_002},
+    # Bor refuses any tx under this at intake ('gas price below minimum'), verified live against
+    # mainnet: the generic 1 gwei fallback signs a tx no Polygon node will ever accept.
+    min_priority_fee_wei=25_000_000_000,
+    rpc_urls={
+        # drpc leads as the only archive rung, the same rule AVALANCHE states: delivery_refused
+        # probes historical eth_getCode at tip-120 on every overdue swap and that gate decides a
+        # slash, while publicnode prunes right at the edge of it (measured deepest served tip-128
+        # mainnet / tip-126 amoy, and it is a pool whose boundary moves between requests).
+        # The cost lands on a token riding this row, not on pol: drpc's free tier refuses an
+        # address-pinned eth_getLogs span past 100 blocks, so a deposit scanner spends one
+        # failover per call reaching publicnode.
+        'mainnet': ('https://polygon.drpc.org', 'https://polygon-bor-rpc.publicnode.com'),
+        'amoy': ('https://polygon-amoy.drpc.org', 'https://polygon-amoy-bor-rpc.publicnode.com'),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
@@ -165,6 +189,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'avalanche': AVALANCHE,
     'base': BASE,
     'cronos': CRONOS,
+    'polygon': POLYGON,
 }
 
 

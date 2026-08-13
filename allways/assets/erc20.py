@@ -363,6 +363,9 @@ class Erc20(EvmAsset):
                 tip_fee = int(self.chain.eth_rpc('eth_maxPriorityFeePerGas', []), 16)
             except Exception:
                 tip_fee = FALLBACK_PRIORITY_FEE_WEI
+            # A chain that enforces a tip floor rejects anything under it outright, and the failure
+            # repeats identically on every retry — clamp rather than sign an unbroadcastable tx.
+            tip_fee = max(tip_fee, self.chain.network_def.min_priority_fee_wei)
             max_fee = 2 * base_fee + tip_fee
 
             # Token balance BEFORE the gas estimate: an underfunded transfer reverts in the

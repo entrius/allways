@@ -387,6 +387,36 @@ CHAIN_QNT = ChainDefinition(
     refusal_checks=(),
 )
 
+CHAIN_POL = ChainDefinition(
+    id='pol',
+    name='Polygon',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='POL',
+    host_chain='polygon',
+    networks=('mainnet', 'amoy'),
+    testnet_network='amoy',
+    # Measured 1.5000s over 50k mainnet blocks (2026-08-12); Amoy runs 1.0000s. 1 is the integer
+    # floor, and unlike the sub-second chains here it UNDER-states real time. Bounds that DIVIDE by
+    # it (scan lookback, the delivery_refused span) cover 1.5x the wall seconds they read; the one
+    # that MULTIPLIES, compute_extension_target_secs, under-counts by 50s — inside its 120s padding.
+    seconds_per_block=1,
+    # Heimdall v2 milestones finalize deterministically but BEHIND the tip (the finalized tag has
+    # trailed by 1-5 blocks across repeated 40-sample runs, matching the docs' 2-5s), so unlike
+    # Snowman/HyperBFT there is a reorg window to outrun. Its depth is set by how long a milestone
+    # can stall, not by a producer turn as on BSC: under VEBloP one elected producer builds the
+    # whole unfinalized span. 100 blocks = 150s real, >=20x the deepest lag seen, and inside the
+    # program's 600s fulfillment grace.
+    min_confirmations=100,
+    # Rate sanity floor, not an economic guarantee: 0.05 POL covers a 21k-gas transfer up to
+    # ~2380 gwei — 8.4x the ~282 gwei a transfer actually costs today (249 base + 30 tip), and
+    # 4.5x the ~534 gwei ceiling a send authorises (2x base + tip). Miners price real gas.
+    min_onchain_amount=50_000_000_000_000_000,
+    # Producer-stamped timestamps vs the hub clock, as on Arbitrum — and under VEBloP a single
+    # elected producer stamps a whole span, so its clock offset never averages out across proposers.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -402,6 +432,7 @@ SUPPORTED_CHAINS = {
     'aster': CHAIN_ASTER,
     'uni': CHAIN_UNI,
     'qnt': CHAIN_QNT,
+    'pol': CHAIN_POL,
 }
 
 

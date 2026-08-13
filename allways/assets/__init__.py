@@ -16,6 +16,7 @@ from allways.assets.eth import Ether
 from allways.assets.ethusdc import EthUsdc
 from allways.assets.evm_coin import EvmCoin
 from allways.assets.hype import Hype
+from allways.assets.pol import Pol
 from allways.assets.qnt import Qnt
 from allways.assets.sol import Sol
 from allways.assets.tao import Tao
@@ -36,6 +37,7 @@ __all__ = [
     'Bnb',
     'Avax',
     'Cro',
+    'Pol',
     'Erc20',
     'ArbUsdc',
     'BaseUsdc',
@@ -71,6 +73,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('aster', Aster, ()),
     AssetSpec('uni', Uni, ()),
     AssetSpec('qnt', Qnt, ()),
+    AssetSpec('pol', Pol, ()),
 )
 
 
