@@ -284,16 +284,18 @@ class EvmCoin(EvmAsset):
         gas = est + est // 5
         return None if gas > MAX_TRANSFER_GAS else gas
 
-    def can_deliver_to(self, address: str, amount: int) -> bool:
+    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: an EOA can never refuse a transfer; a code-bearing dest must pass
-        a simulated transfer. Fails open — only a positive revert blocks a reservation."""
+        the same simulation the miner's send runs — from the committed sender when known, with
+        the +20% headroom and MAX_TRANSFER_GAS cap. A dest the send path would refuse (revert
+        only for msg.sender != 0, or gas just under the cap from zero) must bounce here, not
+        ride the miner to a timeout slash. Fails open on RPC trouble."""
         try:
             if (self.chain.eth_rpc('eth_getCode', [address, 'latest']) or '0x') == '0x':
                 return True
-            self.chain.eth_rpc('eth_estimateGas', [{'from': ZERO_ADDRESS, 'to': address, 'value': hex(amount)}])
+        except Exception:
             return True
-        except Exception as e:
-            return 'revert' not in str(e).lower()
+        return self._transfer_gas(from_address or ZERO_ADDRESS, address, amount) is not None
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: code at the destination — now or sampled across the window since

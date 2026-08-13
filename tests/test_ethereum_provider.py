@@ -728,6 +728,24 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_getCode': down})
         assert provider.can_deliver_to(RECIPIENT, 10**15)
 
+    def test_can_deliver_to_simulates_from_committed_sender(self, provider):
+        # A dest can accept from address(0) yet revert for the miner's actual sender (e.g.
+        # `receive()` gated on msg.sender) — the reserve gate must run the send's simulation.
+        def gas(params):
+            if params[0]['from'] == TEST_ADDR:
+                raise RuntimeError('rpc error execution reverted')
+            return '0xb000'
+
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': gas})
+        assert provider.can_deliver_to(RECIPIENT, 10**15)  # sender unknown: from-zero still passes
+        assert not provider.can_deliver_to(RECIPIENT, 10**15, from_address=TEST_ADDR)
+
+    def test_can_deliver_to_applies_send_path_gas_cap(self, provider):
+        # 90k estimates under MAX_TRANSFER_GAS raw, but the send path's +20% headroom puts it
+        # at 108k — the miner would refuse to pay, so the reservation must never start.
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': hex(90_000)})
+        assert not provider.can_deliver_to(RECIPIENT, 10**15)
+
     def test_delivery_refused_code_at_latest(self, provider):
         rpc_stub(
             provider, {'eth_blockNumber': hex(1000), 'eth_getCode': lambda p: '0xef0100' if p[1] == 'latest' else '0x'}

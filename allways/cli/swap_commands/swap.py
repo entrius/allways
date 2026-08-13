@@ -47,6 +47,7 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
     to_smallest_units,
+    unviable_reason,
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
@@ -415,7 +416,8 @@ def swap_now_command(
     if miner_opt:
         viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if not viable:
-            fail('No miner can fund an executable swap for that amount within bounds.')
+            reason = unviable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+            fail(f'No miner can take this swap: {reason}.')
         best_to = max(p[1].to_amount for p in viable)
         if miner_opt == _MINER_PICK:
             cand, amts = _pick_intake(viable, from_chain, to_chain)
@@ -432,7 +434,8 @@ def swap_now_command(
     else:
         best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
         if best is None:
-            fail('No miner can fund an executable swap for that amount within bounds.')
+            reason = unviable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+            fail(f'No miner can take this swap: {reason}.')
         cand, amts = best
 
     # Deliverability screens — before the fee-charging entry AND before sending into a doomed swap.
@@ -646,12 +649,15 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
     dest_provider = _gate_provider(to_chain, client, config)
+    quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Format first — offline, and a malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
         amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
-        if not dest_provider.can_deliver_to(receive_addr, amts.to_amount):
+        # Simulate from the miner's committed dest-side sender, as the validator gate does.
+        miner_to_addr = getattr(quote, 'miner_to_addr', '') if quote else ''
+        if not dest_provider.can_deliver_to(receive_addr, amts.to_amount, from_address=miner_to_addr or None):
             fail(
                 f'  Your receive address cannot accept {to_chain.upper()} right now '
                 '(frozen or transfers paused). No funds moved.'
@@ -659,7 +665,6 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     src_provider = _gate_provider(from_chain, client, config)
     if src_provider is None:
         return
-    quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
     if miner_addr and (
         not src_provider.chain.is_valid_address(miner_addr) or not src_provider.can_deliver_to(miner_addr, from_amount)

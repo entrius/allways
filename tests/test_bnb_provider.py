@@ -247,6 +247,21 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_getCode': '0x60806040', 'eth_estimateGas': refuse})
         assert provider.can_deliver_to(RECIPIENT, 10**16) is False
 
+    def test_reserve_gate_runs_the_send_paths_simulation(self, provider):
+        # Sender-gated refusal (accepts from address(0), reverts for the committed miner) and an
+        # estimate the +20% headroom pushes over MAX_TRANSFER_GAS must both bounce at reserve —
+        # exactly what the miner's _transfer_gas would refuse to pay at delivery.
+        miner = Account.from_key(TEST_KEY).address
+
+        def gas(params):
+            if params[0]['from'] == miner:
+                raise RuntimeError('rpc error execution reverted')
+            return hex(90_000)  # 90k raw → 108k with headroom → over the 100k cap
+
+        rpc_stub(provider, {'eth_getCode': '0x60806040', 'eth_estimateGas': gas})
+        assert provider.can_deliver_to(RECIPIENT, 10**16, from_address=miner) is False
+        assert provider.can_deliver_to(RECIPIENT, 10**16) is False
+
     def test_slash_gate_exempts_a_dest_that_gained_then_revoked_code(self, provider, frozen_now):
         # The case only temporal sampling can catch, and the one a miner gets slashed over: the
         # dest delegates via EIP-7702 after the reservation pinned it, the payout reverts, and the

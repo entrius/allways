@@ -115,7 +115,10 @@ def test_open_happy_path_persists_routed_request():
 
 def _gate_asset(can_deliver, valid=lambda addr: True):
     """Duck-typed asset for the reserve deliverability gates (can_deliver_to + chain format check)."""
-    return SimpleNamespace(can_deliver_to=can_deliver, chain=SimpleNamespace(is_valid_address=valid))
+    return SimpleNamespace(
+        can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
+        chain=SimpleNamespace(is_valid_address=valid),
+    )
 
 
 def test_undeliverable_destination_rejects_before_any_bid():

@@ -194,3 +194,28 @@ class TestComputeExtensionTargetSecs:
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
             compute_extension_target_secs('doge', 0, self.NOW, self.CEILING)
+
+
+class TestReplayGrace:
+    """Freshness gates on block_time >= floor - grace, where the floor is stamped by the HUB
+    clock. Spoke timestamps — however well-behaved on their own chain — say nothing about
+    hub-vs-spoke skew, so a zero grace strands an honest deposit stamped just behind the floor."""
+
+    def test_every_evm_chain_carries_the_skew_grace(self):
+        # Ethereum's monotonic slot timestamps once justified 0 here; the floor is hub-stamped,
+        # so ETH (and ethusdc with it) need the same allowance as every other EVM row.
+        for chain in SUPPORTED_CHAINS.values():
+            if chain.host_chain is not None:
+                assert chain.replay_grace_secs == 60, chain.id
+
+    def test_freshness_consumer_absorbs_the_eth_grace(self):
+        # The validator reads grace off chain_def (solana_swap_loop._is_fresh) — a deposit
+        # stamped inside the grace window is fresh; one predating it is still a replay.
+        from types import SimpleNamespace
+
+        from allways.validator.solana_swap_loop import is_tx_fresh
+
+        floor = 1_755_000_000
+        grace = CHAIN_ETH.replay_grace_secs
+        assert is_tx_fresh(SimpleNamespace(block_time=floor - grace), floor, grace)
+        assert not is_tx_fresh(SimpleNamespace(block_time=floor - grace - 1), floor, grace)

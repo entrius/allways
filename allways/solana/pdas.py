@@ -108,8 +108,16 @@ def legacy_initiate_round_pda(miner, program_id: Optional[Pubkey] = None) -> Pub
     return _derive([b'vote', bytes([REQ_INITIATE]), _pk_bytes(miner)], program_id)
 
 
-def swap_pda(swap_key: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
-    return _derive([b'swap', bytes(swap_key)], program_id)
+def swap_key_bytes(swap_key) -> bytes:
+    """The 32-byte swap_key from either form it circulates in: raw bytes, or the hex string
+    (0x or bare) the CLI, API, and logs surface."""
+    if isinstance(swap_key, str):
+        return bytes.fromhex(swap_key.removeprefix('0x'))
+    return bytes(swap_key)
+
+
+def swap_pda(swap_key: bytes | str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    return _derive([b'swap', swap_key_bytes(swap_key)], program_id)
 
 
 def quote_pda(

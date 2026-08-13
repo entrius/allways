@@ -229,7 +229,8 @@ class AllwaysSolanaClient:
     def get_pool(self, miner, backing: str = 'sol'):
         return self._get('Pool', pdas.pool_pda(miner, backing, self.program_id))
 
-    def get_swap(self, swap_key: bytes):
+    def get_swap(self, swap_key: bytes | str):
+        """``swap_key`` in either circulating form — 32 raw bytes or the hex string (0x or bare)."""
         return self._get('Swap', pdas.swap_pda(swap_key, self.program_id))
 
     def get_quote(self, miner, from_chain: str, to_chain: str, backing: str = 'sol'):
