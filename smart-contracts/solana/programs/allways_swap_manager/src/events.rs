@@ -109,6 +109,22 @@ pub struct SwapTimedOut {
     pub payee: String,
 }
 
+/// The no-fault cancel verdict: the destination provably could not receive the payout, so the swap is
+/// closed with no slash, fee, or strike, and the miner keeps the source. Unlike `SwapTimedOut`, the bond
+/// reconciler must do NOTHING to a vaulted bond on this event — there is no seizure to relay, and the
+/// on-chain `reserved_collateral` view was already cleared by `release_reserved`.
+#[event]
+pub struct SwapCancelled {
+    pub swap_key: [u8; 32],
+    pub miner: Pubkey,
+    /// Backing chain whose hub was freed.
+    pub collateral_chain: String,
+    /// Swap size, for ledger symmetry with the other terminals.
+    pub collateral_amount: u64,
+    /// Advisory reason discriminant (`CANCEL_REASON_*`); observability only, never a consensus input.
+    pub reason: u8,
+}
+
 /// A validator slid a reservation/swap deadline forward (single-validator, no quorum). Carries the
 /// new deadline (post-value) so consumers set an absolute, not a delta.
 #[event]

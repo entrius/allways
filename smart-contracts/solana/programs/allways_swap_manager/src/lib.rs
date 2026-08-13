@@ -261,6 +261,11 @@ pub mod allways_swap_manager {
     pub fn timeout_swap(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         timeout_swap::handler(ctx, swap_key)
     }
+    /// Validators cancel a swap whose destination provably cannot receive the payout, with NO slash,
+    /// fee, or strike — the lenient sibling of timeout. Frees the miner and closes the swap on quorum.
+    pub fn cancel_swap(ctx: Context<CancelSwap>, swap_key: [u8; 32], reason: u8) -> Result<()> {
+        cancel_swap::handler(ctx, swap_key, reason)
+    }
 
     // --- Deadline extensions (single validator, no quorum; bounded by a frozen ceiling) ---
     /// A validator slides a reservation's deadline forward while it waits on slow source-chain

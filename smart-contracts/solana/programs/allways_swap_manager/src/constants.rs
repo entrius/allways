@@ -87,6 +87,18 @@ pub const REQ_SET_WEIGHTS: u8 = 8;
 pub const REQ_SET_ATTESTATION: u8 = 9;
 /// Global round bumping `Config.last_attest_heartbeat` (the dead-man fuse's liveness signal).
 pub const REQ_ATTEST_HEARTBEAT: u8 = 10;
+/// Per-swap round for the no-fault cancel terminal (destination provably cannot receive the payout).
+/// Distinct from REQ_TIMEOUT so the two terminals accrue votes in separate rounds; the first to reach
+/// quorum closes the swap and the loser reverts on the gone PDA.
+pub const REQ_CANCEL: u8 = 11;
+
+/// Advisory `SwapCancelled.reason` discriminants — observability only, NEVER a consensus input (not
+/// bound into the vote hash), so validators co-count the verdict rather than fragmenting over the label.
+pub const CANCEL_REASON_EVM_REVERT: u8 = 0;
+pub const CANCEL_REASON_ERC20_BLACKLIST: u8 = 1;
+pub const CANCEL_REASON_ERC20_PAUSED: u8 = 2;
+pub const CANCEL_REASON_SOL_RESERVED: u8 = 3;
+pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
 /// each) ahead, so the seed slot never lands in the window of the leader who included the arming tx.
