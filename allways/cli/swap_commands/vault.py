@@ -72,7 +72,7 @@ def _report(result, ok_msg: str):
             console.print(
                 '[yellow]The chain could not draw the funds (TransferFailed) — pallet-contracts '
                 'pre-charges the FULL gas limit (refunded after execution) plus the existential '
-                'deposit, so a transfer near the signer\'s whole balance fails even though the fee '
+                "deposit, so a transfer near the signer's whole balance fails even though the fee "
                 'actually charged is tiny. Leave ~0.3 τ of headroom or post a smaller amount.[/yellow]'
             )
         else:
