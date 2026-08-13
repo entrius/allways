@@ -18,6 +18,7 @@ from allways.chains import (
     CHAIN_ETH,
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
+    CHAIN_QNT,
     CHAIN_TAO,
     CHAIN_UNI,
     EXTENSION_BUCKET_SECONDS,
@@ -64,6 +65,9 @@ class TestGetChain:
 
     def test_uni(self):
         assert get_chain_def('uni') is CHAIN_UNI
+
+    def test_qnt(self):
+        assert get_chain_def('qnt') is CHAIN_QNT
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):

@@ -13,6 +13,7 @@ Allways creates a verification layer above independent systems. Assets move nati
 Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, and SOL ↔ CRO (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, and SOL ↔ ASTER (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, and SOL ↔ UNI (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
+Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, and QNT — plus SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
 
 ## Miner Risk Disclaimer
 
@@ -128,6 +129,7 @@ needs to persist across restarts.
 - `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `CRO_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE,CRO}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars). See `.env.example`.
 - `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars; BNB and aster both ride the `BNB_*` vars). See `.env.example`.
 - `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc and uni all ride the `ETH_*` vars). See `.env.example`.
+- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc and qnt all ride the `ETH_*` vars). See `.env.example`.
 
 ## Running a Local Subtensor Lite Node (Validators)
 

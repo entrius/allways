@@ -8,6 +8,7 @@ network, and a dropped key breaks a documented command.
 """
 
 import json
+import os
 
 import pytest
 from click.testing import CliRunner
@@ -24,6 +25,10 @@ def config_file(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'CONFIG_FILE', path)
     monkeypatch.setattr(helpers, 'CONFIG_FILE', path)
     monkeypatch.setattr(helpers, '_CLI_OVERRIDES', {})
+    # The shim writes {PREFIX}_NETWORK straight into os.environ, and monkeypatch cannot undo a
+    # write it did not make — isolate the process env so it can't follow the session into an
+    # asset constructor (a leaked ETH_NETWORK=sepolia builds every ETH asset on the wrong network).
+    monkeypatch.setattr(os, 'environ', os.environ.copy())
     for chain in SUPPORTED_CHAINS.values():
         monkeypatch.delenv(f'{chain.env_prefix}_NETWORK', raising=False)
     for var in ('SOLANA_RPC_URL', 'SOLANA_RPC_API_KEY', 'SOLANA_KEYPAIR_PATH', 'ALLWAYS_PROGRAM_ID'):
@@ -198,15 +203,11 @@ class TestProviderHandoff:
     """The config only matters because it reaches the providers through {PREFIX}_NETWORK."""
 
     def test_shim_feeds_every_chain(self, config_file, monkeypatch):
-        import os
-
         helpers.apply_chain_network_env({network_key(c): c.networks[1] for c in NAME_SELECTED_CHAINS})
         for chain in NAME_SELECTED_CHAINS:
             assert os.environ[f'{chain.env_prefix}_NETWORK'] == chain.networks[1]
 
     def test_shim_never_overrides_an_explicit_env(self, config_file, monkeypatch):
-        import os
-
         for chain in NAME_SELECTED_CHAINS:
             monkeypatch.setenv(f'{chain.env_prefix}_NETWORK', 'mainnet')
         helpers.apply_chain_network_env({network_key(c): c.networks[1] for c in NAME_SELECTED_CHAINS})

@@ -354,6 +354,39 @@ CHAIN_UNI = ChainDefinition(
     refusal_checks=(),
 )
 
+CHAIN_QNT = ChainDefinition(
+    id='qnt',
+    name='Quant',
+    # atto-QNT. Not 'wei' — that is ETH's subunit, and this row is a token on Ethereum, not ETH.
+    native_unit='aQNT',
+    decimals=18,
+    # Ethereum's prefix, shared with CHAIN_ETH: one ETH_NETWORK / ETH_RPC_URLS / ETH_PRIVATE_KEY
+    # serves every asset on it, so they can never disagree about which Ethereum they are on.
+    env_prefix='ETH',
+    host_chain='ethereum',
+    # CHAIN_ETH already declares the ETH_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=12,
+    # CHAIN_ETH's finality, deliberately identical — two assets on one chain must not disagree
+    # about its reorg depth. 32 × 12s = 384s, inside the program's 600s default fulfillment grace.
+    min_confirmations=32,
+    # Rate sanity floor, not an economic guarantee: 0.1 QNT covers this contract's ~65k-gas
+    # transfer only below ~48 gwei — miners price real gas into their quotes, and the per-swap
+    # lever is the contract's min_swap_amount. A fraction of a token, not whole units: QNT's
+    # unit value is ~60x a stablecoin's, so a floor of 1 QNT would price out honest small legs.
+    min_onchain_amount=100_000_000_000_000_000,
+    # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
+    # one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=60,
+    # Quant's ICO token, deployed 2018 by Quant and verified byte-for-byte on Sourcify (solc
+    # 0.4.21 StandardToken, not a proxy). mint is crowdsale-gated; nothing else is privileged.
+    asset_locator='0x4a220E6096B25EADb88358cb44068A3248254675',
+    # No freeze surface: the verified source has no blacklist, no pause and no owner. And none can
+    # be added: EIP-1967 slots empty, and the runtime holds no DELEGATECALL/SELFDESTRUCT/CREATE.
+    refusal_checks=(),
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -368,6 +401,7 @@ SUPPORTED_CHAINS = {
     'cro': CHAIN_CRO,
     'aster': CHAIN_ASTER,
     'uni': CHAIN_UNI,
+    'qnt': CHAIN_QNT,
 }
 
 
