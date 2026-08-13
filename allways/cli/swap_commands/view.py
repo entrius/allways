@@ -27,6 +27,7 @@ from allways.cli.swap_commands.helpers import (
     fail,
     freshest_reservation,
     from_lamports,
+    from_rao,
     get_solana_cli_context,
     load_miner_book,
     miner_runtime_status,
@@ -441,6 +442,10 @@ def _sol_or(amount: int, zero_label: str) -> str:
     return f'{from_lamports(amount):.4f} SOL' + (f' ({zero_label})' if amount == 0 else '')
 
 
+def _tao_or(rao: int, zero_label: str) -> str:
+    return f'{from_rao(rao):.4f} τ' + (f' ({zero_label})' if rao == 0 else '')
+
+
 def _votes_needed(cfg) -> int:
     """Votes required for consensus — mirrors the program's headcount check
     (consensus.rs: votes*100 >= threshold*total), i.e. ceil(threshold*total/100)."""
@@ -477,6 +482,11 @@ def view_config(as_json):
                 'max_collateral_sol': from_lamports(cfg.max_collateral),
                 'min_swap_amount_sol': from_lamports(cfg.min_swap_amount),
                 'max_swap_amount_sol': from_lamports(cfg.max_swap_amount),
+                'tao_min_collateral_tao': from_rao(int(getattr(cfg, 'tao_min_collateral', 0) or 0)),
+                'tao_min_swap_amount_tao': from_rao(int(getattr(cfg, 'tao_min_swap_amount', 0) or 0)),
+                'tao_max_swap_amount_tao': from_rao(int(getattr(cfg, 'tao_max_swap_amount', 0) or 0)),
+                'settlement_grace_secs': int(getattr(cfg, 'settlement_grace_secs', 0) or 0),
+                'attest_max_age_secs': int(getattr(cfg, 'attest_max_age_secs', 0) or 0),
                 'fulfillment_timeout_secs': cfg.fulfillment_timeout_secs,
                 'reservation_ttl_secs': cfg.reservation_ttl_secs,
                 'pool_window_secs': cfg.pool_window_secs,
@@ -496,6 +506,11 @@ def view_config(as_json):
     console.print(f'  Max collateral:       {_sol_or(cfg.max_collateral, "unlimited")}')
     console.print(f'  Min swap amount:      {_sol_or(cfg.min_swap_amount, "no minimum")}')
     console.print(f'  Max swap amount:      {_sol_or(cfg.max_swap_amount, "no maximum")}')
+    console.print(f'  TAO min collateral:   {_tao_or(int(getattr(cfg, "tao_min_collateral", 0) or 0), "none")}')
+    console.print(f'  TAO min swap:         {_tao_or(int(getattr(cfg, "tao_min_swap_amount", 0) or 0), "no minimum")}')
+    console.print(f'  TAO max swap:         {_tao_or(int(getattr(cfg, "tao_max_swap_amount", 0) or 0), "no maximum")}')
+    console.print(f'  Settlement grace:     {secs_str(int(getattr(cfg, "settlement_grace_secs", 0) or 0))}')
+    console.print(f'  Attest max age:       {secs_str(int(getattr(cfg, "attest_max_age_secs", 0) or 0))}')
     console.print(f'  Fulfillment timeout:  {secs_str(cfg.fulfillment_timeout_secs)}')
     console.print(f'  Reservation TTL:      {secs_str(cfg.reservation_ttl_secs)}')
     console.print(f'  Pool window:          {secs_str(cfg.pool_window_secs)}')

@@ -942,3 +942,22 @@ def test_activity_events_hub_column_migrates_in_place(tmp_path: Path):
     assert state['hk_a']['sol'] == MinerActivity.FULFILLING
     assert state['hk_a']['tao'] == MinerActivity.RESERVED
     store.close()
+
+
+class TestMinerlessEvents:
+    def test_by_design_minerless_events_skip_without_debug_noise(self, tmp_path: Path, monkeypatch):
+        """AttestHeartbeat is {at} by construction — skipping it must not log the
+        'missing miner field' line that reads like a decode defect in validator logs."""
+        from allways.validator import event_index as ei
+
+        calls = []
+        monkeypatch.setattr(ei.bt.logging, 'debug', lambda *a, **k: calls.append(a))
+        heartbeat = EventRecord(
+            name='AttestHeartbeat', fields={'at': 1_000}, slot=1, block_time=1_000, signature='sig-hb'
+        )
+        halt = EventRecord(name='HaltSet', fields={'halted': True}, slot=2, block_time=1_001, signature='sig-halt')
+
+        written = make_index(make_store(tmp_path)).ingest([heartbeat, halt], ATTR)
+
+        assert written == 0
+        assert calls == []

@@ -20,6 +20,11 @@ def _config(**over):
         max_collateral=0,
         min_swap_amount=0,
         max_swap_amount=0,
+        tao_min_swap_amount=100_000_000,
+        tao_max_swap_amount=1_000_000_000,
+        tao_min_collateral=250_000_000,
+        settlement_grace_secs=900,
+        attest_max_age_secs=86_400,
         halted=False,
         reservation_fee_lamports=1_000_000,
         pool_window_secs=60,
@@ -49,6 +54,40 @@ def test_view_config_renders_every_field(monkeypatch):
     assert '0.001000 SOL' in result.output  # reservation fee in SOL
     assert 'On-chain Program Config' in result.output
     assert 'alw config' in result.output  # cross-link to the local CLI settings
+
+
+def test_view_config_renders_the_tao_hub_bounds(monkeypatch):
+    """Full TAO capacity needs 1.1 × tao_max_swap — an operator can't size a bond off
+    bounds the config view hides, so every TAO field must render."""
+    client = MagicMock()
+    client.get_config.return_value = _config()
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(view.view_group, ['config'])
+
+    assert result.exit_code == 0, result.output
+    for label in ('TAO min collateral:', 'TAO min swap:', 'TAO max swap:', 'Settlement grace:', 'Attest max age:'):
+        assert label in result.output
+    assert '0.2500' in result.output  # tao_min_collateral in TAO
+    assert '1.0000' in result.output  # tao_max_swap in TAO
+
+
+def test_view_config_json_carries_the_tao_hub_bounds(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config()
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(view.view_group, ['config', '--json'])
+
+    assert result.exit_code == 0, result.output
+    import json as _json
+
+    payload = _json.loads(result.output)
+    assert payload['tao_min_collateral_tao'] == 0.25
+    assert payload['tao_min_swap_amount_tao'] == 0.1
+    assert payload['tao_max_swap_amount_tao'] == 1.0
+    assert payload['settlement_grace_secs'] == 900
+    assert payload['attest_max_age_secs'] == 86_400
 
 
 def test_votes_needed_mirrors_contract_headcount_math():

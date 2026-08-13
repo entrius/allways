@@ -114,3 +114,35 @@ def test_set_config_votes_exact_rao_and_prints_a_round_tripping_peer_command(mon
     assert m
     assert vault_cli._tao_flag_to_rao(m.group(1), 'min') == 1_000_000_007
     assert vault_cli._tao_flag_to_rao(m.group(2), 'max') == 9_000_000_023
+
+
+# ─── _report / vault-address guards (v3.1 testnet findings) ──────────────────
+
+
+def test_transfer_failed_names_the_gas_precharge(capsys):
+    """Posting near the signer's whole balance dies on the pallet's fee pre-charge; a bare
+    "Call failed (TransferFailed)" gives the operator nothing to act on."""
+    vault_cli._report(VaultCallResult(ok=False, error='TransferFailed'), 'unused')
+    out = capsys.readouterr().out
+    assert 'TransferFailed' in out
+    assert 'pre-charges' in out
+    assert 'headroom' in out
+
+
+def test_off_record_vault_address_warns(capsys):
+    """A stale configured vault reads back healthy but no validator attests bonds posted to it."""
+    from allways.constants import TAO_HUB_VAULT_ADDRESSES
+
+    vault_cli._warn_if_off_record('5GAE4JD8zpQUfYLKKqWifLMEpEo9YrqkkUUdxjsmHyogBEcD', 'test')
+    out = capsys.readouterr().out
+    assert 'of-record' in out
+    assert TAO_HUB_VAULT_ADDRESSES['test'][:8] in out
+
+
+def test_on_record_or_unknown_network_vault_address_stays_quiet(capsys):
+    from allways.constants import TAO_HUB_VAULT_ADDRESSES
+
+    vault_cli._warn_if_off_record(TAO_HUB_VAULT_ADDRESSES['test'], 'test')
+    vault_cli._warn_if_off_record('5AnyVault', 'finney')  # no of-record entry yet
+    vault_cli._warn_if_off_record('5AnyVault', None)
+    assert capsys.readouterr().out == ''
