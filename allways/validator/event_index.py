@@ -18,7 +18,7 @@ events drive FULFILL_START/END. The crown credits a miner only while its activit
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
@@ -63,7 +63,8 @@ class SolanaEventIndex:
     def ingest(self, records: List[EventRecord], attribution: Dict[str, str]) -> int:
         """Persist ``records`` (oldest-first) into the event tables, mapping each event's miner Solana
         pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). Events from an unbound
-        pubkey are dropped (no UID to credit); ``reconcile_live_state`` later heals any state they carried.
+        pubkey are dropped (no UID to credit); the per-round reconciles (``reconcile_live_state`` for
+        active/collateral, ``reconcile_live_quotes`` for rates) later heal the state they carried.
         Records with no ``blockTime`` are skipped defensively — poll() already holds the cursor before
         unstamped txs, so none should reach here. Returns the count written."""
         written = 0
@@ -241,6 +242,42 @@ class SolanaEventIndex:
                 self.state_store.insert_collateral_event(now, hotkey, live_collateral, backing='sol')
                 bt.logging.warning(
                     f'reconcile {hotkey[:8]}: event-derived collateral ≠ chain, corrected to {live_collateral}'
+                )
+
+    def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> None:
+        """Rate-liveness backstop, the ``reconcile_live_state`` sibling for the rate stream.
+        Lane termination is otherwise event-driven only (``QuoteRemoved``/``MinerBackingChanged``),
+        so one lost removal would freeze a lane's last nonzero rate forever — the prune keeps it
+        as the per-lane anchor and every future window would keep crediting it. Once per round,
+        diff the event-derived positive-rate lanes against the live on-chain quote book
+        (``live_quotes``: ``{(hotkey, from, to, collateral_chain): display_rate}``): a lane with
+        no live quote is zeroed, a lane whose live rate differs is corrected to the chain's value.
+        Corrections are stamped ``now`` (credit already granted stands — error bounded at one
+        round) and per-lane quiet-window guarded, so a legitimately in-flight quote change is
+        never fought. An empty book is treated as a failed read and skipped — fail open, so an
+        RPC hiccup can never zero every lane at once."""
+        if not live_quotes:
+            bt.logging.warning('reconcile: MinerQuote read empty, skipping quote reconcile this round')
+            return
+        quiet_start = now - RECONCILE_QUIET_SECS
+        recent_lanes = self.state_store.rate_lanes_touched_in_range(quiet_start, now)
+        for lane, derived_rate in self.state_store.lanes_with_live_rate(now).items():
+            if lane in recent_lanes:
+                continue
+            hotkey, from_chain, to_chain, backing = lane
+            live_rate = live_quotes.get(lane)
+            if live_rate is None:
+                self.state_store.insert_rate_event(hotkey, from_chain, to_chain, 0.0, now, collateral_chain=backing)
+                bt.logging.warning(
+                    f'reconcile {hotkey[:8]}: {from_chain}->{to_chain} ({backing}) has no live quote, rate zeroed'
+                )
+            elif live_rate != derived_rate:
+                self.state_store.insert_rate_event(
+                    hotkey, from_chain, to_chain, live_rate, now, collateral_chain=backing
+                )
+                bt.logging.warning(
+                    f'reconcile {hotkey[:8]}: {from_chain}->{to_chain} ({backing}) event-derived rate '
+                    f'{derived_rate} ≠ chain, corrected to {live_rate}'
                 )
 
     @staticmethod

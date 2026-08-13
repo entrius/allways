@@ -178,6 +178,40 @@ class ValidatorStateStore:
         )
         return [(r['from_chain'], r['to_chain']) for r in rows]
 
+    def lanes_with_live_rate(self, block: int) -> Dict[Tuple[str, str, str, str], float]:
+        """Cross-hotkey variant of ``directions_with_live_rate``: every
+        ``(hotkey, from_chain, to_chain, collateral_chain)`` lane whose latest
+        rate at-or-before ``block`` is positive, mapped to that rate. This is
+        the event-derived side of the per-round quote-existence reconcile."""
+        rows = self._fetchall(
+            """
+            SELECT hotkey, from_chain, to_chain, collateral_chain, rate FROM (
+                SELECT hotkey, from_chain, to_chain, collateral_chain, rate,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY hotkey, from_chain, to_chain, collateral_chain
+                           ORDER BY block DESC, id DESC
+                       ) AS rn
+                FROM rate_events
+                WHERE block <= ?
+            ) WHERE rn = 1 AND rate > 0
+            """,
+            (block,),
+        )
+        return {(r['hotkey'], r['from_chain'], r['to_chain'], r['collateral_chain']): r['rate'] for r in rows}
+
+    def rate_lanes_touched_in_range(self, start_block: int, end_block: int) -> Set[Tuple[str, str, str, str]]:
+        """Lanes with any rate event in ``(start_block, end_block]`` — the
+        reconcile's per-lane quiet-window guard reads this so a stale live
+        view never overwrites a fresher real event."""
+        rows = self._fetchall(
+            """
+            SELECT DISTINCT hotkey, from_chain, to_chain, collateral_chain
+            FROM rate_events WHERE block > ? AND block <= ?
+            """,
+            (start_block, end_block),
+        )
+        return {(r['hotkey'], r['from_chain'], r['to_chain'], r['collateral_chain']) for r in rows}
+
     # ─── crown event tables (Solana-sourced via SolanaEventIndex) ───────
 
     def insert_active_event(self, block_num: int, hotkey: str, active: bool) -> None:
@@ -771,15 +805,20 @@ class ValidatorStateStore:
 
     def prune_events_older_than(self, cutoff_block: int) -> None:
         """Delete rate events older than ``cutoff_block``, preserving the
-        latest row per ``(hotkey, from_chain, to_chain)`` as a state-
-        reconstruction anchor for ``get_latest_rate_before(window_start)``."""
+        latest row per ``(hotkey, from_chain, to_chain, collateral_chain)``
+        lane as a state-reconstruction anchor for
+        ``get_latest_rate_before(window_start)``. The backing is part of the
+        anchor key (F4): on a dual-backing direction each backing's lane is
+        scored on its own rate stream, so keeping only the direction's newest
+        row would delete the sibling backing's anchor and silently drop that
+        lane out of the crown at window start."""
         self._execute(
             """
             DELETE FROM rate_events
             WHERE block < ?
               AND id NOT IN (
                   SELECT MAX(id) FROM rate_events
-                  GROUP BY hotkey, from_chain, to_chain
+                  GROUP BY hotkey, from_chain, to_chain, collateral_chain
               )
             """,
             (cutoff_block,),

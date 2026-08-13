@@ -35,6 +35,7 @@ from allways.constants import (
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
+    RATE_PRECISION,
     RECYCLE_UID,
     REWARD_MINER_STATES,
     SCORING_WINDOW_BLOCKS,
@@ -46,7 +47,7 @@ from allways.constants import (
 )
 from allways.solana.layouts import lock_max
 from allways.solana.pdas import BACKING_BITS
-from allways.utils.rate import is_executable_rate, min_executable_hub_leg
+from allways.utils.rate import is_executable_rate, min_executable_hub_leg, quantize_rate_fixed
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
 from allways.validator.state_store import ValidatorStateStore
@@ -237,6 +238,27 @@ def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, 
     return states
 
 
+def live_quote_rates(
+    solana_client, attribution: Optional[Dict[str, str]] = None
+) -> Dict[Tuple[str, str, str, str], float]:
+    """``{(hotkey, from_chain, to_chain, collateral_chain): display_rate}`` for every live
+    on-chain quote from a bound miner — the chain-truth side of the quote-existence
+    reconcile (``SolanaEventIndex.reconcile_live_quotes``). Rates pass through the same
+    quantize-then-scale transform as ``QuoteSet`` ingest so an unchanged quote compares
+    equal to its event-derived rate. Unbound miners are dropped, matching ingest: their
+    lanes never entered the event tables, so there is nothing to reconcile."""
+    if attribution is None:
+        attribution = build_attribution(solana_client)
+    quotes: Dict[Tuple[str, str, str, str], float] = {}
+    for _pda, q in solana_client.get_all('MinerQuote'):
+        hotkey = attribution.get(str(q.miner))
+        if hotkey is None:
+            continue
+        lane = (hotkey, str(q.from_chain).lower(), str(q.to_chain).lower(), str(q.collateral_chain).lower())
+        quotes[lane] = quantize_rate_fixed(int(q.rate)) / RATE_PRECISION
+    return quotes
+
+
 def build_eligibility(
     solana_client,
     metagraph,
@@ -402,8 +424,16 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # on-chain counters (B3.3, pubkey→hotkey via the sr25519 binding; absent hotkey → not
     # eligible), and the reconcile backstop that corrects event-derived active/collateral
     # state the ingest lost — before the replay below reads those tables.
-    live_states = live_miner_states(self.solana_client, self.metagraph)
+    attribution = build_attribution(self.solana_client)
+    live_states = live_miner_states(self.solana_client, self.metagraph, attribution)
     self.event_index.reconcile_live_state(live_states, now=current_time)
+    # Rate-liveness backstop: a lost QuoteRemoved would otherwise freeze a lane's crown
+    # credit forever (the prune keeps the last rate as the lane's anchor). Best-effort —
+    # the reconcile is a safety net, so a failed quote read never sinks the round.
+    try:
+        self.event_index.reconcile_live_quotes(live_quote_rates(self.solana_client, attribution), now=current_time)
+    except Exception as e:
+        bt.logging.warning(f'quote reconcile failed, skipping this round: {e}')
     # The global (strike) view feeds the trace log; rows gate per lane so a TAO settle zeroes
     # only tao-lane contributions while sol-lane rows keep earning (V-2, F4).
     eligibility = {hk: is_eligible(ms, current_time) for hk, ms in live_states.items()}

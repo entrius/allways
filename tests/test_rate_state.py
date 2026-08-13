@@ -201,6 +201,24 @@ class TestPrune:
         assert store.get_latest_rate_before('hk1', 'btc', 'tao', block=10_000) == (6500.0, 100)
         store.close()
 
+    def test_prune_preserves_anchor_per_backing_on_dual_lane(self, tmp_path: Path):
+        """A dual-backing direction keeps BOTH backings' anchors — the anchor
+        key includes collateral_chain. Regression: grouping by direction only
+        deleted the older backing's newest row whenever the sibling backing
+        had a fresher one, silently dropping that lane out of the crown at
+        window start (observed live: tao-backed sol↔tao lanes on testnet)."""
+        store = make_store(tmp_path)
+        # tao-backed lane posted first, sol-backed sibling re-posted later —
+        # both older than the cutoff, so each survives only as its lane's anchor.
+        store.insert_rate_event('hk1', 'sol', 'tao', 0.361, block=100, collateral_chain='tao')
+        store.insert_rate_event('hk1', 'sol', 'tao', 0.360, block=200, collateral_chain='sol')
+
+        store.prune_events_older_than(cutoff_block=5_000)
+
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=10_000, collateral_chain='tao') == (0.361, 100)
+        assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=10_000, collateral_chain='sol') == (0.360, 200)
+        store.close()
+
 
 class TestConcurrency:
     def test_concurrent_writes_threadsafe(self, tmp_path: Path):
