@@ -141,6 +141,21 @@ BASE = EvmNetwork(
     },
 )
 
+CRONOS = EvmNetwork(
+    label='Cronos',
+    chain_ids={'mainnet': 25, 'testnet': 338},
+    rpc_urls={
+        # publicnode leads: it tracks the tip closely (the official gateway measured a median 25
+        # blocks behind it, 32% of samples past 32) and so serves every hot-path call. It keeps
+        # only ~100 blocks of Ethermint state (the Cosmos SDK pruning-keep-recent default), so the
+        # official gateway trails as the archive rung that answers delivery_refused's 120-block
+        # probe by fall-through — a rung need not lead to serve a call the leader errors on.
+        'mainnet': ('https://cronos-evm-rpc.publicnode.com', 'https://evm.cronos.org'),
+        # Both testnet rungs serve historical eth_getCode past 100k blocks; official leads for symmetry.
+        'testnet': ('https://evm-t3.cronos.org', 'https://cronos-testnet.drpc.org'),
+    },
+)
+
 # ChainDefinition.host_chain → the EvmNetwork that hosts the asset.
 EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'ethereum': ETHEREUM,
@@ -149,6 +164,7 @@ EVM_NETWORKS: Mapping[str, EvmNetwork] = {
     'bsc': BSC,
     'avalanche': AVALANCHE,
     'base': BASE,
+    'cronos': CRONOS,
 }
 
 

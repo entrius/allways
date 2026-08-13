@@ -262,6 +262,32 @@ CHAIN_ETHUSDC = ChainDefinition(
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
+CHAIN_CRO = ChainDefinition(
+    id='cro',
+    name='Cronos',
+    native_unit='wei',
+    decimals=18,
+    env_prefix='CRO',
+    host_chain='cronos',
+    networks=('mainnet', 'testnet'),
+    testnet_network='testnet',
+    # 0.4749s measured over the last 100k mainnet blocks; 1 is the integer floor. Flooring up is
+    # safe where the value is MULTIPLIED (the extension target overestimates the wait) but not
+    # where a window is DIVIDED out of it: the 300s scan lookback lands at ~142s of wall time and
+    # delivery_refused's 120-block cap at ~57s. See the SCAN_LOOKBACK_SECS note in assets/evm.py.
+    seconds_per_block=1,
+    # Cronos is Ethermint on CometBFT: a block commits only with >2/3 pre-commits and no fork-choice
+    # rule can revert it, so finality IS inclusion — there is no reorg depth to outrun, as on
+    # Avalanche. 2 is a one-block margin against an endpoint serving a head consensus hasn't sealed.
+    min_confirmations=2,
+    # Rate sanity floor, not an economic guarantee: 0.5 CRO covers a 21k-gas transfer below ~23,800
+    # gwei — ~63x the 375 gwei base fee measured on mainnet, whose gas prices sit three orders of
+    # magnitude above L1's. Miners price real gas into their quotes.
+    min_onchain_amount=500_000_000_000_000_000,
+    # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
+    replay_grace_secs=60,
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -273,6 +299,7 @@ SUPPORTED_CHAINS = {
     'avax': CHAIN_AVAX,
     'baseusdc': CHAIN_BASEUSDC,
     'ethusdc': CHAIN_ETHUSDC,
+    'cro': CHAIN_CRO,
 }
 
 
