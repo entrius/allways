@@ -465,7 +465,9 @@ class Erc20(EvmAsset):
                 bt.logging.warning(f'{self._log} historical refusal sample at {probe} failed ({e}) — skipping')
         return False
 
-    def cancel_evidence(self, address: str, amount: int, tx_hash: Optional[str] = None) -> Optional[int]:
+    def cancel_evidence(
+        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+    ) -> Optional[int]:
         """No-fault-cancel evidence for a FiatToken: the issuer's own state proves the destination
         cannot receive — a blacklisted dest or a paused token — attributed to the DEST, not the miner
         (a reverted ERC-20 transfer alone is ambiguous: it could be miner-blacklist or miner-under-

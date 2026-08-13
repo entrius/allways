@@ -78,7 +78,7 @@ class RecordingProvider:
             raise ProviderUnreachableError('down')
         return self.refuses
 
-    def cancel_evidence(self, address, amount, tx_hash=None):
+    def cancel_evidence(self, address, amount, tx_hash=None, from_address=None):
         if self.cancel_reason == 'raise':
             raise ProviderUnreachableError('down')
         return self.cancel_reason

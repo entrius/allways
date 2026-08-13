@@ -322,16 +322,20 @@ class EvmCoin(EvmAsset):
         probes = ['latest'] + [hex(max(0, tip - span // d)) for d in (1, 2)]
         return any((self.chain.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
-    def cancel_evidence(self, address: str, amount: int, tx_hash: Optional[str] = None) -> Optional[int]:
+    def cancel_evidence(
+        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+    ) -> Optional[int]:
         """No-fault-cancel evidence for native EVM: the miner's own delivery tx reverted despite a
         correct, well-gassed attempt — sound proof the destination refused, strong enough to TERMINATE
         the swap with no slash (unlike ``delivery_refused``, a getCode deferral hint). Returns
-        ``CANCEL_REASON_EVM_REVERT`` only when the recorded tx (1) reverted (receipt status 0), (2) paid
-        the pinned dest, (3) carried >= the required value, and (4) supplied a gas LIMIT >=
-        ``ETH_FULFILL_GAS_FLOOR``. Clause (4) is load-bearing: it stops a miner under-gassing to fake a
-        refusal and keep the taker's source. Deliberately NOT ``gasUsed < gas`` (a hostile contract can
-        burn all gas to mimic OOG). ``None`` on anything short of that proof or on RPC trouble — the
-        caller then keeps waiting, never slashes."""
+        ``CANCEL_REASON_EVM_REVERT`` only when the recorded tx (1) reverted (receipt status 0), (2) came
+        FROM the committed miner sender, (3) paid the pinned dest, (4) carried >= the required value, and
+        (5) supplied a gas LIMIT >= ``ETH_FULFILL_GAS_FLOOR``. Clauses (2) and (5) are load-bearing: (5)
+        stops a miner under-gassing to fake a refusal, and (2) stops a miner pointing at a reverted tx
+        sent from a throwaway address (against a dest that reverts unless ``msg.sender`` is the committed
+        miner) to claim refusal without ever attempting delivery from its own address. Deliberately NOT
+        ``gasUsed < gas`` (a hostile contract can burn all gas to mimic OOG). ``None`` on anything short
+        of that proof or on RPC trouble — the caller then keeps waiting, never slashes."""
         if not tx_hash:
             return None
         try:
@@ -344,6 +348,8 @@ class EvmCoin(EvmAsset):
         norm = self.chain.normalize_address
         if int(receipt.get('status') or '0x0', 16) != 0:
             return None  # succeeded (or unreadable status) — a delivered tx is not a refusal
+        if from_address and norm(tx.get('from') or '') != norm(from_address):
+            return None  # not the committed miner's own attempt — could be a throwaway-sender ruse
         if norm(tx.get('to') or '') != norm(address):
             return None  # paid the wrong destination
         if int(tx.get('value') or '0x0', 16) < int(amount):

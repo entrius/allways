@@ -21,6 +21,7 @@ from allways.constants import (
 )
 
 DEST = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
+MINER = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'  # the committed miner sender
 TX = '0x' + 'ab' * 32
 AMOUNT = 256  # 0x100
 
@@ -40,8 +41,8 @@ def _stub(provider, tx, receipt):
     return provider
 
 
-def _tx(to=DEST, value=AMOUNT, gas=100_000):
-    return {'to': to, 'value': hex(value), 'gas': hex(gas)}
+def _tx(to=DEST, value=AMOUNT, gas=100_000, from_=MINER):
+    return {'from': from_, 'to': to, 'value': hex(value), 'gas': hex(gas)}
 
 
 class TestEvmCancelEvidence:
@@ -65,6 +66,17 @@ class TestEvmCancelEvidence:
         # The load-bearing anti-fake clause: a miner must not under-gas to manufacture a "refused" verdict.
         p = _stub(_evm(monkeypatch), _tx(gas=90_000), {'status': '0x0'})
         assert p.cancel_evidence(DEST, AMOUNT, TX) is None
+
+    def test_from_committed_miner_is_evidence(self, monkeypatch):
+        p = _stub(_evm(monkeypatch), _tx(from_=MINER), {'status': '0x0'})
+        assert p.cancel_evidence(DEST, AMOUNT, TX, from_address=MINER) == CANCEL_REASON_EVM_REVERT
+
+    def test_from_non_committed_sender_rejected(self, monkeypatch):
+        # A reverted tx to the right dest with correct value+gas but sent from a THROWAWAY address is not
+        # a good-faith attempt: a dest reverting unless msg.sender==committedMiner could otherwise be used
+        # to manufacture a refusal without ever delivering from the committed sender.
+        p = _stub(_evm(monkeypatch), _tx(from_='0x' + '11' * 20), {'status': '0x0'})
+        assert p.cancel_evidence(DEST, AMOUNT, TX, from_address=MINER) is None
 
     def test_no_tx_hash_is_none(self, monkeypatch):
         assert _evm(monkeypatch).cancel_evidence(DEST, AMOUNT, None) is None

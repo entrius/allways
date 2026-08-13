@@ -211,7 +211,10 @@ class SolanaSwapLoop:
             return None
         try:
             reason = provider.cancel_evidence(
-                swap.user_to_addr, self.expected_user_receives(swap), getattr(swap, 'to_tx_hash', '') or None
+                swap.user_to_addr,
+                self.expected_user_receives(swap),
+                getattr(swap, 'to_tx_hash', '') or None,
+                from_address=getattr(swap, 'miner_to_addr', '') or None,
             )
         except Exception as e:
             bt.logging.warning(f'{self._label(swap)}: cancel_evidence check failed ({e}) — not cancelling')

@@ -263,7 +263,9 @@ class Sol(Asset, Chain):
         exact, so unlike the EVM probes there is no RPC to fail and no window to sample."""
         return address in RESERVED_ACCOUNTS
 
-    def cancel_evidence(self, address: str, amount: int, tx_hash: Optional[str] = None) -> Optional[int]:
+    def cancel_evidence(
+        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+    ) -> Optional[int]:
         """No-fault-cancel evidence: a reserved-account destination is undeliverable by construction, a
         fixed offline membership test — deterministic, no RPC, sound enough to terminate the swap with
         no slash. Returns CANCEL_REASON_SOL_RESERVED, else None."""
