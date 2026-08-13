@@ -9,6 +9,7 @@ from allways.assets.erc20 import Erc20
 from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
+    CHAIN_ASTER,
     CHAIN_AVAX,
     CHAIN_BASEUSDC,
     CHAIN_BNB,
@@ -56,6 +57,9 @@ class TestGetChain:
 
     def test_cro(self):
         assert get_chain_def('cro') is CHAIN_CRO
+
+    def test_aster(self):
+        assert get_chain_def('aster') is CHAIN_ASTER
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):

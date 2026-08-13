@@ -288,6 +288,38 @@ CHAIN_CRO = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_ASTER = ChainDefinition(
+    id='aster',
+    name='Aster',
+    native_unit='wei',
+    decimals=18,
+    # BNB Smart Chain's prefix, shared with CHAIN_BNB: one BNB_NETWORK / BNB_RPC_URLS /
+    # BNB_PRIVATE_KEY serves both assets, so they can never disagree about which BSC they are on.
+    env_prefix='BNB',
+    host_chain='bsc',
+    # CHAIN_BNB already declares the BNB_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    seconds_per_block=1,
+    # CHAIN_BNB's finality, deliberately identical — two assets on one chain must not disagree
+    # about its reorg depth. See CHAIN_BNB for the derivation (BEP-126 quorum, BEP-341
+    # turn_length 8). 15 × 1s, inside the program's 600s default fulfillment grace.
+    min_confirmations=15,
+    # Rate sanity floor, not an economic guarantee. Break-even at CHAIN_BNB's 9.5 gwei reference
+    # is 0.48 ASTER for a ~50k-gas BEP-20 transfer (measured 29,698 warm); rounded up to 1, which
+    # prices ~19 gwei. Deliberately the strictest floor in the registry — a floor can only
+    # over-restrict, never slash. Miners price real gas in; the per-swap lever is min_swap_amount.
+    min_onchain_amount=1_000_000_000_000_000_000,
+    # BSC's clock, as CHAIN_BNB: what this absorbs is hub-vs-spoke skew, and two assets on one
+    # chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=60,
+    # ASTER as published by the issuer (docs.asterdex.com, 2026-08-12).
+    asset_locator='0x000Ae314E2A2172a039B26378814C252734f556A',
+    # Verified source is stock OpenZeppelin ERC20 + ERC20Permit with no blacklist and no pause,
+    # on a contract that can never gain one: EIP-1967 slots empty, owner() reverts (2026-08-12).
+    refusal_checks=(),
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -300,6 +332,7 @@ SUPPORTED_CHAINS = {
     'baseusdc': CHAIN_BASEUSDC,
     'ethusdc': CHAIN_ETHUSDC,
     'cro': CHAIN_CRO,
+    'aster': CHAIN_ASTER,
 }
 
 
