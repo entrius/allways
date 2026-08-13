@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod bind_hotkey;
+pub mod cancel_swap;
 pub mod close_legacy_quote;
 pub mod close_legacy_slot;
 pub mod close_legacy_swap;
@@ -34,6 +35,7 @@ pub mod withdraw_treasury;
 // handlers are always called fully-qualified, e.g. `initialize::handler`.)
 pub use admin::*;
 pub use bind_hotkey::*;
+pub use cancel_swap::*;
 pub use close_legacy_quote::*;
 pub use close_legacy_slot::*;
 pub use close_legacy_swap::*;

@@ -70,12 +70,18 @@ class RecordingProvider:
         self.confirmations = confirmations
         self.refuses = False
         self.valid_addr = valid_addr
+        self.cancel_reason = None  # sound no-fault-cancel evidence (a CANCEL_REASON_* int), else None
         self.calls = []
 
     def delivery_refused(self, address, since_unix):
         if self.refuses == 'unreachable':
             raise ProviderUnreachableError('down')
         return self.refuses
+
+    def cancel_evidence(self, address, amount, tx_hash=None, from_address=None):
+        if self.cancel_reason == 'raise':
+            raise ProviderUnreachableError('down')
+        return self.cancel_reason
 
     @property
     def chain(self):
@@ -206,6 +212,43 @@ def test_overdue_malformed_dest_addr_waits_no_slash():
     loop, providers = loop_with(result=None)
     providers['sol'].valid_addr = False
     assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+
+
+def test_fulfilled_sound_cancel_evidence_refuses_no_slash():
+    # Sound evidence the dest can't receive (miner's reverted tx / issuer freeze / reserved account) →
+    # REFUSE (cancel_swap, no slash/fee/strike), carrying the reason code.
+    loop, providers = loop_with(result=None)
+    providers['sol'].cancel_reason = 3  # CANCEL_REASON_SOL_RESERVED
+    action = loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500)
+    assert action.decision == SwapDecision.REFUSE
+    assert action.reason_code == 3
+
+
+def test_cancel_evidence_fires_early_before_deadline():
+    # Cancel is strictly lenient, so it fires ahead of the deadline — no waiting for the ceiling.
+    loop, providers = loop_with(result=None)
+    providers['sol'].cancel_reason = 3
+    action = loop.decide(make_swap(status='Fulfilled', timeout_at=9999), now=1500)  # not overdue
+    assert action.decision == SwapDecision.REFUSE
+
+
+def test_active_sound_cancel_evidence_refuses_without_fulfillment():
+    # Solana/ERC-20 refusal is provable without a delivery tx, so an Active swap into an unpayable dest
+    # cancels immediately rather than waiting for a fulfillment that can never land.
+    loop, providers = loop_with(result=None)
+    providers['sol'].cancel_reason = 3
+    action = loop.decide(make_swap(status='Active', timeout_at=9999), now=1500)
+    assert action.decision == SwapDecision.REFUSE
+
+
+def test_getcode_hint_without_sound_evidence_does_not_refuse():
+    # A getCode/issuer HINT (delivery_refused) is NOT sufficient to cancel — only sound cancel_evidence is.
+    # With no sound evidence and before the ceiling, the hint defers (WAIT), never REFUSE and never slash.
+    loop, providers = loop_with(result=None)
+    providers['sol'].refuses = True  # hint only
+    providers['sol'].cancel_reason = None  # no sound evidence
+    action = loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500)
+    assert action.decision == SwapDecision.WAIT
 
 
 def test_active_refusing_dest_past_ceiling_times_out():

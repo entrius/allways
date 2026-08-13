@@ -19,7 +19,7 @@ from solders.pubkey import Pubkey
 from allways import dev_signal
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
-from allways.constants import EXTENSION_PADDING_SECONDS
+from allways.constants import CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
@@ -30,6 +30,7 @@ class SwapDecision(Enum):
     CONFIRM = 'confirm'  # Fulfilled: both legs verified -> would confirm_swap
     TIMEOUT = 'timeout'  # Active past its deadline -> would timeout_swap
     CANCEL = 'cancel'  # PendingAttestation whose reservation expired -> close_stale_claim (reap, no slash)
+    REFUSE = 'refuse'  # Active/Fulfilled with a provably-unpayable dest -> cancel_swap (no slash/fee/strike)
     EXTEND_RESERVATION = 'extend_reservation'  # source valid-but-unconfirmed near expiry -> slide reserved_until
     EXTEND_TIMEOUT = 'extend_timeout'  # dest valid-but-unconfirmed near timeout -> slide timeout_at
     WAIT = 'wait'  # in-flight, nothing to do yet
@@ -44,6 +45,7 @@ class SwapAction(NamedTuple):
     decision: SwapDecision
     target_at: Optional[int] = None
     reason: Optional[str] = None
+    reason_code: Optional[int] = None  # CANCEL_REASON_* discriminant carried by a REFUSE (cancel_swap)
 
 
 # Decisions that drive an on-chain write this pass.
@@ -53,6 +55,7 @@ ACTIONABLE = frozenset(
         SwapDecision.CONFIRM,
         SwapDecision.TIMEOUT,
         SwapDecision.CANCEL,
+        SwapDecision.REFUSE,
         SwapDecision.EXTEND_RESERVATION,
         SwapDecision.EXTEND_TIMEOUT,
     }
@@ -197,6 +200,33 @@ class SolanaSwapLoop:
             bt.logging.warning(f'{self._label(swap)}: delivery_refused check failed ({e}) — deferring, not slashing')
             return True
 
+    def _cancel_action(self, swap: Any) -> Optional[SwapAction]:
+        """A REFUSE (no-fault cancel_swap) action when the dest PROVABLY can't receive — sound enough to
+        close with no slash (EVM: the miner's reverted delivery tx at/above the gas floor; ERC-20: attested
+        issuer blacklist/pause; Solana: reserved-account membership). None otherwise. Distinct from and
+        stronger than ``_dest_refuses`` (a mere deferral hint): only positive, sound evidence terminates a
+        swap here, so a getCode hint alone never converts to a cancel — it keeps the swap deferring."""
+        provider = self.providers.get(swap.to_chain)
+        if provider is None:
+            return None
+        try:
+            reason = provider.cancel_evidence(
+                swap.user_to_addr,
+                self.expected_user_receives(swap),
+                getattr(swap, 'to_tx_hash', '') or None,
+                from_address=getattr(swap, 'miner_to_addr', '') or None,
+            )
+        except Exception as e:
+            bt.logging.warning(f'{self._label(swap)}: cancel_evidence check failed ({e}) — not cancelling')
+            return None
+        if reason is None:
+            return None
+        return SwapAction(
+            SwapDecision.REFUSE,
+            reason=f'dest provably unpayable (reason={reason}) — cancel, no slash/fee/strike',
+            reason_code=reason,
+        )
+
     def _get_reservation(self, miner: Any, backing: str) -> Any:
         """The (miner, hub) reservation slot — per-backing since v3.1, so a swap's timeline is read
         off ITS hub's slot and a concurrent other-hub reservation can't shadow it."""
@@ -272,20 +302,31 @@ class SolanaSwapLoop:
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
             return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
-        # Unverifiable/stale dest + overdue ⇒ TIMEOUT; else wait for the leg. Without the confirmation
-        # count and remaining runway, a healthy deferral and an imminent slash render identically.
+        # No-fault cancel: sound evidence the dest can't receive (miner's reverted tx / issuer freeze /
+        # reserved account) → close with NO slash, EARLY, ahead of the overdue/timeout logic.
+        cancel = self._cancel_action(swap)
+        if cancel is not None:
+            return cancel
+        # Unverifiable/stale dest. Without the confirmation count and remaining runway, a healthy
+        # deferral and an imminent slash render identically.
         why = (
             f'src={s_status} dst={d_status} [{_confs(swap.to_chain, d_info)}] timeout_in={int(swap.timeout_at) - now}s'
         )
         if not overdue:
             return SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
         if self._dest_refuses(swap):
-            # Terminal past the ceiling: an undeliverable dest never recovers, so timing out is the only
-            # path that clears the hub bit — before it, keep deferring to protect a genuinely live miner.
+            # No SOUND cancel evidence, but the dest may refuse (getCode / malformed / check unreachable):
+            # defer the slash to protect a live miner. An undeliverable dest never recovers, so at the
+            # max_extend_at ceiling still TIMEOUT — else has_active_swap never clears and collateral freezes.
+            # A dest that GENUINELY refuses yields sound evidence → REFUSE above, well before the ceiling; so
+            # only an evidence-less case (miner never produced a valid reverted tx) reaches this slash.
             if now < int(swap.max_extend_at):
-                return SwapAction(SwapDecision.WAIT, reason=f'{why} + overdue but dest refuses delivery — not slashing')
+                return SwapAction(
+                    SwapDecision.WAIT, reason=f'{why} + overdue but dest may refuse — deferring, not slashing'
+                )
             return SwapAction(
-                SwapDecision.TIMEOUT, reason=f'{why} + dest refuses past max_extend_at — terminal, slashing'
+                SwapDecision.TIMEOUT,
+                reason=f'{why} + dest refuses past max_extend_at, no sound cancel evidence — terminal, slashing',
             )
         return SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
 
@@ -377,14 +418,24 @@ class SolanaSwapLoop:
         if status == 'PendingAttestation':
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
+            # No-fault cancel for chains whose refusal is provable WITHOUT a delivery tx (Solana reserved
+            # account, ERC-20 issuer freeze): an Active swap into such a dest cancels immediately — no point
+            # waiting for a fulfillment that can never land. Native EVM has no tx yet, so this is None until
+            # the miner broadcasts + marks fulfilled (then the Fulfilled branch adjudicates the reverted tx).
+            cancel = self._cancel_action(swap)
+            if cancel is not None:
+                return cancel
             # Never extend: no mark_fulfilled = no broadcast evidence, so an overdue Active is slash-eligible.
             if overdue and self._dest_refuses(swap):
-                # The refusal guard defers a slash so a transient dest fault can't punish a live miner —
-                # but an undeliverable dest never becomes deliverable, so at the max_extend_at ceiling it is
-                # terminal: time out (else has_active_swap never clears and the hub's collateral freezes).
+                # Defer a slash to protect a live miner; but an undeliverable dest never recovers, so past
+                # max_extend_at still TIMEOUT (else the hub's collateral freezes). A genuine refusal yields
+                # sound cancel evidence → REFUSE above, before the ceiling.
                 if now < int(swap.max_extend_at):
-                    return SwapAction(SwapDecision.WAIT, reason='overdue but dest refuses delivery — not slashing')
-                return SwapAction(SwapDecision.TIMEOUT, reason='dest refuses past max_extend_at — terminal, slashing')
+                    return SwapAction(SwapDecision.WAIT, reason='overdue but dest may refuse — deferring, not slashing')
+                return SwapAction(
+                    SwapDecision.TIMEOUT,
+                    reason='dest refuses past max_extend_at, no sound cancel evidence — terminal, slashing',
+                )
             return SwapAction(
                 SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
                 reason='overdue, miner never fulfilled — slashing' if overdue else 'awaiting miner mark_fulfilled',
@@ -420,6 +471,11 @@ class SolanaSwapLoop:
             elif decision == SwapDecision.CANCEL:
                 # Permissionless reap (no vote round) — first validator wins, peers no-op benignly.
                 sig = self.client.close_stale_claim(swap.miner, swap_key, str(swap.collateral_chain))
+            elif decision == SwapDecision.REFUSE:
+                # No-fault cancel of a provably-unpayable dest — quorum-gated like timeout, no slash.
+                if self.client.has_voted(pdas.REQ_CANCEL, swap_key, voter):
+                    return False
+                sig = self.client.cancel_swap(swap_key, swap.miner, action.reason_code or CANCEL_REASON_OTHER)
             elif decision == SwapDecision.EXTEND_RESERVATION:
                 sig = self.client.extend_reservation(swap.miner, action.target_at, str(swap.collateral_chain))
             elif decision == SwapDecision.EXTEND_TIMEOUT:

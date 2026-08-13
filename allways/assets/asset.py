@@ -197,6 +197,18 @@ class Asset(ABC):
         """Slash gate: True only on positive evidence delivery was refusable since ``since_unix``."""
         return False
 
+    def cancel_evidence(
+        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+    ) -> Optional[int]:
+        """No-fault-cancel gate: a ``CANCEL_REASON_*`` int on evidence sound enough to TERMINATE a swap
+        (close with no slash/fee/strike, miner keeps source), else None. Stronger than
+        ``delivery_refused`` (a mere deferral hint): a wrong verdict here converts a genuine miner
+        default into a free pass, so passive chains (BTC/TAO) and the default return None — they cannot
+        refuse a payout. ``from_address`` is the committed miner sender the delivery must come from, so a
+        provider that keys on the miner's OWN reverted tx can reject one from any other address.
+        EVM/ERC-20/Sol override."""
+        return None
+
     @abstractmethod
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None

@@ -316,6 +316,7 @@ EVENT_DISCRIMINATORS = {
     'SwapFulfilled': bytes([62, 201, 236, 62, 234, 76, 17, 39]),
     'SwapInitiated': bytes([88, 197, 100, 28, 189, 82, 98, 2]),
     'SwapTimedOut': bytes([216, 21, 45, 129, 255, 250, 107, 166]),
+    'SwapCancelled': bytes([210, 232, 53, 121, 126, 236, 66, 142]),
     'SwapTimeoutExtended': bytes([125, 63, 87, 100, 186, 75, 227, 121]),
     'TreasuryWithdrawn': bytes([143, 181, 157, 169, 87, 155, 170, 46]),
     'ValidatorWeightsUpdated': bytes([38, 6, 182, 182, 124, 27, 131, 38]),
@@ -442,6 +443,13 @@ EVENT_LAYOUTS = {
         'reimbursement' / U64,
         'payee' / String,
     ),
+    'SwapCancelled': CStruct(
+        'swap_key' / Hash32,
+        'miner' / Pubkey32,
+        'collateral_chain' / String,
+        'collateral_amount' / U64,
+        'reason' / U8,
+    ),
     'SwapTimeoutExtended': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'validator' / Pubkey32, 'timeout_at' / I64),
     'TreasuryWithdrawn': CStruct('recipient' / Pubkey32, 'amount' / U64, 'total' / U64),
     'ValidatorWeightsUpdated': CStruct('count' / U8, 'updated_at' / I64),
@@ -475,6 +483,7 @@ EVENT_PUBKEY_FIELDS = {
     'SwapFulfilled': ['miner'],
     'SwapInitiated': ['user', 'miner'],
     'SwapTimedOut': ['miner'],
+    'SwapCancelled': ['miner'],
     'SwapTimeoutExtended': ['miner', 'validator'],
     'TreasuryWithdrawn': ['recipient'],
     'ValidatorWeightsUpdated': [],
@@ -492,6 +501,7 @@ IX_DISCRIMINATORS = {
     'vote_initiate': bytes([210, 23, 157, 114, 35, 129, 164, 4]),
     'confirm_swap': bytes([183, 168, 179, 117, 86, 243, 166, 195]),
     'timeout_swap': bytes([18, 157, 212, 120, 145, 200, 239, 63]),
+    'cancel_swap': bytes([88, 174, 98, 148, 24, 252, 93, 89]),  # no-fault terminal (unpayable dest)
     'close_stale_claim': bytes([185, 69, 27, 37, 187, 78, 157, 188]),  # reap an orphaned PendingAttestation claim
     'vote_activate': bytes([24, 233, 47, 230, 116, 115, 109, 41]),
     'vote_deactivate': bytes([243, 169, 237, 143, 48, 91, 0, 119]),
@@ -570,6 +580,7 @@ IX_AMOUNT_ARGS = CStruct('amount' / U64)
 
 # B2 swap-lifecycle args. `swap_key` is a borsh `[u8; 32]` (fixed array → raw 32 bytes, no len prefix).
 IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # vote_initiate, timeout_swap, close_stale_claim
+IX_CANCEL_SWAP_ARGS = CStruct('swap_key' / Hash32, 'reason' / U8)  # cancel_swap (reason is advisory)
 IX_SUBMIT_CLAIM_ARGS = CStruct('swap_key' / Hash32, 'from_tx_hash' / String, 'from_tx_block' / U32)
 IX_CONFIRM_SWAP_ARGS = CStruct('swap_key' / Hash32, 'from_chain' / String, 'to_chain' / String)
 IX_MARK_FULFILLED_ARGS = CStruct('swap_key' / Hash32, 'to_tx_hash' / String, 'to_tx_block' / U32)

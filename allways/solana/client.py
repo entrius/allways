@@ -691,6 +691,25 @@ class AllwaysSolanaClient:
         args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
         return self._send([self._ix('timeout_swap', args, metas)])
 
+    def cancel_swap(self, swap_key: bytes, miner, reason: int = 255) -> str:
+        """Vote to cancel a swap whose destination provably cannot receive the payout; on quorum the
+        swap is closed and the miner freed with NO slash, fee, or strike (the lenient sibling of
+        timeout). Leaner account list than timeout_swap — no collateral_vault or user, since no funds
+        move. ``reason`` is an advisory CANCEL_REASON_* discriminant (not consensus-bound)."""
+        validator = self.keypair.pubkey()
+        m = _as_pubkey(miner)
+        metas = [
+            AccountMeta(validator, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(m, False, False),
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
+            AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
+            AccountMeta(pdas.vote_round_pda(pdas.REQ_CANCEL, swap_key, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_CANCEL_SWAP_ARGS.build({'swap_key': swap_key, 'reason': int(reason) & 0xFF})
+        return self._send([self._ix('cancel_swap', args, metas)])
+
     def close_stale_claim(self, miner, swap_key: bytes, backing: str = 'sol') -> str:
         """Permissionless: reap an orphaned PendingAttestation claim whose reservation has expired (or was
         superseded). Closes the Swap PDA (rent -> caller) and frees the reservation's claim slot. No slash —

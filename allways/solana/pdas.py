@@ -25,6 +25,7 @@ REQ_TIMEOUT = 7
 REQ_SET_WEIGHTS = 8
 REQ_SET_ATTESTATION = 9
 REQ_ATTEST_HEARTBEAT = 10
+REQ_CANCEL = 11  # no-fault cancel_swap terminal (mirrors constants.rs)
 
 # Per-backing activation bits on MinerState.active_backings (constants.rs).
 BACKING_BIT_SOL = 1 << 0

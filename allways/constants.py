@@ -47,6 +47,14 @@ MIN_BALANCE_FOR_TX_RAO = 20_000_000  # 0.02 TAO buffer for extrinsic fees
 # BTC fee floor (sat/vB). Catches the case where the upstream estimator
 # returns nonsense low. 5 is cheap enough to barely register on mainnet
 # and still clears testnet quickly, so a single floor covers both.
+# No-fault cancel (unpayable destination): advisory reason discriminants passed to cancel_swap.
+# Mirror smart-contracts/.../constants.rs CANCEL_REASON_*; observability only, never consensus-bound.
+CANCEL_REASON_EVM_REVERT = 0
+CANCEL_REASON_ERC20_BLACKLIST = 1
+CANCEL_REASON_ERC20_PAUSED = 2
+CANCEL_REASON_SOL_RESERVED = 3
+CANCEL_REASON_OTHER = 255
+
 BTC_MIN_FEE_RATE = 5
 # Modest pad on estimated fee rates (not on explicit user overrides) against
 # mempool conditions drifting between estimate and broadcast. Goal is

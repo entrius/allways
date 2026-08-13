@@ -8,11 +8,17 @@ from eth_utils import to_checksum_address
 from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
+from allways.constants import CANCEL_REASON_EVM_REVERT
 
 TRANSFER_GAS = 21_000
 # Refuse destinations whose receive hook wants more than this — bounds the miner's gas
 # spend against a hostile contract; the slash gate exempts code-bearing dests anyway.
 MAX_TRANSFER_GAS = 100_000
+# Gas limit the miner supplies on a refusal-evidence broadcast (a dest that reverts a well-gassed
+# transfer). Equal to MAX_TRANSFER_GAS so a good-faith attempt provides at least the gas a cooperative
+# smart-wallet delivery would consume; a resulting revert is then sound "dest refused" evidence, and a
+# miner cannot under-gas to manufacture one. A revert refunds the unused gas, so real cost << the limit.
+ETH_FULFILL_GAS_FLOOR = MAX_TRANSFER_GAS
 ZERO_ADDRESS = '0x' + '00' * 20
 # Hard ceiling on the deposit scanner's block walk, independent of block time: the walk costs one
 # RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
@@ -218,8 +224,16 @@ class EvmCoin(EvmAsset):
 
             gas = self._transfer_gas(acct.address, to_address, amount)
             if gas is None:
-                self._send_error(f'destination {to_address} refuses {prefix} transfers — not sending')
-                return None
+                # The destination refuses a well-formed transfer (revert) or wants more gas than the cap.
+                # Do NOT bail silently — broadcast a floor-gas attempt so the on-chain reverted tx becomes
+                # the evidence that earns a no-fault cancel (no slash) rather than a false timeout slash.
+                # The revert refunds unused gas, so the miner's real cost is intrinsic + execution, bounded
+                # by ETH_FULFILL_GAS_FLOOR. The miner marks fulfilled with this hash like any delivery; the
+                # validator adjudicates delivered-vs-refused from the receipt.
+                gas = ETH_FULFILL_GAS_FLOOR
+                bt.logging.warning(
+                    f'{to_address} refuses {prefix} transfers — broadcasting a floor-gas attempt as refusal evidence'
+                )
 
             nonce = int(self.chain.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
 
@@ -307,6 +321,42 @@ class EvmCoin(EvmAsset):
         span = min(120, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         probes = ['latest'] + [hex(max(0, tip - span // d)) for d in (1, 2)]
         return any((self.chain.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
+
+    def cancel_evidence(
+        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+    ) -> Optional[int]:
+        """No-fault-cancel evidence for native EVM: the miner's own delivery tx reverted despite a
+        correct, well-gassed attempt — sound proof the destination refused, strong enough to TERMINATE
+        the swap with no slash (unlike ``delivery_refused``, a getCode deferral hint). Returns
+        ``CANCEL_REASON_EVM_REVERT`` only when the recorded tx (1) reverted (receipt status 0), (2) came
+        FROM the committed miner sender, (3) paid the pinned dest, (4) carried >= the required value, and
+        (5) supplied a gas LIMIT >= ``ETH_FULFILL_GAS_FLOOR``. Clauses (2) and (5) are load-bearing: (5)
+        stops a miner under-gassing to fake a refusal, and (2) stops a miner pointing at a reverted tx
+        sent from a throwaway address (against a dest that reverts unless ``msg.sender`` is the committed
+        miner) to claim refusal without ever attempting delivery from its own address. Deliberately NOT
+        ``gasUsed < gas`` (a hostile contract can burn all gas to mimic OOG). ``None`` on anything short
+        of that proof or on RPC trouble — the caller then keeps waiting, never slashes."""
+        if not tx_hash:
+            return None
+        try:
+            tx = self.chain.eth_rpc('eth_getTransactionByHash', [tx_hash], null_needs_quorum=True)
+            receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash]) if tx else None
+        except Exception:
+            return None
+        if not tx or not receipt:
+            return None
+        norm = self.chain.normalize_address
+        if int(receipt.get('status') or '0x0', 16) != 0:
+            return None  # succeeded (or unreadable status) — a delivered tx is not a refusal
+        if from_address and norm(tx.get('from') or '') != norm(from_address):
+            return None  # not the committed miner's own attempt — could be a throwaway-sender ruse
+        if norm(tx.get('to') or '') != norm(address):
+            return None  # paid the wrong destination
+        if int(tx.get('value') or '0x0', 16) < int(amount):
+            return None  # under-paid — not a good-faith attempt
+        if int(tx.get('gas') or '0x0', 16) < ETH_FULFILL_GAS_FLOOR:
+            return None  # under-gassed — could be manufactured; never accept as refusal
+        return CANCEL_REASON_EVM_REVERT
 
     # Plain JSON-RPC has no address→tx index (Esplora/getSignaturesForAddress have one), so the
     # deposit scanner follows the head incrementally like the TAO provider: each call scans only
