@@ -408,8 +408,9 @@ CHAIN_POL = ChainDefinition(
     # whole unfinalized span. 100 blocks = 150s real, >=20x the deepest lag seen, and inside the
     # program's 600s fulfillment grace.
     min_confirmations=100,
-    # Rate sanity floor, not an economic guarantee: 0.05 POL covers a 21k-gas transfer below
-    # ~2380 gwei, ~9x the 230-260 gwei base fee Polygon has held for weeks. Miners price real gas.
+    # Rate sanity floor, not an economic guarantee: 0.05 POL covers a 21k-gas transfer up to
+    # ~2380 gwei — 8.4x the ~282 gwei a transfer actually costs today (249 base + 30 tip), and
+    # 4.5x the ~534 gwei ceiling a send authorises (2x base + tip). Miners price real gas.
     min_onchain_amount=50_000_000_000_000_000,
     # Producer-stamped timestamps vs the hub clock, as on Arbitrum — and under VEBloP a single
     # elected producer stamps a whole span, so its clock offset never averages out across proposers.

@@ -13,7 +13,7 @@ from eth_account import Account
 
 from allways.assets import evm_coin
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.evm import POLYGON, EvmChain
+from allways.assets.evm import FALLBACK_PRIORITY_FEE_WEI, POLYGON, EvmChain, EvmRpcError
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
 from allways.assets.pol import Pol
 from allways.chains import CHAIN_POL, get_chain_def
@@ -27,14 +27,36 @@ DELEGATION = '0xef0100' + '11' * 20  # EIP-7702 delegation indicator
 MINED_BLOCK = 0xF4240  # 1_000_000
 CONFIRMED_TIP = MINED_BLOCK + CHAIN_POL.min_confirmations - 1
 
+# Polygon's real fee scale, not Ethereum's. A 1-gwei fixture would pin a transaction Bor
+# rejects at intake (25 gwei tip floor), so the fee values are the hazard, not scenery.
+BASE_FEE = 250_000_000_000  # 230-260 gwei sustained on mainnet
+TIP_FEE = 30_000_000_000  # eth_maxPriorityFeePerGas suggestion
 SEND_RESPONSES = {
     'eth_blockNumber': hex(100),
-    'eth_getBlockByNumber': {'baseFeePerGas': hex(10**9)},
-    'eth_maxPriorityFeePerGas': hex(10**9),
+    'eth_getBlockByNumber': {'baseFeePerGas': hex(BASE_FEE)},
+    'eth_maxPriorityFeePerGas': hex(TIP_FEE),
     'eth_getTransactionCount': '0x0',
     'eth_getBalance': hex(10**19),
     'eth_estimateGas': hex(21_000),
 }
+
+
+def signed_transfer(tip_fee):
+    """The exact payload send_amount must produce for a 0.01 POL transfer at the stubbed fees."""
+    signed = Account.sign_transaction(
+        {
+            'chainId': 137,
+            'nonce': 0,
+            'to': RECIPIENT,
+            'value': 10**16,
+            'gas': 25_200,
+            'maxFeePerGas': 2 * BASE_FEE + tip_fee,
+            'maxPriorityFeePerGas': tip_fee,
+        },
+        TEST_KEY,
+    )
+    raw = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
+    return raw.hex().removeprefix('0x')
 
 
 @pytest.fixture
@@ -51,6 +73,10 @@ def frozen_now(monkeypatch):
     now = 1_800_000_000
     monkeypatch.setattr(evm_coin.time, 'time', lambda: now)
     return now
+
+
+def _method_gone(params):
+    raise EvmRpcError('the method eth_maxPriorityFeePerGas does not exist', {'code': -32601})
 
 
 def rpc_stub(provider, responses: dict):
@@ -206,21 +232,31 @@ class TestSending:
 
         rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction=capture))
         assert provider.send_amount(RECIPIENT, 10**16) == (TX, 0)
+        assert broadcast['raw'].removeprefix('0x') == signed_transfer(TIP_FEE)
 
-        expected = Account.sign_transaction(
-            {
-                'chainId': 137,
-                'nonce': 0,
-                'to': RECIPIENT,
-                'value': 10**16,
-                'gas': 25_200,
-                'maxFeePerGas': 3 * 10**9,
-                'maxPriorityFeePerGas': 10**9,
-            },
-            TEST_KEY,
+    @pytest.mark.parametrize(
+        'fee_answer',
+        [_method_gone, hex(FALLBACK_PRIORITY_FEE_WEI)],
+        ids=['fee-method-absent', 'endpoint-suggests-below-the-floor'],
+    )
+    def test_tip_is_clamped_to_polygons_protocol_floor(self, provider, fee_answer):
+        # Bor refuses a tx under 25 gwei at intake, so the generic 1 gwei fallback signs something
+        # no Polygon node accepts. The failure is deterministic, not transient: no broadcast, no
+        # sent-cache entry, an identical retry next pass, and every live pol swap rides to a slash.
+        # An operator-supplied POL_RPC_URLS endpoint that omits the fee method reaches it directly.
+        assert FALLBACK_PRIORITY_FEE_WEI < POLYGON.min_priority_fee_wei
+        broadcast = {}
+
+        def capture(params):
+            broadcast['raw'] = params[0]
+            return TX
+
+        rpc_stub(
+            provider,
+            dict(SEND_RESPONSES, eth_maxPriorityFeePerGas=fee_answer, eth_sendRawTransaction=capture),
         )
-        raw = getattr(expected, 'raw_transaction', None) or getattr(expected, 'rawTransaction')
-        assert broadcast['raw'].removeprefix('0x') == raw.hex().removeprefix('0x')
+        assert provider.send_amount(RECIPIENT, 10**16) == (TX, 0)
+        assert broadcast['raw'].removeprefix('0x') == signed_transfer(POLYGON.min_priority_fee_wei)
 
     def test_no_key_refused(self, provider, monkeypatch):
         monkeypatch.delenv('POL_PRIVATE_KEY', raising=False)
