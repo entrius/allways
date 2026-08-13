@@ -417,6 +417,39 @@ CHAIN_POL = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_POLUSDC = ChainDefinition(
+    id='polusdc',
+    name='USDC (Polygon)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Polygon's prefix, shared with CHAIN_POL: one POL_NETWORK / POL_RPC_URLS / POL_PRIVATE_KEY
+    # serves both assets, so they can never disagree about which Polygon they are on.
+    env_prefix='POL',
+    host_chain='polygon',
+    # CHAIN_POL already declares the POL_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    # CHAIN_POL's clock and finality, deliberately identical — two assets on one chain must not
+    # disagree about its reorg depth. 100 blocks = 150s of real 1.5s blocks, inside the program's
+    # 600s default fulfillment grace. Pinned against CHAIN_POL by test, so neither can drift.
+    seconds_per_block=1,
+    min_confirmations=100,
+    # Rate sanity floor, not an economic guarantee: 0.01 USDC covers FiatToken's measured 79k-gas
+    # transfer below ~1700 gwei — ~7x the 230-260 gwei base fee Polygon has held for weeks. Priced
+    # on the COLD recipient (79k; a warm one is 61k), since a payout goes to a user's address that
+    # usually holds no USDC yet. Far under ethusdc's 5 USDC because Polygon gas costs cents, far
+    # over arbusdc's unit floor because it is not free either.
+    min_onchain_amount=10_000,
+    # CHAIN_POL's clock, for the same reason its finality is: what this absorbs is hub-vs-spoke
+    # skew, and two assets on one chain disagreeing about that chain's clock would be indefensible.
+    replay_grace_secs=60,
+    # Circle-verified native USDC on Polygon PoS (developers.circle.com, 2026-08-12) — NOT the
+    # bridged USDC.e at 0x2791Bca1f2de4661eD88A30C99A7a9449Aa84174, which also answers
+    # symbol() == 'USDC' and the FiatToken freeze surface, so only this pin tells them apart.
+    asset_locator='0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -433,6 +466,7 @@ SUPPORTED_CHAINS = {
     'uni': CHAIN_UNI,
     'qnt': CHAIN_QNT,
     'pol': CHAIN_POL,
+    'polusdc': CHAIN_POLUSDC,
 }
 
 

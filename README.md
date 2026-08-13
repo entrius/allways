@@ -15,6 +15,7 @@ Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbit
 Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, and SOL ↔ UNI (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, and QNT — plus SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
 Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, and SOL ↔ POL (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
+Currently live with SOL ↔ BTC, SOL ↔ TAO, SOL ↔ ETH, SOL ↔ USDC-on-Arbitrum, SOL ↔ HYPE, SOL ↔ BNB, SOL ↔ AVAX, SOL ↔ USDC-on-Base, SOL ↔ USDC-on-Ethereum, SOL ↔ POL, and SOL ↔ USDC-on-Polygon (hub-and-spoke: every pair has a SOL leg). Designed to scale to any verifiable asset.
 
 ## Miner Risk Disclaimer
 
