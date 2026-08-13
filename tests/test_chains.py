@@ -4,6 +4,8 @@ import re
 
 import pytest
 
+from allways.assets import ASSET_REGISTRY
+from allways.assets.erc20 import Erc20
 from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
@@ -87,6 +89,13 @@ class TestGetChain:
             assert len(ids) == 1, f'{host} needs exactly one networks-declaring row, found {ids}'
         for prefix, ids in owners.items():
             assert len(ids) == 1, f'{prefix}_NETWORK is declared by more than one row: {ids}'
+
+    def test_every_token_row_declares_its_refusal_checks(self):
+        """Declaring is what keeps a token's miners slashable. () claims no freeze surface;
+        only None is undeclared, and a token row must never be None."""
+        for spec in ASSET_REGISTRY:
+            declared = get_chain_def(spec.chain_id).refusal_checks is not None
+            assert declared is issubclass(spec.cls, Erc20), spec.chain_id
 
     def test_only_self_hosted_assets_lack_a_host_chain(self):
         for chain_id in ('btc', 'tao', 'sol'):
