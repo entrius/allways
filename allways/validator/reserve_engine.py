@@ -174,13 +174,11 @@ def reserve_on_behalf(
     provider = providers.get(to_chain)
     miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
     if provider is not None:
+        # Validity only: NOT a deliverability prediction. Reserve-time deliverability isn't a security
+        # boundary (a dest can pass here then revert later via 7702/conditional code); the sound check is
+        # the delivery-time reverted-tx proof (cancel_swap). Fat-finger UX belongs in the client app.
         if not provider.chain.is_valid_address(user_to_addr):
             return ReserveResult(False, f'destination is not a valid {to_chain} address')
-        # Simulate delivery from the miner's committed dest-side sender: confirm pins
-        # sender == miner_to_addr, so a dest that refuses only THAT sender must bounce here too.
-        miner_to_addr = getattr(miner_quote, 'miner_to_addr', '') if miner_quote else ''
-        if not provider.can_deliver_to(user_to_addr, amts.to_amount, from_address=miner_to_addr or None):
-            return ReserveResult(False, 'destination address rejects incoming transfers')
     # Same gate, source side (T18): the miner's receive address must accept the user's funds —
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)
