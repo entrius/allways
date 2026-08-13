@@ -188,3 +188,28 @@ def test_pda_derivation():
     # backings never collide, and the round shares the same composite target.
     assert pdas.bond_attestation_pda(miner, 'tao') != pdas.bond_attestation_pda(miner, 'eth')
     assert isinstance(pdas.attestation_round_pda(miner, 'tao'), Pubkey)
+
+
+def test_swap_pda_accepts_hex_string_forms():
+    # The swap_key circulates as bytes on-chain but as a hex string in the CLI, API, and logs
+    # (F-12) — every surface form must derive the same PDA, so a pasted key just works.
+    key = bytes(range(32))
+    from_bytes = pdas.swap_pda(key)
+    assert pdas.swap_pda(key.hex()) == from_bytes
+    assert pdas.swap_pda('0x' + key.hex()) == from_bytes
+
+
+def test_get_swap_accepts_hex_string(monkeypatch):
+    # get_swap is the reader users actually hit with a pasted hex key — pin the boundary end-to-end.
+    from unittest.mock import MagicMock
+
+    from allways.solana.client import AllwaysSolanaClient
+
+    client = AllwaysSolanaClient.__new__(AllwaysSolanaClient)
+    client.program_id = pdas.resolve_program_id()
+    client.rpc = MagicMock()
+    client.rpc.get_account_info.return_value = None
+
+    key = bytes(range(32))
+    assert client.get_swap('0x' + key.hex()) is None  # no TypeError — reaches the RPC read
+    client.rpc.get_account_info.assert_called_once_with(pdas.swap_pda(key, client.program_id))

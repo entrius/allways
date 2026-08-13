@@ -105,9 +105,9 @@ CHAIN_ETH = ChainDefinition(
     # Rate sanity floor, not an economic guarantee: 0.00005 ETH covers a 21k-gas transfer
     # fee only below ~2.4 gwei — miners price real gas into their quotes.
     min_onchain_amount=50_000_000_000_000,
-    # Timestamps must strictly exceed the parent's, so a mined deposit can never stamp
-    # earlier than a reservation created before it — no BTC-style median-time lag.
-    replay_grace_secs=0,
+    # Monotonic slot timestamps don't help here: the freshness floor is stamped by the hub
+    # clock, so hub-vs-spoke skew needs the same modest allowance as the other EVM chains.
+    replay_grace_secs=60,
 )
 
 CHAIN_ARBUSDC = ChainDefinition(
@@ -251,7 +251,7 @@ CHAIN_ETHUSDC = ChainDefinition(
     min_onchain_amount=5_000_000,
     # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
     # one chain disagreeing about that chain's clock would be indefensible.
-    replay_grace_secs=0,
+    replay_grace_secs=60,
     # Circle-verified native USDC on Ethereum (developers.circle.com, 2026-08-11).
     asset_locator='0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
 )

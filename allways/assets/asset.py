@@ -185,8 +185,12 @@ class Asset(ABC):
     @abstractmethod
     def get_balance(self, address: str) -> int: ...
 
-    def can_deliver_to(self, address: str, amount: int) -> bool:
-        """Reserve-time gate: False only on positive evidence the destination cannot receive."""
+    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
+        """Reserve-time gate: False only on positive evidence the destination cannot receive.
+
+        ``from_address`` is the committed sender the delivery would come from, when the caller
+        knows it — providers that simulate delivery should simulate from it, since a hostile
+        dest can accept from one sender and refuse another."""
         return True
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:

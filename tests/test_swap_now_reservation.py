@@ -485,7 +485,7 @@ class _Gate:
         self.checked = []
         self.chain = types.SimpleNamespace(is_valid_address=lambda addr: addr not in set(malformed))
 
-    def can_deliver_to(self, addr, amount):
+    def can_deliver_to(self, addr, amount, from_address=None):
         self.checked.append(addr)
         return addr not in self.reject
 

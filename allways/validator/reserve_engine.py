@@ -172,16 +172,19 @@ def reserve_on_behalf(
     # later. Format first: it's offline and a malformed address can never be delivered to.
     providers = getattr(validator, 'axon_assets', {})
     provider = providers.get(to_chain)
+    miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
     if provider is not None:
         if not provider.chain.is_valid_address(user_to_addr):
             return ReserveResult(False, f'destination is not a valid {to_chain} address')
-        if not provider.can_deliver_to(user_to_addr, amts.to_amount):
+        # Simulate delivery from the miner's committed dest-side sender: confirm pins
+        # sender == miner_to_addr, so a dest that refuses only THAT sender must bounce here too.
+        miner_to_addr = getattr(miner_quote, 'miner_to_addr', '') if miner_quote else ''
+        if not provider.can_deliver_to(user_to_addr, amts.to_amount, from_address=miner_to_addr or None):
             return ReserveResult(False, 'destination address rejects incoming transfers')
     # Same gate, source side (T18): the miner's receive address must accept the user's funds —
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)
     if src_provider is not None:
-        miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
         miner_from_addr = getattr(miner_quote, 'miner_from_addr', '') if miner_quote else ''
         if miner_from_addr and (
             not src_provider.chain.is_valid_address(miner_from_addr)

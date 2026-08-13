@@ -251,8 +251,9 @@ class Sol(Asset, Chain):
             bt.logging.error(f'SOL get_balance failed for {address}: {e}')
             return 0
 
-    def can_deliver_to(self, address: str, amount: int) -> bool:
-        """Reserve-time gate: bounce a reserved-key destination before any funds move."""
+    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
+        """Reserve-time gate: bounce a reserved-key destination before any funds move.
+        System-account credits are sender-agnostic, so ``from_address`` plays no part here."""
         return address not in RESERVED_ACCOUNTS
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:

@@ -425,10 +425,11 @@ class Erc20(EvmAsset):
 
     # --- Delivery gates (F3: blacklist + pause, deliberately no getCode) ---
 
-    def can_deliver_to(self, address: str, amount: int) -> bool:
+    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: the issuer can freeze an address (blacklist) or the whole token
         (pause) — both make delivery impossible regardless of dest code and neither is the
-        miner's fault, so they must bounce the reservation. Fails open on RPC trouble."""
+        miner's fault, so they must bounce the reservation. Fails open on RPC trouble.
+        ``from_address`` is unused: FiatToken transfers gate on issuer state, not dest code."""
         try:
             return not self._eth_call(SEL_IS_BLACKLISTED, address) and not self._eth_call(SEL_PAUSED)
         except Exception:
