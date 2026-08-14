@@ -7,8 +7,9 @@ this index persists them into the ``state_store`` event tables, attributing each
 its bound Bittensor hotkey at write time (B3.2). The crown math is unchanged — it consumes the same
 ``get_*_at`` / ``get_*_in_range`` shapes ``ContractEventWatcher`` exposed. ``SwapCompleted`` additionally
 persists its realized legs into ``clearing_rates``, the per-swap realized-volume history the dashboard and
-treasury reporting read. ``SwapCompleted``/``SwapTimedOut`` also record the swap's terminal outcome into
-``swap_outcomes``, the seam's post-close completed-vs-slashed truth (terminal swap PDAs are closed on-chain).
+treasury reporting read. ``SwapCompleted``/``SwapTimedOut``/``SwapCancelled`` also record the swap's terminal outcome into
+``swap_outcomes``, the seam's post-close completed-vs-slashed-vs-cancelled truth (terminal swap PDAs are
+closed on-chain).
 
 The axis is unix ``blockTime`` seconds (the ``block_num``/``block`` columns are repurposed), not substrate
 blocks. Reservation + swap lifecycle drive a per-miner ``MinerActivity`` machine (D4): ``PoolResolved``
@@ -31,21 +32,25 @@ from allways.utils.rate import quantize_rate_fixed
 from allways.validator.state_store import ValidatorStateStore
 
 # Swap-lifecycle events → MinerActivity edges. A reserved miner enters FULFILLING on
-# SwapInitiated and returns to AVAILABLE on completion/timeout (see classes.MinerActivity).
+# SwapInitiated and returns to AVAILABLE on any terminal: completion, timeout, or no-fault
+# cancel — a missing terminal edge strands the hub in FULFILLING (crownless) indefinitely.
 _FULFILL_TRANSITIONS = {
     'SwapInitiated': ActivityTransition.FULFILL_START,
     'SwapCompleted': ActivityTransition.FULFILL_END,
     'SwapTimedOut': ActivityTransition.FULFILL_END,
+    'SwapCancelled': ActivityTransition.FULFILL_END,
 }
 
 # Terminal events → per-swap outcome persisted for the seam (reserve_engine._swap_stage):
 # terminal swap PDAs close on-chain, so this index is what disambiguates a slash from a
 # completion once the account is gone. ``expired`` is a claim reaped stale before attestation
 # (close_stale_claim closes the Swap PDA) — the user never completed, so it's terminal too.
+# ``cancelled`` is the no-fault cancel_swap terminal (dest provably unpayable; no slash).
 _OUTCOME_BY_EVENT = {
     'SwapCompleted': 'completed',
     'SwapTimedOut': 'timed_out',
     'StaleClaimClosed': 'expired',
+    'SwapCancelled': 'cancelled',
 }
 
 

@@ -25,7 +25,7 @@ class ActivityTransition(IntEnum):
     which opens before its initiation, and a reservation lapse applies last so an
     in-flight swap survives its synthetic ``RESERVE_EXPIRE``."""
 
-    FULFILL_END = 0  # SwapCompleted / SwapTimedOut
+    FULFILL_END = 0  # SwapCompleted / SwapTimedOut / SwapCancelled
     RESERVE_START = 1  # PoolResolved
     FULFILL_START = 2  # SwapInitiated
     RESERVE_EXPIRE = 3  # synthetic, at reserve block_time + reservation_ttl_secs
