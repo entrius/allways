@@ -64,6 +64,9 @@ class FakeRepo:
     def delete_crown_in_range(self, from_chain, to_chain, backing, lo, hi, commit=False):
         self.conn._maybe_fail()
 
+    def trim_crown_tails(self, from_chain, to_chain, backing, at_ts, commit=False):
+        self.conn._maybe_fail()
+
     def set_sync_cursor(self, key, value, commit=False):
         self.conn._maybe_fail()
 
@@ -182,3 +185,28 @@ def test_halt_flush_clears_live_score_tip(monkeypatch):
     result = storage.flush_halt_window(directions=[('sol', 'btc', 'sol')], window_start=0, window_end=100, max_ts=100)
     assert result.success
     assert calls == [[]]
+
+
+def test_scoring_flush_trims_pre_window_tails(monkeypatch):
+    """flush_scoring_window clamps intervals that run into the window from
+    before its start. The started_at-keyed wipe can't reach them, and a
+    surviving tail overlaps the recomputed rows and double-counts crown time
+    (seen as /crown/time shareOfWindow > 1 after a validator restart, whose
+    initial round anchors behind what the old process last flushed)."""
+    conn = FakeConnection()
+    storage = make_storage(monkeypatch, [conn])
+    calls = []
+    storage.repo.trim_crown_tails = lambda f, t, b, at, commit=False: calls.append(('trim', f, t, b, at))
+    storage.repo.delete_crown_in_range = lambda f, t, b, lo, hi, commit=False: calls.append(('delete', f, t, b, lo, hi))
+    storage.repo.store_crown_holders_bulk = lambda rows, commit=False: len(rows)
+    storage.repo.store_miner_scores_bulk = lambda rows, commit=False: len(rows)
+    lane = ('sol', 'btc', 'sol')
+    result = storage.flush_scoring_window(
+        crown_rows_by_direction={lane: []},
+        crown_window_bounds_by_direction={lane: (1_000, 4_600)},
+        miner_score_rows=[],
+        crown_holders_max_ts=4_600,
+    )
+    assert result.success
+    # Trim runs before the wipe, clamped at the same window edge the wipe keys on.
+    assert calls == [('trim', 'sol', 'btc', 'sol', 1_000), ('delete', 'sol', 'btc', 'sol', 1_000, 4_600)]

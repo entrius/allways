@@ -157,6 +157,7 @@ class DatabaseStorage:
                 for direction, rows in crown_rows_by_direction.items():
                     from_chain, to_chain, backing = direction
                     lo, hi = crown_window_bounds_by_direction[direction]
+                    self.repo.trim_crown_tails(from_chain, to_chain, backing, lo, commit=False)
                     self.repo.delete_crown_in_range(from_chain, to_chain, backing, lo, hi, commit=False)
                     crown_inserted += self.repo.store_crown_holders_bulk(rows, commit=False)
                 result.stored_counts['crown_holders'] = crown_inserted
@@ -205,6 +206,7 @@ class DatabaseStorage:
 
             with self.db_connection.pipeline():
                 for from_chain, to_chain, backing in directions:
+                    self.repo.trim_crown_tails(from_chain, to_chain, backing, window_start, commit=False)
                     self.repo.delete_crown_in_range(
                         from_chain, to_chain, backing, window_start, window_end, commit=False
                     )

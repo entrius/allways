@@ -18,6 +18,7 @@ from .queries import (
     DELETE_CURRENT_CROWN_BY_DIRECTION,
     DELETE_CURRENT_MINER_SCORES,
     SET_SYNC_CURSOR,
+    TRIM_CROWN_TAILS_AT,
 )
 
 
@@ -66,6 +67,23 @@ class Repository(BaseRepository):
         return self.execute_command(
             DELETE_CROWN_IN_RANGE,
             (from_chain, to_chain, backing, lo_ts, hi_ts),
+            commit=commit,
+        )
+
+    def trim_crown_tails(
+        self,
+        from_chain: str,
+        to_chain: str,
+        backing: str,
+        at_ts: int,
+        commit: bool = True,
+    ) -> bool:
+        """Clamp intervals that started before ``at_ts`` but run past it to end
+        at ``at_ts`` — they would overlap (and double-count against) the window
+        being rewritten from ``at_ts`` on."""
+        return self.execute_command(
+            TRIM_CROWN_TAILS_AT,
+            (at_ts, from_chain, to_chain, backing, at_ts, at_ts),
             commit=commit,
         )
 
