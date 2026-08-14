@@ -150,11 +150,6 @@ pub fn handler(
             .release_reserved(bit, crate::constants::required_collateral(collateral_amount));
         ctx.accounts.miner_state.successful_swaps =
             ctx.accounts.miner_state.successful_swaps.saturating_add(1);
-        // Strike decay: a completed swap forgives one prior failure, so a transient fault (a dead
-        // Esplora, a slow chain) can't permanently strike-out an otherwise-healthy miner. The
-        // strike gate still bites a miner that fails faster than it succeeds.
-        ctx.accounts.miner_state.failed_swaps =
-            ctx.accounts.miner_state.failed_swaps.saturating_sub(1);
 
         // Accrue the miner's realized per-direction track record (count saturates; volume totals use
         // checked_add so a saturated sum can never silently corrupt the VWAP the validator reads).
