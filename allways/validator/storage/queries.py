@@ -22,6 +22,21 @@ ON CONFLICT (started_at, from_chain, to_chain, backing, hotkey)
 DO UPDATE SET ended_at = EXCLUDED.ended_at, credit = EXCLUDED.credit, rate = EXCLUDED.rate
 """
 
+# Pre-window tail trim: the wipe above keys on started_at, so an interval
+# opened BEFORE the window that is still running into it survives the delete
+# and overlaps the recomputed rows — double-counting that lane's crown time
+# for every reader. Happens whenever the window anchor regresses behind
+# already-flushed rows, e.g. a restarted validator's initial round
+# (last_scored_time boots to now - SCORING_WINDOW_SECS, not to what the old
+# process last flushed). The recomputed window is authoritative, so clamp
+# such tails to its start; the pre-window portion stays as flushed.
+TRIM_CROWN_TAILS_AT = """
+UPDATE crown_holders
+SET ended_at = %s
+WHERE from_chain = %s AND to_chain = %s AND backing = %s
+  AND started_at < %s AND ended_at > %s
+"""
+
 # sync_cursor: bookkeeping watermarks. The validator advances these in the
 # same transaction as the data they describe, so a partial write never leaves
 # the cursor ahead of (or behind) the rows.
