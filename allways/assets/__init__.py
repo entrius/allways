@@ -11,7 +11,7 @@ from allways.assets.bnb import Bnb
 from allways.assets.btc import Bitcoin
 from allways.assets.chain import Chain
 from allways.assets.cro import Cro
-from allways.assets.erc20 import Erc20
+from allways.assets.erc20 import Erc20, MissingTestnetDeployment
 from allways.assets.eth import Ether
 from allways.assets.ethusdc import EthUsdc
 from allways.assets.evm_coin import EvmCoin
@@ -116,6 +116,13 @@ def create_assets(
             if check:
                 provider.check_connection(require_send=require_send)
             providers[chain_id] = provider
+        except MissingTestnetDeployment as e:
+            # A spoke with no deployment on this test network can't exist here at all, so it
+            # disables rather than failing the boot. A miner that quotes the pair (explicitly
+            # in required_chains) still fails hard — it must not advertise what it can't serve.
+            if check and required_chains is not None and chain_id in required_chains:
+                raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
+            bt.logging.warning(f'{cls.__name__} disabled on this network: {e} — {chain_id} pairs are unavailable here')
         except Exception as e:
             if check and required:
                 raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e

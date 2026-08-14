@@ -137,8 +137,8 @@ class TestSharedEnvIdentity:
 class TestNoTestnetDeployment:
     """QNT is issuer-deployed on Ethereum only. Until a project-deployed test token is pinned —
     immutable AND with no pause or blacklist, or the row's declaration stops being true on
-    testnet — a testnet provider cannot be built, and validators build every provider at boot,
-    so this row must not reach a testnet validator's LAUNCH_SPOKES."""
+    testnet — a testnet provider cannot be built. create_assets disables the spoke on testnet
+    (MissingTestnetDeployment) so a testnet validator still boots without it."""
 
     def test_sepolia_has_no_pinned_contract(self, monkeypatch):
         assert 'qnt' not in TESTNET_TOKEN_CONTRACTS

@@ -54,14 +54,23 @@ TESTNET_TOKEN_CONTRACTS = {
 }
 
 
+class MissingTestnetDeployment(ValueError):
+    """The token has no pinned deployment on the configured test network (issuer-deployed
+    assets like QNT/PAXG often exist on mainnet only). Distinct so create_assets can disable
+    the spoke on testnet instead of failing the whole neuron's boot."""
+
+
 def _token_contract(chain_def: ChainDefinition, network: str) -> str:
     var = f'{chain_def.id.upper()}_TOKEN_CONTRACT'
     override = os.environ.get(var)
     if override:
         return override
-    contract = (
-        chain_def.asset_locator if network == 'mainnet' else TESTNET_TOKEN_CONTRACTS.get(chain_def.id, {}).get(network)
-    )
+    if network != 'mainnet':
+        contract = TESTNET_TOKEN_CONTRACTS.get(chain_def.id, {}).get(network)
+        if not contract:
+            raise MissingTestnetDeployment(f'No {chain_def.id} token contract for network {network!r} — set {var}')
+        return contract
+    contract = chain_def.asset_locator
     if not contract:
         raise ValueError(f'No {chain_def.id} token contract for network {network!r} — set {var}')
     return contract
