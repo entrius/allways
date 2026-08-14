@@ -114,11 +114,23 @@ class TestIngestActivity:
         idx.ingest(
             [
                 rec(
-                    'PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user',
-                    requests=1, collateral_chain='tao',
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='tao',
                 ),
                 rec('SwapInitiated', miner='pk_a', block_time=250, collateral_chain='tao'),
-                rec('SwapCancelled', miner='pk_a', block_time=400, collateral_chain='tao', collateral_amount=10, reason=0),
+                rec(
+                    'SwapCancelled',
+                    miner='pk_a',
+                    block_time=400,
+                    collateral_chain='tao',
+                    collateral_amount=10,
+                    reason=0,
+                ),
             ],
             ATTR,
         )
@@ -441,7 +453,17 @@ class TestIngestSwapOutcomes:
         idx = SolanaEventIndex(store)
         key = bytes(range(32))
         idx.ingest(
-            [rec('SwapCancelled', miner='pk_a', block_time=400, swap_key=key, collateral_chain='sol', collateral_amount=10, reason=0)],
+            [
+                rec(
+                    'SwapCancelled',
+                    miner='pk_a',
+                    block_time=400,
+                    swap_key=key,
+                    collateral_chain='sol',
+                    collateral_amount=10,
+                    reason=0,
+                )
+            ],
             ATTR,
         )
         assert store.get_swap_outcome(key.hex()) == 'cancelled'
