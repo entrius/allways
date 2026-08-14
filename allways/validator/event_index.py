@@ -217,16 +217,24 @@ class SolanaEventIndex:
             return None
         return ttl if ttl > 0 else None
 
-    def reconcile_live_state(self, live_states: Dict[str, object], now: int) -> None:
+    def reconcile_live_state(
+        self, live_states: Dict[str, object], now: int, live_bonds: Optional[Dict[str, int]] = None
+    ) -> None:
         """Scoring-round backstop for lost events (unbound-at-ingest drops, abandoned unstamped
         txs, RPC gaps): diff each bound miner's live chain state against the event-derived view
         and write corrective events stamped ``now``. Corrections apply from now on — crown
         already credited over a divergent stretch stands, bounding the error at one round.
         A miner is corrected only while its event stream has been quiet for
-        ``RECONCILE_QUIET_SECS``, so a stale live read never fights an in-flight real event."""
+        ``RECONCILE_QUIET_SECS``, so a stale live read never fights an in-flight real event.
+
+        ``live_bonds`` is the tao purse's sibling to ``ms.collateral``: ``{hotkey: effective
+        tao collateral}`` (0 for an unlocked bond, matching the ``BondAttested`` ingest). It
+        exists because the tao stream has no live-read backstop of its own — a lost
+        ``BondAttested`` (or, before #-this, a mis-keyed prune deleting the tao anchor) leaves
+        the purse stuck at 0 and silently drops the miner off every tao lane's crown. Absent
+        (``None``) it is skipped, preserving the sol-only behaviour for callers that don't pass it."""
         derived_active = self.state_store.get_active_state_at(now)
-        # ms.collateral is the SOL local purse; reconcile only that stream (the TAO bond is fed by
-        # BondAttested, not this live read) so a tao-backing row can't be mistaken for a divergence.
+        # ms.collateral is the SOL local purse; the TAO bond rides ``live_bonds`` below.
         derived_collateral = self.state_store.get_collaterals_at(now, backing='sol')
         quiet_start = now - RECONCILE_QUIET_SECS
         recent_active = {e['hotkey'] for e in self.state_store.get_active_events_in_range(quiet_start, now)}
@@ -244,6 +252,17 @@ class SolanaEventIndex:
                 bt.logging.warning(
                     f'reconcile {hotkey[:8]}: event-derived collateral ≠ chain, corrected to {live_collateral}'
                 )
+        if live_bonds is not None:
+            derived_tao = self.state_store.get_collaterals_at(now, backing='tao')
+            recent_tao = {
+                e['hotkey'] for e in self.state_store.get_collateral_events_in_range(quiet_start, now, backing='tao')
+            }
+            for hotkey, bond in live_bonds.items():
+                if hotkey not in recent_tao and derived_tao.get(hotkey) != int(bond):
+                    self.state_store.insert_collateral_event(now, hotkey, int(bond), backing='tao')
+                    bt.logging.warning(
+                        f'reconcile {hotkey[:8]}: event-derived tao collateral ≠ chain, corrected to {int(bond)}'
+                    )
 
     def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> None:
         """Rate-liveness backstop, the ``reconcile_live_state`` sibling for the rate stream.

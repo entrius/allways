@@ -219,6 +219,25 @@ class TestPrune:
         assert store.get_latest_rate_before('hk1', 'sol', 'tao', block=10_000, collateral_chain='sol') == (0.360, 200)
         store.close()
 
+    def test_prune_collateral_preserves_anchor_per_backing(self, tmp_path: Path):
+        """A dual-backing miner keeps BOTH purses' collateral anchors — the
+        prune key includes backing. Regression: grouping by hotkey alone kept
+        only the globally-newest row, so a fresher sol row deleted the tao
+        anchor, get_collaterals_at(backing='tao') found nothing, and the miner
+        dropped off every tao lane's crown (observed live: uid 12's tao purse,
+        0.85 τ bond attested on-chain yet no tao collateral row in the store)."""
+        store = make_store(tmp_path)
+        # tao bond attested first, sol purse re-posted later — both older than
+        # the cutoff, so each survives only as its own purse's anchor.
+        store.insert_collateral_event(100, 'hk1', 850_000_000, backing='tao')
+        store.insert_collateral_event(200, 'hk1', 2_000_000_000, backing='sol')
+
+        store.prune_collateral_events(cutoff_block=5_000)
+
+        assert store.get_collaterals_at(10_000, backing='tao') == {'hk1': 850_000_000}
+        assert store.get_collaterals_at(10_000, backing='sol') == {'hk1': 2_000_000_000}
+        store.close()
+
 
 class TestConcurrency:
     def test_concurrent_writes_threadsafe(self, tmp_path: Path):

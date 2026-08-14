@@ -782,15 +782,21 @@ class ValidatorStateStore:
 
     def prune_collateral_events(self, cutoff_block: int) -> None:
         """Drop collateral events older than ``cutoff_block``, preserving the
-        latest row per hotkey as a reconstruction anchor (mirrors
-        ``prune_active_events``)."""
+        latest row per ``(hotkey, backing)`` as a reconstruction anchor.
+
+        The anchor MUST be keyed by backing: a dual-backing miner posts one
+        collateral stream per purse (sol local, tao bond), and grouping by
+        hotkey alone kept only the globally-newest row — so a fresher sol row
+        silently deleted the tao anchor, ``get_collaterals_at(backing='tao')``
+        found nothing, and the miner dropped off every tao lane's crown. Same
+        per-lane keying the rate prune uses (#668)."""
         if cutoff_block <= 0:
             return
         self._execute(
             """
             DELETE FROM collateral_events
             WHERE block_num < ?
-              AND id NOT IN (SELECT MAX(id) FROM collateral_events GROUP BY hotkey)
+              AND id NOT IN (SELECT MAX(id) FROM collateral_events GROUP BY hotkey, backing)
             """,
             (cutoff_block,),
         )
