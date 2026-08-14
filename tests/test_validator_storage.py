@@ -196,12 +196,8 @@ def test_scoring_flush_trims_pre_window_tails(monkeypatch):
     conn = FakeConnection()
     storage = make_storage(monkeypatch, [conn])
     calls = []
-    storage.repo.trim_crown_tails = (
-        lambda f, t, b, at, commit=False: calls.append(('trim', f, t, b, at))
-    )
-    storage.repo.delete_crown_in_range = (
-        lambda f, t, b, lo, hi, commit=False: calls.append(('delete', f, t, b, lo, hi))
-    )
+    storage.repo.trim_crown_tails = lambda f, t, b, at, commit=False: calls.append(('trim', f, t, b, at))
+    storage.repo.delete_crown_in_range = lambda f, t, b, lo, hi, commit=False: calls.append(('delete', f, t, b, lo, hi))
     storage.repo.store_crown_holders_bulk = lambda rows, commit=False: len(rows)
     storage.repo.store_miner_scores_bulk = lambda rows, commit=False: len(rows)
     lane = ('sol', 'btc', 'sol')
