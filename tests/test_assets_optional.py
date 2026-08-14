@@ -44,6 +44,29 @@ def test_none_means_all_required(registry):
         cp.create_assets(check=True)
 
 
+class _NoTestnet:
+    def __init__(self):
+        raise cp.MissingTestnetDeployment('No qnt token contract for network sepolia')
+
+
+@pytest.fixture
+def registry_with_missing_testnet(monkeypatch):
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('qnt', _NoTestnet, ()), ('sol', _Ok, ())))
+
+
+def test_missing_testnet_deployment_degrades_for_validators(registry_with_missing_testnet):
+    # required_chains=None (validator: all chains required) must still boot — the spoke
+    # simply doesn't exist on this network.
+    providers = cp.create_assets(check=True)
+    assert 'sol' in providers
+    assert 'qnt' not in providers
+
+
+def test_missing_testnet_deployment_still_fails_a_quoting_miner(registry_with_missing_testnet):
+    with pytest.raises(RuntimeError, match='failed startup check'):
+        cp.create_assets(check=True, required_chains={'qnt', 'sol'})
+
+
 def test_evm_network_names_match_the_rpc_registry():
     """chains.py names the networks the CLI accepts; assets/evm.py names the chain ids the
     provider dials. One fact in two files, so CI compares them — for the row that declares the

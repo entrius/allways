@@ -5,9 +5,9 @@ qnt-specific. Two things: it is the third asset on Ethereum's env identity, and 
 ``refusal_checks=()`` — QNT implements neither isBlacklisted nor paused, and
 probing them REVERTS, which the slash gate would read as "defer" forever.
 
-Everything here builds on mainnet: QNT has no Sepolia deployment, so the row has no
-TESTNET_TOKEN_CONTRACTS entry and a testnet provider only constructs behind the
-QNT_TOKEN_CONTRACT override. That gap is why this spoke is not mergeable yet.
+Everything here builds on mainnet. On Sepolia the row pins Quant's official test QNT
+(dispensed by its documented getTestQNT faucet) in TESTNET_TOKEN_CONTRACTS, with the
+QNT_TOKEN_CONTRACT override still available for pointing elsewhere.
 """
 
 import pytest
@@ -134,18 +134,16 @@ class TestSharedEnvIdentity:
             provider.check_connection(require_send=False)
 
 
-class TestNoTestnetDeployment:
-    """QNT is issuer-deployed on Ethereum only. Until a project-deployed test token is pinned —
-    immutable AND with no pause or blacklist, or the row's declaration stops being true on
-    testnet — a testnet provider cannot be built, and validators build every provider at boot,
-    so this row must not reach a testnet validator's LAUNCH_SPOKES."""
+class TestTestnetDeployment:
+    """The Sepolia pin is Quant's own test QNT — a verified plain ERC20 (immutable, no pause
+    or blacklist; probing reverts like mainnet), so the row's declared surface stays true on
+    testnet. A spoke without such a pin (e.g. paxg) degrades via MissingTestnetDeployment
+    instead of failing the neuron's boot."""
 
-    def test_sepolia_has_no_pinned_contract(self, monkeypatch):
-        assert 'qnt' not in TESTNET_TOKEN_CONTRACTS
+    def test_sepolia_pin_builds_the_provider(self, monkeypatch):
         monkeypatch.setenv('ETH_NETWORK', 'sepolia')
         monkeypatch.delenv('QNT_TOKEN_CONTRACT', raising=False)
-        with pytest.raises(ValueError, match='QNT_TOKEN_CONTRACT'):
-            Qnt()
+        assert Qnt().token_contract == TESTNET_TOKEN_CONTRACTS['qnt']['sepolia']
 
     def test_override_restores_the_shared_network_identity(self, monkeypatch):
         # What pinning a test token buys: the same one-ETH_NETWORK guarantee, on Sepolia.
