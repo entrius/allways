@@ -49,6 +49,10 @@ TESTNET_TOKEN_CONTRACTS = {
     # Same address as mainnet and byte-identical runtime bytecode (keccak
     # 0xdeba17f1…0868, 12567 bytes) — verified symbol UNI, 18 decimals, 1e27 supply.
     'uni': {'sepolia': '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984'},
+    # Quant's official test QNT, dispensed by its documented getTestQNT faucet
+    # (0xCe8623CD…54825, docs.overledger.dev). Verified plain ERC20 — immutable, no
+    # pause/blacklist, probes revert — so the row's declared surface holds on Sepolia.
+    'qnt': {'sepolia': '0x81Dc68CB065ec6D9a4d24f6e2F442dc2A236D853'},
     # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
     'polusdc': {'amoy': '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'},
 }
