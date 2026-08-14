@@ -135,9 +135,8 @@ pub struct MinerState {
     /// Lifetime swaps completed (confirm_swap quorum). Monotonic. Off-chain emissions warm-up gate:
     /// a miner earns nothing until `successful_swaps >= 2`.
     pub successful_swaps: u32,
-    /// Lifetime swaps failed (timeout_swap quorum), less one per completed swap (confirm_swap decays
-    /// it by 1, floored at 0). Off-chain strike-out gate: `failed_swaps > 2` => no emissions. Decay
-    /// means a healthy miner recovers by completing swaps, not only by re-registering.
+    /// Lifetime swaps failed (timeout_swap quorum). Monotonic, never resets. Off-chain strike-out gate:
+    /// `failed_swaps > 2` => no emissions (recover by re-registering).
     pub failed_swaps: u32,
     /// Stored PDA bump.
     pub bump: u8,
