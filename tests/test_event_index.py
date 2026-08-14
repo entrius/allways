@@ -88,6 +88,44 @@ class TestIngestActivity:
         assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
         store.close()
 
+    def test_swap_cancelled_frees_the_hub(self, tmp_path: Path):
+        """The no-fault cancel is a terminal like completion/timeout: without its FULFILL_END
+        the hub stays FULFILLING (crownless) until an unrelated swap's terminal repairs it."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('SwapInitiated', miner='pk_a', block_time=250),
+                rec('SwapCancelled', miner='pk_a', block_time=400, collateral_chain='', collateral_amount=10, reason=0),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(400) == {}  # cancelled → AVAILABLE
+        # The synthetic RESERVE_EXPIRE at 1200 then no-ops in AVAILABLE.
+        assert idx.get_activity_state_at(1200) == {}
+        store.close()
+
+    def test_swap_cancelled_frees_only_its_hub(self, tmp_path: Path):
+        """A v3.1 cancel carries the backing hub — the sibling hub's machine must not step."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec(
+                    'PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user',
+                    requests=1, collateral_chain='tao',
+                ),
+                rec('SwapInitiated', miner='pk_a', block_time=250, collateral_chain='tao'),
+                rec('SwapCancelled', miner='pk_a', block_time=400, collateral_chain='tao', collateral_amount=10, reason=0),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': {'tao': MinerActivity.FULFILLING}}
+        assert idx.get_activity_state_at(400) == {}  # only the tao machine ever stepped
+        store.close()
+
     def test_pool_resolved_synthesizes_reserve_expire(self, tmp_path: Path):
         """A reservation with no swap forfeits the crown until block_time + ttl,
         then RESERVE_EXPIRE returns the miner to AVAILABLE."""
@@ -395,6 +433,18 @@ class TestIngestSwapOutcomes:
         )
         assert store.get_swap_outcome(key.hex()) == 'timed_out'
         assert store.get_swap_outcome(DEFAULT_SWAP_KEY.hex()) is None  # only the event's key lands
+        store.close()
+
+    def test_swap_cancelled_records_cancelled_outcome(self, tmp_path: Path):
+        """Post-close, the seam must distinguish a cancel from a completion — both close the PDA."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        idx.ingest(
+            [rec('SwapCancelled', miner='pk_a', block_time=400, swap_key=key, collateral_chain='sol', collateral_amount=10, reason=0)],
+            ATTR,
+        )
+        assert store.get_swap_outcome(key.hex()) == 'cancelled'
         store.close()
 
     def test_stale_claim_closed_records_expired_outcome(self, tmp_path: Path):
