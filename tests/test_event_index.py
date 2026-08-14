@@ -759,9 +759,7 @@ class TestReconcileLiveState:
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         store.insert_collateral_event(self.NOW - 60, 'hk_a', 900_000_000, backing='tao')
-        idx.reconcile_live_state(
-            {'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 1}
-        )
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 1})
         assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {'hk_a': 900_000_000}
         store.close()
 
@@ -771,9 +769,7 @@ class TestReconcileLiveState:
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         store.insert_collateral_event(100, 'hk_a', 850_000_000, backing='tao')
-        idx.reconcile_live_state(
-            {'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 0}
-        )
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 0})
         assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {'hk_a': 0}
         store.close()
 
