@@ -238,6 +238,28 @@ def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, 
     return states
 
 
+def live_bond_balances(
+    solana_client, metagraph, attribution: Optional[Dict[str, str]] = None, chain: str = 'tao'
+) -> Dict[str, int]:
+    """``{hotkey: effective bond collateral}`` for bound, on-metagraph miners with a
+    ``BondAttestation`` on ``chain`` — the tao purse's live-read backstop, the sibling of
+    ``live_miner_states``' ``ms.collateral`` for the sol purse. An unlocked bond backs
+    nothing → 0, matching the ``BondAttested`` ingest. One ``get_all`` per round; feeds
+    ``reconcile_live_state`` so a lost/pruned tao anchor self-heals like the sol one."""
+    if attribution is None:
+        attribution = build_attribution(solana_client)
+    metagraph_hotkeys = set(metagraph.hotkeys)
+    bonds: Dict[str, int] = {}
+    for _pubkey, ba in solana_client.get_all('BondAttestation'):
+        if str(ba.chain).lower() != chain:
+            continue
+        hotkey = attribution.get(str(ba.miner))
+        if hotkey is None or hotkey not in metagraph_hotkeys:
+            continue
+        bonds[hotkey] = int(ba.effective_balance) if ba.locked else 0
+    return bonds
+
+
 def live_quote_rates(
     solana_client, attribution: Optional[Dict[str, str]] = None
 ) -> Dict[Tuple[str, str, str, str], float]:
@@ -426,7 +448,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # state the ingest lost — before the replay below reads those tables.
     attribution = build_attribution(self.solana_client)
     live_states = live_miner_states(self.solana_client, self.metagraph, attribution)
-    self.event_index.reconcile_live_state(live_states, now=current_time)
+    # The tao bond has no live field on MinerState, so read the attestations too — else a
+    # lost/pruned tao anchor leaves the purse stuck at 0 and drops the miner off every tao crown.
+    live_bonds = live_bond_balances(self.solana_client, self.metagraph, attribution)
+    self.event_index.reconcile_live_state(live_states, now=current_time, live_bonds=live_bonds)
     # Rate-liveness backstop: a lost QuoteRemoved would otherwise freeze a lane's crown
     # credit forever (the prune keeps the last rate as the lane's anchor). Best-effort —
     # the reconcile is a safety net, so a failed quote read never sinks the round.

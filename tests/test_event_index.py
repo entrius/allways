@@ -730,6 +730,53 @@ class TestReconcileLiveState:
         assert len(store.load_all_collateral_events()) == 1
         store.close()
 
+    def test_reseeds_missing_tao_collateral_from_live_bond(self, tmp_path: Path):
+        # The tao anchor was lost (missed BondAttested, or a mis-keyed prune) so the purse
+        # reads 0 and the miner is off every tao crown — the live bond re-seeds it. Regression
+        # for the live divergence: 0.85 τ attested on-chain, no tao collateral row in the store.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_collateral_event(100, 'hk_a', 2_000_000_000, backing='sol')  # sol purse intact
+        idx.reconcile_live_state(
+            {'hk_a': self._ms(active=True, collateral=2_000_000_000)},
+            now=self.NOW,
+            live_bonds={'hk_a': 850_000_000},
+        )
+        assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {'hk_a': 850_000_000}
+        assert idx.get_miner_collaterals_at(self.NOW, backing='sol') == {'hk_a': 2_000_000_000}  # untouched
+        store.close()
+
+    def test_tao_backstop_skipped_when_bonds_absent(self, tmp_path: Path):
+        # Default (no live_bonds) keeps the sol-only behaviour — no spurious tao rows.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        idx.reconcile_live_state({'hk_a': self._ms(active=True, collateral=42)}, now=self.NOW)
+        assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {}
+        store.close()
+
+    def test_tao_quiet_guard_defers_to_recent_bond_event(self, tmp_path: Path):
+        # A real BondAttested landed seconds ago; a stale live bond read must not overwrite it.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_collateral_event(self.NOW - 60, 'hk_a', 900_000_000, backing='tao')
+        idx.reconcile_live_state(
+            {'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 1}
+        )
+        assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {'hk_a': 900_000_000}
+        store.close()
+
+    def test_unlocked_bond_reconciles_to_zero(self, tmp_path: Path):
+        # An unlocked bond backs nothing → 0 (live_bond_balances maps it so); a stale nonzero
+        # tao anchor is corrected down, matching the BondAttested ingest.
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        store.insert_collateral_event(100, 'hk_a', 850_000_000, backing='tao')
+        idx.reconcile_live_state(
+            {'hk_a': self._ms(active=True, collateral=0)}, now=self.NOW, live_bonds={'hk_a': 0}
+        )
+        assert idx.get_miner_collaterals_at(self.NOW, backing='tao') == {'hk_a': 0}
+        store.close()
+
 
 class TestReconcileLiveQuotes:
     """Rate-liveness backstop: a lane whose event-derived rate is positive but
