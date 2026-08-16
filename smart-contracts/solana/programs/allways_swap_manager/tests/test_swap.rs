@@ -3,13 +3,14 @@
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        AccountDeserialize, AccountSerialize, InstructionData, Space, ToAccountMetas,
     },
     allways_swap_manager::constants::{
         FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
+    solana_account::Account,
     solana_hash::Hash,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -351,6 +352,70 @@ fn close_stale_claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> 
         .to_account_metas(None),
     )
 }
+/// Like `close_stale_claim_ix` but lets the caller aim an ARBITRARY reservation account at the swap —
+/// the whole point of the V-C1 cross-hub reap (hand in the miner's OTHER-hub reservation).
+fn close_stale_claim_ix_with_resv(
+    caller: &Pubkey,
+    miner: &Pubkey,
+    from_tx_hash: &str,
+    reservation: Pubkey,
+) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseStaleClaim { swap_key: key }.data(),
+        allways_swap_manager::accounts::CloseStaleClaim {
+            caller: *caller,
+            miner: *miner,
+            reservation,
+            swap: swap_pda(&key),
+        }
+        .to_account_metas(None),
+    )
+}
+/// Plant an initialized Reservation PDA for `miner` under a non-sol `backing` (the second hub of a
+/// dual-hub miner), so a test can hand it to `close_stale_claim`. `reserved_until`/`claimed` control
+/// whether the contract's staleness clause would fire absent the backing bind.
+fn plant_reservation(
+    svm: &mut LiteSVM,
+    miner: &Pubkey,
+    backing: &str,
+    claimed: [u8; 32],
+    reserved_until: i64,
+) -> Pubkey {
+    let (pda, bump) =
+        Pubkey::find_program_address(&[b"resv", miner.as_ref(), backing.as_bytes()], &pid());
+    let r = Reservation {
+        router: *miner,
+        from_addr: String::new(),
+        user: LOTTERY_USER,
+        user_to_addr: String::new(),
+        from_chain: String::new(),
+        to_chain: String::new(),
+        collateral_chain: backing.to_string(),
+        collateral_amount: 0,
+        from_amount: 0,
+        to_amount: 0,
+        miner_from_addr: String::new(),
+        miner_to_addr: String::new(),
+        rate: 0,
+        created_at: BASE_TS,
+        reserved_until,
+        finalize_by: 0,
+        max_extend_at: 0,
+        claimed_swap_key: claimed,
+        bump,
+    };
+    let mut data = Vec::new();
+    r.try_serialize(&mut data).unwrap();
+    data.resize(8 + Reservation::INIT_SPACE, 0);
+    svm.set_account(
+        pda,
+        Account { lamports: 10_000_000, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+    pda
+}
 fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
@@ -633,6 +698,33 @@ fn test_stale_claim_reap() {
     assert!(svm.get_account(&swap_pda(&key)).is_none(), "stale claim closed");
     let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
     assert_eq!(r.claimed_swap_key, [0u8; 32], "claim slot freed");
+}
+
+#[test]
+fn test_cross_backing_reap_rejected() {
+    // Red-team V-C1 (F1): a dual-hub miner's OTHER-hub reservation must not reap a HEALTHY swap.
+    // The `reservation` PDA is seeded on its own collateral_chain, so a foreign (tao) reservation
+    // validates in `close_stale_claim`; without the backing bind it trivially satisfies the
+    // `claimed_swap_key != swap_key` staleness clause and closes a live sol swap → permanent taker
+    // strand (permissionless). The fix rejects on ChainMismatch before the staleness test.
+    let (mut svm, vals, miner, _rent) = setup();
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let key = swap_key("srctx1");
+    // Clock stays at BASE_TS: the sol reservation is LIVE, so its own slot is non-stale (the honest
+    // guard) — the cross-hub substitution is the ONLY way to force a reap here.
+    let tao_resv = plant_reservation(&mut svm, &miner.pubkey(), "tao", [0u8; 32], BASE_TS - 1);
+
+    let res = send(
+        &mut svm,
+        close_stale_claim_ix_with_resv(&vals[0].pubkey(), &miner.pubkey(), "srctx1", tao_resv),
+        &vals[0].pubkey(),
+        &vals[0],
+    );
+    assert!(res.is_err(), "cross-backing reap of a healthy swap must be rejected (ChainMismatch)");
+    // Healthy swap survives; the sol reservation still owns the claim.
+    assert!(svm.get_account(&swap_pda(&key)).is_some(), "healthy swap must survive the rejected reap");
+    let sol = reservation_acct(&svm, &miner.pubkey());
+    assert_eq!(sol.claimed_swap_key, key, "sol claim slot must be untouched");
 }
 
 fn read_swap(svm: &LiteSVM, key: &[u8; 32]) -> Swap {
