@@ -142,12 +142,13 @@ class SolanaSwapLoop:
         self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: str = ''
     ) -> Tuple[str, Any]:
         """Tri-state leg status: ('ok', info) confirmed match, ('pending', info) all details match but
-        awaiting confirmations (extendable), ('no', None) absent/mismatch/no-provider (slash-eligible),
-        ('down', None) provider unreachable this round."""
+        awaiting confirmations (extendable), ('no', None) absent/mismatch (slash-eligible), ('down', None)
+        unverifiable this round — provider unreachable OR no provider for the chain (never slash on absence
+        of a verifier; an unsupported/disabled spoke reaching chain state must SKIP, not TIMEOUT)."""
         provider = self.providers.get(chain)
         if provider is None:
-            bt.logging.warning(f'no chain provider for {chain}; cannot verify')
-            return ('no', None)
+            bt.logging.warning(f'no chain provider for {chain}; cannot verify — treating as unverifiable (down)')
+            return ('down', None)
         if not tx_hash:
             return ('no', None)
         try:
@@ -418,6 +419,11 @@ class SolanaSwapLoop:
         if status == 'PendingAttestation':
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
+            # An Active swap never re-fetches the dest leg (no tx yet), so a missing dest provider would
+            # slip past the tri-state guard and TIMEOUT below on mere absence of a verifier. Same rule as
+            # _fetch_leg's None provider: unverifiable → SKIP, never slash an unsupported/disabled spoke.
+            if self.providers.get(swap.to_chain) is None:
+                return SwapAction(SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify')
             # No-fault cancel for chains whose refusal is provable WITHOUT a delivery tx (Solana reserved
             # account, ERC-20 issuer freeze): an Active swap into such a dest cancels immediately — no point
             # waiting for a fulfillment that can never land. Native EVM has no tx yet, so this is None until
