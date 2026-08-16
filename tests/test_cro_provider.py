@@ -14,8 +14,7 @@ from eth_account import Account
 from allways.assets import evm_coin
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.cro import Cro
-from allways.assets.evm import EvmRpcError
-from allways.assets.evm import CRONOS, EvmChain
+from allways.assets.evm import CRONOS, EvmChain, EvmRpcError
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
 from allways.chains import CHAIN_CRO, get_chain_def
 from allways.constants import LAUNCH_SPOKES

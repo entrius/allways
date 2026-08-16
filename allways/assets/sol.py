@@ -322,7 +322,9 @@ class Sol(Asset, Chain):
         # Never send from a key that can't satisfy the validator's sender pin: the leg would be rejected
         # and the funds wasted. Refuse before broadcasting (mirrors the EVM/BTC providers).
         if from_address is not None and str(self.keypair.pubkey()) != str(from_address):
-            bt.logging.error(f'{LOG_SOL} committed sender {from_address} != wallet {self.keypair.pubkey()} — not sending')
+            bt.logging.error(
+                f'{LOG_SOL} committed sender {from_address} != wallet {self.keypair.pubkey()} — not sending'
+            )
             return None
 
         # Reuse a prior own broadcast for THIS obligation instead of paying twice: a confirm() timeout

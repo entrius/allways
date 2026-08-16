@@ -13,8 +13,7 @@ from eth_account import Account
 from allways.assets import evm_coin
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.bnb import Bnb
-from allways.assets.evm import EvmRpcError
-from allways.assets.evm import BSC, EvmChain
+from allways.assets.evm import BSC, EvmChain, EvmRpcError
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
 from allways.chains import CHAIN_BNB, get_chain_def
 from allways.constants import LAUNCH_SPOKES
