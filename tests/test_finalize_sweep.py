@@ -26,9 +26,12 @@ class SweepClient:
     def __init__(self, reservation):
         self.keypair = SolKeypair()
         self._reservation = reservation
+        self.siblings = {}  # backing -> reservation, for the duplicate-source guard's sibling read
         self.finalized = []
 
     def get_reservation(self, miner, backing='sol'):
+        if backing in self.siblings:
+            return self.siblings[backing]
         return self._reservation
 
     def finalize_reservation(
@@ -80,6 +83,43 @@ def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
     assert to_amount == 210_000
     # Whole queue dropped: winner served, losers re-request via their clients.
     assert v.state_store.distinct_routed_pools() == []
+    v.state_store.close()
+
+
+def _live_sibling(*, from_chain='sol', from_addr='', reserved_until=NOW + 300):
+    """A live-unclaimed reservation on the miner's OTHER hub, for the duplicate-source guard."""
+    return SimpleNamespace(
+        from_chain=from_chain,
+        from_addr=from_addr,
+        reserved_until=reserved_until,
+        claimed_swap_key=b'\x00' * 32,  # unclaimed → in the matchable set
+    )
+
+
+def test_duplicate_source_addr_on_other_hub_is_refused(tmp_path):
+    # V-C2: a source address may back only one live-unclaimed reservation per miner. The winner's
+    # from_addr already backs a LIVE reservation on the miner's tao hub (same from_chain), so a single
+    # deposit could satisfy both — refuse to finalize the duplicate rather than let it be siphoned.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client)  # the sol seat we're about to finalize
+    client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → collides
+    assert finalize_won_seats(v, NOW) == []
+    assert not client.finalized, 'colliding-source seat must not be finalized'
+    assert v.state_store.distinct_routed_pools() == [], 'colliding queue dropped'
+    v.state_store.close()
+
+
+def test_different_source_addr_on_other_hub_finalizes(tmp_path):
+    # A DIFFERENT source address on the other hub is a normal simultaneous swap — must still finalize.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client)
+    client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr='someone-elses-src')
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → no collision
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert len(client.finalized) == 1
     v.state_store.close()
 
 

@@ -274,6 +274,28 @@ def finalize_won_seats(validator, now: int) -> list:
                 store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         req = draw_pool_winner(queue)
+        # A source address may back only ONE live-unclaimed reservation per miner at a time. Two live
+        # reservations that share (from_chain, from_addr) on one miner are both matchable by a single
+        # deposit — matching is `>=` amount, so the amount can't disambiguate — and confirm_deposit
+        # would claim it for whichever slot is scanned first. That lets an attacker who declares a
+        # victim's from_addr on the miner's OTHER hub siphon the victim's deposit. Refuse to finalize a
+        # colliding seat. No post-claim state needed: a claimed reservation leaves the live-unclaimed
+        # set on its own, so the address frees itself.
+        providers = getattr(validator, 'axon_assets', {})
+        src = providers.get(from_chain)
+        want_addr = src.chain.normalize_address(req['user_from_addr']) if src else req['user_from_addr']
+        live_slots, _ = _live_unclaimed_slots(client, Pubkey.from_string(miner), now)
+        if any(
+            s.from_chain == from_chain
+            and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want_addr
+            for s, _b in live_slots
+        ):
+            bt.logging.warning(
+                f'routed sweep {miner[:8]}: source address already backs a live reservation on this '
+                f'miner — refusing a duplicate-source seat, dropping queue'
+            )
+            store.delete_routed_requests(miner, from_chain, to_chain, backing)
+            continue
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
