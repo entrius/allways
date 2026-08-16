@@ -706,7 +706,7 @@ class TestDeliveryGates:
     must be ungameable (slash gate)."""
 
     def _revert(self, params):
-        raise RuntimeError('rpc error execution reverted')
+        raise EvmRpcError('execution reverted', {'code': 3, 'message': 'execution reverted'})
 
     def test_can_deliver_to_eoa_true_without_simulation(self, provider):
         calls = counting_rpc_stub(provider, {'eth_getCode': '0x'})
@@ -733,7 +733,7 @@ class TestDeliveryGates:
         # `receive()` gated on msg.sender) — the reserve gate must run the send's simulation.
         def gas(params):
             if params[0]['from'] == TEST_ADDR:
-                raise RuntimeError('rpc error execution reverted')
+                raise EvmRpcError('execution reverted', {'code': 3, 'message': 'execution reverted'})
             return '0xb000'
 
         rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': gas})
@@ -789,7 +789,7 @@ class TestTransferGas:
         # P0: a reverting dest no longer bails silently — the miner broadcasts a floor-gas attempt so the
         # on-chain reverted tx becomes no-fault-cancel evidence (a REFUSE, not a false timeout slash).
         def revert(params):
-            raise RuntimeError('rpc error execution reverted')
+            raise EvmRpcError('execution reverted', {'code': 3, 'message': 'execution reverted'})
 
         assert self._send(provider, revert) is not None
 

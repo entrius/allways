@@ -14,6 +14,7 @@ from eth_account import Account
 from allways.assets import evm_coin
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.cro import Cro
+from allways.assets.evm import EvmRpcError
 from allways.assets.evm import CRONOS, EvmChain
 from allways.assets.evm_coin import MAX_WALK_BLOCKS
 from allways.chains import CHAIN_CRO, get_chain_def
@@ -252,7 +253,7 @@ class TestDeliveryGates:
         assert provider.can_deliver_to(RECIPIENT, 10**16) is True
 
         def refuse(params):
-            raise RuntimeError('rpc error execution reverted')
+            raise EvmRpcError('execution reverted', {'code': 3, 'message': 'execution reverted'})
 
         rpc_stub(provider, {'eth_getCode': '0x60806040', 'eth_estimateGas': refuse})
         assert provider.can_deliver_to(RECIPIENT, 10**16) is False
