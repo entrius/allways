@@ -248,5 +248,17 @@ class TestTotalObligationGate:
         f.providers['tao'].get_balance.assert_not_called()
 
 
+class TestSendDestUsesPinnedSender:
+    def test_send_dest_funds_passes_pinned_miner_to_addr_not_stale_cache(self):
+        # H4: the dest send must use the swap's pinned miner_to_addr, not a chain-wide cache that
+        # last-write-wins across quotes (sending from the wrong wallet → slash).
+        provider = MagicMock()
+        provider.send_amount.return_value = ('tx', 1)
+        f = make_fulfiller(my_addresses={'tao': 'STALE-cache-addr'})  # != swap.miner_to_addr ('5miner')
+        f.providers = {'tao': provider}
+        f.send_dest_funds(make_swap(), 396_000_000)
+        assert provider.send_amount.call_args.kwargs['from_address'] == '5miner'
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

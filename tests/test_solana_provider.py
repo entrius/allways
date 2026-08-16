@@ -109,6 +109,13 @@ class TestSendDedup:
         assert p._prior_broadcast(('RECIP', 5_000_000, 'swapB')) is None  # different dedup scope
 
 
+class TestSendGuard:
+    def test_send_refuses_when_from_address_mismatches_key(self):
+        # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+        p = provider_with(FakeRpc(), keypair=Keypair())
+        assert p.send_amount('RECIPIENT', 1000, from_address='someOtherWallet') is None
+
+
 class TestFetchAndVerify:
     def test_match_returns_info(self):
         p = provider_with(FakeRpc(tx=make_tx('RECIP', 2_000_000, slot=100), slot=131))

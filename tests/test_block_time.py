@@ -149,6 +149,15 @@ def _raw_transfer_block(txid, dest, amount, sender, settled=True):
     }
 
 
+def test_tao_send_refuses_when_from_address_mismatches_wallet():
+    # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+    p = Tao.__new__(Tao)
+    p.wallet = MagicMock()
+    p.wallet.coldkeypub.ss58_address = 'minerTAO'
+    p.broadcasted_txids = {}
+    assert p.send_amount('userTAO', 1000, from_address='someoneElse') is None
+
+
 def test_tao_own_transfer_landed_matches_exact_hash():
     # H2: reuse a prior payout only when THAT exact extrinsic is on-chain, so a confirm-timeout retry
     # can't double-pay. (payout block: sender=miner, dest=user)

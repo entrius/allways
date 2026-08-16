@@ -658,6 +658,13 @@ class Tao(Asset, Chain):
         if self.wallet is None:
             bt.logging.error('TAO send_amount called on a read-only Tao (no wallet)')
             return None
+        # Never send from a key that can't satisfy the validator's sender pin: the leg would be rejected
+        # and the funds wasted. Refuse before broadcasting (mirrors the EVM/BTC providers).
+        if from_address is not None and self.wallet.coldkeypub.ss58_address != str(from_address):
+            bt.logging.error(
+                f'TAO committed sender {from_address} != wallet {self.wallet.coldkeypub.ss58_address} — not sending'
+            )
+            return None
 
         # Reuse a prior own broadcast for THIS obligation rather than re-sending: subtensor.transfer can
         # report failure on a transfer that actually included, and the next poll would otherwise double-pay.

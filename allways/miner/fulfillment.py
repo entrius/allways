@@ -280,10 +280,10 @@ class SwapFulfiller:
             dev_signal.emit('refuse', swap_key=swap.key_hex, reason='withhold_dest')
             return None
 
-        # Miner's own dest-chain sending address — cached from this miner's posted quote at startup, passed
-        # as a hint so UTXO-based providers can skip probing. Providers that identify their own sender from
-        # a wallet keypair (e.g. subtensor) ignore it, so this is uniform across chains.
-        from_address = self.my_addresses.get(swap.to_chain)
+        # Miner's committed dest sender for THIS swap — the pinned miner_to_addr the validator checks the
+        # leg against, NOT a chain-wide cache that last-write-wins across quotes (which could send from the
+        # wrong wallet → slash). Providers verify it against their signing key and refuse a mismatch.
+        from_address = swap.miner_to_addr
 
         bt.logging.info(
             f'Swap {swap.key_hex[:16]}: initiating dest send of {user_receives_amount} to {swap.user_to_addr} '
