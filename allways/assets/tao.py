@@ -33,6 +33,9 @@ class Tao(Asset, Chain):
         self.events_cache: Dict[str, list] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
+        # Own-broadcast dedup: dedup_scope -> (to, amount, extrinsic_hash). subtensor.transfer can report
+        # failure on a transfer that actually included; without this the next poll re-sends and double-pays.
+        self.broadcasted_txids: Dict[str, Tuple[str, int, str]] = {}
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -625,6 +628,29 @@ class Tao(Asset, Chain):
             bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
 
+    def _own_transfer_landed(self, tx_hash: str, from_addr: str, to_addr: str, amount: int) -> Optional[SendResult]:
+        """``(tx_hash, block_num)`` if THIS exact recorded extrinsic is on-chain as a matching transfer,
+        else None. Matches on the extrinsic hash (not first-match), so it can never reuse a different
+        swap's transfer. Reliable because ``send`` uses wait_for_inclusion: after it returns the extrinsic
+        is included-or-not, never still-pending."""
+        head = self.chain.get_current_block_height()
+        if head is None:
+            return None
+        floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
+        for block_num in range(floor + 1, head + 1):
+            block = self.get_block(block_num)
+            if not block or 'extrinsics' not in block:
+                continue
+            is_raw = block.get('_raw', False)
+            for ext in block['extrinsics']:
+                decoded = self.decode_transfer(ext, is_raw)
+                if decoded is None:
+                    continue
+                ext_hash, dest, amt, sender = decoded
+                if ext_hash == tx_hash and dest == to_addr and sender == from_addr and int(amt) >= int(amount):
+                    return (tx_hash, block_num)
+        return None
+
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
     ) -> SendResult:
@@ -632,6 +658,22 @@ class Tao(Asset, Chain):
         if self.wallet is None:
             bt.logging.error('TAO send_amount called on a read-only Tao (no wallet)')
             return None
+
+        # Reuse a prior own broadcast for THIS obligation rather than re-sending: subtensor.transfer can
+        # report failure on a transfer that actually included, and the next poll would otherwise double-pay.
+        from_ss58 = self.wallet.coldkeypub.ss58_address
+        scope = dedup_key or ''
+        prior = self.broadcasted_txids.get(scope)
+        if prior is not None and prior[0] == to_address and prior[1] == int(amount):
+            try:
+                landed = self._own_transfer_landed(prior[2], from_ss58, to_address, amount)
+            except Exception as e:
+                bt.logging.error(f'TAO prior send unresolved ({e}) — not re-sending, would risk a double pay')
+                return None
+            if landed is not None:
+                bt.logging.info(f'TAO reusing prior tx {landed[0]} to {to_address} ({amount} rao)')
+                return landed
+
         try:
             response = self.subtensor.transfer(
                 wallet=self.wallet,
@@ -640,6 +682,13 @@ class Tao(Asset, Chain):
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
+            # Record the extrinsic hash BEFORE the success gate: a transfer reported failed may still have
+            # included, and only a recorded hash lets the next poll re-probe it instead of re-sending.
+            recorded = getattr(getattr(response, 'extrinsic_receipt', None), 'extrinsic_hash', None)
+            if recorded:
+                self.broadcasted_txids[scope] = (to_address, int(amount), recorded)
+                if len(self.broadcasted_txids) > 256:
+                    self.broadcasted_txids.pop(next(iter(self.broadcasted_txids)))
             if not response.success:
                 bt.logging.error(f'TAO transfer failed: {response.message}')
                 return None

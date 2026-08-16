@@ -149,6 +149,27 @@ def _raw_transfer_block(txid, dest, amount, sender, settled=True):
     }
 
 
+def test_tao_own_transfer_landed_matches_exact_hash():
+    # H2: reuse a prior payout only when THAT exact extrinsic is on-chain, so a confirm-timeout retry
+    # can't double-pay. (payout block: sender=miner, dest=user)
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=100, blocks=blocks)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) == ('0xpay', 100)
+
+
+def test_tao_own_transfer_landed_ignores_a_different_extrinsic():
+    # A matching (to, amount) transfer from a DIFFERENT extrinsic must NOT be reused — no mis-attribution.
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=100, blocks=blocks)
+    assert p._own_transfer_landed('0xNOTMINE', 'minerTAO', 'userTAO', 5000) is None
+
+
+def test_tao_own_transfer_landed_absent_returns_none():
+    # Genuine failure (nothing on chain) → None → the caller re-sends, which is correct.
+    p = _scan_provider(head=100, blocks={})
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
+
+
 def test_tao_scanner_finds_matching_transfer_in_new_blocks():
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
     p = _scan_provider(head=100, blocks=blocks)

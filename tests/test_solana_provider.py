@@ -12,6 +12,7 @@ from solders.keypair import Keypair
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
+from allways.solana.rpc import SolanaRpcError
 
 
 def make_tx(recipient, credit, sender='SENDER', slot=100, block_time=5000, err=None, extra_keys=None):
@@ -54,6 +55,58 @@ def provider_with(rpc, keypair=None):
     p = Sol(solana_rpc_url='fake://rpc', solana_keypair=keypair)
     p.rpc = rpc
     return p
+
+
+class DedupRpc:
+    """Programmable getSignatureStatuses[0] + getSlot for the own-broadcast dedup guard."""
+
+    def __init__(self, status, slot=1000):
+        self._status = status
+        self._slot = slot
+
+    def get_slot(self, commitment='confirmed'):
+        return self._slot
+
+    def get_signature_statuses(self, sigs):
+        return [self._status]
+
+
+class TestSendDedup:
+    """H2: a landed prior broadcast must be reused, never re-sent, so a confirm() timeout can't double-pay."""
+
+    WANT = ('RECIP', 5_000_000, 'swap1')
+
+    def _p(self, status, slot=1000):
+        p = provider_with(DedupRpc(status, slot))
+        p.broadcasted_txids['SIG'] = (*self.WANT, 1000)
+        return p
+
+    def test_reuses_landed_prior(self):
+        p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'confirmed'})
+        assert p._prior_broadcast(self.WANT) == ('SIG', 123)
+
+    def test_reuses_processed_prior_that_already_moved_funds(self):
+        p = self._p({'err': None, 'slot': 50, 'confirmationStatus': 'processed'})
+        assert p._prior_broadcast(self.WANT) == ('SIG', 50)
+
+    def test_failed_prior_dropped_allows_fresh_send(self):
+        p = self._p({'err': 'InstructionError', 'slot': 10})
+        assert p._prior_broadcast(self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
+
+    def test_pending_recent_prior_waits(self):
+        p = self._p(None, slot=1010)  # head 1010, seen 1000 → within TTL, not on chain → must wait
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+
+    def test_expired_unlanded_prior_allows_fresh_send(self):
+        p = self._p(None, slot=2000)  # head-seen = 1000 > 150 TTL → blockhash expired, never landed
+        assert p._prior_broadcast(self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
+
+    def test_different_obligation_is_ignored(self):
+        p = self._p({'err': None, 'slot': 5})
+        assert p._prior_broadcast(('RECIP', 5_000_000, 'swapB')) is None  # different dedup scope
 
 
 class TestFetchAndVerify:
