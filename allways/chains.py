@@ -434,12 +434,10 @@ CHAIN_POLUSDC = ChainDefinition(
     # 600s default fulfillment grace. Pinned against CHAIN_POL by test, so neither can drift.
     seconds_per_block=1,
     min_confirmations=100,
-    # Rate sanity floor, not an economic guarantee: 0.01 USDC covers FiatToken's measured 79k-gas
-    # transfer below ~1700 gwei — ~7x the 230-260 gwei base fee Polygon has held for weeks. Priced
-    # on the COLD recipient (79k; a warm one is 61k), since a payout goes to a user's address that
-    # usually holds no USDC yet. Far under ethusdc's 5 USDC because Polygon gas costs cents, but
-    # above bare dust because Polygon gas is not free either.
-    min_onchain_amount=10_000,
+    # 5 USDC, matching the other USDC spokes: min_onchain_amount doubles as the crown-eligibility
+    # floor in is_executable_rate, so a Polygon-cheap-gas send floor here would widen the crown band
+    # ~500x vs siblings. Polygon's low gas is priced into miner quotes, not this floor.
+    min_onchain_amount=5_000_000,
     # CHAIN_POL's clock, for the same reason its finality is: what this absorbs is hub-vs-spoke
     # skew, and two assets on one chain disagreeing about that chain's clock would be indefensible.
     replay_grace_secs=60,
