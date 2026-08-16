@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 
 from allways.constants import (
@@ -502,6 +503,24 @@ SUPPORTED_CHAINS = {
     'polusdc': CHAIN_POLUSDC,
     'paxg': CHAIN_PAXG,
 }
+
+
+def apply_testnet_network_defaults() -> dict[str, str]:
+    """Default any unset spoke ``{PREFIX}_NETWORK`` to the chain's ``testnet_network``.
+
+    A testnet neuron that never set e.g. ``ETH_NETWORK`` otherwise falls through to the provider's
+    mainnet default (``evm.py``/``btc.py``) — verifying test swaps against mainnet, or broadcasting a
+    real mainnet payout for a test obligation. An explicitly-set env var always wins (set
+    ``ETH_NETWORK=mainnet`` to opt one spoke back). Returns the vars it set, for the caller to log."""
+    applied: dict[str, str] = {}
+    for chain in SUPPORTED_CHAINS.values():
+        if not chain.networks or not chain.testnet_network:
+            continue  # network isn't picked by name here, or shares another asset's prefix
+        env_var = f'{chain.env_prefix}_NETWORK'
+        if not os.environ.get(env_var):
+            os.environ[env_var] = chain.testnet_network
+            applied[env_var] = chain.testnet_network
+    return applied
 
 
 def get_chain_def(chain_id: str) -> ChainDefinition:

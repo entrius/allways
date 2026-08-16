@@ -24,9 +24,11 @@ import wandb  # noqa: E402
 
 from allways import __version__  # noqa: E402
 from allways.assets import create_assets  # noqa: E402
+from allways.chains import apply_testnet_network_defaults  # noqa: E402
 from allways.constants import (  # noqa: E402
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
+    NETUID_FINNEY,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
 )
@@ -75,9 +77,25 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
+        # A testnet neuron must not silently verify against mainnet spokes: unset {PREFIX}_NETWORK
+        # defaults to mainnet in the providers, so a test swap would be checked on mainnet. Default
+        # unset spokes to testnet here (an explicit env var still wins).
+        if int(self.config.netuid) != NETUID_FINNEY:
+            applied = apply_testnet_network_defaults()
+            if applied:
+                bt.logging.warning(
+                    f'testnet neuron (netuid {self.config.netuid}): defaulted unset spoke networks to '
+                    f'testnet {applied} — set {{PREFIX}}_NETWORK to override.'
+                )
+
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
+        if int(self.config.netuid) != NETUID_FINNEY and 'mainnet' in solana_rpc_url.lower():
+            bt.logging.warning(
+                f'testnet neuron (netuid {self.config.netuid}) resolved a mainnet-looking Solana RPC '
+                f'({solana_rpc_url}) — the hub/control plane may target the wrong cluster.'
+            )
         self.assets = create_assets(
             check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
         )
