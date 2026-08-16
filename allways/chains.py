@@ -252,7 +252,7 @@ CHAIN_ETHUSDC = ChainDefinition(
     min_confirmations=32,
     # Rate sanity floor, not an economic guarantee: 5 USDC covers FiatToken's ~65k-gas transfer
     # only below ~41 gwei — miners price real gas into their quotes, and the per-swap lever is the
-    # contract's min_swap_amount. Above arbusdc's unit floor because L1 gas is not L2 gas.
+    # contract's min_swap_amount. L1 gas dwarfs L2 gas, so the floor sits well above bare dust.
     min_onchain_amount=5_000_000,
     # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
     # one chain disagreeing about that chain's clock would be indefensible.
@@ -437,8 +437,8 @@ CHAIN_POLUSDC = ChainDefinition(
     # Rate sanity floor, not an economic guarantee: 0.01 USDC covers FiatToken's measured 79k-gas
     # transfer below ~1700 gwei — ~7x the 230-260 gwei base fee Polygon has held for weeks. Priced
     # on the COLD recipient (79k; a warm one is 61k), since a payout goes to a user's address that
-    # usually holds no USDC yet. Far under ethusdc's 5 USDC because Polygon gas costs cents, far
-    # over arbusdc's unit floor because it is not free either.
+    # usually holds no USDC yet. Far under ethusdc's 5 USDC because Polygon gas costs cents, but
+    # above bare dust because Polygon gas is not free either.
     min_onchain_amount=10_000,
     # CHAIN_POL's clock, for the same reason its finality is: what this absorbs is hub-vs-spoke
     # skew, and two assets on one chain disagreeing about that chain's clock would be indefensible.

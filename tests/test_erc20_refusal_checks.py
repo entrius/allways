@@ -55,6 +55,20 @@ def test_an_undeclared_row_fails_at_construction():
         Erc20(replace(DECLARED, refusal_checks=None))
 
 
+def test_check_connection_raises_when_token_probe_errors():
+    # An ERC-20's token contract is its asset identity — a getCode probe we can't complete must fail
+    # boot, not warn-and-continue (a warn boots a broken/misconfigured token as "ready").
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            raise EvmRpcError('token RPC unreachable')
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)  # host chain reachable; isolate the token probe
+    with pytest.raises(ConnectionError):
+        provider.check_connection(require_send=False)
+
+
 class TestNoChecksNeverTouchTheRpc:
     """Recorded on a transcript, never by raising inside the stub — ``can_deliver_to`` swallows
     every exception into its fail-open ``True``, so a raising stub would be satisfied by the

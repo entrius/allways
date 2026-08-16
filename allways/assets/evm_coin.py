@@ -297,7 +297,9 @@ class EvmCoin(EvmAsset):
         try:
             est = int(self.chain.eth_rpc('eth_estimateGas', [params]), 16)
         except Exception as e:
-            return None if 'revert' in str(e).lower() else TRANSFER_GAS
+            # Structured on-chain verdict, not message-substring (which misses a code-3 revert whose
+            # text omits the word "revert" → a doomed tx would broadcast). Mirrors the ERC-20 twin.
+            return None if getattr(e, 'is_execution_revert', False) else TRANSFER_GAS
         gas = est + est // 5
         return None if gas > MAX_TRANSFER_GAS else gas
 
