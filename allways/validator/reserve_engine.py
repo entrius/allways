@@ -179,6 +179,14 @@ def reserve_on_behalf(
         # the delivery-time reverted-tx proof (cancel_swap). Fat-finger UX belongs in the client app.
         if not provider.chain.is_valid_address(user_to_addr):
             return ReserveResult(False, f'destination is not a valid {to_chain} address')
+        # Reject user_to_addr == the miner's committed delivery address. The miner must deliver FROM
+        # miner_to_addr, so this makes every delivery a from==to self-transfer that the anti-wash
+        # verifier rejects → the leg never confirms → the miner is force-slashed with no cancel escape.
+        miner_to_addr = getattr(miner_quote, 'miner_to_addr', '') if miner_quote else ''
+        if miner_to_addr and provider.chain.normalize_address(user_to_addr) == provider.chain.normalize_address(
+            miner_to_addr
+        ):
+            return ReserveResult(False, 'destination must differ from the miner delivery address')
     # Same gate, source side (T18): the miner's receive address must accept the user's funds —
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)

@@ -117,7 +117,7 @@ def _gate_asset(can_deliver, valid=lambda addr: True):
     """Duck-typed asset for the reserve deliverability gates (can_deliver_to + chain format check)."""
     return SimpleNamespace(
         can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
-        chain=SimpleNamespace(is_valid_address=valid),
+        chain=SimpleNamespace(is_valid_address=valid, normalize_address=lambda addr: addr),
     )
 
 
@@ -152,6 +152,30 @@ def test_malformed_miner_receive_address_rejects():
     assert not result.ok
     assert 'miner receive address' in result.reason
     assert client.calls == []
+
+
+def test_user_to_addr_equal_miner_delivery_address_rejects():
+    # V-H1: user_to_addr == miner_to_addr makes every delivery a from==to self-transfer the anti-wash
+    # verifier rejects → the miner never confirms the leg and is force-slashed with no cancel escape.
+    # Bounce it at reserve before any bid.
+    client = FakeClient()
+    client.quote.miner_to_addr = 'minerBTCdeliver'
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'minerBTCdeliver', 10**9)
+    assert not result.ok
+    assert 'differ from the miner delivery address' in result.reason
+    assert client.calls == []
+
+
+def test_distinct_dest_addr_with_miner_to_addr_set_reserves():
+    # The guard must not over-reject: a normal dest address different from the miner's still reserves.
+    client = FakeClient()
+    client.quote.miner_to_addr = 'minerBTCdeliver'
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert result.ok
 
 
 def test_cased_chain_id_rejects_at_intake():
