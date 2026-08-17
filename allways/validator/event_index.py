@@ -123,6 +123,14 @@ class SolanaEventIndex:
             return self._apply_reservation(hotkey, block_time, self._event_hub(rec))
         if name in ('ReservationFilled', 'ReservationExtended'):
             return self._apply_reservation_deadline(hotkey, rec)
+        if name == 'UnfilledReservationClosed':
+            # Permissionless reap of a drawn-but-unfilled reservation frees the miner on-chain; the
+            # crown index must free it too or the miner stays reserved until the synthetic
+            # RESERVE_EXPIRE. Insert a RESERVE_EXPIRE at the event's block_time on its own hub.
+            self.state_store.insert_activity_event(
+                block_time, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=self._event_hub(rec)
+            )
+            return True
         if name == 'SwapFulfilled':
             # Persist the delivery hash for post-close receipts — the Swap PDA (and its
             # to_tx_hash) is gone once the swap completes, and the offering's receipt links

@@ -88,6 +88,22 @@ class TestIngestActivity:
         assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
         store.close()
 
+    def test_unfilled_reservation_closed_frees_the_miner(self, tmp_path: Path):
+        """V-L8: the permissionless reap frees the miner on-chain; the crown index must free it too,
+        not leave it RESERVED until the synthetic RESERVE_EXPIRE fires."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)  # synthetic expiry would land at 1200
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('UnfilledReservationClosed', miner='pk_a', block_time=400, router='pk_router'),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(300) == {'hk_a': _both(MinerActivity.RESERVED)}  # reserved before the reap
+        assert idx.get_activity_state_at(400) == {}  # reap → AVAILABLE, well before the synthetic 1200 expiry
+        store.close()
+
     def test_swap_cancelled_frees_the_hub(self, tmp_path: Path):
         """The no-fault cancel is a terminal like completion/timeout: without its FULFILL_END
         the hub stays FULFILLING (crownless) until an unrelated swap's terminal repairs it."""
