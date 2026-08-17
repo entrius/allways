@@ -392,20 +392,30 @@ class Sol(Asset, Chain):
     def _prior_broadcast(self, want: tuple) -> Optional[SendResult]:
         """Reusable (sig, slot) from a prior own broadcast for this (to, amount, dedup) obligation that
         provably landed — so a confirm() timeout that returned None can never cause a second pay. None
-        when no prior send can have moved funds; RAISES when a recent send is neither on-chain nor
-        expired yet (caller must wait, not re-send)."""
+        when no prior send can have moved funds; RAISES when the prior send is unresolved (not yet
+        expired, or only at ``processed`` commitment) — the caller must wait, not re-send."""
         head = self._current_slot()
         for sig, (to, amt, scope, seen) in list(self.broadcasted_txids.items()):
             if (to, amt, scope) != want:
                 continue
             st = (self.rpc.get_signature_statuses([sig]) or [None])[0]
             if st is not None:
+                if st.get('confirmationStatus') not in ('confirmed', 'finalized'):
+                    # processed-only: possibly a minority fork that never settles. Reusing it would
+                    # mark the leg delivered while the user is never paid; a failed status at
+                    # processed is equally unsettled. Either way: wait for majority commitment.
+                    raise SolanaRpcError(f'prior send {sig[:16]}... only processed — waiting for confirmed')
                 if st.get('err') is None:
-                    return (sig, int(st.get('slot') or 0))  # landed (any status) → reuse, never re-send
+                    return (sig, int(st.get('slot') or 0))  # settled at majority commitment → reuse
                 del self.broadcasted_txids[sig]  # failed on-chain → moved nothing, a fresh send is safe
                 continue
-            if head is not None and head - int(seen) > self._BROADCAST_TTL_SLOTS:
-                del self.broadcasted_txids[sig]  # blockhash long expired unlanded → safe to resend
-                continue
+            if head is not None:
+                if int(seen) <= 0:
+                    # get_slot failed at record time, so the record's age is unknown: backfill with the
+                    # current head so the TTL counts from now — "can't tell" must read recent, never expired.
+                    self.broadcasted_txids[sig] = (to, amt, scope, head)
+                elif head - int(seen) > self._BROADCAST_TTL_SLOTS:
+                    del self.broadcasted_txids[sig]  # blockhash long expired unlanded → safe to resend
+                    continue
             raise SolanaRpcError(f'prior send {sig[:16]}... not on-chain yet and not expired — waiting a pass')
         return None
