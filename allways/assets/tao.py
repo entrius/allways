@@ -671,7 +671,9 @@ class Tao(Asset, Chain):
                 return (tx_hash, block_num)
         return None
 
-    def _lost_hash_prior_landed(self, from_addr: str, to_addr: str, amount: int, seen_head: int) -> Optional[SendResult]:
+    def _lost_hash_prior_landed(
+        self, from_addr: str, to_addr: str, amount: int, seen_head: int
+    ) -> Optional[SendResult]:
         """Resolve a prior send whose extrinsic hash was never learned: ``subtensor.transfer`` raised
         mid-submit (e.g. a websocket drop during wait_for_inclusion), so the extrinsic may have reached
         the chain even though the call reported nothing. ``(hash, block)`` if a settled
