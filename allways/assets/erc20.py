@@ -138,11 +138,11 @@ class Erc20(EvmAsset):
         try:
             code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest']) or '0x'
         except Exception as e:
-            # For an ERC-20 the token contract IS the asset identity — a probe we can't complete
-            # must fail boot, not warn-and-continue (a warn boots a broken token as "ready").
-            raise ConnectionError(
-                f'{self.chain_def.id} token contract probe failed on {self.chain.network}: {e}'
-            ) from e
+            # A probe we can't COMPLETE is transient (unreachable RPC / rate-limit storm) — degrade, never
+            # crash the whole validator at boot over one spoke's flaky endpoint (that takes the hub down too).
+            # The real config fault — a codeless/wrong contract — is a COMPLETED probe returning '0x' below.
+            bt.logging.warning(f'{self.chain_def.id} token contract probe unreachable on {self.chain.network} ({e}) — degraded')
+            return
         if code == '0x':
             # A typo'd override or wrong network would otherwise surface as every send failing.
             raise ConnectionError(

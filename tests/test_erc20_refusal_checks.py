@@ -55,9 +55,9 @@ def test_an_undeclared_row_fails_at_construction():
         Erc20(replace(DECLARED, refusal_checks=None))
 
 
-def test_check_connection_raises_when_token_probe_errors():
-    # An ERC-20's token contract is its asset identity — a getCode probe we can't complete must fail
-    # boot, not warn-and-continue (a warn boots a broken/misconfigured token as "ready").
+def test_check_connection_degrades_when_token_probe_unreachable():
+    # A probe we can't COMPLETE is transient (flaky RPC / rate-limit storm). It must NOT crash the whole
+    # validator at boot over one spoke — that takes the hub down too. Degrade (return), don't raise.
     def rpc(method, params, **kw):
         if method == 'eth_getCode':
             raise EvmRpcError('token RPC unreachable')
@@ -65,7 +65,20 @@ def test_check_connection_raises_when_token_probe_errors():
 
     provider = build(DECLARED, rpc)
     provider.chain.connect_network = lambda: (1, 100)  # host chain reachable; isolate the token probe
-    with pytest.raises(ConnectionError):
+    provider.check_connection(require_send=False)  # no raise
+
+
+def test_check_connection_raises_on_codeless_contract():
+    # The genuine config fault is a COMPLETED probe returning '0x' (typo'd / wrong-network contract) —
+    # that stays fatal, or every later send fails against a non-contract.
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            return '0x'
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)
+    with pytest.raises(ConnectionError, match='no code'):
         provider.check_connection(require_send=False)
 
 
