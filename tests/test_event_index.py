@@ -577,6 +577,35 @@ class TestIngestSwapOutcomes:
         assert store.get_swap_outcome(key.hex()) == 'expired'
         store.close()
 
+    def test_unbound_miner_still_records_terminal_outcome(self, tmp_path: Path):
+        """V-M5: a miner that deregs mid-swap is unbound at ingest, but the terminal outcome +
+        delivery hash are keyed purely by swap_key — record them so /status can resolve, while
+        the UID-crediting clearing volume stays empty."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        n = idx.ingest(
+            [
+                rec('SwapFulfilled', miner='pk_c', block_time=390, swap_key=key, to_tx_hash='0xdead'),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_c',  # unbound
+                    block_time=400,
+                    swap_key=key,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100,
+                    to_amount=200,
+                ),
+            ],
+            ATTR,
+        )
+        assert n == 2
+        assert store.get_swap_outcome(key.hex()) == 'completed'
+        assert store.get_swap_fulfillment(key.hex()) == '0xdead'
+        assert store.get_clearing_volumes(0, 1000) == {}  # no UID → no volume credited
+        store.close()
+
     def test_reingest_of_same_event_is_a_noop_upsert(self, tmp_path: Path):
         """A cursor reset can replay history — the outcome row upserts instead of erroring."""
         store = make_store(tmp_path)

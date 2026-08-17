@@ -83,11 +83,36 @@ class SolanaEventIndex:
                 continue
             hotkey = attribution.get(miner_pk)
             if hotkey is None:
-                # Unbound (or invalid binding) miner — no UID to credit, so its events are dropped.
+                # Unbound (or invalid binding) miner — no UID to credit, so the crown-relevant
+                # effects (activity/collateral/quote/clearing) are dropped and healed by the
+                # per-round reconciles. But the swap's terminal outcome + delivery hash are keyed
+                # purely by swap_key, so still record them — else a dereg-mid-swap permanently
+                # strands /status at ``fulfilled`` (V-M5), since the cursor advances regardless.
+                if self._record_unattributed_outcome(rec, int(block_time)):
+                    written += 1
                 continue
             if self._apply(rec, hotkey, int(block_time)):
                 written += 1
         return written
+
+    def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
+        """Persist only the swap_key-keyed terminal facts (delivery hash + terminal/stale outcome)
+        for an event whose miner pubkey is unbound at ingest. These rows credit no UID — they are
+        the seam's post-close truth read by /status — so they must land even when every
+        crown-relevant effect is dropped. Idempotent upserts, so a later re-bind + re-ingest is a
+        no-op. Returns True if a row was written."""
+        if rec.name == 'SwapFulfilled':
+            self.state_store.record_swap_fulfillment(
+                bytes(rec.fields['swap_key']).hex(), str(rec.fields['to_tx_hash']), block_time
+            )
+            return True
+        outcome = _OUTCOME_BY_EVENT.get(rec.name)
+        if outcome is not None:
+            swap_key = bytes(rec.fields['swap_key']).hex()
+            self.state_store.record_swap_outcome(swap_key, outcome, block_time)
+            dev_signal.emit('swap_outcome', swap_key=swap_key, outcome=outcome)
+            return True
+        return False
 
     def _apply(self, rec: EventRecord, hotkey: str, block_time: int) -> bool:
         name = rec.name
