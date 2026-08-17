@@ -784,7 +784,9 @@ class Bitcoin(Asset, Chain):
                 time.sleep(3)
         # Estimation failed both attempts — broadcast at the survivable fallback, not the strand-prone
         # floor (V-L5). Warn (not debug): a real send is going out at a non-estimated rate.
-        bt.logging.warning(f'estimate_fee_rate: /fee-estimates unavailable — using {BTC_FALLBACK_FEE_RATE} sat/vB fallback')
+        bt.logging.warning(
+            f'estimate_fee_rate: /fee-estimates unavailable — using {BTC_FALLBACK_FEE_RATE} sat/vB fallback'
+        )
         return BTC_FALLBACK_FEE_RATE
 
     def send_amount(

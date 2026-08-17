@@ -6,8 +6,6 @@ higher `BTC_FALLBACK_FEE_RATE`, while a successful estimate still floors at `BTC
 (calm-mempool sends keep paying the real low rate). Backend mocked — no network, no real sleep.
 """
 
-import pytest
-
 from allways.constants import BTC_FALLBACK_FEE_RATE, BTC_MIN_FEE_RATE
 
 
