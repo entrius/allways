@@ -53,6 +53,9 @@ CANCEL_REASON_EVM_REVERT = 0
 CANCEL_REASON_ERC20_BLACKLIST = 1
 CANCEL_REASON_ERC20_PAUSED = 2
 CANCEL_REASON_SOL_RESERVED = 3
+# An issuer-enabled transfer fee shaves the delivered log below the pinned amount, so every
+# honest delivery on the token would false-slash — a hub-wide, no-fault condition (V-M2/PAXG).
+CANCEL_REASON_ERC20_FEE_ENABLED = 4
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5

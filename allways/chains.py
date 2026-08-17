@@ -47,6 +47,10 @@ class ChainDefinition:
     # ABI signatures the issuer refuses delivery with: 'f()' stops the whole token, 'f(address)'
     # freezes one destination. Required on every token row; () claims no freeze surface at all.
     refusal_checks: tuple[str, ...] | None = None
+    # ABI signature of a `(uint256)->uint256` view returning the transfer fee an issuer would take
+    # on a given amount (PAXG's getFeeFor). Set only on tokens with an admin-settable fee; a live
+    # non-zero fee shaves every delivery below the pinned amount, so it's a no-fault cancel (V-M2).
+    fee_check: str | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -482,6 +486,10 @@ CHAIN_PAXG = ChainDefinition(
     # surface here would make every probe raise, which defers each slash only as far as
     # max_extend_at (~2.6h) and then times out anyway — slashing and striking an honest miner.
     refusal_checks=('isFrozen(address)', 'paused()'),
+    # PAXG's fee is an admin-upgradeable proxy lever, currently 0. If Paxos ever sets feeRate>0,
+    # getFeeFor(amount) turns non-zero and every honest delivery's Transfer log falls below the
+    # pinned amount — probe it so the swap cancels no-fault instead of mass-slashing (V-M2).
+    fee_check='getFeeFor(uint256)',
 )
 
 SUPPORTED_CHAINS = {
