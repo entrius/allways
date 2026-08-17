@@ -373,7 +373,9 @@ class SolanaSwapLoop:
         to_provider = self.providers.get(swap.to_chain)
         norm = to_provider.chain.normalize_address if to_provider is not None else (lambda a: a)
         if swap.miner_to_addr and norm(swap.user_to_addr) == norm(swap.miner_to_addr):
-            return SwapAction(SwapDecision.REJECT, reason='dest == miner delivery address (poisoned) — refusing to attest')
+            return SwapAction(
+                SwapDecision.REJECT, reason='dest == miner delivery address (poisoned) — refusing to attest'
+            )
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(
