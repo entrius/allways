@@ -363,10 +363,9 @@ class EvmCoin(EvmAsset):
             return None  # under-gassed — could be manufactured; never accept as refusal
         return CANCEL_REASON_EVM_REVERT
 
-    # Plain JSON-RPC has no address→tx index (Esplora/getSignaturesForAddress have one), so the
-    # deposit scanner follows the head incrementally like the TAO provider: each call scans only
-    # blocks minted since the last call for this (from, to, amount) triple, bounded by
-    # SCAN_LOOKBACK_BLOCKS on the first call or after a gap (≈5 min of the chain's blocks).
+    # Plain JSON-RPC has no address→tx index, so the scanner walks the head incrementally: each
+    # call scans blocks minted since the last for this (from, to, amount) triple. The cold-start
+    # floor is min(SCAN_LOOKBACK_BLOCKS, MAX_WALK_BLOCKS) ≤ 32 blocks — under SCAN_LOOKBACK_SECS on fast chains.
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
         """Tx hash of a recent settled transfer ``from_addr`` → ``to_addr`` of >= ``amount``, else
         None. A hash-finder only — the seam's confirm re-verifies everything by hash, so a miss
