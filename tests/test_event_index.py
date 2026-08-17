@@ -225,10 +225,24 @@ class TestIngestActivity:
         idx = make_index(store, ttl=30)
         idx.ingest(
             [
-                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router',
-                    user='pk_user', requests=1, collateral_chain='sol'),
-                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router',
-                    user='pk_user', requests=1, collateral_chain='tao'),
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='sol',
+                ),
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='tao',
+                ),
                 rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=600, collateral_chain='tao'),
             ],
             ATTR,
