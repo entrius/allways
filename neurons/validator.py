@@ -35,7 +35,7 @@ from allways.constants import (  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
-from allways.solana.rpc import resolve_rpc_url  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -91,11 +91,6 @@ class Validator(BaseValidatorNeuron):
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
-        if int(self.config.netuid) != NETUID_FINNEY and 'mainnet' in solana_rpc_url.lower():
-            bt.logging.warning(
-                f'testnet neuron (netuid {self.config.netuid}) resolved a mainnet-looking Solana RPC '
-                f'({solana_rpc_url}) — the hub/control plane may target the wrong cluster.'
-            )
         self.assets = create_assets(
             check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
         )
@@ -133,6 +128,9 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning('VALIDATOR_MODE=vote — Solana contract votes ON, set_weights OFF.')
         solana_read_only = mode == 'watch'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        # Fail closed if a testnet neuron is pointed at mainnet, or the program id is on the wrong
+        # cluster — positively classified by genesis hash, not the mainnet-substring blind spot.
+        assert_cluster_safe(self.solana_client.rpc, self.solana_client.program_id, self.config.netuid, role='validator')
         warn_if_unbound(self.solana_client)
         # `solana_config_cache` serves swap bounds + halt (and the relay's heartbeat freshness)
         # off one TTL-cached Config read, replacing the old substrate reads.

@@ -27,7 +27,7 @@ from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
-from allways.solana.rpc import resolve_rpc_url  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
@@ -57,12 +57,10 @@ class Miner(BaseMinerNeuron):
 
         # Solana program client (signer = the miner's Solana keypair; separate from the bt wallet).
         solana_rpc_url = resolve_rpc_url()
-        if int(self.config.netuid) != NETUID_FINNEY and 'mainnet' in solana_rpc_url.lower():
-            bt.logging.warning(
-                f'testnet neuron (netuid {self.config.netuid}) resolved a mainnet-looking Solana RPC '
-                f'({solana_rpc_url}) — the hub/control plane may target the wrong cluster.'
-            )
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        # Fail closed if a testnet neuron is pointed at mainnet, or the program id is on the wrong
+        # cluster — positively classified by genesis hash, not the mainnet-substring blind spot.
+        assert_cluster_safe(self.solana_client.rpc, self.solana_client.program_id, self.config.netuid, role='miner')
         self.solana_pubkey = self.solana_client.keypair.pubkey()
         # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer
         # user↔miner transfer; separate from the program client that never custodies swap assets).
