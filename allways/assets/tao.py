@@ -629,10 +629,15 @@ class Tao(Asset, Chain):
             return False
 
     def _own_transfer_landed(self, tx_hash: str, from_addr: str, to_addr: str, amount: int) -> Optional[SendResult]:
-        """``(tx_hash, block_num)`` if THIS exact recorded extrinsic is on-chain as a matching transfer,
-        else None. Matches on the extrinsic hash (not first-match), so it can never reuse a different
-        swap's transfer. Reliable because ``send`` uses wait_for_inclusion: after it returns the extrinsic
-        is included-or-not, never still-pending."""
+        """``(tx_hash, block_num)`` if THIS exact recorded extrinsic is on-chain AND its funds provably
+        moved, else None. Matches on the extrinsic hash (not first-match), so it can never reuse a
+        different swap's transfer. Inclusion is NOT settlement: an included-but-failed transfer (e.g.
+        insufficient balance) still occupies a block and decodes to the intended dest/amount, so the
+        match is gated on ``settled_credit`` (the Balances.Transfer event) exactly as the deposit
+        scanner is — otherwise a genuinely-failed send is mistaken for paid, never retried, and rides to
+        a slash. Reliable because ``send`` uses wait_for_inclusion: after it returns the extrinsic is
+        included-or-not, never still-pending. RAISES (ProviderUnreachableError) when settlement can't be
+        read, so the caller waits rather than re-sending an unresolved transfer into a double pay."""
         head = self.chain.get_current_block_height()
         if head is None:
             return None
@@ -642,13 +647,19 @@ class Tao(Asset, Chain):
             if not block or 'extrinsics' not in block:
                 continue
             is_raw = block.get('_raw', False)
-            for ext in block['extrinsics']:
+            for position, ext in enumerate(block['extrinsics']):
                 decoded = self.decode_transfer(ext, is_raw)
                 if decoded is None:
                     continue
                 ext_hash, dest, amt, sender = decoded
-                if ext_hash == tx_hash and dest == to_addr and sender == from_addr and int(amt) >= int(amount):
-                    return (tx_hash, block_num)
+                if ext_hash != tx_hash or dest != to_addr or sender != from_addr or int(amt) < int(amount):
+                    continue
+                # Exact-hash call match is only a candidate; confirm the funds actually moved.
+                ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
+                settled = self.settled_credit(block_num, ext_idx, to_addr)
+                if settled is None or settled[1] < int(amount):
+                    return None  # included but the transfer failed → moved nothing → safe to re-send
+                return (tx_hash, block_num)
         return None
 
     def send_amount(

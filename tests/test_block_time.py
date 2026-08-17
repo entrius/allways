@@ -179,6 +179,28 @@ def test_tao_own_transfer_landed_absent_returns_none():
     assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
 
 
+def test_tao_own_transfer_landed_rejects_an_included_but_failed_extrinsic():
+    # Inclusion is NOT settlement: the extrinsic is in the block and decodes to the intended dest/amount,
+    # but it dispatched with an error (fee taken, no Balances.Transfer). Reusing it would mark a swap paid
+    # that moved no funds → the miner never retries and rides to a slash. Must return None (safe re-send).
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO', settled=False)}
+    p = _scan_provider(head=100, blocks=blocks)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
+
+
+def test_tao_own_transfer_landed_raises_when_settlement_unreadable():
+    # The exact extrinsic is on-chain but its settlement events can't be read: RAISE so the caller waits
+    # rather than re-sending an unresolved transfer into a double pay (the send_amount except-branch).
+    block = {
+        '_raw': True,
+        'extrinsics': [{'extrinsic_hash': '0xpay', 'dest': 'userTAO', 'amount': 5000, 'sender': 'minerTAO'}],
+        '_events': [],  # settled_credit treats no-events-on-a-block-with-extrinsics as unreachable
+    }
+    p = _scan_provider(head=100, blocks={100: block})
+    with pytest.raises(ProviderUnreachableError):
+        p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000)
+
+
 def test_tao_scanner_finds_matching_transfer_in_new_blocks():
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
     p = _scan_provider(head=100, blocks=blocks)
