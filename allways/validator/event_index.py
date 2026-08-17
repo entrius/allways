@@ -96,6 +96,8 @@ class SolanaEventIndex:
             return True
         if name == 'PoolResolved':
             return self._apply_reservation(hotkey, block_time, self._event_hub(rec))
+        if name in ('ReservationFilled', 'ReservationExtended'):
+            return self._apply_reservation_deadline(hotkey, rec)
         if name == 'SwapFulfilled':
             # Persist the delivery hash for post-close receipts — the Swap PDA (and its
             # to_tx_hash) is gone once the swap completes, and the offering's receipt links
@@ -192,16 +194,26 @@ class SolanaEventIndex:
 
     def _apply_reservation(self, hotkey: str, block_time: int, hub: Optional[str]) -> bool:
         """PoolResolved → RESERVE_START now + a synthetic RESERVE_EXPIRE at
-        ``block_time + reservation_ttl_secs`` (``reserved_until`` isn't on the
-        event). Dropped if no TTL source is wired, so the reservation never opens
-        without its matching expiry. The expiry inherits the start's hub so the
-        pair opens and closes the same per-hub machine."""
+        ``block_time + reservation_ttl_secs`` — a guess, since ``reserved_until`` isn't on this
+        event; ReservationFilled/Extended later re-stamp it to the real deadline (drawn-unfilled
+        reservations keep the guess as their fallback expiry). Dropped if no TTL source is wired,
+        so the reservation never opens without an expiry. The expiry inherits the start's hub."""
         ttl = self._reservation_ttl()
         if ttl is None:
             bt.logging.warning('SolanaEventIndex: no reservation_ttl; dropping PoolResolved')
             return False
         self.state_store.insert_activity_event(block_time, hotkey, ActivityTransition.RESERVE_START, hub=hub)
         self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=hub)
+        return True
+
+    def _apply_reservation_deadline(self, hotkey: str, rec: EventRecord) -> bool:
+        """ReservationFilled/Extended carry the real ``reserved_until`` — re-stamp the synthetic
+        RESERVE_EXPIRE off PoolResolved's draw+ttl guess. Without this a busy miner is scored
+        AVAILABLE once SwapInitiated lands after the guess (slow BTC confs, or a claim-runway extend)."""
+        reserved_until = int(rec.fields['reserved_until'])
+        if reserved_until <= 0:
+            return False
+        self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), reserved_until)
         return True
 
     @staticmethod

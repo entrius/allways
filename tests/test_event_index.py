@@ -154,6 +154,92 @@ class TestIngestActivity:
         assert kinds == [1, 3]  # RESERVE_START then synthetic RESERVE_EXPIRE
         store.close()
 
+    def test_reservation_filled_restamps_expiry_so_late_initiate_stays_busy(self, tmp_path: Path):
+        """V-H5: PoolResolved's draw+ttl expiry is a guess. When SwapInitiated lands after it
+        (slow BTC confs), the miner must still be FULFILLING — not scored AVAILABLE and earning the
+        crown while busy. ReservationFilled carries the real reserved_until; we re-stamp the guess."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)  # tiny ttl → synthetic expiry at 230, before SwapInitiated
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=600),
+                rec('SwapInitiated', miner='pk_a', block_time=250),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
+            ],
+            ATTR,
+        )
+        # Re-stamped to 600, so the miner is NOT freed at the old 230 guess.
+        assert idx.get_activity_state_at(230) == {'hk_a': _both(MinerActivity.RESERVED)}
+        # The bug regression: without the re-stamp this would be {} (AVAILABLE) — FULFILL_START
+        # would have hit AVAILABLE (no edge) and held there through the whole swap.
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(399) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
+        # The single RESERVE_EXPIRE row was moved (not duplicated) from 230 to 600.
+        expiries = [e['block'] for e in idx.get_activity_events_in_range(0, 2000) if e['kind'] == 3]
+        assert expiries == [600]
+        store.close()
+
+    def test_reservation_extended_pushes_expiry(self, tmp_path: Path):
+        """A claim-runway extend (validator slides reserved_until for slow source confs) emits
+        ReservationExtended — the expiry must follow it, else the miner is freed mid-fulfillment."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=300),
+                rec('ReservationExtended', miner='pk_a', block_time=280, reserved_until=900, validator='pk_router'),
+                rec('SwapInitiated', miner='pk_a', block_time=350),  # past the pre-extend 300 deadline
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=600,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.RESERVED)}
+        assert idx.get_activity_state_at(350) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(600) == {}  # completed → AVAILABLE
+        expiries = [e['block'] for e in idx.get_activity_events_in_range(0, 2000) if e['kind'] == 3]
+        assert expiries == [900]  # one row, pushed guess(230)→fill(300)→extend(900)
+        store.close()
+
+    def test_restamp_targets_only_its_own_hub(self, tmp_path: Path):
+        """The re-stamp matches on hub, so a fill on one purse must not move the sibling's expiry."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router',
+                    user='pk_user', requests=1, collateral_chain='sol'),
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router',
+                    user='pk_user', requests=1, collateral_chain='tao'),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=600, collateral_chain='tao'),
+            ],
+            ATTR,
+        )
+        # tao expiry moved to 600; sol expiry untouched at the 230 guess.
+        rows = idx.get_activity_events_in_range(0, 2000)
+        expiries = sorted((e['hub'], e['block']) for e in rows if e['kind'] == 3)
+        assert expiries == [('sol', 230), ('tao', 600)]
+        assert idx.get_activity_state_at(400) == {'hk_a': {'tao': MinerActivity.RESERVED}}  # sol freed, tao held
+        store.close()
+
     def test_busy_miner_is_the_reserved_miner_not_the_router(self, tmp_path: Path):
         """PoolResolved.miner (not .winner, the router) is busy-gated."""
         store = make_store(tmp_path)
