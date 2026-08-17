@@ -35,8 +35,17 @@ class SweepClient:
         return self._reservation
 
     def finalize_reservation(
-        self, miner, user, user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount, backing='sol',
-        *, from_chain=None
+        self,
+        miner,
+        user,
+        user_from_addr,
+        user_to_addr,
+        collateral_amount,
+        from_amount,
+        to_amount,
+        backing='sol',
+        *,
+        from_chain=None,
     ):
         self.finalized.append(
             (str(miner), str(user), user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount)
