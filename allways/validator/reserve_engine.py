@@ -328,6 +328,7 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.from_amount,
                 fill.to_amount,
                 backing,
+                from_chain=from_chain,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)

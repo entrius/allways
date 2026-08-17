@@ -202,6 +202,7 @@ pub mod allways_swap_manager {
         collateral_amount: u64,
         from_amount: u128,
         to_amount: u128,
+        from_addr_hash: [u8; 32],
     ) -> Result<()> {
         finalize_reservation::handler(
             ctx,
@@ -211,6 +212,7 @@ pub mod allways_swap_manager {
             collateral_amount,
             from_amount,
             to_amount,
+            from_addr_hash,
         )
     }
     /// Permissionless: reap an unfilled reservation past its finalize deadline, freeing the miner.

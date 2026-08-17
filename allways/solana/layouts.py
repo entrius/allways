@@ -604,6 +604,7 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
+    'from_addr_hash' / Hash32,  # V-C2: keccak(user_from_addr); seeds the source_lock, verified on-chain
 )
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
 # W2 — vote_activate / vote_deactivate now name the purse they act on.

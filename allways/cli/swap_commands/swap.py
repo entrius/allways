@@ -946,6 +946,7 @@ def _reserve_self_represented(
             fill.from_amount,
             fill.to_amount,
             backing,
+            from_chain=from_chain,
         )
     except Exception as e:
         reason = contract_reject_reason(e)

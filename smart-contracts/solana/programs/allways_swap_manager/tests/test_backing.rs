@@ -252,6 +252,7 @@ fn resolve_ix(caller: &Pubkey, miner: &Pubkey) -> Instruction {
     )
 }
 fn finalize_ix(
+    from_chain: &str,
     router: &Pubkey,
     miner: &Pubkey,
     user: &Pubkey,
@@ -259,10 +260,11 @@ fn finalize_ix(
     from_amount: u128,
     to_amount: u128,
 ) -> Instruction {
-    finalize_ix_b("sol", router, miner, user, collateral_amount, from_amount, to_amount)
+    finalize_ix_b("sol", from_chain, router, miner, user, collateral_amount, from_amount, to_amount)
 }
 fn finalize_ix_b(
     backing: &str,
+    from_chain: &str,
     router: &Pubkey,
     miner: &Pubkey,
     user: &Pubkey,
@@ -279,6 +281,7 @@ fn finalize_ix_b(
             collateral_amount,
             from_amount,
             to_amount,
+            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -288,6 +291,12 @@ fn finalize_ix_b(
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, backing),
             attestation: None,
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&["userSrcAddr".as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -512,7 +521,7 @@ fn reserve_spoke(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
     draw(svm, val, miner, SPOKE_FROM, SPOKE_TO);
     send(
         svm,
-        finalize_ix(&val.pubkey(), miner, &LOTTERY_USER, SOL_AMOUNT, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix(SPOKE_FROM, &val.pubkey(), miner, &LOTTERY_USER, SOL_AMOUNT, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &val.pubkey(),
         val,
     )
@@ -539,7 +548,7 @@ fn test_backing_defaults_to_sol_and_is_pinned_through_the_swap() {
 
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix(SPOKE_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -649,7 +658,7 @@ fn test_the_verdict_names_the_payee_on_the_backing_chain() {
     draw(&mut svm, &vals[0], &miner.pubkey(), HUB_FROM, HUB_TO);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix(HUB_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -711,7 +720,7 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     draw(&mut svm, &vals[0], &miner.pubkey(), HUB_FROM, HUB_TO);
     send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix(HUB_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, SOL_AMOUNT, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -730,7 +739,7 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "tao");
     let err = send(
         &mut svm,
-        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix_b("tao", HUB_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -751,7 +760,7 @@ fn test_swap_bounds_are_selected_by_backing_not_converted() {
     .expect("lower tao min");
     let err = send(
         &mut svm,
-        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix_b("tao", HUB_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -767,7 +776,7 @@ fn test_collateral_binds_to_the_backing_leg_on_either_side_of_the_pair() {
     draw(&mut svm, &vals[0], &miner.pubkey(), HUB_FROM, HUB_TO);
     let err = send(
         &mut svm,
-        finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
+        finalize_ix(HUB_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, SOL_AMOUNT as u128, TAO_AMOUNT),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -781,7 +790,7 @@ fn test_collateral_binds_to_the_backing_leg_on_either_side_of_the_pair() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "tao"); // btc→sol, backed by TAO
     let err = send(
         &mut svm,
-        finalize_ix_b("tao", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix_b("tao", SPOKE_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, TAO_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -798,7 +807,7 @@ fn test_unsupported_backing_is_refused_at_finalize_and_at_initiate() {
     set_reservation_backing(&mut svm, &miner.pubkey(), "btc");
     let err = send(
         &mut svm,
-        finalize_ix_b("btc", &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, OTHER_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
+        finalize_ix_b("btc", SPOKE_FROM, &vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, OTHER_AMOUNT as u64, OTHER_AMOUNT, SOL_AMOUNT as u128),
         &vals[0].pubkey(),
         &vals[0],
     )

@@ -223,6 +223,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             collateral_amount: SOL_AMOUNT,
             from_amount: 100_000,
             to_amount: SOL_AMOUNT as u128,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -232,6 +233,12 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             attestation: None,
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )

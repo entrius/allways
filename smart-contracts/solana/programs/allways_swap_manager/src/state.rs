@@ -349,6 +349,19 @@ pub struct Reservation {
     pub bump: u8,
 }
 
+/// V-C2 on-chain source-address lock (`seeds = [SRCLOCK_SEED, miner, from_chain, keccak(from_addr)]`).
+/// `finalize_reservation` claims it so a live-unclaimed reservation holds a `(from_chain, from_addr)`
+/// exclusively per miner — a second reservation (any backing/hub) declaring the same source finds a live
+/// lock and reverts. `reserved_until` is the staleness marker: a lock at or past it is free to reclaim,
+/// so a lapsed reservation never permanently strands its source. Reused across rounds (never closed).
+#[account]
+#[derive(InitSpace)]
+pub struct SourceLock {
+    /// The holding reservation's `reserved_until`; a lock `< now` is stale and reclaimable.
+    pub reserved_until: i64,
+    pub bump: u8,
+}
+
 /// Swap lifecycle status. `PendingAttestation` = source-tx claim recorded, not yet attested (no miner
 /// obligation). Terminal states (Completed/TimedOut) aren't stored — the Swap PDA is closed on
 /// confirm/timeout. New variant appended last to keep Active/Fulfilled discriminants stable.

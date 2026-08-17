@@ -364,6 +364,7 @@ fn finalize_ix_b(
             collateral_amount,
             from_amount,
             to_amount,
+            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -373,6 +374,17 @@ fn finalize_ix_b(
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, backing),
             attestation,
+            source_lock: Pubkey::find_program_address(
+                &[
+                    b"srclock",
+                    miner.as_ref(),
+                    (if backing == SOL { SPOKE_FROM } else { HUB_FROM }).as_bytes(),
+                    &hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+                ],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
